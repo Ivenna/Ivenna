@@ -1,0 +1,17 @@
+.{
+    .name = .ivenna,
+    .version = "0.1.0",
+    .fingerprint = 0x67d11ca2aeb63bd0,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .greeting = .{ .path = "packages/greeting" },
+    },
+    .paths = .{
+        ".zig-version",
+        "build.zig",
+        "build.zig.zon",
+        "apps",
+        "packages",
+        "README.md",
+    },
+}
