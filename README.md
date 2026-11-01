@@ -1,11 +1,17 @@
 # Ivenna
 
-A Zig monorepo with a CLI and a `greeting` example package.
+Ivenna 是一个面向长期运行的 AI agent，探索如何通过持续会话与自主记忆“维持自我”。
 
-Zig version: [`.zig-version`](.zig-version).
+后续输入可以接续已有会话；Ivenna 也可以自行组织、读取和调整记忆，在不同会话间继续使用这些信息。
 
-```sh
-zig build
-zig build run
-zig build test
-```
+## 当前状态
+
+项目仍处于原型阶段，目前通过 HTTP 服务接收输入、处理会话并保存历史，交互方式和记忆管理仍在迭代。
+
+## 文档
+
+- [运行 Ivenna](docs/running.md)：从源码在本地启动服务。
+- [使用 Ivenna](docs/usage.md)：连接已有服务，提交输入并继续已有会话。
+- [文档目录](docs/README.md)：查找运行、使用与开发资料。
+
+参与项目开发，可从[开发指南](docs/development.md)开始。

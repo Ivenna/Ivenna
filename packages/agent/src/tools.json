@@ -1,0 +1,30 @@
+[
+  {
+    "type": "function",
+    "name": "database",
+    "description": "Execute PostgreSQL SQL in your own persistent database, shared across your sessions. Design and manage its tables and data, including creating, changing, querying, and deleting them. Each call has an independent connection; use one SQL script for operations that need the same connection or an explicit transaction. Results contain column names and rows; values are PostgreSQL text or null. SQL errors are returned with earlier command results; explicitly committed changes can remain after a later error. COPY streaming is not supported. This database starts without application-defined memory tables.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "sql": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sql"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "wait_for_input",
+    "description": "Pause this session once the current tool batch is processed and no input is queued. New input or an explicit resume continues the same session and history.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+]
