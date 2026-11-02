@@ -112,7 +112,7 @@ pub const Api = struct {
     fn executeSession(self: *Api, id: i64) void {
         self.engine.execute(id) catch |err| switch (err) {
             error.Canceled, error.SessionNotAvailable => return,
-            else => std.log.warn("session {d} stopped: {s}", .{ id, @errorName(err) }),
+            else => std.log.warn("session {d} execution failed: {s}", .{ id, @errorName(err) }),
         };
     }
 };
@@ -147,10 +147,9 @@ fn sendSession(allocator: Allocator, request: *std.http.Server.Request, status: 
     return sendJson(allocator, request, status, .{
         .id = session.id,
         .user_fields = try std.json.parseFromSliceLeaky(std.json.Value, allocator, session.user_fields_json, .{}),
-        .status = session.status,
+        .state = session.state,
         .messages = try std.json.parseFromSliceLeaky(std.json.Value, allocator, session.messages_json, .{}),
         .pending_inputs = try std.json.parseFromSliceLeaky(std.json.Value, allocator, session.pending_inputs_json, .{}),
-        .error_message = session.error_message,
     });
 }
 

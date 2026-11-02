@@ -1,0 +1,11 @@
+HostKey /run/memory-host-key
+AuthorizedKeysFile .ssh/authorized_keys
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers memory
+DisableForwarding yes
+PermitTTY no
+PrintMotd no
+ForceCommand /usr/local/bin/memory-shell

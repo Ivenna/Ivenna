@@ -1,17 +1,238 @@
 [
   {
     "type": "function",
-    "name": "database",
-    "description": "Execute PostgreSQL SQL in your own persistent database, shared across your sessions. Design and manage its tables and data, including creating, changing, querying, and deleting them. Each call has an independent connection; use one SQL script for operations that need the same connection or an explicit transaction. Results contain column names and rows; values are PostgreSQL text or null. SQL errors are returned with earlier command results; explicitly committed changes can remain after a later error. COPY streaming is not supported. This database starts without application-defined memory tables.",
+    "name": "browse_memory_room",
+    "description": "Explore a memory room and discover its child rooms and memory entries. Rooms persist across sessions; choose their organization freely. All memory tools reply with either {result: ...} or {error: {code, message}}. Here, result contains room and entries; each entry has address, name, and kind (room or memory).",
     "parameters": {
       "type": "object",
       "properties": {
-        "sql": {
-          "type": "string"
+        "room": {
+          "type": "string",
+          "description": "The room location, relative to the shared entrance. Omit to use the entrance, \".\"."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "find_memory",
+    "description": "Find memory entries and rooms by name within a room and its descendants. Use recall_memory to search remembered content. The result contains room, query, and matches; each match has address, name, and kind. No matches returns an empty matches list.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The name or name pattern to find. Literal mode matches part of a name."
+        },
+        "room": {
+          "type": "string",
+          "description": "The room location, relative to the shared entrance. Omit to use the entrance, \".\"."
+        },
+        "match_mode": {
+          "type": "string",
+          "description": "Interpret query as literal text (default), a glob such as \"*.md\", or a regular expression.",
+          "enum": [
+            "literal",
+            "glob",
+            "regex"
+          ]
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "Match upper and lower case exactly. Omit to ignore case."
         }
       },
       "required": [
-        "sql"
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "recall_memory",
+    "description": "Search memory entries for a clue within a room and its descendants. The result contains room, clue, and matches; each match has address, line, and text. Use a matching address to read the full entry. No matches returns an empty matches list.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "clue": {
+          "type": "string",
+          "description": "The text or pattern to find in memory entries."
+        },
+        "room": {
+          "type": "string",
+          "description": "The room location, relative to the shared entrance. Omit to use the entrance, \".\"."
+        },
+        "match_mode": {
+          "type": "string",
+          "description": "Interpret clue as literal text (default) or a regular expression.",
+          "enum": [
+            "literal",
+            "regex"
+          ]
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "Match upper and lower case exactly. Omit to ignore case."
+        }
+      },
+      "required": [
+        "clue"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "read_memory",
+    "description": "Read a memory entry at a known location. Browse or search first if you need to find it. The result contains address and content.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The memory entry location, relative to the shared entrance."
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "remember",
+    "description": "Keep the supplied content as a memory entry at a chosen location. You choose its wording and structure. Create a containing room first when needed. The result contains address.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The location for the memory entry, relative to the shared entrance."
+        },
+        "content": {
+          "type": "string",
+          "description": "The content to keep in this entry."
+        },
+        "mode": {
+          "type": "string",
+          "description": "create makes a new entry and reports an occupied location; append adds content; replace writes the full content. Default: create.",
+          "enum": [
+            "create",
+            "append",
+            "replace"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "content"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "revise_memory",
+    "description": "Revise matching text in a memory entry. Read the entry first to choose the change. The result contains address and revision (no_match, unchanged, or revised).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The memory entry location, relative to the shared entrance."
+        },
+        "old_text": {
+          "type": "string",
+          "description": "The text to match, or a regular expression when match_mode is regex."
+        },
+        "new_text": {
+          "type": "string",
+          "description": "The replacement text. Regex mode expands captures such as ${1} and ${name}; literal mode keeps this text as supplied."
+        },
+        "replace_all": {
+          "type": "boolean",
+          "description": "Replace every match. Omit to replace only the first."
+        },
+        "match_mode": {
+          "type": "string",
+          "description": "Interpret old_text as literal text (default) or a regular expression. Literal matching is case-sensitive; a regex can set inline flags.",
+          "enum": [
+            "literal",
+            "regex"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "old_text",
+        "new_text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "create_memory_room",
+    "description": "Create a room to organize memory entries and child rooms. Parent rooms are created as needed, and an existing room can be reused. Choose names and organization freely. The result contains address.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The new room location, relative to the shared entrance."
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "move_memory",
+    "description": "Move or rename a memory entry or a room and its contents. The destination may be a new location or an existing room to move into. An occupied target is reported as an error. The result contains the actual new address; update any references to the old location as needed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The location of a memory entry or room, relative to the shared entrance."
+        },
+        "destination": {
+          "type": "string",
+          "description": "The new location, or an existing room to move into. Both are relative to the shared entrance."
+        }
+      },
+      "required": [
+        "address",
+        "destination"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "forget_memory",
+    "description": "Remove a memory entry or an empty room. Set recursive to true to remove a room and all its contents. The shared entrance is retained. The result contains address.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The location of a memory entry or room, relative to the shared entrance."
+        },
+        "recursive": {
+          "type": "boolean",
+          "description": "Remove all entries and child rooms at this location. Omit to remove only an entry or an empty room."
+        }
+      },
+      "required": [
+        "address"
       ],
       "additionalProperties": false
     }
@@ -19,7 +240,7 @@
   {
     "type": "function",
     "name": "wait_for_input",
-    "description": "Pause this session once the current tool batch is processed and no input is queued. New input or an explicit resume continues the same session and history.",
+    "description": "Request a pause when this tool batch finishes and no input is queued. New input or an explicit resume continues the same session and history.",
     "parameters": {
       "type": "object",
       "properties": {},

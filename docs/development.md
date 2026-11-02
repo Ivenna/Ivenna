@@ -1,45 +1,46 @@
 # 参与开发
 
-运行环境与配置见[运行指南](running.md)，模块依赖、会话执行与存储关系见[架构说明](architecture.md)。
+先按[运行指南](running.md)准备环境与配置。模块依赖、会话执行和存储关系见[架构说明](architecture.md)，开发约定见 [AGENTS.md](../AGENTS.md)。
 
 ## 仓库与构建
 
-这是一个 monorepo，应用位于 `apps/`，可复用模块位于 `packages/`：
+应用位于 `apps/`，可复用模块位于 `packages/`：
 
 | 位置 | 职责 |
 | --- | --- |
 | [apps/server](../apps/server) | HTTP 接口、配置与服务生命周期 |
-| [packages/agent](../packages/agent) | 会话循环、模型接入、工具与持久化 |
-| [dev/postgres](../dev/postgres) | 本地记忆库与账号的初始化 |
-| [compose.yaml](../compose.yaml) | 本地开发所需的 PostgreSQL |
+| [packages/agent](../packages/agent) | 会话执行、模型与记忆工具接入、程序状态存储 |
+| [dev/memory](../dev/memory) | 记忆容器构建、SSH 入口与本地启动 |
+| [compose.yaml](../compose.yaml) | 本地 PostgreSQL |
 
-根构建聚合应用。应用拥有各自的构建入口和依赖，`apps/server` 依赖 `packages/agent`。
-
-在仓库根目录构建并安装应用到 `zig-out`：
+`apps/server` 依赖 `packages/agent`，根构建聚合应用。在仓库根目录运行：
 
 ```sh
 zig build
 ```
 
-加载运行配置并启动 PostgreSQL 后，可从根目录启动服务：
+构建产物安装到 `zig-out`。加载配置并启动所需容器后，从同一目录运行服务：
 
 ```sh
 zig build serve
 ```
 
-也可以使用应用自己的构建入口：
+## 更新服务与记忆容器
+
+服务代码、[schema.sql](../packages/agent/src/schema.sql) 和 [tools.json](../packages/agent/src/tools.json) 编译进本地应用。修改后停止服务，再运行 `zig build serve`，即可重新构建并启动；数据库结构的调整还需按下一节处理。
+
+[memory.nu](../packages/agent/src/memory.nu) 是 agent 包拥有的远端记忆操作实现，由 [Containerfile](../dev/memory/Containerfile) 安装到记忆容器。修改该处理程序、容器构建文件、SSH 服务配置或容器内入口后，停止本地服务，重新创建记忆容器并启动服务：
 
 ```sh
-(cd apps/server && zig build)
-(cd apps/server && zig build run)
+dev/memory/start.sh down
+dev/memory/start.sh up
+zig build serve
 ```
+
+`up` 在容器不存在时重新构建镜像，沿用同名记忆卷和已有 SSH 密钥。部署到其他远端工作区时，更新对应的处理程序与入口，部署位置见[使用远端记忆](running.md#使用远端记忆)。记忆工具的使用约定见[记忆房间](memory.md)。
 
 ## 调整程序数据结构
 
-项目仍在探索，数据结构、数据库表、接口和模块边界按当前设计直接调整。开发工作约定见根目录的 [AGENTS.md](../AGENTS.md)。
+[schema.sql](../packages/agent/src/schema.sql) 定义当前程序会话表。服务启动时创建缺失的表，修改该文件不会更新已存在的表。
 
-[schema.sql](../packages/agent/src/schema.sql) 是程序会话表的当前定义。服务启动时初始化缺失的表，已有表的结构不会随文件修改自动更新。开发阶段不维护旧结构兼容或迁移，结构变化时按需重建程序库。
-
-重建前先停止本地服务，目标为 `DATABASE_URL` 指向的程序库；随后重新启动服务以初始化当前 schema。程序库与记忆库共用 PostgreSQL 数据卷，重建程序库时保留这个卷和 Ivenna 的记忆库。
-
-SQL 定义和 [tools.json](../packages/agent/src/tools.json) 都通过 `@embedFile` 编译进服务，修改后需要重新构建。Ivenna 记忆库中的表由它自行组织，程序不预定义记忆表。
+数据库结构需要随设计调整时，先停止本地服务，再清理旧对象或重建 `DATABASE_URL` 指向的程序库；重新启动服务时创建当前定义的表。程序库与记忆卷各自独立，重建程序库时保留记忆卷。

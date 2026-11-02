@@ -1,0 +1,19 @@
+FROM ghcr.io/nushell/nushell:0.116.1-alpine
+
+USER root
+RUN apk add --no-cache openssh-server ripgrep fd \
+    && adduser -D -h /home/memory -s /bin/sh memory \
+    && passwd -d memory \
+    && mkdir -p /memory /run/sshd /home/memory/.ssh \
+    && chown memory:memory /memory /home/memory/.ssh \
+    && chmod 700 /home/memory/.ssh
+
+COPY dev/memory/sshd_config /etc/ssh/sshd_config
+COPY dev/memory/entrypoint.sh /usr/local/bin/memory-entrypoint
+COPY dev/memory/memory-shell.sh /usr/local/bin/memory-shell
+COPY packages/agent/src/memory.nu /usr/local/lib/ivenna/memory.nu
+RUN chmod 755 /usr/local/bin/memory-entrypoint /usr/local/bin/memory-shell
+
+WORKDIR /memory
+EXPOSE 22
+ENTRYPOINT ["/usr/local/bin/memory-entrypoint"]

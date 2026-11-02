@@ -5,7 +5,7 @@ const input = @import("input.zig");
 pub const Store = storage.Store;
 pub const Session = storage.Session;
 pub const Provider = model.Provider;
-pub const Database = @import("database.zig").Database;
+pub const Memory = @import("memory.zig").Memory;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
@@ -13,7 +13,7 @@ pub const Engine = struct {
     allocator: Allocator,
     io: std.Io,
     store: *Store,
-    database: Database,
+    memory: Memory,
     provider: Provider,
 
     pub fn createSession(self: *Engine, a: Allocator, user_fields: Value) !i64 {
@@ -59,46 +59,59 @@ pub const Engine = struct {
             const history = try std.json.parseFromSliceLeaky([]Value, a, session.messages_json, .{});
             var messages = std.array_list.Managed(Value).fromOwnedSlice(a, history);
             const output = try self.provider.next(a, messages.items);
-            // DeepSeek is stateless: retain all output items, including the
-            // reasoning items needed to continue the same tool loop.
+            // Replay complete output, including reasoning items, in the next
+            // model request so the tool loop retains its context.
             try messages.appendSlice(output);
-            var called_tool = false;
-            var waiting = false;
+            var action: RoundAction = .no_tools;
             for (output) |item| {
                 if (!std.mem.eql(u8, try model.textField(item, "type"), "function_call")) continue;
-                called_tool = true;
+                if (action == .no_tools) action = .continue_session;
                 const name = try model.textField(item, "name");
                 const args = try model.textField(item, "arguments");
                 const outcome = self.invoke(a, name, args) catch |err| switch (err) {
                     error.InvalidToolArguments, error.UnknownTool => Outcome{
-                        .content = try std.json.Stringify.valueAlloc(a, .{ .err = @errorName(err) }, .{}),
+                        .reply = try std.json.Stringify.valueAlloc(a, Memory.Reply{
+                            .@"error" = .{
+                                .code = if (err == error.InvalidToolArguments) "invalid_arguments" else "unknown_tool",
+                                .message = if (err == error.InvalidToolArguments)
+                                    "The arguments do not match this tool's parameters. Check the required fields and allowed values."
+                                else
+                                    "This tool is not available. Choose one of the provided tools.",
+                            },
+                        }, .{}),
                     },
                     else => return err,
+                };
+                const content = switch (outcome) {
+                    .reply => |content| content,
+                    .wait_for_input => blk: {
+                        action = .wait_requested;
+                        break :blk "{\"result\":\"waiting_for_input\"}";
+                    },
                 };
                 var reply: std.json.ObjectMap = .empty;
                 try reply.put(a, "type", .{ .string = "function_call_output" });
                 try reply.put(a, "call_id", .{ .string = try model.textField(item, "call_id") });
-                try reply.put(a, "output", .{ .string = outcome.content });
+                try reply.put(a, "output", .{ .string = content });
                 try messages.append(.{ .object = reply });
-                waiting = waiting or outcome.waiting;
             }
             // Persist model output together with its tool replies. A crash
             // before this checkpoint can cause tool effects to be repeated.
             const next_checkpoint = try std.json.Stringify.valueAlloc(a, messages.items, .{});
-            if (try self.store.checkpoint(id, next_checkpoint, waiting or !called_tool)) return;
+            if (try self.store.checkpoint(id, next_checkpoint, action != .continue_session)) return;
         }
     }
 
-    const Outcome = struct { content: []const u8, waiting: bool = false };
+    const RoundAction = enum { no_tools, continue_session, wait_requested };
+    const Outcome = union(enum) { reply: []const u8, wait_for_input };
 
     fn invoke(self: *Engine, a: Allocator, name: []const u8, arguments: []const u8) !Outcome {
-        if (std.mem.eql(u8, name, "database")) {
-            const args = try parseArgs(struct { sql: []const u8 }, a, arguments);
-            return .{ .content = try self.database.execute(a, args.sql) };
+        if (try Memory.Request.parse(a, name, arguments)) |request| {
+            return .{ .reply = try self.memory.invoke(a, request) };
         }
         if (std.mem.eql(u8, name, "wait_for_input")) {
             _ = try parseArgs(struct {}, a, arguments);
-            return .{ .content = "{\"waiting\":true}", .waiting = true };
+            return .wait_for_input;
         }
         return error.UnknownTool;
     }

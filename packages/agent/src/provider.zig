@@ -4,10 +4,13 @@ const Value = std.json.Value;
 
 /// Every request uses the worker's Io, so canceling it also cancels its HTTP I/O.
 pub const Provider = struct {
+    pub const default_base_url = "https://api.deepseek.com";
+    pub const default_model = "deepseek-flash";
+
     client: *std.http.Client,
-    base_url: []const u8 = "https://api.deepseek.com",
+    base_url: []const u8 = default_base_url,
     api_key: []const u8 = "",
-    model: []const u8 = "deepseek-flash",
+    model: []const u8 = default_model,
 
     pub fn next(self: Provider, arena: Allocator, input: []const Value) ![]const Value {
         try self.client.io.checkCancel();
@@ -45,7 +48,7 @@ pub const Provider = struct {
             };
             const detail = failure.@"error".message;
             const message = if (self.api_key.len == 0) detail else try std.mem.replaceOwned(u8, arena, detail, self.api_key, "[redacted]");
-            std.log.err("DeepSeek: {s}", .{message});
+            std.log.err("model endpoint: {s}", .{message});
             return error.ModelHttpFailure;
         }
         if (response.head.content_encoding != .identity) return error.UnsupportedModelEncoding;

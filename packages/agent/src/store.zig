@@ -3,14 +3,20 @@ const pg = @import("pg");
 
 const Allocator = std.mem.Allocator;
 
+pub const State = union(enum) {
+    waiting,
+    pending,
+    running,
+    failed: []const u8,
+};
+
 /// Strings belong to the allocator supplied to getSession.
 pub const Session = struct {
     id: i64,
     user_fields_json: []const u8,
-    status: []const u8,
+    state: State,
     messages_json: []const u8,
     pending_inputs_json: []const u8,
-    error_message: ?[]const u8,
 };
 
 pub const Store = struct {
@@ -146,28 +152,36 @@ pub const Store = struct {
 fn copySession(allocator: Allocator, row: *pg.QueryRow) !Session {
     const user_fields_json = try allocator.dupe(u8, try row.get([]const u8, 1));
     errdefer allocator.free(user_fields_json);
-    const status = try allocator.dupe(u8, try row.get([]const u8, 2));
-    errdefer allocator.free(status);
+    const state: State = switch (try row.get(std.meta.Tag(State), 2)) {
+        .waiting => .waiting,
+        .pending => .pending,
+        .running => .running,
+        .failed => .{ .failed = try allocator.dupe(u8, try row.get([]const u8, 5)) },
+    };
+    errdefer freeState(allocator, state);
     const messages_json = try allocator.dupe(u8, try row.get([]const u8, 3));
     errdefer allocator.free(messages_json);
     const pending_inputs_json = try allocator.dupe(u8, try row.get([]const u8, 4));
     errdefer allocator.free(pending_inputs_json);
-    const error_message = if (try row.get(?[]const u8, 5)) |value| try allocator.dupe(u8, value) else null;
-    errdefer if (error_message) |value| allocator.free(value);
     return .{
         .id = try row.get(i64, 0),
         .user_fields_json = user_fields_json,
-        .status = status,
+        .state = state,
         .messages_json = messages_json,
         .pending_inputs_json = pending_inputs_json,
-        .error_message = error_message,
     };
+}
+
+fn freeState(allocator: Allocator, state: State) void {
+    switch (state) {
+        .failed => |message| allocator.free(message),
+        else => {},
+    }
 }
 
 fn freeSession(allocator: Allocator, session: Session) void {
     allocator.free(session.user_fields_json);
-    allocator.free(session.status);
+    freeState(allocator, session.state);
     allocator.free(session.messages_json);
     allocator.free(session.pending_inputs_json);
-    if (session.error_message) |value| allocator.free(value);
 }

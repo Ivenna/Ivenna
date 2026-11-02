@@ -23,10 +23,10 @@ pub fn main(init: std.process.Init) !void {
         .allocator = init.gpa,
         .io = io,
         .store = &store,
-        .database = .{
-            .allocator = init.gpa,
+        .memory = .{
             .io = io,
-            .database_url = config.memory_database_url,
+            .ssh_target = config.memory_ssh_target,
+            .ssh_config = config.memory_ssh_config,
         },
         .provider = .{
             .client = &client,
@@ -66,14 +66,14 @@ pub fn main(init: std.process.Init) !void {
     defer select.cancelDiscard();
     try select.concurrent(.server, Api.listen, .{ &api, &listener });
     try select.concurrent(.shutdown, waitForStop, .{io});
-    std.log.info("Ivenna listening on http://{s}:{d} (DeepSeek: {s})", .{
+    std.log.info("Ivenna listening on http://{s}:{d} (model: {s})", .{
         config.host, config.port, config.llm_model,
     });
     switch (try select.await()) {
         .server => |result| try result,
         .shutdown => |result| {
             try result;
-            std.log.info("stopping Ivenna and joining requests and sessions", .{});
+            std.log.info("stopping Ivenna and waiting for active tasks", .{});
         },
     }
 }
