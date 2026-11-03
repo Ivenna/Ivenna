@@ -10,9 +10,9 @@ pub const Host = struct {
 
     pub const Context = Shell.Context;
 
-    pub fn init(io: std.Io, directory: []const u8, environ: *const std.process.Environ.Map) Host {
+    pub fn init(io: std.Io, directory: []const u8, data_directory: []const u8, environ: *const std.process.Environ.Map) Host {
         return .{
-            .shell = .{ .io = io, .directory = directory, .environ = environ },
+            .shell = .{ .io = io, .directory = directory, .data_directory = data_directory, .environ = environ },
         };
     }
 

@@ -18,7 +18,6 @@
         "packages/agent/src",
         "docs",
         "dev",
-        "compose.yaml",
         ".env.example",
         "AGENTS.md",
         "README.md",

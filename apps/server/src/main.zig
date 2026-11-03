@@ -13,10 +13,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const host_directory = try std.process.currentPathAlloc(io, init.gpa);
     defer init.gpa.free(host_directory);
+    const data_directory = try std.fs.path.resolve(init.gpa, &.{ host_directory, config.data_dir });
+    defer init.gpa.free(data_directory);
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, data_directory, .fromMode(0o700));
+    const database_path = try std.fs.path.joinZ(init.gpa, &.{ data_directory, "state.sqlite" });
+    defer init.gpa.free(database_path);
     var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
     defer client.deinit();
 
-    var store = try agent.Store.init(io, init.gpa, config.database_url);
+    var store = try agent.Store.init(io, init.gpa, database_path);
     defer store.deinit();
     try store.initializeSchema();
     try store.recoverInterrupted();
@@ -30,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
             .ssh_target = config.memory_ssh_target,
             .ssh_config = config.memory_ssh_config,
         },
-        .host = .init(io, host_directory, init.environ_map),
+        .host = .init(io, host_directory, data_directory, init.environ_map),
         .provider = .{
             .client = &client,
             .base_url = config.llm_base_url,

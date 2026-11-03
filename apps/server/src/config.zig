@@ -2,7 +2,7 @@ const std = @import("std");
 const Provider = @import("agent").Provider;
 
 pub const Config = struct {
-    database_url: []const u8,
+    data_dir: []const u8,
     memory_ssh_target: []const u8,
     memory_ssh_config: ?[]const u8,
     host: []const u8,
@@ -13,8 +13,8 @@ pub const Config = struct {
 
     /// Values borrow the process environment, which outlives the server.
     pub fn load(env: *const std.process.Environ.Map) !Config {
-        const database_url = env.get("DATABASE_URL") orelse "postgres://ivenna:ivenna@127.0.0.1:5432/ivenna";
-        if (database_url.len == 0) return error.MissingDatabaseUrl;
+        const data_dir = env.get("DATA_DIR") orelse ".ivenna";
+        if (data_dir.len == 0) return error.MissingDataDirectory;
         const memory_ssh_target = env.get("MEMORY_SSH_TARGET") orelse "ivenna-memory";
         if (memory_ssh_target.len == 0) return error.MissingMemorySshTarget;
         const memory_ssh_config = env.get("MEMORY_SSH_CONFIG");
@@ -27,7 +27,7 @@ pub const Config = struct {
             return error.MissingLlmCredentials;
         }
         return .{
-            .database_url = database_url,
+            .data_dir = data_dir,
             .memory_ssh_target = memory_ssh_target,
             .memory_ssh_config = memory_ssh_config,
             .host = env.get("HOST") orelse "127.0.0.1",

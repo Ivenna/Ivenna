@@ -4,9 +4,9 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        .pg = .{
-            .url = "https://github.com/karlseguin/pg.zig/archive/0ccd7d9dabce32e4cee0dd789d8007934099a0f9.tar.gz",
-            .hash = "pg-0.0.0-Wp_7geJVBwDaf2o8erlmelEP5RBEuMESnFWWrNLQneEy",
+        .sqlite = .{
+            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+            .hash = "N-V-__8AAETTsACt-JClKW4BKM6GIeql6to34i9WbXMgbXeI",
         },
         .yaml = .{
             .url = "https://github.com/sakakibara/yaml-zig/archive/0e3e14ee481cf037bdb3191866219c03e8d7f8b5.tar.gz",

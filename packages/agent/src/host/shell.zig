@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 pub const Shell = struct {
     io: std.Io,
     directory: []const u8,
+    data_directory: []const u8,
     environ: *const std.process.Environ.Map,
 
     const default_timeout_ms = 600_000;
@@ -64,7 +65,7 @@ pub const Shell = struct {
     pub fn run(self: Shell, a: Allocator, context: Context, args: Command) !Result {
         const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromMilliseconds(args.timeout_ms orelse default_timeout_ms), .clock = .awake });
         const conversation = try std.fmt.allocPrint(a, "{d}", .{context.session_id});
-        const log_directory = try std.fs.path.join(a, &.{ self.directory, ".ivenna", "host", conversation });
+        const log_directory = try std.fs.path.join(a, &.{ self.data_directory, "host", conversation });
         _ = try std.Io.Dir.cwd().createDirPathStatus(self.io, log_directory, .fromMode(0o700));
         var random: [16]u8 = undefined;
         self.io.random(&random);

@@ -54,7 +54,7 @@ Commands run as the service's OS account. All sessions share that account and fi
 
 ## Results and interruption
 
-A command result contains its outcome and both output streams. For session `1`, the command above returns a result such as:
+A command result contains its outcome and both output streams. For session `1` with the default data directory, the command above returns a result such as:
 
 ```json
 {
@@ -92,6 +92,6 @@ Both `stdout` and `stderr` contain:
 | `truncated` | Whether the preview omitted content |
 | `path` | Absolute path to the complete output file |
 
-The preview limit does not stop the command. Invalid UTF-8 bytes are replaced in previews; log files retain the original bytes. Logs remain under `.ivenna/host/<session_id>/` in the startup directory and can be read or removed through subsequent shell calls.
+The preview limit does not stop the command. Invalid UTF-8 bytes are replaced in previews; output files retain the original bytes. Files remain under `<DATA_DIR>/host/<session_id>/` and can be read or removed through subsequent shell calls. `DATA_DIR` defaults to `.ivenna` in the startup directory; see [local data](running.md#local-data) for configuration.
 
 A timeout returns the output captured so far. Service cancellation also stops the process group. Neither action undoes completed changes. A restart may repeat a command whose result was not checkpointed; see [failure and recovery](architecture.md#failure-and-recovery).

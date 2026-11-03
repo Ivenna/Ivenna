@@ -1,10 +1,10 @@
 # Running Ivenna
 
-These steps start the local HTTP service from the repository root. In the default development environment, PostgreSQL and the memory workspace run in containers, while the Ivenna service runs locally.
+These steps start the local HTTP service from the repository root. Ivenna stores application state in embedded SQLite. The default memory workspace runs in a container, while the service runs locally.
 
 ## Prerequisites and configuration
 
-Install the Zig version specified in [`.zig-version`](../.zig-version) and an OpenSSH client. You also need a DeepSeek API key and a container engine with Compose support. Additional programs for the agent's [host shell](host.md) can be installed independently; see [optional host tools](#optional-host-tools).
+Install the Zig version specified in [`.zig-version`](../.zig-version) and an OpenSSH client. You also need a DeepSeek API key. The local memory workspace requires a container engine; [remote memory](#using-remote-memory) can be used instead. SQLite is compiled into the application, so it needs no separate service or command-line installation. Additional programs for the agent's [host shell](host.md) can be installed independently; see [optional host tools](#optional-host-tools).
 
 Copy the configuration template from the repository root:
 
@@ -12,24 +12,35 @@ Copy the configuration template from the repository root:
 cp -n .env.example .env
 ```
 
-Edit `.env` and set `LLM_API_KEY` and `CONTAINER_ENGINE`. Use the container engine's command name or executable path; the startup commands invoke it as a single executable with Compose support. The template's `MEMORY_SSH_CONFIG` points to the SSH configuration file that the memory startup script will generate. Other settings are optional. Git ignores `.env` and the local files generated during startup.
+Edit `.env` and set `LLM_API_KEY`. For the local memory workspace, also set `CONTAINER_ENGINE` to the container engine's command name or executable path. The memory startup script invokes it as a single executable. The template's `MEMORY_SSH_CONFIG` points to the SSH configuration file that the script will generate. Other settings are optional. Git ignores `.env` and the default `.ivenna/` data directory.
 
 ## Starting the service
 
-In the same terminal, load the configuration, then start PostgreSQL, the memory container, and the service:
+In the same terminal, load the configuration, then start the memory container and the service:
 
 ```sh
 set -a
 . ./.env
 set +a
-"$CONTAINER_ENGINE" compose up -d --wait db
 dev/memory/start.sh up
 zig build serve
 ```
 
 On its first run, the [memory startup script](../dev/memory/start.sh) builds the image, creates a memory volume and SSH keys, writes the connection configuration to `.ivenna/dev-memory/`, and waits for the memory tools to become available. Later runs reuse the existing container, volume, and keys. The generated SSH configuration defines the target `ivenna-memory`, which connects to `127.0.0.1:2222` by default.
 
-The service listens on `http://127.0.0.1:5882` by default and calls `deepseek-flash` through the DeepSeek [Responses API](https://api-docs.deepseek.com/guides/responses_api/). Leave it running in this terminal and follow the [usage guide](usage.md) to submit input from another terminal. Run one service process per application database: startup recovery assumes sole ownership of its sessions.
+The service creates its local data directory and opens `state.sqlite` on startup. It listens on `http://127.0.0.1:5882` by default and calls `deepseek-flash` through the DeepSeek [Responses API](https://api-docs.deepseek.com/guides/responses_api/). Leave it running in this terminal and follow the [usage guide](usage.md) to submit input from another terminal. Run one service process per data directory: startup recovery assumes sole ownership of its sessions.
+
+## Local data
+
+`DATA_DIR` selects the service's local data directory. It defaults to `.ivenna`, relative to the startup directory; an absolute path can place data elsewhere. The service creates the directory with private permissions when it is missing. Use a location writable by the service account.
+
+| Location | Contents |
+| --- | --- |
+| `<DATA_DIR>/state.sqlite` | Sessions, saved history, and pending inputs |
+| `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr files from host commands |
+| Memory workspace selected by SSH configuration | Shared memory rooms and entries, stored as files |
+
+The local memory setup keeps connection files and SSH keys in the repository's `.ivenna/dev-memory/` and memory content in its named container volume. Changing `DATA_DIR` moves neither of those locations. Keep the data directory and the selected memory workspace when continuing a deployment; [changing application data structures](development.md#changing-application-data-structures) explains how to reset development session data.
 
 ## Optional host tools
 
@@ -46,13 +57,11 @@ The service reads exported process variables; the startup commands load them fro
 | `LLM_API_KEY` | Model API key | Required |
 | `LLM_BASE_URL` | Model API base URL | `https://api.deepseek.com` |
 | `LLM_MODEL` | Model name | `deepseek-flash` |
-| `DATABASE_URL` | Application session database | `postgres://ivenna:ivenna@127.0.0.1:5432/ivenna` |
+| `DATA_DIR` | Local application data directory | `.ivenna`, relative to the startup directory |
 | `MEMORY_SSH_TARGET` | Memory workspace SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration; the local template sets `.ivenna/dev-memory/config` |
 
-Relative paths such as the template's `MEMORY_SSH_CONFIG` resolve from the service's working directory. These instructions use the repository root. If you start the service elsewhere, adjust the configuration path or use an absolute path. The startup directory also supplies the default working directory for [host commands and their logs](host.md#running-commands).
-
-Use `POSTGRES_PORT` and `POSTGRES_PASSWORD` to override the local PostgreSQL port and initial password in [compose.yaml](../compose.yaml). Keep `DATABASE_URL` consistent with the port and database credentials. Changing `POSTGRES_PASSWORD` does not change the password stored in an existing database; see the [PostgreSQL image documentation](https://github.com/docker-library/docs/tree/master/postgres#environment-variables).
+Relative paths such as `DATA_DIR` and the template's `MEMORY_SSH_CONFIG` resolve from the service's working directory. These instructions use the repository root. If you start the service elsewhere, adjust those paths or use absolute paths to continue using the same data and memory connection. Host commands also use the startup directory as their default working directory; their output files live under `DATA_DIR`.
 
 For the local memory container, use `MEMORY_SSH_PORT` to change the port, and `MEMORY_CONTAINER_NAME`, `MEMORY_VOLUME_NAME`, and `MEMORY_IMAGE` to choose the container, memory volume, and image names.
 
@@ -60,7 +69,7 @@ These settings take effect when the container is created. Run `dev/memory/start.
 
 ## Using remote memory
 
-To connect to an existing remote workspace, configure SSH first, then follow the startup steps for PostgreSQL and the service, skipping the local memory container.
+To connect to an existing remote workspace, configure SSH first, then follow the startup steps for the service, skipping the local memory container. This setup does not require a container engine.
 
 The application uses the `ivenna-memory` SSH target by default. Set `MEMORY_SSH_TARGET` to use another target. To use your standard OpenSSH configuration, remove the template's `MEMORY_SSH_CONFIG` from `.env`; to use a dedicated configuration file, set it to that file's path. SSH configuration controls the user, hostname, keys, connection timeout, and host key verification.
 
@@ -73,13 +82,12 @@ The application invokes this fixed entry point over SSH. Use the container's [Co
 
 ## Stopping and restarting
 
-Press `Ctrl+C` in the service terminal to stop Ivenna. If PostgreSQL and the memory container are still running, run `zig build serve` again to continue using saved sessions and memory.
+Press `Ctrl+C` in the service terminal to stop Ivenna. If the memory workspace is still available, run `zig build serve` again with the same configuration to continue using saved sessions and memory.
 
-To stop the local containers as well, run:
+To remove the local memory container as well, run:
 
 ```sh
 dev/memory/start.sh down
-"$CONTAINER_ENGINE" compose down
 ```
 
-These commands preserve data volumes and SSH keys. Next time, repeat the steps for [starting the service](#starting-the-service). Run `dev/memory/start.sh status` to check the local memory container's status.
+This preserves the memory volume and SSH keys, and leaves the service's local data directory in place. Next time, repeat the steps for [starting the service](#starting-the-service). Run `dev/memory/start.sh status` to check the local memory container's status.

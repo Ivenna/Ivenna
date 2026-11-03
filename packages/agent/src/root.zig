@@ -38,8 +38,7 @@ pub const Engine = struct {
     pub fn execute(self: *Engine, id: i64) !void {
         try self.store.claimSession(id);
         self.loop(id) catch |err| {
-            // Cancellation must stay cancellable, including when PostgreSQL is
-            // unavailable. Startup recovery resumes unfinished sessions.
+            // Cancellation leaves the last saved checkpoint for startup recovery.
             if (err == error.Canceled) return err;
             self.store.failSession(id, @errorName(err)) catch |persist_err| {
                 if (persist_err == error.Canceled) return persist_err;
