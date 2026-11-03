@@ -33,7 +33,10 @@ pub const Memory = struct {
         },
         remember: struct {
             address: []const u8,
-            content: []const u8,
+            content: union(enum) {
+                text: []const u8,
+                file: struct { path: []const u8 },
+            },
             mode: ?enum { create, append, replace } = null,
         },
         revise_memory: struct {
@@ -55,12 +58,18 @@ pub const Memory = struct {
 
         pub fn parse(allocator: Allocator, name: []const u8, arguments: []const u8) !?Request {
             const tag = std.meta.stringToEnum(std.meta.Tag(Request), name) orelse return null;
-            return switch (tag) {
+            const request: Request = switch (tag) {
                 inline else => |active| @unionInit(Request, @tagName(active), std.json.parseFromSliceLeaky(@FieldType(Request, @tagName(active)), allocator, arguments, .{}) catch |err| switch (err) {
                     error.OutOfMemory => return err,
                     else => return error.InvalidToolArguments,
                 }),
             };
+            if (request == .remember and request.remember.content == .file) {
+                const path = request.remember.content.file.path;
+                if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
+                    return error.InvalidToolArguments;
+            }
+            return request;
         }
 
         fn changesMemory(request: Request) bool {
@@ -82,8 +91,33 @@ pub const Memory = struct {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const scratch = arena.allocator();
-        // Missing overrides remain missing; the execution boundary owns defaults.
-        const payload = try std.json.Stringify.valueAlloc(scratch, request, .{ .emit_null_optional_fields = false });
+        // File sources belong to the service host; the remote handler receives
+        // bytes rather than a host path. Missing modes retain remote defaults.
+        const payload = switch (request) {
+            .remember => |args| blk: {
+                const bytes = switch (args.content) {
+                    .text => |text| text,
+                    .file => |source| std.Io.Dir.cwd().readFileAlloc(self.io, source.path, scratch, .unlimited) catch |err| switch (err) {
+                        error.Canceled, error.OutOfMemory => return err,
+                        else => return textReply(allocator, try std.json.Stringify.valueAlloc(allocator, .{
+                            .@"error" = .{
+                                .code = "source_unavailable",
+                                .message = try std.fmt.allocPrint(allocator, "Could not read host file '{s}': {s}. This write was not sent to memory.", .{ source.path, @errorName(err) }),
+                            },
+                        }, .{})),
+                    },
+                };
+                const encoder = std.base64.standard.Encoder;
+                const data = try scratch.alloc(u8, encoder.calcSize(bytes.len));
+                _ = encoder.encode(data, bytes);
+                break :blk try std.json.Stringify.valueAlloc(scratch, .{ .remember = .{
+                    .address = args.address,
+                    .data = data,
+                    .mode = args.mode,
+                } }, .{ .emit_null_optional_fields = false });
+            },
+            else => try std.json.Stringify.valueAlloc(scratch, request, .{ .emit_null_optional_fields = false }),
+        };
 
         var argv: std.array_list.Managed([]const u8) = .init(scratch);
         try argv.appendSlice(&.{
@@ -169,10 +203,10 @@ pub const Memory = struct {
         });
         const failure: Reply = .{ .@"error" = if (request.changesMemory()) .{
             .code = "memory_change_uncertain",
-            .message = "The memory room did not return a complete response. Memory may have changed; inspect it before retrying the change.",
+            .message = "The memory room did not return a complete response. Memory may have changed.",
         } else .{
             .code = "memory_unavailable",
-            .message = "The memory room did not return a complete response. Check the connection before trying again.",
+            .message = "The memory room did not return a complete response.",
         } };
         return textReply(allocator, try std.json.Stringify.valueAlloc(allocator, failure, .{}));
     }

@@ -44,7 +44,7 @@ pub const Host = struct {
         return self.respond(a, context, request) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,
             else => try textReply(a, try failure(a, "host_unavailable", switch (request) {
-                .run_host_shell => try std.fmt.allocPrint(a, "Could not return the command result: {s}. The host may have changed; inspect it before retrying.", .{@errorName(err)}),
+                .run_host_shell => try std.fmt.allocPrint(a, "Could not return the command result: {s}. The host may have changed.", .{@errorName(err)}),
                 .get_host_shell => try std.fmt.allocPrint(a, "Could not describe the host shell: {s}.", .{@errorName(err)}),
             })),
         };

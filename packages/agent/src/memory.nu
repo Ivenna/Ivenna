@@ -119,6 +119,7 @@ def dispatch [root: string, operation: string, args: record] {
             }
             let matches = $recalled.stdout | lines | each {|line| $line | from json }
                 | where type == "match"
+                | where {|item| $item.data.path.text? != null and $item.data.lines.text? != null }
                 | each {|item|
                     let target = resolve $root (relative-address $root $item.data.path.text)
                     {address: $target.address, line: $item.data.line_number, text: $item.data.lines.text}
@@ -131,15 +132,16 @@ def dispatch [root: string, operation: string, args: record] {
         },
         "remember" => {
             let target = resolve $root $args.address
+            let content = $args.data | decode base64
             match ($args.mode? | default "create") {
                 "create" => {
                     if ($target.path | path exists) {
-                        fail already_exists $"Address '($target.address)' already exists. Choose another address, use append or replace mode, or call revise_memory."
+                        fail already_exists $"Address '($target.address)' already exists."
                     }
-                    $args.content | save --raw $target.path
+                    $content | save --raw $target.path
                 },
-                "append" => { $args.content | save --raw --append $target.path },
-                "replace" => { $args.content | save --raw --force $target.path },
+                "append" => { $content | save --raw --append $target.path },
+                "replace" => { $content | save --raw --force $target.path },
                 _ => { fail invalid_argument "The mode argument must be create, append, or replace." }
             }
             {address: $target.address}
@@ -152,6 +154,9 @@ def dispatch [root: string, operation: string, args: record] {
                 _ => { fail invalid_argument "Revision matching mode must be literal or regex." }
             }
             let before = open --raw $target.path
+            if ($before | describe) != "string" or ($before | str contains (char nul)) {
+                fail unsupported_content "Text revision requires UTF-8 content without NUL bytes."
+            }
             let matched = if $regex { $before =~ $args.old_text } else { $before | str contains $args.old_text }
             let after = $before | str replace --all=($args.replace_all? | default false) --regex=$regex --no-expand=(not $regex) $args.old_text $args.new_text
             let revision = if not $matched {
@@ -177,18 +182,18 @@ def dispatch [root: string, operation: string, args: record] {
                 resolve $root ([$destination.address ($source.address | path basename)] | path join)
             } else { $destination }
             if ($target.path | path exists) {
-                fail already_exists $"Destination address '($target.address)' already exists; choose another address."
+                fail already_exists $"Destination address '($target.address)' already exists."
             }
             mv $source.entry_path $target.entry_path
             {address: $target.address}
         },
         "forget_memory" => {
             let target = existing $root $args.address
-            if $target.path == $root { fail invalid_address "The shared entrance cannot be removed. Choose a memory entry or child room." }
+            if $target.path == $root { fail invalid_address "The shared entrance cannot be removed." }
             rm --recursive=($args.recursive? | default false) $target.entry_path
             {address: $target.address}
         },
-        _ => { fail invalid_operation "Unknown memory operation. Use one of the available memory tools." }
+        _ => { fail invalid_operation "Unknown memory operation." }
     }
 }
 

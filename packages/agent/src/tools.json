@@ -101,7 +101,7 @@
   {
     "type": "function",
     "name": "browse_memory_room",
-    "description": "Explore a memory room and discover its child rooms and memory entries. Rooms persist across sessions; choose their organization freely. The result contains room and entries; each entry has address, name, and kind (room or memory).",
+    "description": "List a memory room's entries and child rooms. Memory is persistent and shared across sessions. Returns room and entries; each entry has address, name, and kind (room or memory).",
     "parameters": {
       "type": "object",
       "properties": {
@@ -117,7 +117,7 @@
   {
     "type": "function",
     "name": "find_memory",
-    "description": "Find memory entries and rooms by name within a room and its descendants. Use recall_memory to search remembered content. The result contains room, query, and matches; each match has address, name, and kind. No matches returns an empty matches list.",
+    "description": "Find memory entries and rooms by name within a room and its descendants. Returns room, query, and matches; each match has address, name, and kind.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -131,7 +131,7 @@
         },
         "match_mode": {
           "type": "string",
-          "description": "Interpret query as literal text (default), a glob such as \"*.md\", or a regular expression.",
+          "description": "Interpret query as literal text (default), a glob, or a regular expression.",
           "enum": [
             "literal",
             "glob",
@@ -152,7 +152,7 @@
   {
     "type": "function",
     "name": "recall_memory",
-    "description": "Search memory entries for a clue within a room and its descendants. The result contains room, clue, and matches; each match has address, line, and text. Use a matching address to read the full entry. No matches returns an empty matches list.",
+    "description": "Search text in memory entries within a room and its descendants. Returns room, clue, and matches; each match has address, line, and text.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -186,7 +186,7 @@
   {
     "type": "function",
     "name": "read_memory",
-    "description": "Read a memory entry at a known location. Returns its address and full text, or image metadata with native JPEG, PNG, GIF, or WebP content. Unsupported content or image data over 32 MiB returns a diagnostic.",
+    "description": "Read a memory entry. Returns its address and full text, or image metadata with native JPEG, PNG, GIF, or WebP content. Unsupported content or image data over 32 MiB returns a diagnostic.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -262,7 +262,7 @@
   {
     "type": "function",
     "name": "remember",
-    "description": "Write text to a memory entry. The result contains address.",
+    "description": "Store text or the bytes of a host file in a memory entry. Returns its address.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -271,12 +271,50 @@
           "description": "The location for the memory entry, relative to the shared entrance."
         },
         "content": {
-          "type": "string",
-          "description": "Text to keep in this entry."
+          "type": "object",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "description": "Text to store."
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "file": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Source file on the service host, absolute or relative to the service startup directory. Its bytes are copied without conversion."
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Source of the content to store."
         },
         "mode": {
           "type": "string",
-          "description": "create (default) fails if the address already exists; append adds text without inserting a separator; replace overwrites the entry. append and replace also create missing entries. create and append require an existing containing room; replace also creates missing parent rooms.",
+          "description": "create (default) fails if the address already exists; append concatenates bytes without a separator; replace overwrites the entry. append and replace also create missing entries. create and append require an existing containing room; replace also creates missing parent rooms.",
           "enum": [
             "create",
             "append",
@@ -294,7 +332,7 @@
   {
     "type": "function",
     "name": "revise_memory",
-    "description": "Revise matching text in an existing memory entry. The result contains address and revision (no_match, unchanged, or revised).",
+    "description": "Revise matching text in an existing UTF-8 memory entry without NUL bytes. Other content returns unsupported_content. The result contains address and revision (no_match, unchanged, or revised).",
     "parameters": {
       "type": "object",
       "properties": {
@@ -334,7 +372,7 @@
   {
     "type": "function",
     "name": "create_memory_room",
-    "description": "Create a room to organize memory entries and child rooms. Parent rooms are created as needed, and an existing room can be reused. The result contains address.",
+    "description": "Create a memory room and any missing parent rooms. An existing room is reused. Returns its address.",
     "parameters": {
       "type": "object",
       "properties": {

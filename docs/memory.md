@@ -26,7 +26,7 @@ All addresses are relative to the shared entrance, including those returned by t
 | `find_memory` | `query` | Find entries and rooms by name |
 | `recall_memory` | `clue` | Recall relevant entries by content |
 | `read_memory` | `address` | Read an entry as text or an image |
-| `remember` | `address`, `content` | Create an entry, append text, or replace its content with text |
+| `remember` | `address`, `content` | Write text or copy a host file into an entry |
 | `revise_memory` | `address`, `old_text`, `new_text` | Revise matching text in an entry |
 | `create_memory_room` | `address` | Create a room and any missing parent rooms |
 | `move_memory` | `address`, `destination` | Move or rename entries and rooms |
@@ -38,9 +38,18 @@ For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content
 
 `read_memory` accepts an optional `expected` object for the complete entry. Omit it for automatic classification as full text or a supported image. See [tool content](content.md) for the expectation branches, URL references, and limits.
 
-For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to add content without inserting a separator, or `replace` to write the full content. Both modes can also create a missing entry. Create and append require an existing containing room; replace also creates missing parent rooms.
+`remember.content` selects exactly one source:
 
-Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
+| Content | Meaning |
+| --- | --- |
+| `{"text":"..."}` | Write the supplied text as UTF-8 |
+| `{"file":{"path":"..."}}` | Copy a file's original bytes from the service's filesystem |
+
+A source file path can be absolute or relative to the service's startup directory. The destination `address` remains relative to the memory entrance. Browsing, name searches, moving, and removal work with entries of any format. See [tool content](content.md) for the types currently returned to the model by `read_memory`.
+
+For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to append the source bytes without inserting a separator, or `replace` to write the full content. Both modes can also create a missing entry. Create and append require an existing containing room; replace also creates missing parent rooms.
+
+`revise_memory` requires the entry to contain UTF-8 text without NUL bytes. Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
 
 When moving an entry or room, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists. By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance cannot be moved or removed.
 
@@ -55,7 +64,13 @@ Call `create_memory_room` to create a room:
 Call `remember` to record an entry:
 
 ```json
-{"address":"languages/progress.md","content":"French: practice twice a week. Japanese: practice once a week."}
+{"address":"languages/progress.md","content":{"text":"French: practice twice a week. Japanese: practice once a week."}}
+```
+
+Call `remember` to store an audio recording from the host:
+
+```json
+{"address":"languages/practice.wav","content":{"file":{"path":"/path/to/practice.wav"}}}
 ```
 
 Call `recall_memory` to search a room's remembered content:
@@ -115,6 +130,8 @@ The `kind` field is `room` for a memory room and `memory` for a memory entry. A 
 | `unchanged` | A match was found, but the content did not change |
 | `revised` | The content was revised |
 
-On failure, `error` provides a `code` and `message` describing the problem. `memory_unavailable` means a read-only operation ended without a complete response. `memory_change_uncertain` means memory may have changed, but the outcome is unknown. Read the relevant entry before retrying an uncertain change. For a create, move, or remove operation, browse the original and destination locations before deciding whether to retry.
+On failure, `error` provides a `code` and `message` describing the problem. `source_unavailable` means a host source file could not be read; this invocation sent no remote memory request. `unsupported_content` from a revision means the entry was not UTF-8 text without NUL bytes, so no revision was written.
+
+`memory_unavailable` means a read-only operation ended without a complete response. `memory_change_uncertain` means memory may have changed, but the outcome is unknown.
 
 Resuming a session may repeat operations whose results were not yet saved in a checkpoint. See [failure and recovery](architecture.md#failure-and-recovery) for details.

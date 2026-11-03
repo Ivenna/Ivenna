@@ -72,9 +72,9 @@ pub const Engine = struct {
                             .@"error" = .{
                                 .code = if (err == error.InvalidToolArguments) "invalid_arguments" else "unknown_tool",
                                 .message = if (err == error.InvalidToolArguments)
-                                    "The arguments do not match this tool's parameters. Check the required fields and allowed values."
+                                    "The arguments do not match this tool's parameters."
                                 else
-                                    "This tool is not available. Choose one of the provided tools.",
+                                    "This tool is not available.",
                             },
                         }, .{})),
                     },

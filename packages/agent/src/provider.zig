@@ -42,7 +42,7 @@ pub const Provider = struct {
         @memcpy(input[0..history.len], history);
         input[history.len] = reply;
         if (try self.requestSize(arena, input) > 48 * 1024 * 1024)
-            return contentLimitReply(arena, call_id, content, "Images omitted: the next model request would exceed 48 MiB. Use fewer or smaller images, or continue in a new session.");
+            return contentLimitReply(arena, call_id, content, "Images omitted: the next model request would exceed 48 MiB.");
         return reply;
     }
 
@@ -61,7 +61,7 @@ pub const Provider = struct {
         while (index > reply_start) {
             index -= 1;
             if (!hasImage(history[index])) continue;
-            const rejection = try contentLimitReply(arena, try textField(history[index], "call_id"), &.{}, "Images omitted: the completed tool results would make the next model request exceed 48 MiB. Use fewer or smaller images, or continue in a new session.");
+            const rejection = try contentLimitReply(arena, try textField(history[index], "call_id"), &.{}, "Images omitted: the completed tool results would make the next model request exceed 48 MiB.");
             var parts: std.array_list.Managed(Value) = .init(arena);
             for (contentParts(history[index])) |part| {
                 if (imageUrl(part) == null) try parts.append(part);
@@ -211,7 +211,7 @@ fn imageLimit(content: []const Content, history: []const Value) ?[]const u8 {
             if (imageUrl(part) != null) count += 1;
         }
     }
-    if (count > 600) return "Images omitted: this result would exceed 600 images in one model request. Continue in a new session.";
+    if (count > 600) return "Images omitted: this result would exceed 600 images in one model request.";
     return null;
 }
 

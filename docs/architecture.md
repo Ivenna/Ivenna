@@ -14,7 +14,7 @@ This guide describes the current implementation of the project's [design intent]
 | [Engine](../packages/agent/src/root.zig) | Create sessions, run model and tool loops, and save each turn's results |
 | [Provider](../packages/agent/src/provider.zig) | Encode model requests and tool content, and decode complete output with typed function calls |
 | [Store](../packages/agent/src/store.zig) | Persist sessions, history, and the input inbox, and apply session state transitions |
-| [Memory](../packages/agent/src/memory.zig) | Send structured memory requests to the remote handler and return operation results |
+| [Memory](../packages/agent/src/memory.zig) | Resolve write sources, exchange structured requests with the remote handler, and return operation results |
 | [Host](../packages/agent/src/host.zig) | Parse and route shell requests with trusted conversation context |
 
 HTTP and concurrency use the Zig standard library. SQLite is compiled into the application, input serialization to YAML uses `yaml-zig`, and image format recognition uses [zignal](https://github.com/arrufat/zignal). Dependency versions are pinned in the [agent package manifest](../packages/agent/build.zig.zon). See the [development guide](development.md) for the repository layout and build commands.
@@ -39,7 +39,13 @@ Autonomous memory is shared across all sessions. The model chooses memory operat
 
 The remote handler, [memory.nu](../packages/agent/src/memory.nu), runs at a fixed path, fills in default values for omitted arguments, and checks that addresses resolve within the memory workspace. It uses [fd](https://github.com/sharkdp/fd) to find names, [ripgrep](https://github.com/BurntSushi/ripgrep) to search content, and Nushell built-ins to read, write, and organize entries. The handler runs predefined operations, treating content and match expressions supplied by the model as data.
 
+For `remember`, Memory resolves the selected text or host-file source before starting SSH. Text becomes UTF-8 bytes; file contents are read without format detection or conversion. Both sources use base64 in the internal request's `data` field. The remote handler decodes these bytes and writes them according to the requested mode. Source-file paths stay local to the application. A local read failure returns `source_unavailable` without sending a remote request.
+
 The handler returns either a `result` branch with exit code `0` or an `error` branch with exit code `1`. A successful read carries the entry's raw bytes as base64 in `data`, together with its `address`. Memory decodes and classifies these bytes, returning full text or image metadata with native image content. Other operations retain their JSON result structure.
+
+Memory storage and address-based operations accept arbitrary file types. Text revision requires UTF-8 without NUL bytes; the handler rejects other content before writing. Model-facing reads support the content types described in [tool content](content.md).
+
+Reads and writes currently buffer complete files and JSON payloads in the application and remote handler. Transfer memory usage therefore grows with file size. Incremental transfers remain future work; the streaming protocol and buffering limits are undecided.
 
 Memory verifies that the response and exit code agree, then passes operation errors back to the model. If the SSH exchange ends without a complete, consistent reply, including malformed read data, Memory logs the diagnostics and returns an error indicating that memory is unavailable or that the outcome of a change is uncertain. Other failures, such as an inability to start the SSH process, propagate to session failure handling. See [memory rooms](memory.md) for tool usage and [using remote memory](running.md#using-remote-memory) for deployment.
 
@@ -135,3 +141,5 @@ A tool's `error` branch is saved in history as a tool result, leaving the model 
 New input or an explicit resume lets a failed session continue from its saved history. At startup, the service first changes any remaining `running` sessions to `pending`, then schedules all pending sessions. Recovery currently assumes one service process per application state database.
 
 Session checkpoints, remote memory operations, and host command effects do not share a transaction. If a tool changes memory or host files but the service stops before saving its checkpoint, recovery may repeat the operation. Losing the connection, timing out, or canceling the local wait also does not undo completed changes. When a tool's outcome is uncertain, inspect the current state before deciding what to do next.
+
+Re-executing a `remember` file-source call reads the current host file again; session history retains the source path rather than the transferred bytes.

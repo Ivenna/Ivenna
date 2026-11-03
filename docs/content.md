@@ -1,6 +1,8 @@
 # Tool content
 
-Memory reads and host commands can return text or images directly to the model. `read_memory` classifies an entry's contents; `run_host_shell` classifies stdout and returns stderr as diagnostics. To request analysis, include the source and task in a [session input](usage.md#submitting-input-and-checking-results).
+Memory reads and host commands can return text or images directly to the model. `read_memory` classifies an entry's contents; `run_host_shell` classifies stdout and returns stderr as diagnostics.
+
+Memory entries can contain any file type. This guide describes content returned to the model; the [memory guide](memory.md) covers writing and managing entries.
 
 ## Expected content
 
@@ -9,11 +11,11 @@ Both tools accept an optional `expected` argument. Select exactly one branch bel
 | Value | Meaning |
 | --- | --- |
 | `{"auto":{}}` | Identify text or a supported image from the output bytes |
-| `{"text":{}}` | Express an expectation of text; actual text or image content determines the result |
-| `{"image":{}}` | Expect image data; actual text or image content determines the result |
-| `{"image":{"representation":"url"}}` | Interpret nonempty text output as an image URL reference; image bytes are still returned as an image |
+| `{"text":{}}` | Expect text |
+| `{"image":{}}` | Expect image data |
+| `{"image":{"representation":"url"}}` | Expect an image URL reference |
 
-Expectations do not request conversion, rendering, or OCR. Text returned when an image was expected remains text.
+Text and image-data expectations are hints; classification uses the actual bytes.
 
 Read an image entry with `read_memory`:
 
@@ -31,19 +33,19 @@ Memory addresses are relative to the shared memory entrance. Shell paths use the
 
 ## Image URL references
 
-Use `expected: {"image":{"representation":"url"}}` when the tool's text output is the intended image URL. For example, call `run_host_shell` with:
+With `expected: {"image":{"representation":"url"}}`, either tool passes its entire nonempty text output unchanged as one native image reference. Recognized image bytes still return as image data. Retrieval and validation of the reference belong to the configured model service. Empty output remains text.
+
+For example, a shell command can return an image reference:
 
 ```json
 {"command":"printf '%s' 'https://example.com/image.png'","expected":{"image":{"representation":"url"}}}
 ```
 
-A memory entry containing an image URL can likewise be read with `expected: {"image":{"representation":"url"}}`. The entire nonempty text is passed unchanged as one native image reference. Ivenna does not fetch or validate the reference. The address must be supported and accessible to the configured model service. Empty output remains text.
-
-With automatic, text, or image-data expectations, an output containing a URL remains text. Use a host command to download remote content when local inspection is needed.
+With automatic, text, or image-data expectations, URLs remain text.
 
 ## Content and results
 
-Supported image formats are JPEG, PNG, GIF, and WebP, identified by their format signatures. An image supplied as bytes may contain at most 32 MiB. Text results require valid UTF-8 without NUL bytes.
+Supported image formats are JPEG, PNG, GIF, and WebP, identified by their format signatures. Image bytes returned to the model may contain at most 32 MiB per image. Text results require valid UTF-8 without NUL bytes.
 
 Memory reads retain the full text of an entry. Shell text is returned as a preview of at most 16 KiB, retaining the beginning and end when truncated. For larger non-image shell output, text detection checks only the previewed bytes. Full stdout and stderr remain in their log files. An image expectation with `representation: "url"` reads the full stdout text so that its reference is not truncated.
 
