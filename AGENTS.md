@@ -1,7 +1,7 @@
-# 开发阶段约定
+# Development conventions
 
-项目仍在探索，数据结构、数据库表、接口和模块边界均未定型，按当前设计直接调整。
+The project is still in an exploratory phase. Data structures, database tables, interfaces, and module boundaries are not yet settled; change them directly to match the current design.
 
-不为开发期间的旧结构保留兼容分支，不设计或维护迁移流程。PostgreSQL 只维护当前 schema，结构变化时按需重建本地开发库，不引入迁移版本、升级链或迁移框架。
+Do not retain compatibility code paths for superseded designs. Do not design or maintain migration workflows. Maintain only the current PostgreSQL schema. When it changes, rebuild the local development database as needed, without introducing versioned migrations, upgrade chains, or migration frameworks.
 
-开发阶段不提前编写测试或引入测试框架。应用在本地运行，仅容器化中间件。
+During development, do not write tests in advance or introduce test frameworks. Run the application locally; containerize only middleware.

@@ -1,24 +1,24 @@
-# 运行 Ivenna
+# Running Ivenna
 
-以下步骤从仓库根目录启动本地 HTTP 服务。默认开发环境中的 PostgreSQL 和记忆工作区运行在容器中，Ivenna 服务在本地运行。
+These steps start the local HTTP service from the repository root. In the default development environment, PostgreSQL and the memory workspace run in containers, while the Ivenna service runs locally.
 
-## 准备环境与配置
+## Prerequisites and configuration
 
-需要安装 [`.zig-version`](../.zig-version) 指定的 Zig、OpenSSH 客户端，准备 DeepSeek API 密钥，以及支持 Compose 的容器环境。
+Install the Zig version specified in [`.zig-version`](../.zig-version) and an OpenSSH client. You also need a DeepSeek API key and a container engine with Compose support.
 
-通过 `CONTAINER_ENGINE` 指定本机容器引擎入口。其值为单个可执行文件路径或命令名，该入口需支持容器管理命令和 `compose` 子命令。本机所需的额外参数或环境设置可放在包装脚本中。
+Set `CONTAINER_ENGINE` to the local container engine's command name or executable path. It must be a single executable that supports container management commands and the `compose` subcommand. If your setup needs extra arguments or environment settings, put them in a wrapper script.
 
-在仓库根目录复制配置：
+Copy the configuration template from the repository root:
 
 ```sh
 cp -n .env.example .env
 ```
 
-编辑 `.env`，填写 `LLM_API_KEY` 和 `CONTAINER_ENGINE`。模板中的 `MEMORY_SSH_CONFIG` 用于连接下面创建的本地记忆容器，其余配置沿用默认值。`.env` 和启动时生成的本地文件均已被 Git 忽略。
+Edit `.env` and set `LLM_API_KEY` and `CONTAINER_ENGINE`. The template's `MEMORY_SSH_CONFIG` points to the SSH configuration file that the memory startup script will generate. Leave the remaining settings at their defaults. Git ignores `.env` and the local files generated during startup.
 
-## 启动服务
+## Starting the service
 
-在同一终端加载配置，再启动 PostgreSQL、记忆容器和服务：
+In the same terminal, load the configuration, then start PostgreSQL, the memory container, and the service:
 
 ```sh
 set -a
@@ -29,49 +29,51 @@ dev/memory/start.sh up
 zig build serve
 ```
 
-[记忆启动脚本](../dev/memory/start.sh)首次运行时构建镜像、创建记忆卷和 SSH 密钥，将连接配置写入 `.ivenna/dev-memory/`，并等待记忆工具可用。后续运行会使用已有容器、卷和密钥。本地记忆入口为 `ivenna-memory`，默认监听 `127.0.0.1:2222`。
+On its first run, the [memory startup script](../dev/memory/start.sh) builds the image, creates a memory volume and SSH keys, writes the connection configuration to `.ivenna/dev-memory/`, and waits for the memory tools to become available. Later runs reuse the existing container, volume, and keys. The generated SSH configuration defines the target `ivenna-memory`, which connects to `127.0.0.1:2222` by default.
 
-服务默认监听 `http://127.0.0.1:5882`，通过 DeepSeek [Responses API](https://api-docs.deepseek.com/guides/responses_api/) 调用 `deepseek-flash`。保持此终端中的服务运行，在另一个终端按[使用指南](usage.md)提交输入。同一个程序数据库由单个服务进程使用。
+The service listens on `http://127.0.0.1:5882` by default and calls `deepseek-flash` through the DeepSeek [Responses API](https://api-docs.deepseek.com/guides/responses_api/). Leave it running in this terminal and follow the [usage guide](usage.md) to submit input from another terminal. Run only one service process against each application database.
 
-## 调整配置
+## Changing configuration
 
-服务从进程环境读取配置。需要改变行为时，在 `.env` 中增加对应覆盖；修改后停止服务，在新终端重新执行启动步骤。
+The service reads configuration from its process environment. To change a setting, edit or add it in `.env`. Stop the service, then repeat the startup steps in a new terminal to load the updated configuration.
 
-| 调整内容 | 配置项 |
+| Setting | Environment variables |
 | --- | --- |
-| HTTP 监听地址与端口 | `HOST`、`PORT` |
-| 模型 API 地址与模型 | `LLM_BASE_URL`、`LLM_MODEL` |
-| 程序会话数据库连接 | `DATABASE_URL` |
-| 记忆工作区的 SSH 连接 | `MEMORY_SSH_TARGET`、`MEMORY_SSH_CONFIG`，见[使用远端记忆](#使用远端记忆) |
+| HTTP listen address and port | `HOST`, `PORT` |
+| Model API URL and model | `LLM_BASE_URL`, `LLM_MODEL` |
+| Application session database connection | `DATABASE_URL` |
+| Memory workspace SSH connection | `MEMORY_SSH_TARGET`, `MEMORY_SSH_CONFIG`; see [using remote memory](#using-remote-memory) |
 
-本地模板中的 SSH 配置路径相对于服务进程的工作目录。本文统一从仓库根目录启动；从其他目录启动时，将 `MEMORY_SSH_CONFIG` 改为绝对路径。
+The template sets `MEMORY_SSH_CONFIG` to a relative path, which the service resolves from its working directory. These instructions start the service from the repository root. If you start it elsewhere, set `MEMORY_SSH_CONFIG` to an absolute path.
 
-本地 PostgreSQL 的端口和首次初始化密码由 `POSTGRES_PORT`、`POSTGRES_PASSWORD` 覆盖。更改端口时，同步修改 `DATABASE_URL`；更改已有数据库的登录密码时，同步修改数据库角色和连接 URL。容器环境中的密码只用于首次初始化，参见 [PostgreSQL 镜像说明](https://github.com/docker-library/docs/tree/master/postgres#environment-variables)。
+Use `POSTGRES_PORT` and `POSTGRES_PASSWORD` to override the local PostgreSQL port and initial password. When changing the port, also update `DATABASE_URL`. When changing the password for an existing database, update both the database role and the connection URL. The password in the container environment is only used during initial setup; see the [PostgreSQL image documentation](https://github.com/docker-library/docs/tree/master/postgres#environment-variables).
 
-本地记忆容器可通过 `MEMORY_SSH_PORT` 调整端口，通过 `MEMORY_CONTAINER_NAME`、`MEMORY_VOLUME_NAME`、`MEMORY_IMAGE` 选择容器、记忆卷和镜像名称。这些配置在创建容器时生效：先使用原配置运行 `dev/memory/start.sh down`，修改并在新终端加载配置后，再运行 `up`。更新镜像内容的方法见[更新服务与记忆容器](development.md#更新服务与记忆容器)。
+For the local memory container, use `MEMORY_SSH_PORT` to change the port, and `MEMORY_CONTAINER_NAME`, `MEMORY_VOLUME_NAME`, and `MEMORY_IMAGE` to choose the container, memory volume, and image names.
 
-## 使用远端记忆
+These settings take effect when the container is created. Run `dev/memory/start.sh down` with the original configuration, update `.env`, load it in a new terminal, then run `dev/memory/start.sh up`. To update the image contents, see [updating the service and memory container](development.md#updating-the-service-and-memory-container).
 
-连接已有远端工作区时，先配置好 SSH，再按启动流程运行 PostgreSQL 和服务，省去本地记忆容器的启动步骤。
+## Using remote memory
 
-应用默认使用 `ivenna-memory` 这个 SSH 目标，使用其他目标时设置 `MEMORY_SSH_TARGET`。使用 OpenSSH 常规配置时，从 `.env` 中移除模板提供的 `MEMORY_SSH_CONFIG`；使用专用配置文件时，将其设为文件路径。用户、主机名、密钥、连接超时和主机密钥验证由 SSH 配置管理。
+To connect to an existing remote workspace, configure SSH first, then follow the startup steps for PostgreSQL and the service, skipping the local memory container.
 
-远端需要安装 Nushell、ripgrep 和 fd，并部署两个固定文件：
+The application uses the `ivenna-memory` SSH target by default. Set `MEMORY_SSH_TARGET` to use another target. To use your standard OpenSSH configuration, remove the template's `MEMORY_SSH_CONFIG` from `.env`; to use a dedicated configuration file, set it to that file's path. SSH configuration controls the user, hostname, keys, connection timeout, and host key verification.
 
-- 将 [memory.nu](../packages/agent/src/memory.nu) 安装到 `/usr/local/lib/ivenna/memory.nu`。
-- 按 [memory-shell.sh](../dev/memory/memory-shell.sh) 提供 `/usr/local/bin/memory-shell` 入口，进入 `/memory` 后运行该处理程序。SSH 账号需能读写这个工作区。
+The remote host needs Nushell, ripgrep, and fd installed, along with two files at fixed locations:
 
-应用通过 SSH 调用固定入口。容器内的安装方式与 SSH 服务配置分别见 [Containerfile](../dev/memory/Containerfile) 和 [sshd_config](../dev/memory/sshd_config)，可作为远端部署参考。
+- Install [memory.nu](../packages/agent/src/memory.nu) at `/usr/local/lib/ivenna/memory.nu`.
+- Install `/usr/local/bin/memory-shell` using [memory-shell.sh](../dev/memory/memory-shell.sh) as a reference. This script must change to `/memory` before running the handler. The SSH account needs read and write access to this workspace.
 
-## 停止与再次运行
+The application invokes this fixed entry point over SSH. Use the container's [Containerfile](../dev/memory/Containerfile) and [sshd_config](../dev/memory/sshd_config) as references for installation and SSH server configuration on a remote host.
 
-在服务终端按 `Ctrl+C` 停止 Ivenna。PostgreSQL 和记忆容器仍在运行时，再执行 `zig build serve` 即可继续使用已保存的会话与记忆。
+## Stopping and restarting
 
-需要一并停止本地容器时，运行：
+Press `Ctrl+C` in the service terminal to stop Ivenna. If PostgreSQL and the memory container are still running, run `zig build serve` again to continue using saved sessions and memory.
+
+To stop the local containers as well, run:
 
 ```sh
 dev/memory/start.sh down
 "$CONTAINER_ENGINE" compose down
 ```
 
-这些命令保留数据卷和 SSH 密钥。下次使用时，重新执行[启动服务](#启动服务)的步骤。运行 `dev/memory/start.sh status` 可查看本地记忆容器状态。
+These commands preserve data volumes and SSH keys. Next time, repeat the steps for [starting the service](#starting-the-service). Run `dev/memory/start.sh status` to check the local memory container's status.

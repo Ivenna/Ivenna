@@ -1,109 +1,109 @@
-# 记忆房间
+# Memory rooms
 
-记忆房间是 Ivenna 跨会话共享的持久记忆空间。模型通过浏览、寻找、回忆、记录和修订等工具组织内容，每次调用只需选择工具并提供参数。房间层级、条目名称、文本格式和相互引用由 Ivenna 自行形成。
+Ivenna stores persistent memory in rooms shared across sessions. The model uses tools to browse, find, recall, record, and revise memories. Ivenna chooses its own room hierarchy, entry names, text formats, and cross-references.
 
-本地启动见[运行指南](running.md)，连接其他记忆工作区见[使用远端记忆](running.md#使用远端记忆)。执行协议与模块边界见[架构说明](architecture.md#程序状态与自主记忆)。
+See the [running guide](running.md) for local setup or [using remote memory](running.md#using-remote-memory) to connect to another memory workspace. The [architecture guide](architecture.md#application-state-and-autonomous-memory) describes the execution protocol and module boundaries.
 
-## 位置与组织
+## Addresses and organization
 
-| 概念 | 含义 |
+| Concept | Meaning |
 | --- | --- |
-| 记忆房间 | 容纳相关条目和子房间的空间 |
-| 记忆条目 | 保存在某个位置的文本，内容与格式由 Ivenna 决定 |
-| 位置 | 相对于记忆空间入口的路径，例如 `语言/近况.md`；`.` 表示入口 |
-| 线索 | 用于寻找名称或检索内容的文本、通配模式或正则表达式 |
+| Memory room | A space containing related entries and child rooms |
+| Memory entry | Text stored at an address, with content and format chosen by Ivenna |
+| Address | A path relative to the shared entrance, such as `languages/progress.md`; `.` is the entrance |
+| Clue | Text, a glob pattern, or a regular expression for searching names or content |
 
-所有位置都相对于入口。`room` 仅限定浏览或检索的范围，每次调用独立定位；返回的位置也始终相对于入口。房间或条目移动后，位置随之改变，需要保留的引用由 Ivenna 一同整理。
+All addresses are relative to the shared entrance, including those returned by tools. The `room` argument limits where a tool browses or searches; each call resolves its addresses independently. Moving a room or entry changes its address, so Ivenna must update any references it wants to preserve.
 
-## 工具与参数
+## Tools and arguments
 
-[tools.json](../packages/agent/src/tools.json) 定义模型可用的工具及参数。下表列出各工具的必需参数；可选参数省略时采用默认行为。
+[tools.json](../packages/agent/src/tools.json) defines the tools and arguments available to the model. The table below lists the required arguments. Omit optional arguments to use their defaults.
 
-| 工具 | 必需参数 | 用途 |
+| Tool | Required arguments | Purpose |
 | --- | --- | --- |
-| `browse_memory_room` | 无 | 浏览房间中的条目和子房间 |
-| `find_memory` | `query` | 按名称寻找条目和房间 |
-| `recall_memory` | `clue` | 按内容回忆相关条目 |
-| `read_memory` | `address` | 阅读指定条目的完整内容 |
-| `remember` | `address`、`content` | 新建条目、追加或替换内容 |
-| `revise_memory` | `address`、`old_text`、`new_text` | 修订条目中的匹配内容 |
-| `create_memory_room` | `address` | 创建房间，按需建立父级 |
-| `move_memory` | `address`、`destination` | 移动或重命名条目及房间 |
-| `forget_memory` | `address` | 删除条目或房间 |
+| `browse_memory_room` | None | Browse a room's entries and child rooms |
+| `find_memory` | `query` | Find entries and rooms by name |
+| `recall_memory` | `clue` | Recall relevant entries by content |
+| `read_memory` | `address` | Read an entry's full content |
+| `remember` | `address`, `content` | Create an entry, append content, or replace its content |
+| `revise_memory` | `address`, `old_text`, `new_text` | Revise matching content in an entry |
+| `create_memory_room` | `address` | Create a room and any missing parent rooms |
+| `move_memory` | `address`, `destination` | Move or rename entries and rooms |
+| `forget_memory` | `address` | Remove an entry or room |
 
-浏览、寻找和回忆可通过 `room` 指定范围，省略时从入口开始。`find_memory` 和 `recall_memory` 都会检索子房间。
+Use `room` to limit browsing and searches to a room; it defaults to the shared entrance. Both `find_memory` and `recall_memory` also search child rooms.
 
-名称检索的 `match_mode` 支持 `literal`、`glob` 和 `regex`，内容检索支持 `literal` 和 `regex`。默认使用字面文本，其中名称检索匹配名称中的片段。两种检索默认忽略大小写，设置 `case_sensitive: true` 可区分大小写。
+For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content searches support `literal` and `regex`. Searches use literal, case-insensitive matching by default. Literal name searches match any part of a name. Set `case_sensitive: true` to make searches case-sensitive.
 
-记录内容时，`mode` 默认为 `create`，位置已存在时报错；`append` 追加内容，`replace` 替换完整内容。新建条目前，先按需要创建所在的记忆房间。
+For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to add content or `replace` to replace all of an entry's content. Create the containing room first if it does not already exist.
 
-修订默认按字面文本区分大小写，只替换第一处匹配。`replace_all: true` 替换全部匹配；`match_mode: "regex"` 启用正则表达式，替换内容可使用 `${1}`、`${name}` 等捕获组引用。正则本身也可使用内联标志。
+Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
 
-移动时，`destination` 可以是一个新位置，也可以是已有房间；移入已有房间时保留原名称，实际目标已存在时报错。删除默认适用于条目或空房间；`recursive: true` 可删除房间及其全部内容。入口位置始终保留。
+When moving an entry or room, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists. By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance is always preserved.
 
-## 操作示例
+## Examples
 
-调用 `create_memory_room`，建立一个房间：
-
-```json
-{"address":"语言"}
-```
-
-调用 `remember`，留下一个条目：
+Call `create_memory_room` to create a room:
 
 ```json
-{"address":"语言/近况.md","content":"法语：每周练习两次。日语：每周练习一次。"}
+{"address":"languages"}
 ```
 
-调用 `recall_memory`，在指定房间中回忆相关内容：
+Call `remember` to record an entry:
 
 ```json
-{"clue":"法语","room":"语言"}
+{"address":"languages/progress.md","content":"French: practice twice a week. Japanese: practice once a week."}
 ```
 
-调用 `find_memory`，按名称模式寻找条目：
+Call `recall_memory` to search a room's remembered content:
 
 ```json
-{"query":"*.md","room":"语言","match_mode":"glob"}
+{"clue":"French","room":"languages"}
 ```
 
-调用 `revise_memory`，调整一处内容：
+Call `find_memory` to find entries by a name pattern:
 
 ```json
-{"address":"语言/近况.md","old_text":"每周练习两次","new_text":"每周练习三次"}
+{"query":"*.md","room":"languages","match_mode":"glob"}
 ```
 
-也可以用正则表达式同时修订多处，例如将两个语种名称改为学习项目名称：
+Call `revise_memory` to update a passage:
 
 ```json
-{"address":"语言/近况.md","old_text":"(法语|日语)：","new_text":"${1}学习：","replace_all":true,"match_mode":"regex"}
+{"address":"languages/progress.md","old_text":"practice twice a week","new_text":"practice three times a week"}
 ```
 
-## 理解结果与错误
-
-每次回复只有 `result` 或 `error` 中的一种。成功时，`result` 包含本次操作的结果，例如记录完成后返回位置：
+A regular expression can revise several passages at once. For example, update both language labels:
 
 ```json
-{"result":{"address":"语言/近况.md"}}
+{"address":"languages/progress.md","old_text":"(French|Japanese):","new_text":"${1} study:","replace_all":true,"match_mode":"regex"}
 ```
 
-| 操作 | `result` 中的内容 |
+## Results and errors
+
+Every response contains either `result` or `error`. Successful responses put the operation's output in `result`. For example, `remember` returns the entry's address:
+
+```json
+{"result":{"address":"languages/progress.md"}}
+```
+
+| Operation | Contents of `result` |
 | --- | --- |
-| 浏览 | `room` 和 `entries`；每项有 `address`、`name`、`kind` |
-| 按名称寻找 | `room`、`query` 和 `matches`；每项有 `address`、`name`、`kind` |
-| 按内容回忆 | `room`、`clue` 和 `matches`；每项有 `address`、`line`、`text` |
-| 阅读 | `address` 和 `content` |
-| 修订 | `address` 和 `revision` |
-| 记录、创建房间、移动、删除 | `address`；移动返回实际的新位置 |
+| Browse | `room` and `entries`; each entry has `address`, `name`, and `kind` |
+| Find by name | `room`, `query`, and `matches`; each match has `address`, `name`, and `kind` |
+| Recall by content | `room`, `clue`, and `matches`; each match has `address`, `line`, and `text` |
+| Read | `address` and `content` |
+| Revise | `address` and `revision` |
+| Record, create a room, move, or remove | `address`; moving returns the actual new address |
 
-`kind` 的 `room` 表示记忆房间，`memory` 表示记忆条目。检索没有匹配时，`matches` 为空列表；内容匹配的 `line` 从 1 开始。修订结果的 `revision` 有三个值：
+The `kind` field is `room` for a memory room and `memory` for a memory entry. A search with no matches returns an empty `matches` list. In content matches, `line` is a line number starting at 1. The `revision` field has three possible values:
 
-| 值 | 含义 |
+| Value | Meaning |
 | --- | --- |
-| `no_match` | 未找到匹配内容 |
-| `unchanged` | 找到匹配，但内容保持不变 |
-| `revised` | 内容已修订 |
+| `no_match` | No matching content was found |
+| `unchanged` | A match was found, but the content did not change |
+| `revised` | The content was revised |
 
-失败时，`error` 提供 `code` 和 `message`，描述本次操作遇到的问题。`memory_unavailable` 表示只读操作未取得完整回复；`memory_change_uncertain` 表示修改是否完成尚未确认。遇到后者，先读取相关条目；涉及创建、移动或删除时，浏览原位置与目标位置，再决定是否重试。
+On failure, `error` provides a `code` and `message` describing the problem. `memory_unavailable` means a read-only operation ended without a complete response. `memory_change_uncertain` means memory may have changed, but the outcome is unknown. Read the relevant entry before retrying an uncertain change. For a create, move, or remove operation, browse the original and destination locations before deciding whether to retry.
 
-会话恢复可能重复执行尚未记入检查点的操作，相关执行边界见[失败与恢复](architecture.md#失败与恢复)。
+Resuming a session may repeat operations whose results were not yet saved in a checkpoint. See [failure and recovery](architecture.md#failure-and-recovery) for details.

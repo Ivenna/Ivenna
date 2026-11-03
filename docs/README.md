@@ -1,11 +1,11 @@
-# 文档
+# Documentation
 
-按当前任务选择入口：
+Choose a guide for your task:
 
-| 任务 | 文档 |
+| Task | Guide |
 | --- | --- |
-| 准备运行环境并启动服务 | [运行指南](running.md) |
-| 提交输入、查询状态和继续会话 | [使用指南](usage.md) |
-| 了解记忆房间的组织方式与工具操作 | [记忆房间](memory.md) |
-| 构建源码、修改模块和调整开发数据 | [开发指南](development.md) |
-| 理解模块依赖、执行生命周期与持久化边界 | [架构说明](architecture.md) |
+| Set up the environment and start the service | [Running guide](running.md) |
+| Submit input, check status, and continue sessions | [Usage guide](usage.md) |
+| Understand memory room organization and tools | [Memory rooms](memory.md) |
+| Build from source, modify modules, and update the database schema | [Development guide](development.md) |
+| Understand module dependencies, session execution, and data persistence | [Architecture guide](architecture.md) |

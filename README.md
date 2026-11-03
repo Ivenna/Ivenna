@@ -1,13 +1,13 @@
 # Ivenna
 
-Ivenna 是一个面向长期运行的 AI agent，探索如何通过持续会话与自主记忆“维持自我”。
+Ivenna is an AI agent exploring how persistent conversations and autonomous memory can sustain a sense of self over time.
 
-项目目前处于原型阶段，通过 HTTP 服务接收输入并保存会话历史。后续输入可以接续已有会话；Ivenna 也可以通过[记忆房间](docs/memory.md)自行组织、读取和修订跨会话共享的记忆。
+The project is currently a prototype. It accepts input through an HTTP service and saves each session's history so you can continue the conversation later. Ivenna can also organize, read, and revise memory shared across sessions through its [memory rooms](docs/memory.md).
 
-## 开始使用
+## Getting started
 
-先按[运行指南](docs/running.md)在本地启动服务，再按[使用指南](docs/usage.md)提交输入、查询结果并继续会话。
+Follow the [running guide](docs/running.md) to start the service locally, then use the [usage guide](docs/usage.md) to submit input, retrieve results, and continue sessions.
 
-## 参与开发
+## Development
 
-[开发指南](docs/development.md)介绍源码构建和数据结构调整，[架构说明](docs/architecture.md)介绍模块职责、会话执行与存储边界。全部资料见[文档目录](docs/README.md)。
+The [development guide](docs/development.md) covers building from source and changing data structures. The [architecture guide](docs/architecture.md) explains module responsibilities, session execution, and storage boundaries. See the [documentation index](docs/README.md) for all guides.

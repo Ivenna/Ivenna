@@ -1,89 +1,89 @@
-# 使用会话
+# Using sessions
 
-Ivenna 持续保存会话及其历史。创建会话后，后续输入沿用同一个会话 ID。以下示例使用 `http://127.0.0.1:5882`，连接其他服务时替换地址；本地启动步骤见[运行指南](running.md)。
+Ivenna persists sessions and their history. Once you create a session, use the same session ID for subsequent inputs. The examples below use `http://127.0.0.1:5882`; replace this address when connecting to another service. See the [running guide](running.md) for local startup instructions.
 
-## 创建会话
+## Creating a session
 
-提交一个 JSON 对象，保存每次输入使用的默认字段；没有默认字段时可提交 `{}`：
+Submit a JSON object containing the default fields to use for each input. Submit `{}` if you have no default fields:
 
 ```sh
 curl http://127.0.0.1:5882/sessions \
   -H 'Content-Type: application/json' \
-  -d '{"language":"zh-CN","timezone":"Asia/Shanghai"}'
+  -d '{"language":"en","timezone":"Asia/Shanghai"}'
 ```
 
-成功时返回 `201` 和会话记录。记下其中的 `id`；初始 `state` 为 `{"waiting":{}}`，创建本身不会开始模型处理。
+A successful response returns `201` and the session record. Save its `id`. The initial `state` is `{"waiting":{}}`; creating a session does not start model processing.
 
-## 提交输入并查询结果
+## Submitting input and checking results
 
-假设会话 ID 为 `1`，提交第一条输入：
+Assuming the session ID is `1`, submit the first input:
 
 ```sh
 curl http://127.0.0.1:5882/sessions/1/inputs \
   -H 'Content-Type: application/json' \
-  -d '{"message":"请记住，我正在学习法语。"}'
+  -d '{"message":"Please remember that I am learning French."}'
 ```
 
-响应 `202` 及 `{"id":1,"status":"accepted"}` 确认输入已接收并交由后台处理。随后查询会话，读取执行状态和已保存的历史：
+A `202` response with `{"id":1,"status":"accepted"}` confirms that the input has been accepted for background processing. Query the session to read its execution state and saved history:
 
 ```sh
 curl http://127.0.0.1:5882/sessions/1
 ```
 
-`state` 为 `pending` 或 `running` 分支时，处理仍在进行，可稍后再次查询。模型运行由服务管理，提交请求结束后仍会继续。
+If `state` contains the `pending` or `running` branch, processing is still in progress; query again later. The service manages model execution, which continues after the submission request ends.
 
-## 继续与恢复
+## Continuing and resuming
 
-后续输入仍提交到同一个 `/sessions/1/inputs`。会话正在运行时，新输入会排队，在当前轮次结束后接入；会话已进入 `waiting` 或 `failed` 时，新输入会调度它继续处理。
+Submit subsequent inputs to the same `/sessions/1/inputs` endpoint. If the session is running, new inputs are queued and incorporated after the current turn. If the session is `waiting` or `failed`, new input schedules it to continue processing.
 
-需要在没有新输入的情况下继续执行时，调用：
+To continue execution without new input, call:
 
 ```sh
 curl -X POST http://127.0.0.1:5882/sessions/1/resume
 ```
 
-恢复接口接受 `waiting`、`failed` 或 `pending` 会话，继续使用已有历史。会话正在运行或不存在时返回 `409`。
+The resume endpoint accepts sessions in `waiting`, `failed`, or `pending` state and continues with their existing history. It returns `409` if the session is running or does not exist.
 
-## 输入字段
+## Input fields
 
-创建会话和提交输入的请求体都必须是 JSON 对象。创建时保存的字段作为默认值；每次提交输入时，顶层同名字段覆盖默认值，只对本次输入生效。嵌套对象和数组保持原结构，同名嵌套对象会整体覆盖。
+Request bodies for session creation and input submission must be JSON objects. Fields saved at creation serve as defaults. Each input overrides matching top-level fields for that input only. Merging happens only at the top level: an object or array supplied for a field replaces that field's default value in full.
 
-例如，会话默认字段中的 `language` 为 `zh-CN`，某次输入提交 `{"language":"en","message":"Summarize what we know."}`，本次提供给模型的语言字段为 `en`，下次未指定时仍为 `zh-CN`。示例中的 `language` 和 `timezone` 都是普通字段，服务将它们提供给模型，没有针对这些名称的专门处理。
+For example, if the session's default `language` is `en` and an input submits `{"language":"fr","message":"Summarize what we know."}`, the language field sent to the model for that input is `fr`. The next input uses `en` again unless it overrides the field. The service passes fields such as `language` and `timezone` to the model without interpreting them.
 
-`session_id` 始终由服务设为当前会话 ID；合并后仍没有 `message` 字段时，补为空字符串。其他字段可按使用场景自行组织。
+The service always sets `session_id` to the current session ID. If `message` is still absent after merging, it is set to an empty string. Add other fields as needed.
 
-## 接口与会话记录
+## API and session records
 
-接口返回 JSON。`:id` 为创建会话后取得的 ID。
+The API returns JSON. Replace `:id` with the ID returned when creating a session.
 
-| 接口 | 请求体 | 成功响应 |
+| Endpoint | Request body | Successful response |
 | --- | --- | --- |
-| `POST /sessions` | 默认字段对象 | `201`，完整会话记录 |
-| `POST /sessions/:id/inputs` | 本次输入对象 | `202`，`id` 和 `status: "accepted"` |
-| `GET /sessions/:id` | 无 | `200`，完整会话记录 |
-| `POST /sessions/:id/resume` | 无 | `202`，`id` 和 `status: "accepted"` |
+| `POST /sessions` | Default fields object | `201`, full session record |
+| `POST /sessions/:id/inputs` | Fields for this input | `202`, `id` and `status: "accepted"` |
+| `GET /sessions/:id` | None | `200`, full session record |
+| `POST /sessions/:id/resume` | None | `202`, `id` and `status: "accepted"` |
 
-`202` 响应中的 `status` 表示请求已接收；会话记录中的 `state` 表示执行状态。会话记录包含：
+The `status` in a `202` response indicates that the request was accepted. The `state` in a session record describes its execution state. A session record contains:
 
-| 字段 | 含义 |
+| Field | Meaning |
 | --- | --- |
-| `id` | 后续请求使用的会话 ID |
-| `user_fields` | 创建会话时保存的默认字段 |
-| `state` | 当前会话状态，只包含下表中的一个分支 |
-| `messages` | 已保存的会话历史 |
-| `pending_inputs` | 已接收、尚未接入历史的输入 |
+| `id` | Session ID for subsequent requests |
+| `user_fields` | Default fields saved when the session was created |
+| `state` | Current session state, containing exactly one branch from the table below |
+| `messages` | Saved session history |
+| `pending_inputs` | Accepted inputs not yet incorporated into the history |
 
-| `state` 的值 | 含义 |
+| `state` value | Meaning |
 | --- | --- |
-| `{"waiting":{}}` | 当前处理已暂停，可提交新输入或调用恢复接口继续 |
-| `{"pending":{}}` | 已排队，等待后台执行 |
-| `{"running":{}}` | 正在处理模型请求或工具操作 |
-| `{"failed":"ModelHttpFailure"}` | 本轮执行失败，分支值是错误名称；示例值为 `ModelHttpFailure` |
+| `{"waiting":{}}` | Processing has paused; submit new input or call the resume endpoint to continue |
+| `{"pending":{}}` | Queued for background execution |
+| `{"running":{}}` | Processing a model request or tool operation |
+| `{"failed":"ModelHttpFailure"}` | Execution failed; the branch value is the error name, shown here as `ModelHttpFailure` |
 
-请求体不是 JSON 对象时返回 `400`。查询或提交输入时，找不到会话返回 `404`。HTTP 错误回复使用 `{"error":"错误代码"}`。
+The service returns `400` if a request body is not a JSON object. Requests to read a session or submit input return `404` if the session does not exist. HTTP error responses use `{"error":"error_code"}`.
 
-## 持续使用时的行为
+## Behavior over time
 
-服务重启后，原先处于 `pending` 或 `running` 的会话会从已保存历史继续。中断前已经执行、尚未保存结果的记忆操作可能再次执行；检查点与恢复边界见[失败与恢复](architecture.md#失败与恢复)。
+After a service restart, sessions previously in `pending` or `running` state continue from their saved history. Memory operations completed before the interruption may run again if their results had not yet been saved. See [failure and recovery](architecture.md#failure-and-recovery) for checkpoint and recovery boundaries.
 
-默认字段和历史按会话保存，[记忆空间](memory.md)由所有会话共享。长会话受模型上下文窗口限制，历史的保存与发送方式见[模型输入与历史](architecture.md#模型输入与历史)。
+Each session has its own default fields and history; all sessions share the [memory workspace](memory.md). Long sessions are limited by the model's context window. See [model input and history](architecture.md#model-input-and-history) for how history is stored and sent.
