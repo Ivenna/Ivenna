@@ -12,7 +12,7 @@ This guide describes the current implementation of the project's [design intent]
 | --- | --- |
 | [Api](../apps/server/src/api.zig) | Handle HTTP requests, schedule session tasks, and manage connection and task lifecycles |
 | [Engine](../packages/agent/src/root.zig) | Create sessions, run model and tool loops, and save each turn's results |
-| [Provider](../packages/agent/src/provider.zig) | Call the model API and return its complete output |
+| [Provider](../packages/agent/src/provider.zig) | Decode the model API response and return complete output with typed function calls |
 | [Store](../packages/agent/src/store.zig) | Persist sessions, history, and the input inbox, and apply session state transitions |
 | [Memory](../packages/agent/src/memory.zig) | Send structured memory requests to the remote handler and return operation results |
 | [Host](../packages/agent/src/host.zig) | Parse and route host tool requests with trusted conversation context |
@@ -27,7 +27,9 @@ Session state and history are the records used to continue execution. Host outpu
 
 ## Application state and autonomous memory
 
-Store updates session state, history, and the input inbox atomically in SQLite, using the current structure in [schema.sql](../packages/agent/src/schema.sql). A mutex serializes access to one connection, and transactions keep inbox merges and their state transitions together. A session can be `waiting`, `pending`, `running`, or `failed`; a `failed` state also carries an error name. See [API and session records](usage.md#api-and-session-records) for the HTTP representation.
+Store updates session state, history, and the input inbox atomically in SQLite, using the current structure in [schema.sql](../packages/agent/src/schema.sql). A mutex serializes access to one connection, and transactions keep inbox merges and their state transitions together. Engine reads only saved history for each turn; full session snapshots serve the HTTP API. An empty inbox preserves the existing history without decoding and re-encoding it.
+
+A session can be `waiting`, `pending`, `running`, or `failed`; a `failed` state also carries an error name. See [API and session records](usage.md#api-and-session-records) for the HTTP representation.
 
 Autonomous memory is shared across all sessions. The model chooses memory operations and supplies arguments through the structured tools defined in [tools.json](../packages/agent/src/tools.json). Memory encodes each request as a JSON object containing a single operation and sends it to the SSH process's standard input. For example, a read request is:
 
@@ -81,7 +83,9 @@ When creating a session, Engine saves its default input fields and adds the sole
 
 Subsequent HTTP inputs are merged with the session defaults by [input.zig](../packages/agent/src/input.zig). The session ID is added, and the result is serialized to YAML as a user message for the model. See [input fields](usage.md#input-fields) for the merge rules.
 
-Provider sends the compiled definitions in [tools.json](../packages/agent/src/tools.json) with every model request to DeepSeek's native `/responses` endpoint. Engine retains the response's complete `output`, including reasoning, messages, and function calls. Each tool result is appended to history as a `function_call_output` with the corresponding `call_id` so it can be replayed in the next request.
+Provider sends the compiled definitions in [tools.json](../packages/agent/src/tools.json) with every model request to DeepSeek's native `/responses` endpoint. It decodes the complete response, requires a string `type` on each output item, and parses every function call's `name`, `arguments`, and `call_id` as strings before returning. The returned data belongs to the turn's arena and survives cleanup of the HTTP response buffer. A malformed item type or function-call envelope fails before any tool in that response executes.
+
+Engine receives typed function calls and retains the complete `output`, including reasoning, messages, and function calls, for history replay. The selected tool validates its arguments; an unknown tool or invalid arguments produce a tool error that the model can act on. Each tool result is appended to history as a `function_call_output` with the corresponding `call_id` so it can be replayed in the next request.
 
 Each loop iteration uses its own arena and releases its temporary data after saving a checkpoint. Persisted history continues to grow, and every model request sends the full history. History is not currently compacted or trimmed.
 

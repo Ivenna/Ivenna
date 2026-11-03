@@ -1,10 +1,9 @@
 const std = @import("std");
-const model = @import("provider.zig");
 const storage = @import("store.zig");
 const input = @import("input.zig");
 pub const Store = storage.Store;
 pub const Session = storage.Session;
-pub const Provider = model.Provider;
+pub const Provider = @import("provider.zig").Provider;
 pub const Memory = @import("memory.zig").Memory;
 pub const Host = @import("host.zig").Host;
 const Allocator = std.mem.Allocator;
@@ -56,20 +55,16 @@ pub const Engine = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            const session = try self.store.getSession(a, id) orelse return error.SessionNotFound;
-            const history = try std.json.parseFromSliceLeaky([]Value, a, session.messages_json, .{});
+            const messages_json = try self.store.history(a, id);
+            const history = try std.json.parseFromSliceLeaky([]Value, a, messages_json, .{});
             var messages = std.array_list.Managed(Value).fromOwnedSlice(a, history);
-            const output = try self.provider.next(a, messages.items);
+            const response = try self.provider.next(a, messages.items);
             // Replay complete output, including reasoning items, in the next
             // model request so the tool loop retains its context.
-            try messages.appendSlice(output);
-            var action: RoundAction = .no_tools;
-            for (output) |item| {
-                if (!std.mem.eql(u8, try model.textField(item, "type"), "function_call")) continue;
-                if (action == .no_tools) action = .continue_session;
-                const name = try model.textField(item, "name");
-                const args = try model.textField(item, "arguments");
-                const outcome = self.invoke(a, id, name, args) catch |err| switch (err) {
+            try messages.appendSlice(response.output);
+            var pause_requested = response.calls.len == 0;
+            for (response.calls) |call| {
+                const outcome = self.invoke(a, id, call.name, call.arguments) catch |err| switch (err) {
                     error.InvalidToolArguments, error.UnknownTool => Outcome{
                         .reply = try std.json.Stringify.valueAlloc(a, .{
                             .@"error" = .{
@@ -86,24 +81,23 @@ pub const Engine = struct {
                 const content = switch (outcome) {
                     .reply => |content| content,
                     .wait_for_input => blk: {
-                        action = .wait_requested;
+                        pause_requested = true;
                         break :blk "{\"result\":\"waiting_for_input\"}";
                     },
                 };
                 var reply: std.json.ObjectMap = .empty;
                 try reply.put(a, "type", .{ .string = "function_call_output" });
-                try reply.put(a, "call_id", .{ .string = try model.textField(item, "call_id") });
+                try reply.put(a, "call_id", .{ .string = call.call_id });
                 try reply.put(a, "output", .{ .string = content });
                 try messages.append(.{ .object = reply });
             }
             // Persist model output together with its tool replies. A crash
             // before this checkpoint can cause tool effects to be repeated.
             const next_checkpoint = try std.json.Stringify.valueAlloc(a, messages.items, .{});
-            if (try self.store.checkpoint(id, next_checkpoint, action != .continue_session)) return;
+            if (try self.store.checkpoint(id, next_checkpoint, pause_requested)) return;
         }
     }
 
-    const RoundAction = enum { no_tools, continue_session, wait_requested };
     const Outcome = union(enum) { reply: []const u8, wait_for_input };
 
     fn invoke(self: *Engine, a: Allocator, session_id: i64, name: []const u8, arguments: []const u8) !Outcome {

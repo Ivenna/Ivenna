@@ -12,7 +12,19 @@ pub const Provider = struct {
     api_key: []const u8 = "",
     model: []const u8 = default_model,
 
-    pub fn next(self: Provider, arena: Allocator, input: []const Value) ![]const Value {
+    pub const FunctionCall = struct {
+        call_id: []const u8,
+        name: []const u8,
+        arguments: []const u8,
+    };
+
+    /// Output and call fields belong to the allocator supplied to next.
+    pub const Response = struct {
+        output: []const Value,
+        calls: []const FunctionCall,
+    };
+
+    pub fn next(self: Provider, arena: Allocator, input: []const Value) !Response {
         try self.client.io.checkCancel();
 
         const tools = try std.json.parseFromSliceLeaky(Value, arena, @embedFile("tools.json"), .{});
@@ -57,12 +69,23 @@ pub const Provider = struct {
         const decoded = std.json.parseFromSliceLeaky(struct {
             status: []const u8,
             output: []const Value,
-        }, arena, output.written(), .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        }, arena, output.written(), .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.InvalidModelResponse,
         };
         if (!std.mem.eql(u8, decoded.status, "completed")) return error.ModelResponseNotCompleted;
-        return decoded.output;
+        var calls: std.ArrayList(FunctionCall) = .empty;
+        defer calls.deinit(arena);
+        // Validate the complete batch before Engine can execute any tool.
+        for (decoded.output) |item| {
+            if (!std.mem.eql(u8, try textField(item, "type"), "function_call")) continue;
+            try calls.append(arena, .{
+                .call_id = try textField(item, "call_id"),
+                .name = try textField(item, "name"),
+                .arguments = try textField(item, "arguments"),
+            });
+        }
+        return .{ .output = decoded.output, .calls = try calls.toOwnedSlice(arena) };
     }
 };
 
@@ -76,12 +99,12 @@ fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {
     return err;
 }
 
-pub fn field(value: Value, name: []const u8) error{InvalidModelResponse}!Value {
+fn field(value: Value, name: []const u8) error{InvalidModelResponse}!Value {
     if (value != .object) return error.InvalidModelResponse;
     return value.object.get(name) orelse error.InvalidModelResponse;
 }
 
-pub fn textField(value: Value, name: []const u8) error{InvalidModelResponse}![]const u8 {
+fn textField(value: Value, name: []const u8) error{InvalidModelResponse}![]const u8 {
     const found = try field(value, name);
     if (found != .string) return error.InvalidModelResponse;
     return found.string;

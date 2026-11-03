@@ -12,6 +12,12 @@ Do not retain compatibility code paths for superseded designs. Do not design or 
 
 During development, do not write tests in advance or introduce test frameworks. Run the application locally; containerize only middleware.
 
+## Implementation boundaries
+
+Keep protocol decoding in the component that owns the external interface, and give execution code typed operations. Select data according to the consumer's responsibility; a full API record need not be the unit used by the execution loop.
+
+Make the owner and lifetime of returned data explicit. Copy or transfer ownership of values that must outlive temporary storage; copy borrowed database values before their statement ends. Manage concurrent work through `std.Io` task scopes, arranging cancellation and completion before releasing dependencies. Keep synchronization inside the component that owns the shared state.
+
 ## Repository and build
 
 Applications live in `apps/`, and reusable modules live in `packages/`:

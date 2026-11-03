@@ -83,6 +83,16 @@ pub const Store = struct {
         return try copySession(allocator, statement);
     }
 
+    pub fn history(self: *Store, allocator: Allocator, id: i64) ![]const u8 {
+        try self.lock();
+        defer self.mutex.unlock(self.io);
+        const statement = try self.prepare("SELECT messages_json FROM agent_sessions WHERE id = ?1");
+        defer statement.deinit();
+        try statement.bindInt(1, id);
+        if (!try statement.step()) return error.SessionNotFound;
+        return allocator.dupe(u8, try statement.text(0));
+    }
+
     pub fn userFields(self: *Store, allocator: Allocator, id: i64) ![]const u8 {
         try self.lock();
         defer self.mutex.unlock(self.io);
@@ -142,7 +152,7 @@ pub const Store = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const history = blk: {
+        const merged = blk: {
             const statement = try self.prepare("SELECT messages_json, pending_inputs FROM agent_sessions WHERE id = ?1 AND status = 'pending'");
             defer statement.deinit();
             try statement.bindInt(1, id);
@@ -157,7 +167,7 @@ pub const Store = struct {
         );
         defer statement.deinit();
         try statement.bindInt(1, id);
-        try statement.bindText(2, history.json);
+        try statement.bindText(2, merged.json);
         try statement.execute();
         if (c.sqlite3_changes64(self.database) != 1) return error.SessionNotAvailable;
         try self.execute("COMMIT");
@@ -173,14 +183,14 @@ pub const Store = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const history = blk: {
+        const merged = blk: {
             const statement = try self.prepare("SELECT pending_inputs FROM agent_sessions WHERE id = ?1 AND status = 'running'");
             defer statement.deinit();
             try statement.bindInt(1, id);
             if (!try statement.step()) return error.SessionNotAvailable;
             break :blk try appendInputs(a, messages_json, try statement.text(0));
         };
-        const paused = waiting and history.input_count == 0;
+        const paused = waiting and merged.input_count == 0;
         const statement = try self.prepare(
             \\ UPDATE agent_sessions
             \\ SET messages_json = ?2, pending_inputs = '[]', status = ?3,
@@ -189,7 +199,7 @@ pub const Store = struct {
         );
         defer statement.deinit();
         try statement.bindInt(1, id);
-        try statement.bindText(2, history.json);
+        try statement.bindText(2, merged.json);
         try statement.bindText(3, if (paused) "waiting" else "running");
         try statement.execute();
         if (c.sqlite3_changes64(self.database) != 1) return error.SessionNotAvailable;
@@ -302,8 +312,9 @@ const Statement = struct {
 const JoinedHistory = struct { json: []const u8, input_count: usize };
 
 fn appendInputs(allocator: Allocator, messages_json: []const u8, inputs_json: []const u8) !JoinedHistory {
-    const messages = try std.json.parseFromSliceLeaky([]Value, allocator, messages_json, .{});
     const inputs = try std.json.parseFromSliceLeaky([]Value, allocator, inputs_json, .{});
+    if (inputs.len == 0) return .{ .json = try allocator.dupe(u8, messages_json), .input_count = 0 };
+    const messages = try std.json.parseFromSliceLeaky([]Value, allocator, messages_json, .{});
     const combined = try allocator.alloc(Value, messages.len + inputs.len);
     @memcpy(combined[0..messages.len], messages);
     @memcpy(combined[messages.len..], inputs);
