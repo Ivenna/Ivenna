@@ -2,7 +2,7 @@
   {
     "type": "function",
     "name": "get_host_shell",
-    "description": "Inspect the shell executable, default working directory, and capabilities on Ivenna's host. Available capabilities can be used now; planned capabilities are not implemented yet. Use run_host_shell to execute commands.",
+    "description": "Return the host shell executable, default working directory, and capability status.",
     "parameters": {
       "type": "object",
       "properties": {},
@@ -13,13 +13,13 @@
   {
     "type": "function",
     "name": "run_host_shell",
-    "description": "Execute a command through /bin/sh on Ivenna's host as the service account, and wait for completion or timeout. Commands inherit the service process environment with batch-output overrides. Each call has a separate shell with no terminal or live stdin; use pipes or heredocs for input. Remaining processes in its process group are stopped when the call ends. Replies contain {result: {outcome, stdout, stderr}} or {error: {code, message}}. Outcome is {completed: {exited: code}} or another termination variant, such as {completed: {signal: 'TERM'}}, or {timed_out: {}}. Each stream contains {text, truncated, path}: a preview limited to 16 KiB, whether content was omitted, and the full log's absolute path. The log can be read for omitted output. Timeouts retain captured output; interruption does not undo host changes.",
+    "description": "Run a command as the service account in a fresh, noninteractive /bin/sh on Ivenna's host, with no terminal or live stdin. Waits for completion or timeout, then stops processes remaining in the invocation's process group. Returns the outcome and stdout/stderr previews; each stream's path points to its complete captured output.",
     "parameters": {
       "type": "object",
       "properties": {
         "command": {
           "type": "string",
-          "description": "The shell command to execute. Supports pipelines, redirection, and multiple commands."
+          "description": "Shell command to execute."
         },
         "cwd": {
           "type": "string",
