@@ -18,4 +18,4 @@ Results convey the state and outcome of the particular invocation. Implementatio
 
 The deployment user owns Ivenna's data and chooses where it lives. Keep structured runtime state in embedded SQLite, and keep artifacts and autonomous memory as files. These forms should support inspecting, retaining, and managing the data within the user's deployment.
 
-Session state and history support continued execution. Observation data serves diagnosis and analysis, with its own retention and export lifecycle. A diagnostic record's lifetime should not determine whether a session can resume. Detailed observation interfaces and storage formats can develop as their uses become clear.
+Session state and history support continued execution. Diagnostic records support troubleshooting and analysis, with their own retention and export lifecycle. A diagnostic record's lifetime should not determine whether a session can resume. Dedicated diagnostic interfaces and storage formats can develop as their uses become clear.

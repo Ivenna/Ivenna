@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
+const Content = @import("content.zig").Content;
 
 /// Every request uses the worker's Io, so canceling it also cancels its HTTP I/O.
 pub const Provider = struct {
@@ -24,16 +25,79 @@ pub const Provider = struct {
         calls: []const FunctionCall,
     };
 
+    /// Encode tool content and reject locally detectable limit violations.
+    /// JSON storage and encoded local images use arena; call_id, text, and
+    /// remote URL strings borrow their inputs.
+    pub fn toolReply(self: Provider, arena: Allocator, call_id: []const u8, content: []const Content, history: []const Value) !Value {
+        var has_image = false;
+        for (content) |part| {
+            if (part == .image) has_image = true;
+        }
+        if (!has_image) return encodeToolReply(arena, call_id, content);
+        if (imageLimit(content, history)) |message|
+            return contentLimitReply(arena, call_id, content, message);
+
+        const reply = try encodeToolReply(arena, call_id, content);
+        const input = try arena.alloc(Value, history.len + 1);
+        @memcpy(input[0..history.len], history);
+        input[history.len] = reply;
+        if (try self.requestSize(arena, input) > 48 * 1024 * 1024)
+            return contentLimitReply(arena, call_id, content, "Images omitted: the next model request would exceed 48 MiB. Use fewer or smaller images, or continue in a new session.");
+        return reply;
+    }
+
+    /// Remove image parts in history[reply_start..], newest first, until the
+    /// request fits or no new images remain.
+    pub fn limitToolReplies(self: Provider, arena: Allocator, history: []Value, reply_start: usize) !void {
+        var has_image = false;
+        for (history[reply_start..]) |reply| {
+            if (hasImage(reply)) {
+                has_image = true;
+                break;
+            }
+        }
+        if (!has_image or try self.requestSize(arena, history) <= 48 * 1024 * 1024) return;
+        var index = history.len;
+        while (index > reply_start) {
+            index -= 1;
+            if (!hasImage(history[index])) continue;
+            const rejection = try contentLimitReply(arena, try textField(history[index], "call_id"), &.{}, "Images omitted: the completed tool results would make the next model request exceed 48 MiB. Use fewer or smaller images, or continue in a new session.");
+            var parts: std.array_list.Managed(Value) = .init(arena);
+            for (contentParts(history[index])) |part| {
+                if (imageUrl(part) == null) try parts.append(part);
+            }
+            try parts.appendSlice(contentParts(rejection));
+            try history[index].object.put(arena, "output", .{ .array = parts });
+            if (try self.requestSize(arena, history) <= 48 * 1024 * 1024) return;
+        }
+    }
+
+    fn requestSize(self: Provider, arena: Allocator, input: []const Value) !u64 {
+        var buffer: [4096]u8 = undefined;
+        var counter = std.Io.Writer.Discarding.init(&buffer);
+        try std.json.Stringify.value(try self.requestPayload(arena, input), .{}, &counter.writer);
+        return counter.fullCount();
+    }
+
+    const Payload = struct {
+        model: []const u8,
+        input: []const Value,
+        tools: Value,
+        stream: bool = false,
+    };
+
+    fn requestPayload(self: Provider, arena: Allocator, input: []const Value) !Payload {
+        return .{
+            .model = self.model,
+            .input = input,
+            .tools = try std.json.parseFromSliceLeaky(Value, arena, @embedFile("tools.json"), .{}),
+        };
+    }
+
     pub fn next(self: Provider, arena: Allocator, input: []const Value) !Response {
         try self.client.io.checkCancel();
 
-        const tools = try std.json.parseFromSliceLeaky(Value, arena, @embedFile("tools.json"), .{});
-        const payload = try std.json.Stringify.valueAlloc(arena, .{
-            .model = self.model,
-            .input = input,
-            .tools = tools,
-            .stream = false,
-        }, .{});
+        const payload = try std.json.Stringify.valueAlloc(arena, try self.requestPayload(arena, input), .{});
         const url = try std.fmt.allocPrint(arena, "{s}/responses", .{std.mem.trimEnd(u8, self.base_url, "/")});
         const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{self.api_key});
         var output = std.Io.Writer.Allocating.init(arena);
@@ -88,6 +152,89 @@ pub const Provider = struct {
         return .{ .output = decoded.output, .calls = try calls.toOwnedSlice(arena) };
     }
 };
+
+fn encodeToolReply(arena: Allocator, call_id: []const u8, content: []const Content) !Value {
+    var parts: std.array_list.Managed(Value) = .init(arena);
+    for (content) |part| {
+        var encoded: std.json.ObjectMap = .empty;
+        switch (part) {
+            .text => |value| {
+                try encoded.put(arena, "type", .{ .string = "input_text" });
+                try encoded.put(arena, "text", .{ .string = value });
+            },
+            .image => |source| {
+                const url = switch (source) {
+                    .url => |url| url,
+                    .data => |image| blk: {
+                        const encoder = std.base64.standard.Encoder;
+                        const mime = image.mimeType();
+                        const prefix_length = "data:".len + mime.len + ";base64,".len;
+                        const url = try arena.alloc(u8, prefix_length + encoder.calcSize(image.bytes.len));
+                        _ = try std.fmt.bufPrint(url[0..prefix_length], "data:{s};base64,", .{mime});
+                        _ = encoder.encode(url[prefix_length..], image.bytes);
+                        break :blk url;
+                    },
+                };
+                try encoded.put(arena, "type", .{ .string = "input_image" });
+                try encoded.put(arena, "image_url", .{ .string = url });
+            },
+        }
+        try parts.append(.{ .object = encoded });
+    }
+    var reply: std.json.ObjectMap = .empty;
+    try reply.put(arena, "type", .{ .string = "function_call_output" });
+    try reply.put(arena, "call_id", .{ .string = call_id });
+    try reply.put(arena, "output", .{ .array = parts });
+    return .{ .object = reply };
+}
+
+fn contentLimitReply(arena: Allocator, call_id: []const u8, content: []const Content, message: []const u8) !Value {
+    const text = try std.json.Stringify.valueAlloc(arena, .{
+        .@"error" = .{ .code = "content_limit", .message = message },
+    }, .{});
+    var parts: std.array_list.Managed(Content) = .init(arena);
+    for (content) |part| {
+        if (part == .text) try parts.append(part);
+    }
+    try parts.append(.{ .text = text });
+    return encodeToolReply(arena, call_id, parts.items);
+}
+
+/// Count image parts without interpreting their URLs.
+fn imageLimit(content: []const Content, history: []const Value) ?[]const u8 {
+    var count: usize = 0;
+    for (content) |part| {
+        if (part == .image) count += 1;
+    }
+    for (history) |item| {
+        for (contentParts(item)) |part| {
+            if (imageUrl(part) != null) count += 1;
+        }
+    }
+    if (count > 600) return "Images omitted: this result would exceed 600 images in one model request. Continue in a new session.";
+    return null;
+}
+
+fn contentParts(item: Value) []const Value {
+    if (item != .object) return &.{};
+    const parts = item.object.get("content") orelse item.object.get("output") orelse return &.{};
+    return if (parts == .array) parts.array.items else &.{};
+}
+
+fn hasImage(item: Value) bool {
+    for (contentParts(item)) |part| {
+        if (imageUrl(part) != null) return true;
+    }
+    return false;
+}
+
+fn imageUrl(part: Value) ?[]const u8 {
+    if (part != .object) return null;
+    const kind = part.object.get("type") orelse return null;
+    if (kind != .string or !std.mem.eql(u8, kind.string, "input_image")) return null;
+    const url = part.object.get("image_url") orelse return null;
+    return if (url == .string) url.string else null;
+}
 
 fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {
     // std.http reader/writer adapters erase Canceled to ReadFailed/WriteFailed.

@@ -1,7 +1,10 @@
 const std = @import("std");
+const content = @import("content.zig");
 
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
+const Content = content.Content;
+const Expected = content.Expected;
 
 pub const Memory = struct {
     io: std.Io,
@@ -24,7 +27,10 @@ pub const Memory = struct {
             match_mode: ?MatchMode = null,
             case_sensitive: ?bool = null,
         },
-        read_memory: struct { address: []const u8 },
+        read_memory: struct {
+            address: []const u8,
+            expected: Expected = .{ .auto = .{} },
+        },
         remember: struct {
             address: []const u8,
             content: []const u8,
@@ -70,7 +76,9 @@ pub const Memory = struct {
         @"error": struct { code: []const u8, message: []const u8 },
     };
 
-    pub fn invoke(self: Memory, allocator: Allocator, request: Request) ![]const u8 {
+    /// Returned content and image bytes belong to allocator, independently of
+    /// the temporary SSH request and response buffers.
+    pub fn invoke(self: Memory, allocator: Allocator, request: Request) ![]const Content {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const scratch = arena.allocator();
@@ -124,9 +132,13 @@ pub const Memory = struct {
         const term = try child.wait(self.io);
         const stdout = try reader.toOwnedSlice(0);
         const stderr = try reader.toOwnedSlice(1);
+        var reply_error: ?[]const u8 = null;
         const reply: ?Reply = std.json.parseFromSliceLeaky(Reply, scratch, stdout, .{}) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => null,
+            else => blk: {
+                reply_error = @errorName(err);
+                break :blk null;
+            },
         };
 
         if (input_error == null and term == .exited) {
@@ -135,12 +147,25 @@ pub const Memory = struct {
                     .result => 0,
                     .@"error" => 1,
                 };
-                if (term.exited == expected_exit) return allocator.dupe(u8, stdout);
+                if (term.exited == expected_exit) {
+                    if (request == .read_memory and response == .result) {
+                        const parts = readReply(allocator, response.result, request.read_memory.expected) catch |err| switch (err) {
+                            error.OutOfMemory => return err,
+                            else => blk: {
+                                reply_error = @errorName(err);
+                                break :blk null;
+                            },
+                        };
+                        if (parts) |value| return value;
+                    } else {
+                        return textReply(allocator, try allocator.dupe(u8, stdout));
+                    }
+                }
             }
         }
 
-        std.log.warn("memory room request {s}: SSH {f}; input error: {s}; {s}", .{
-            @tagName(request), term, input_error orelse "none", stderr,
+        std.log.warn("memory room request {s}: SSH {f}; input error: {s}; reply error: {s}; {s}", .{
+            @tagName(request), term, input_error orelse "none", reply_error orelse "none", stderr,
         });
         const failure: Reply = .{ .@"error" = if (request.changesMemory()) .{
             .code = "memory_change_uncertain",
@@ -149,9 +174,58 @@ pub const Memory = struct {
             .code = "memory_unavailable",
             .message = "The memory room did not return a complete response. Check the connection before trying again.",
         } };
-        return std.json.Stringify.valueAlloc(allocator, failure, .{});
+        return textReply(allocator, try std.json.Stringify.valueAlloc(allocator, failure, .{}));
     }
 };
+
+fn readReply(allocator: Allocator, value: Value, expected: Expected) ![]const Content {
+    if (value != .object) return error.InvalidMemoryReply;
+    const address = value.object.get("address") orelse return error.InvalidMemoryReply;
+    const data = value.object.get("data") orelse return error.InvalidMemoryReply;
+    if (address != .string or data != .string) return error.InvalidMemoryReply;
+
+    const decoder = std.base64.standard.Decoder;
+    const size = decoder.calcSizeForSlice(data.string) catch return error.InvalidMemoryReply;
+    const bytes = try allocator.alloc(u8, size);
+    var retain_bytes = false;
+    defer if (!retain_bytes) allocator.free(bytes);
+    decoder.decode(bytes, data.string) catch return error.InvalidMemoryReply;
+
+    return switch (content.classify(bytes, expected)) {
+        .text => |text| textReply(allocator, try std.json.Stringify.valueAlloc(allocator, .{
+            .result = .{ .address = address.string, .content = text },
+        }, .{})),
+        .image => |image| blk: {
+            const Description = union(enum) {
+                data: struct {
+                    format: content.Image.Format,
+                    byte_length: usize,
+                },
+                url: struct {},
+            };
+            const description: Description = switch (image) {
+                .data => |inline_image| .{ .data = .{
+                    .format = inline_image.format,
+                    .byte_length = inline_image.bytes.len,
+                } },
+                .url => .{ .url = .{} },
+            };
+            const metadata = try std.json.Stringify.valueAlloc(allocator, .{
+                .result = .{ .address = address.string, .content = .{ .image = description } },
+            }, .{});
+            const parts = try allocator.dupe(Content, &.{ .{ .text = metadata }, .{ .image = image } });
+            retain_bytes = true;
+            break :blk parts;
+        },
+        .unavailable => |unavailable| textReply(allocator, try std.json.Stringify.valueAlloc(allocator, .{
+            .result = .{ .address = address.string, .content = .{ .unavailable = unavailable } },
+        }, .{})),
+    };
+}
+
+fn textReply(allocator: Allocator, text: []const u8) ![]const Content {
+    return allocator.dupe(Content, &.{.{ .text = text }});
+}
 
 fn writeRequest(io: std.Io, file: std.Io.File, payload: []const u8) std.Io.File.Writer.Error!void {
     defer file.close(io);

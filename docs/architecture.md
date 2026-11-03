@@ -12,18 +12,18 @@ This guide describes the current implementation of the project's [design intent]
 | --- | --- |
 | [Api](../apps/server/src/api.zig) | Handle HTTP requests, schedule session tasks, and manage connection and task lifecycles |
 | [Engine](../packages/agent/src/root.zig) | Create sessions, run model and tool loops, and save each turn's results |
-| [Provider](../packages/agent/src/provider.zig) | Decode the model API response and return complete output with typed function calls |
+| [Provider](../packages/agent/src/provider.zig) | Encode model requests and tool content, and decode complete output with typed function calls |
 | [Store](../packages/agent/src/store.zig) | Persist sessions, history, and the input inbox, and apply session state transitions |
 | [Memory](../packages/agent/src/memory.zig) | Send structured memory requests to the remote handler and return operation results |
-| [Host](../packages/agent/src/host.zig) | Parse and route host tool requests with trusted conversation context |
+| [Host](../packages/agent/src/host.zig) | Parse and route shell requests with trusted conversation context |
 
-HTTP and concurrency use the Zig standard library. SQLite is compiled into the application, and input serialization to YAML uses `yaml-zig`. Dependency versions are pinned in the [agent package manifest](../packages/agent/build.zig.zon). See the [development guide](development.md) for the repository layout and build commands.
+HTTP and concurrency use the Zig standard library. SQLite is compiled into the application, input serialization to YAML uses `yaml-zig`, and image format recognition uses [zignal](https://github.com/arrufat/zignal). Dependency versions are pinned in the [agent package manifest](../packages/agent/build.zig.zon). See the [development guide](development.md) for the repository layout and build commands.
 
-## Local data and observation
+## Local data and diagnostics
 
 The service resolves `DATA_DIR` from its startup directory and creates it when needed. The default is `.ivenna`. Store opens `<DATA_DIR>/state.sqlite`; Shell writes output files under `<DATA_DIR>/host/`. The SSH memory workspace is configured separately. These locations hold the deployment user's data; see [local data](running.md#local-data) for setup and ownership.
 
-Session state and history are the records used to continue execution. Host output files retain command results beyond the model's bounded previews. Diagnostic messages currently go to the service's stderr. Dedicated observation storage, retention controls, and telemetry export remain future work; their interfaces and formats are undecided.
+Session state and history are the records used to continue execution. Host output files retain command results beyond the model's bounded previews. Diagnostic messages currently go to the service's stderr. Dedicated diagnostic storage, retention controls, and telemetry export remain future work; their interfaces and formats are undecided.
 
 ## Application state and autonomous memory
 
@@ -34,12 +34,14 @@ A session can be `waiting`, `pending`, `running`, or `failed`; a `failed` state 
 Autonomous memory is shared across all sessions. The model chooses memory operations and supplies arguments through the structured tools defined in [tools.json](../packages/agent/src/tools.json). Memory encodes each request as a JSON object containing a single operation and sends it to the SSH process's standard input. For example, a read request is:
 
 ```json
-{"read_memory":{"address":"languages/progress.md"}}
+{"read_memory":{"address":"languages/progress.md","expected":{"auto":{}}}}
 ```
 
 The remote handler, [memory.nu](../packages/agent/src/memory.nu), runs at a fixed path, fills in default values for omitted arguments, and checks that addresses resolve within the memory workspace. It uses [fd](https://github.com/sharkdp/fd) to find names, [ripgrep](https://github.com/BurntSushi/ripgrep) to search content, and Nushell built-ins to read, write, and organize entries. The handler runs predefined operations, treating content and match expressions supplied by the model as data.
 
-The handler returns either a `result` branch with exit code `0` or an `error` branch with exit code `1`. Memory verifies that the response and exit code agree, then passes operation errors back to the model. If the SSH exchange ends without a complete, consistent reply, Memory logs the diagnostics and returns an error indicating that memory is unavailable or that the outcome of a change is uncertain. Other failures, such as an inability to start the SSH process, propagate to session failure handling. See [memory rooms](memory.md) for tool usage and [using remote memory](running.md#using-remote-memory) for deployment.
+The handler returns either a `result` branch with exit code `0` or an `error` branch with exit code `1`. A successful read carries the entry's raw bytes as base64 in `data`, together with its `address`. Memory decodes and classifies these bytes, returning full text or image metadata with native image content. Other operations retain their JSON result structure.
+
+Memory verifies that the response and exit code agree, then passes operation errors back to the model. If the SSH exchange ends without a complete, consistent reply, including malformed read data, Memory logs the diagnostics and returns an error indicating that memory is unavailable or that the outcome of a change is uncertain. Other failures, such as an inability to start the SSH process, propagate to session failure handling. See [memory rooms](memory.md) for tool usage and [using remote memory](running.md#using-remote-memory) for deployment.
 
 ## Host execution
 
@@ -48,16 +50,17 @@ Host validates tool arguments, routes requests, and serializes typed results at 
 | Component | Responsibility |
 | --- | --- |
 | [Shell](../packages/agent/src/host/shell.zig) | Describe shell capabilities and execute commands; own future process and terminal control |
+| [Reader](../packages/agent/src/host/reader.zig) | Classify captured stdout and return text previews, images, or URL references |
 | [process.zig](../packages/agent/src/host/process.zig) | Spawn subprocesses, enforce timeouts, stop process groups, and reap direct children |
-| [output.zig](../packages/agent/src/host/output.zig) | Convert output to UTF-8 text and construct bounded previews |
+| [output.zig](../packages/agent/src/host/output.zig) | Read bounded file previews and preserve valid UTF-8 boundaries |
 
-Each `Host.Request` selects one operation, and each `Reply(T)` contains a result or an error. `Shell.Result` always includes an outcome and both output streams. The outcome is a tagged union: completion carries the process termination, while timeout has no termination payload. Each stream groups its text, truncation status, and full log path.
+Each `Host.Request` selects one operation. Host returns shared content parts, using JSON text for structured shell summaries and errors. `Shell.Result` always includes an outcome and both output streams. The outcome is a tagged union: completion carries the process termination, while timeout has no termination payload. Each stream groups its full log path with a content description. Stdout can contain text, an image, or an unavailable-content diagnostic; stderr contains text or a binary-content diagnostic. Host serializes the stream descriptions without image bytes or URLs, then appends any stdout image as native content.
 
 ### Command execution
 
 Engine supplies the current session ID in `Host.Context`. Shell uses this trusted identity to group output files under `<DATA_DIR>/host/<session_id>/`. All sessions execute as the service's OS account and share its filesystem.
 
-Shell executes one command per invocation with a copy of the service's inherited environment, including `PATH`, and overrides for batch output. Changing the command's working directory does not reload that environment. Each command runs through a noninteractive `/bin/sh`, writes full stdout and stderr to files, and returns bounded previews. When the shell exits, times out, or is canceled, the process helper stops any remaining processes in the invocation's process group and reaps the direct child. The [host guide](host.md) defines the tool arguments and results; the [running guide](running.md#optional-host-tools) covers program availability.
+Shell executes one command per invocation with a copy of the service's inherited environment, including `PATH`, and overrides for batch output. Changing the command's working directory does not reload that environment. Each command runs through a noninteractive `/bin/sh` and writes full stdout and stderr to files. Reader classifies stdout according to the command's `expected` hint; stderr uses the text-preview helper. When the shell exits, times out, or is canceled, the process helper stops any remaining processes in the invocation's process group and reaps the direct child. The [host guide](host.md) defines the tool arguments and results; the [running guide](running.md#optional-host-tools) covers program availability.
 
 ### Planned process control
 
@@ -75,6 +78,20 @@ These entries identify planned capabilities; no LLM operations implement them ye
 
 [Pi's bash tool](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/bash.ts) provides a reference for bounded model output with full logs. [Codex's resumable execution tools](https://github.com/openai/codex/blob/main/codex-rs/core/src/tools/handlers/shell_spec.rs) inform process continuation and input; [OpenCode's background shell jobs](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/tool/plugin/shell.ts) illustrate completion scheduling. These references guide later shell controls.
 
+## Tool content
+
+[content.zig](../packages/agent/src/content.zig) defines content expectations, the shared byte classifier, and the text or image parts returned by tools. Memory reads and shell stdout use the same classification rules. The current image sources are bytes and URL references.
+
+Each memory entry or stdout capture is currently classified as one content unit. The shared result sequence can carry multiple content parts; source segmentation and expectations for individual parts remain undecided.
+
+The classifier uses [image.zig](../packages/agent/src/image.zig) to recognize image format signatures through zignal and enforces the per-image byte limit. Reader checks that limit before allocating a recognized image's bytes. Image decoding and complete validation are left to the model service. The returned content parts, image bytes, and URL text belong to the turn's arena. See [tool content](content.md) for expectations, URL interpretation, and supported formats.
+
+Text requires valid UTF-8 without NUL bytes. Memory reads retain full text. Reader produces bounded shell text previews and, for large non-image output, checks the head and tail used in the preview. An image expectation with URL representation reads stdout in full. Classifying omitted preview bytes incrementally remains future work.
+
+[Provider](../packages/agent/src/provider.zig) encodes model requests and checks image count and request size for both image data and URL references. It counts image parts without interpreting their URLs. Image validation and URL retrieval belong to the model service.
+
+Before checkpointing, Provider checks the complete tool batch's request size. If it exceeds the limit, Provider removes images from new tool results, newest first, and appends `content_limit` errors until the request fits or no new images remain. Admission failures for an individual tool result also retain its text and omit its images. Earlier history and text results are preserved, including shell outcomes and stream descriptions. These checks do not trim a request whose earlier history or text alone exceeds the limit, and queued inputs merged at checkpoint can increase its size afterward.
+
 ## Model input and history
 
 When creating a session, Engine saves its default input fields and adds the sole system message:
@@ -85,7 +102,11 @@ Subsequent HTTP inputs are merged with the session defaults by [input.zig](../pa
 
 Provider sends the compiled definitions in [tools.json](../packages/agent/src/tools.json) with every model request to DeepSeek's native `/responses` endpoint. It decodes the complete response, requires a string `type` on each output item, and parses every function call's `name`, `arguments`, and `call_id` as strings before returning. The returned data belongs to the turn's arena and survives cleanup of the HTTP response buffer. A malformed item type or function-call envelope fails before any tool in that response executes.
 
-Engine receives typed function calls and retains the complete `output`, including reasoning, messages, and function calls, for history replay. The selected tool validates its arguments; an unknown tool or invalid arguments produce a tool error that the model can act on. Each tool result is appended to history as a `function_call_output` with the corresponding `call_id` so it can be replayed in the next request.
+Engine receives typed function calls and retains the complete `output`, including reasoning, messages, and function calls, for history replay. The selected tool validates its arguments; an unknown tool or invalid arguments produce a tool error that the model can act on.
+
+Provider encodes tool content as `input_text` and `input_image` parts in a `function_call_output` with the corresponding `call_id`, following DeepSeek's [Responses image input format](https://api-docs.deepseek.com/guides/responses_api/#image-input). Memory reads and shell commands can return text and an image together; other operations return text. Engine appends the encoded results to history for the next model request.
+
+Local image bytes are embedded as base64 data URLs before checkpointing, so replay is independent of the original files. Remote URLs are retained as supplied and fetched by DeepSeek on later requests; their content can change or become unavailable.
 
 Each loop iteration uses its own arena and releases its temporary data after saving a checkpoint. Persisted history continues to grow, and every model request sends the full history. History is not currently compacted or trimmed.
 

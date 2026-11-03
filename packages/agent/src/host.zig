@@ -1,10 +1,10 @@
 const std = @import("std");
 const Shell = @import("host/shell.zig").Shell;
+const Content = @import("content.zig").Content;
 
 const Allocator = std.mem.Allocator;
 
-/// Routes LLM host requests and serializes their replies. Engine supplies the
-/// conversation identity; Shell owns execution and control.
+/// Routes host operations and returns content owned by the current turn.
 pub const Host = struct {
     shell: Shell,
 
@@ -40,21 +40,29 @@ pub const Host = struct {
         }
     };
 
-    pub fn invoke(self: *Host, allocator: Allocator, context: Context, request: Request) ![]const u8 {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const response = self.respond(a, context, request) catch |err| switch (err) {
+    pub fn invoke(self: *Host, a: Allocator, context: Context, request: Request) ![]const Content {
+        return self.respond(a, context, request) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,
-            else => try failure(a, "host_unavailable", try std.fmt.allocPrint(a, "Could not return the command result: {s}. The host may have changed; inspect it before retrying.", .{@errorName(err)})),
+            else => try textReply(a, try failure(a, "host_unavailable", switch (request) {
+                .run_host_shell => try std.fmt.allocPrint(a, "Could not return the command result: {s}. The host may have changed; inspect it before retrying.", .{@errorName(err)}),
+                .get_host_shell => try std.fmt.allocPrint(a, "Could not describe the host shell: {s}.", .{@errorName(err)}),
+            })),
         };
-        return allocator.dupe(u8, response);
     }
 
-    fn respond(self: *Host, a: Allocator, context: Context, request: Request) ![]const u8 {
+    fn respond(self: *Host, a: Allocator, context: Context, request: Request) ![]const Content {
         return switch (request) {
-            .get_host_shell => success(a, self.shell.describe()),
-            .run_host_shell => |args| success(a, try self.shell.run(a, context, args)),
+            .get_host_shell => textReply(a, try success(a, self.shell.describe())),
+            .run_host_shell => |args| blk: {
+                const result = try self.shell.run(a, context, args);
+                var parts: std.array_list.Managed(Content) = .init(a);
+                try parts.append(.{ .text = try success(a, result.describe()) });
+                switch (result.stdout.content) {
+                    .image => |image| try parts.append(.{ .image = image }),
+                    .text, .unavailable => {},
+                }
+                break :blk try parts.toOwnedSlice();
+            },
         };
     }
 };
@@ -71,6 +79,10 @@ fn success(a: Allocator, value: anytype) ![]const u8 {
 
 fn failure(a: Allocator, code: []const u8, message: []const u8) ![]const u8 {
     return std.json.Stringify.valueAlloc(a, Reply(void){ .@"error" = .{ .code = code, .message = message } }, .{});
+}
+
+fn textReply(a: Allocator, text: []const u8) ![]const Content {
+    return a.dupe(Content, &.{.{ .text = text }});
 }
 
 fn validText(value: []const u8) bool {

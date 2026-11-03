@@ -2,7 +2,7 @@
 
 Ivenna is an agent runtime, designed as [a body for an LLM soul](docs/design.md). The project explores how persistent conversations and autonomous memory can sustain a sense of self over time.
 
-The project is currently a prototype. It accepts input through an HTTP service and saves each session's history in local SQLite so you can continue the conversation later. The deployment user owns the data. Ivenna provides shared [memory rooms](docs/memory.md) and [host shell access](docs/host.md).
+The project is currently a prototype. It accepts input through an HTTP service and saves each session's history in local SQLite so you can continue the conversation later. The deployment user owns the data. Ivenna provides shared [memory rooms](docs/memory.md) and [host shell access](docs/host.md), with [text and image results](docs/content.md) from memory reads and command output.
 
 ## Getting started
 

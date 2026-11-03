@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
         .flags = &.{"-DSQLITE_OMIT_LOAD_EXTENSION"},
     });
     const yaml = b.dependency("yaml", .{ .target = target, .optimize = optimize });
+    const zignal = b.dependency("zignal", .{ .target = target, .optimize = optimize });
     _ = b.addModule("agent", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -22,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "sqlite", .module = sqlite_module },
             .{ .name = "yaml", .module = yaml.module("yaml") },
+            .{ .name = "zignal", .module = zignal.module("zignal") },
         },
     });
 }

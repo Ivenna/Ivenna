@@ -1,5 +1,5 @@
 # The application sends one JSON request. Addresses belong to this workspace;
-# directories are memory rooms and text files hold memories.
+# directories are memory rooms and files hold memories.
 def fail [code: string, message: string] {
     error make {code: $code, msg: $message}
 }
@@ -127,7 +127,7 @@ def dispatch [root: string, operation: string, args: record] {
         },
         "read_memory" => {
             let target = memory $root $args.address
-            {address: $target.address, content: (open --raw $target.path)}
+            {address: $target.address, data: (open --raw $target.path | into binary | encode base64)}
         },
         "remember" => {
             let target = resolve $root $args.address

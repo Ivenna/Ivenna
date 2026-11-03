@@ -1,6 +1,9 @@
 const std = @import("std");
 const process = @import("process.zig");
+const Reader = @import("reader.zig").Reader;
 const output = @import("output.zig");
+const Expected = @import("../content.zig").Expected;
+const Image = @import("../content.zig").Image;
 
 const Allocator = std.mem.Allocator;
 
@@ -21,18 +24,75 @@ pub const Shell = struct {
         command: []const u8,
         cwd: ?[]const u8 = null,
         timeout_ms: ?u32 = null,
+        expected: Expected = .{ .auto = .{} },
     };
 
     pub const Stream = struct {
-        text: []const u8,
-        truncated: bool,
         path: []const u8,
+        content: Reader.FileContent,
+
+        pub const Description = struct {
+            path: []const u8,
+            content: union(enum) {
+                text: @FieldType(Reader.FileContent, "text"),
+                image: union(enum) {
+                    data: struct {
+                        format: Image.Format,
+                        byte_length: u64,
+                    },
+                    url: struct {},
+                },
+                unavailable: @FieldType(Reader.FileContent, "unavailable"),
+            },
+        };
+
+        pub fn describe(self: Stream) Stream.Description {
+            return .{
+                .path = self.path,
+                .content = switch (self.content) {
+                    .text => |preview| .{ .text = preview },
+                    .image => |source| .{ .image = switch (source) {
+                        .data => |image| .{ .data = .{
+                            .format = image.format,
+                            .byte_length = image.bytes.len,
+                        } },
+                        .url => .{ .url = .{} },
+                    } },
+                    .unavailable => |unavailable| .{ .unavailable = unavailable },
+                },
+            };
+        }
+    };
+
+    pub const DiagnosticsStream = struct {
+        path: []const u8,
+        content: union(enum) {
+            text: output.Preview,
+            unavailable: struct {
+                byte_length: u64,
+                reason: enum { unsupported_binary },
+            },
+        },
     };
 
     pub const Result = struct {
         outcome: process.Outcome,
         stdout: Stream,
-        stderr: Stream,
+        stderr: DiagnosticsStream,
+
+        pub const Description = struct {
+            outcome: process.Outcome,
+            stdout: Stream.Description,
+            stderr: DiagnosticsStream,
+        };
+
+        pub fn describe(self: Result) Result.Description {
+            return .{
+                .outcome = self.outcome,
+                .stdout = self.stdout.describe(),
+                .stderr = self.stderr,
+            };
+        }
     };
 
     pub const CapabilityStatus = enum { available, planned };
@@ -86,20 +146,27 @@ pub const Shell = struct {
         defer stderr.close(self.io);
 
         const outcome = try self.execute(a, args, stdout, stderr, deadline);
-        const stdout_preview = try output.preview(a, self.io, stdout);
-        const stderr_preview = try output.preview(a, self.io, stderr);
+        const reader: Reader = .{ .io = self.io };
+        const diagnostics: DiagnosticsStream = .{
+            .path = stderr_path,
+            .content = blk: {
+                const preview = output.preview(a, self.io, stderr) catch |err| switch (err) {
+                    error.UnsupportedBinary => break :blk .{ .unavailable = .{
+                        .byte_length = try stderr.length(self.io),
+                        .reason = .unsupported_binary,
+                    } },
+                    else => return err,
+                };
+                break :blk .{ .text = preview };
+            },
+        };
         return .{
             .outcome = outcome,
             .stdout = .{
-                .text = stdout_preview.text,
-                .truncated = stdout_preview.truncated,
                 .path = stdout_path,
+                .content = try reader.readFile(a, stdout, args.expected),
             },
-            .stderr = .{
-                .text = stderr_preview.text,
-                .truncated = stderr_preview.truncated,
-                .path = stderr_path,
-            },
+            .stderr = diagnostics,
         };
     }
 

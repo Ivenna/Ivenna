@@ -6,6 +6,7 @@ pub const Session = storage.Session;
 pub const Provider = @import("provider.zig").Provider;
 pub const Memory = @import("memory.zig").Memory;
 pub const Host = @import("host.zig").Host;
+const Content = @import("content.zig").Content;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
@@ -62,11 +63,12 @@ pub const Engine = struct {
             // Replay complete output, including reasoning items, in the next
             // model request so the tool loop retains its context.
             try messages.appendSlice(response.output);
+            const reply_start = messages.items.len;
             var pause_requested = response.calls.len == 0;
             for (response.calls) |call| {
                 const outcome = self.invoke(a, id, call.name, call.arguments) catch |err| switch (err) {
                     error.InvalidToolArguments, error.UnknownTool => Outcome{
-                        .reply = try std.json.Stringify.valueAlloc(a, .{
+                        .reply = try textContent(a, try std.json.Stringify.valueAlloc(a, .{
                             .@"error" = .{
                                 .code = if (err == error.InvalidToolArguments) "invalid_arguments" else "unknown_tool",
                                 .message = if (err == error.InvalidToolArguments)
@@ -74,7 +76,7 @@ pub const Engine = struct {
                                 else
                                     "This tool is not available. Choose one of the provided tools.",
                             },
-                        }, .{}),
+                        }, .{})),
                     },
                     else => return err,
                 };
@@ -82,15 +84,12 @@ pub const Engine = struct {
                     .reply => |content| content,
                     .wait_for_input => blk: {
                         pause_requested = true;
-                        break :blk "{\"result\":\"waiting_for_input\"}";
+                        break :blk try textContent(a, "{\"result\":\"waiting_for_input\"}");
                     },
                 };
-                var reply: std.json.ObjectMap = .empty;
-                try reply.put(a, "type", .{ .string = "function_call_output" });
-                try reply.put(a, "call_id", .{ .string = call.call_id });
-                try reply.put(a, "output", .{ .string = content });
-                try messages.append(.{ .object = reply });
+                try messages.append(try self.provider.toolReply(a, call.call_id, content, messages.items));
             }
+            try self.provider.limitToolReplies(a, messages.items, reply_start);
             // Persist model output together with its tool replies. A crash
             // before this checkpoint can cause tool effects to be repeated.
             const next_checkpoint = try std.json.Stringify.valueAlloc(a, messages.items, .{});
@@ -98,7 +97,7 @@ pub const Engine = struct {
         }
     }
 
-    const Outcome = union(enum) { reply: []const u8, wait_for_input };
+    const Outcome = union(enum) { reply: []const Content, wait_for_input };
 
     fn invoke(self: *Engine, a: Allocator, session_id: i64, name: []const u8, arguments: []const u8) !Outcome {
         if (try Memory.Request.parse(a, name, arguments)) |request| {
@@ -114,6 +113,10 @@ pub const Engine = struct {
         return error.UnknownTool;
     }
 };
+
+fn textContent(a: Allocator, text: []const u8) ![]const Content {
+    return a.dupe(Content, &.{.{ .text = text }});
+}
 
 fn parseArgs(comptime T: type, a: Allocator, text: []const u8) !T {
     return std.json.parseFromSliceLeaky(T, a, text, .{}) catch |err| switch (err) {

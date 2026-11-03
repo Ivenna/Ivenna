@@ -34,6 +34,8 @@ If `state` contains the `pending` or `running` branch, processing is still in pr
 
 When the session reaches `waiting`, read any new assistant messages in `messages`. The model requests a pause by returning no tool calls or by calling `wait_for_input`; queued inputs keep execution running. If the session reaches `failed`, its state carries the error name; see [continuing and resuming](#continuing-and-resuming) to try again after addressing the failure.
 
+To request analysis of content, include its memory address, host file path, or image URL and the task in `message`. The assistant can read memory or use a host command to supply [text or image content](content.md).
+
 ## Continuing and resuming
 
 Submit subsequent inputs to the same `/sessions/1/inputs` endpoint. If the session is running, new inputs are queued and incorporated after the current turn. If the session is `waiting` or `failed`, new input schedules it to continue processing.

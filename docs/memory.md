@@ -1,6 +1,6 @@
 # Memory rooms
 
-Ivenna stores persistent memory in rooms shared across sessions. The model uses tools to browse, find, recall, record, and revise memories. Ivenna chooses its own room hierarchy, entry names, text formats, and cross-references.
+Ivenna stores persistent memory in rooms shared across sessions. The model uses tools to browse, find, recall, record, and revise memories. Ivenna chooses its own room hierarchy, entry names, formats, and cross-references.
 
 See the [running guide](running.md) for local setup or [using remote memory](running.md#using-remote-memory) to connect to another memory workspace. The [architecture guide](architecture.md#application-state-and-autonomous-memory) describes the execution protocol and module boundaries.
 
@@ -9,7 +9,7 @@ See the [running guide](running.md) for local setup or [using remote memory](run
 | Concept | Meaning |
 | --- | --- |
 | Memory room | A space containing related entries and child rooms |
-| Memory entry | Text stored at an address, with content and format chosen by Ivenna |
+| Memory entry | A file stored at an address, with content and format chosen by Ivenna |
 | Address | A path relative to the shared entrance, such as `languages/progress.md`; `.` is the entrance |
 | Name query | Literal text, a glob pattern, or a regular expression used by `find_memory` |
 | Content clue | Literal text or a regular expression used by `recall_memory` |
@@ -25,18 +25,20 @@ All addresses are relative to the shared entrance, including those returned by t
 | `browse_memory_room` | None | Browse a room's entries and child rooms |
 | `find_memory` | `query` | Find entries and rooms by name |
 | `recall_memory` | `clue` | Recall relevant entries by content |
-| `read_memory` | `address` | Read an entry's full content |
-| `remember` | `address`, `content` | Create an entry, append content, or replace its content |
-| `revise_memory` | `address`, `old_text`, `new_text` | Revise matching content in an entry |
+| `read_memory` | `address` | Read an entry as text or an image |
+| `remember` | `address`, `content` | Create an entry, append text, or replace its content with text |
+| `revise_memory` | `address`, `old_text`, `new_text` | Revise matching text in an entry |
 | `create_memory_room` | `address` | Create a room and any missing parent rooms |
 | `move_memory` | `address`, `destination` | Move or rename entries and rooms |
 | `forget_memory` | `address` | Remove an entry or room |
 
 Use `room` to limit browsing and searches to a room; it defaults to the shared entrance. Both `find_memory` and `recall_memory` also search child rooms.
 
-For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content searches support `literal` and `regex`. Searches use literal, case-insensitive matching by default. Literal name searches match any part of a name. Set `case_sensitive: true` to make searches case-sensitive.
+For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content searches support `literal` and `regex`. Searches use literal, case-insensitive matching by default. Literal name searches match any part of a name. Set `case_sensitive: true` to make searches case-sensitive. Content searches match text in entries.
 
-For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to add content without inserting a separator, or `replace` to write the full content. Both modes can also create a missing entry. The containing room must already exist.
+`read_memory` accepts an optional `expected` object for the complete entry. Omit it for automatic classification as full text or a supported image. See [tool content](content.md) for the expectation branches, URL references, and limits.
+
+For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to add content without inserting a separator, or `replace` to write the full content. Both modes can also create a missing entry. Create and append require an existing containing room; replace also creates missing parent rooms.
 
 Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
 
@@ -68,6 +70,12 @@ Call `find_memory` to find entries by a name pattern:
 {"query":"*.md","room":"languages","match_mode":"glob"}
 ```
 
+Call `read_memory` to read an image entry:
+
+```json
+{"address":"screenshots/dashboard.png","expected":{"image":{}}}
+```
+
 Call `revise_memory` to update a passage:
 
 ```json
@@ -82,7 +90,7 @@ A regular expression can revise several passages at once. For example, update bo
 
 ## Results and errors
 
-Every response contains either `result` or `error`. Successful responses put the operation's output in `result`. For example, `remember` returns the entry's address:
+Every response starts with a JSON text part containing either `result` or `error`. Successful responses put the operation's output in `result`; image reads add native image content after that text part. For example, `remember` returns the entry's address:
 
 ```json
 {"result":{"address":"languages/progress.md"}}
@@ -93,9 +101,11 @@ Every response contains either `result` or `error`. Successful responses put the
 | Browse | `room` and `entries`; each entry has `address`, `name`, and `kind` |
 | Find by name | `room`, `query`, and `matches`; each match has `address`, `name`, and `kind` |
 | Recall by content | `room`, `clue`, and `matches`; each match has `address`, `line`, and `text` |
-| Read | `address` and `content` |
+| Read | `address` and `content`: full text, image metadata, or an unavailable-content diagnostic |
 | Revise | `address` and `revision` |
 | Record, create a room, move, or remove | `address`; moving returns the actual new address |
+
+For an image read, `content` is `{"image":{"data":{"format":"png","byte_length":12345}}}` for image bytes, or `{"image":{"url":{}}}` for a URL reference. Content that cannot be supplied returns `{"unavailable":{"byte_length":12345,"reason":"unsupported_binary"}}`; images exceeding the byte limit use `image_too_large`. These diagnostics preserve the entry's address. The [content guide](content.md) describes model request checks and history.
 
 The `kind` field is `room` for a memory room and `memory` for a memory entry. A search with no matches returns an empty `matches` list. In content matches, `line` is a line number starting at 1. The `revision` field has three possible values:
 
