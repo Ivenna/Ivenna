@@ -11,6 +11,8 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     const io = init.io;
+    const host_directory = try std.process.currentPathAlloc(io, init.gpa);
+    defer init.gpa.free(host_directory);
     var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
     defer client.deinit();
 
@@ -28,6 +30,7 @@ pub fn main(init: std.process.Init) !void {
             .ssh_target = config.memory_ssh_target,
             .ssh_config = config.memory_ssh_config,
         },
+        .host = .init(io, host_directory, init.environ_map),
         .provider = .{
             .client = &client,
             .base_url = config.llm_base_url,

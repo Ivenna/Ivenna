@@ -6,6 +6,7 @@ pub const Store = storage.Store;
 pub const Session = storage.Session;
 pub const Provider = model.Provider;
 pub const Memory = @import("memory.zig").Memory;
+pub const Host = @import("host.zig").Host;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
@@ -14,6 +15,7 @@ pub const Engine = struct {
     io: std.Io,
     store: *Store,
     memory: Memory,
+    host: Host,
     provider: Provider,
 
     pub fn createSession(self: *Engine, a: Allocator, user_fields: Value) !i64 {
@@ -68,9 +70,9 @@ pub const Engine = struct {
                 if (action == .no_tools) action = .continue_session;
                 const name = try model.textField(item, "name");
                 const args = try model.textField(item, "arguments");
-                const outcome = self.invoke(a, name, args) catch |err| switch (err) {
+                const outcome = self.invoke(a, id, name, args) catch |err| switch (err) {
                     error.InvalidToolArguments, error.UnknownTool => Outcome{
-                        .reply = try std.json.Stringify.valueAlloc(a, Memory.Reply{
+                        .reply = try std.json.Stringify.valueAlloc(a, .{
                             .@"error" = .{
                                 .code = if (err == error.InvalidToolArguments) "invalid_arguments" else "unknown_tool",
                                 .message = if (err == error.InvalidToolArguments)
@@ -105,9 +107,12 @@ pub const Engine = struct {
     const RoundAction = enum { no_tools, continue_session, wait_requested };
     const Outcome = union(enum) { reply: []const u8, wait_for_input };
 
-    fn invoke(self: *Engine, a: Allocator, name: []const u8, arguments: []const u8) !Outcome {
+    fn invoke(self: *Engine, a: Allocator, session_id: i64, name: []const u8, arguments: []const u8) !Outcome {
         if (try Memory.Request.parse(a, name, arguments)) |request| {
             return .{ .reply = try self.memory.invoke(a, request) };
+        }
+        if (try Host.Request.parse(a, name, arguments)) |request| {
+            return .{ .reply = try self.host.invoke(a, .{ .session_id = session_id }, request) };
         }
         if (std.mem.eql(u8, name, "wait_for_input")) {
             _ = try parseArgs(struct {}, a, arguments);

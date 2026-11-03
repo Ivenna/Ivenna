@@ -1,0 +1,12 @@
+[tools]
+node = "24"
+pnpm = "10"
+"npm:@openai/codex" = "latest"
+
+[settings.npm]
+package_manager = "pnpm"
+
+[_.ivenna.recommended_tools.codex]
+command = "codex"
+description = "A coding agent for investigating and implementing tasks in a project."
+help = "Run codex --help to discover its capabilities; inspect codex exec --help for non-interactive use."

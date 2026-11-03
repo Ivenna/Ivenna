@@ -84,6 +84,6 @@ The service returns `400` if a request body is not a JSON object. Requests to re
 
 ## Behavior over time
 
-After a service restart, sessions previously in `pending` or `running` state continue from their saved history. Memory operations completed before the interruption may run again if their results had not yet been saved. See [failure and recovery](architecture.md#failure-and-recovery) for checkpoint and recovery boundaries.
+After a service restart, sessions previously in `pending` or `running` state continue from their saved history. Memory operations and host shell commands completed before the interruption may run again if their results had not yet been saved. See [failure and recovery](architecture.md#failure-and-recovery) for checkpoint and recovery boundaries.
 
-Each session has its own default fields and history; all sessions share the [memory workspace](memory.md). Long sessions are limited by the model's context window. See [model input and history](architecture.md#model-input-and-history) for how history is stored and sent.
+Each session has its own default fields and history; all sessions share the [memory workspace](memory.md) and [deployment host](host.md). Long sessions are limited by the model's context window. See [model input and history](architecture.md#model-input-and-history) for how history is stored and sent.

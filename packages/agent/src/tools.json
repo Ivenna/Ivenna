@@ -1,6 +1,54 @@
 [
   {
     "type": "function",
+    "name": "get_host_shell",
+    "description": "Inspect the shell executable, default working directory, and capabilities on Ivenna's host. Available capabilities can be used now; planned capabilities are not implemented yet. Use run_host_shell to execute commands and get_recommended_tools to discover recommended CLIs.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "run_host_shell",
+    "description": "Execute a command through /bin/sh on Ivenna's host as the service account, and wait for completion or timeout. The prepared tool environment stays active when cwd changes. Each call has a separate shell with no terminal or live stdin; use pipes or heredocs for input. Remaining processes in its process group are stopped when the call ends. Replies contain {result: {outcome, stdout, stderr}} or {error: {code, message}}. Outcome is {completed: {exited: code}} or another termination variant, such as {completed: {signal: 'TERM'}}, or {timed_out: {}}. Each stream contains {text, truncated, path}: a preview limited to 16 KiB, whether content was omitted, and the full log's absolute path. Read the log for omitted output. Timeouts retain captured output; interruption does not undo host changes.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "The shell command to execute. Supports pipelines, redirection, and multiple commands."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory, absolute or relative to the service startup directory. Omit to use the service startup directory."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Total execution time in milliseconds. Omit for 600000 (10 minutes). Choose a longer duration when delegating a long task."
+        }
+      },
+      "required": ["command"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "get_recommended_tools",
+    "description": "List all recommended command-line tools. Each entry contains name, command, description, and help. Consult each tool's own help for detailed options and run commands through run_host_shell. Replies contain {result: {tools: [...]}} or {error: {code, message}}.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
     "name": "browse_memory_room",
     "description": "Explore a memory room and discover its child rooms and memory entries. Rooms persist across sessions; choose their organization freely. All memory tools reply with either {result: ...} or {error: {code, message}}. Here, result contains room and entries; each entry has address, name, and kind (room or memory).",
     "parameters": {
