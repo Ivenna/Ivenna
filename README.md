@@ -1,6 +1,6 @@
 # Ivenna
 
-Ivenna is an AI agent exploring how persistent conversations and autonomous memory can sustain a sense of self over time.
+Ivenna is an agent runtime, designed as [a body for an LLM soul](docs/design.md). The project explores how persistent conversations and autonomous memory can sustain a sense of self over time.
 
 The project is currently a prototype. It accepts input through an HTTP service and saves each session's history so you can continue the conversation later. Ivenna provides shared [memory rooms](docs/memory.md) and [host shell access](docs/host.md).
 

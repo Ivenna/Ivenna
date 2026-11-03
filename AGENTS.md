@@ -1,7 +1,8 @@
-# Development conventions
+# Instructions for development agents
 
-The project is still in an exploratory phase. Data structures, database tables, interfaces, and module boundaries are not yet settled; change them directly to match the current design.
+Before changing Ivenna, read and follow:
 
-Do not retain compatibility code paths for superseded designs. Do not design or maintain migration workflows. Maintain only the current PostgreSQL schema. When it changes, rebuild the local development database as needed, without introducing versioned migrations, upgrade chains, or migration frameworks.
+- [Design intent](docs/design.md) for the project's goals and interface principles.
+- [Development guide](docs/development.md) for development conventions, building, and updating the local application.
 
-During development, do not write tests in advance or introduce test frameworks. Run the application locally; containerize only middleware.
+Use the [documentation index](docs/README.md) to find task-specific architecture, setup, and interface references.

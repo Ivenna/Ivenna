@@ -1,6 +1,14 @@
 # Development
 
-Follow the [running guide](running.md) to set up your environment and configuration. See the [architecture guide](architecture.md) for module dependencies, session execution, and storage, and [AGENTS.md](../AGENTS.md) for development conventions.
+This guide defines development conventions and explains how to build and update Ivenna. The [design intent](design.md) guides product and interface decisions; the [architecture guide](architecture.md) describes the current implementation. Follow the [running guide](running.md) for environment setup and configuration.
+
+## Development conventions
+
+The project is still in an exploratory phase. Data structures, database tables, interfaces, and module boundaries are not yet settled; change them directly to match the current design.
+
+Do not retain compatibility code paths for superseded designs. Do not design or maintain migration workflows. Maintain only the current PostgreSQL schema. When it changes, rebuild the local development database as needed, without introducing versioned migrations, upgrade chains, or migration frameworks.
+
+During development, do not write tests in advance or introduce test frameworks. Run the application locally; containerize only middleware.
 
 ## Repository and build
 
@@ -43,4 +51,4 @@ If no container exists, `up` rebuilds the image and creates a container using th
 
 [schema.sql](../packages/agent/src/schema.sql) defines the application's current session tables. The service creates missing tables at startup; editing this file does not update existing tables.
 
-Edit the schema directly, without versioned migrations or compatibility paths. Stop the local service, then drop obsolete database objects or recreate the application database specified by `DATABASE_URL`. On restart, the service creates tables using the current schema. Recreating the application database removes sessions and their history; autonomous memory remains in its separate workspace.
+To apply the updated schema locally, stop the service, then drop obsolete database objects or recreate the application database specified by `DATABASE_URL`. On restart, the service creates tables using the current schema. Recreating the application database removes sessions and their history; autonomous memory remains in its separate workspace.

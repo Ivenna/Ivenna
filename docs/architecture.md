@@ -2,7 +2,7 @@
 
 Ivenna receives input over HTTP and runs model requests and tool calls in persistent sessions. Application state is stored in PostgreSQL, while autonomous memory lives in a separate workspace accessed over SSH. The two stores separate session execution state from the memory Ivenna organizes for itself.
 
-Core tools expose the body's capabilities: memory operations, host shell access, and session pausing. Knowledge of particular programs and workflows can develop through conversation, exploration, and tool help, then be retained in autonomous memory. Deployment maintainers choose which programs are available and which environment the service inherits.
+This guide describes the current implementation of the project's [design intent](design.md), including module boundaries, model input, and session execution.
 
 ## Module responsibilities
 
