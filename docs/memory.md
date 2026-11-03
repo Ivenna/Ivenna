@@ -11,9 +11,10 @@ See the [running guide](running.md) for local setup or [using remote memory](run
 | Memory room | A space containing related entries and child rooms |
 | Memory entry | Text stored at an address, with content and format chosen by Ivenna |
 | Address | A path relative to the shared entrance, such as `languages/progress.md`; `.` is the entrance |
-| Clue | Text, a glob pattern, or a regular expression for searching names or content |
+| Name query | Literal text, a glob pattern, or a regular expression used by `find_memory` |
+| Content clue | Literal text or a regular expression used by `recall_memory` |
 
-All addresses are relative to the shared entrance, including those returned by tools. The `room` argument limits where a tool browses or searches; each call resolves its addresses independently. Moving a room or entry changes its address, so Ivenna must update any references it wants to preserve.
+All addresses are relative to the shared entrance, including those returned by tools. The `room` argument limits where a tool browses or searches; it does not change the base for addresses in later calls. Moving a room or entry changes its address. References stored in memory content are not rewritten automatically.
 
 ## Tools and arguments
 
@@ -35,11 +36,11 @@ Use `room` to limit browsing and searches to a room; it defaults to the shared e
 
 For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content searches support `literal` and `regex`. Searches use literal, case-insensitive matching by default. Literal name searches match any part of a name. Set `case_sensitive: true` to make searches case-sensitive.
 
-For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to add content or `replace` to replace all of an entry's content. Create the containing room first if it does not already exist.
+For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to add content without inserting a separator, or `replace` to write the full content. Both modes can also create a missing entry. The containing room must already exist.
 
 Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
 
-When moving an entry or room, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists. By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance is always preserved.
+When moving an entry or room, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists. By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance cannot be moved or removed.
 
 ## Examples
 

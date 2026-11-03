@@ -1,28 +1,24 @@
 const std = @import("std");
 const Shell = @import("host/shell.zig").Shell;
-const RecommendedTools = @import("host/recommended_tools.zig").RecommendedTools;
 
 const Allocator = std.mem.Allocator;
 
 /// Routes LLM host requests and serializes their replies. Engine supplies the
-/// conversation identity; Shell and RecommendedTools own execution and discovery.
+/// conversation identity; Shell owns execution and control.
 pub const Host = struct {
     shell: Shell,
-    recommended_tools: RecommendedTools,
 
     pub const Context = Shell.Context;
 
     pub fn init(io: std.Io, directory: []const u8, environ: *const std.process.Environ.Map) Host {
         return .{
             .shell = .{ .io = io, .directory = directory, .environ = environ },
-            .recommended_tools = .{ .io = io, .directory = directory },
         };
     }
 
     pub const Request = union(enum) {
         get_host_shell: struct {},
         run_host_shell: Shell.Command,
-        get_recommended_tools: struct {},
 
         pub fn parse(a: Allocator, name: []const u8, arguments: []const u8) !?Request {
             const tag = std.meta.stringToEnum(std.meta.Tag(Request), name) orelse return null;
@@ -33,7 +29,7 @@ pub const Host = struct {
                 }),
             };
             switch (request) {
-                .get_host_shell, .get_recommended_tools => {},
+                .get_host_shell => {},
                 .run_host_shell => |args| {
                     if (!validText(args.command)) return error.InvalidToolArguments;
                     if (args.cwd) |cwd| if (!validText(cwd)) return error.InvalidToolArguments;
@@ -50,7 +46,6 @@ pub const Host = struct {
         const a = arena.allocator();
         const response = self.respond(a, context, request) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,
-            error.EnvironmentUnavailable => try failure(a, "shell_unavailable", "The host shell environment is unavailable. Ask the service operator to check its configuration."),
             else => try failure(a, "host_unavailable", try std.fmt.allocPrint(a, "Could not return the command result: {s}. The host may have changed; inspect it before retrying.", .{@errorName(err)})),
         };
         return allocator.dupe(u8, response);
@@ -60,10 +55,6 @@ pub const Host = struct {
         return switch (request) {
             .get_host_shell => success(a, self.shell.describe()),
             .run_host_shell => |args| success(a, try self.shell.run(a, context, args)),
-            .get_recommended_tools => switch (try self.recommended_tools.read(a)) {
-                .catalog => |catalog| success(a, catalog),
-                .unavailable => failure(a, "recommendations_unavailable", "The recommended tools are unavailable. Ask the service operator to check the tool catalog configuration."),
-            },
         };
     }
 };

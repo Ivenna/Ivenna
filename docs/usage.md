@@ -30,7 +30,9 @@ A `202` response with `{"id":1,"status":"accepted"}` confirms that the input has
 curl http://127.0.0.1:5882/sessions/1
 ```
 
-If `state` contains the `pending` or `running` branch, processing is still in progress; query again later. The service manages model execution, which continues after the submission request ends.
+If `state` contains the `pending` or `running` branch, processing is still in progress; query again later. The service manages model execution, which continues after the submission request ends. The `messages` field contains saved history, so output from an in-progress model and tool turn appears after that turn is checkpointed.
+
+When the session reaches `waiting`, read any new assistant messages in `messages`. The model requests a pause by returning no tool calls or by calling `wait_for_input`; queued inputs keep execution running. If the session reaches `failed`, its state carries the error name; see [continuing and resuming](#continuing-and-resuming) to try again after addressing the failure.
 
 ## Continuing and resuming
 
@@ -50,7 +52,7 @@ Request bodies for session creation and input submission must be JSON objects. F
 
 For example, if the session's default `language` is `en` and an input submits `{"language":"fr","message":"Summarize what we know."}`, the language field sent to the model for that input is `fr`. The next input uses `en` again unless it overrides the field. The service passes fields such as `language` and `timezone` to the model without interpreting them.
 
-The service always sets `session_id` to the current session ID. If `message` is still absent after merging, it is set to an empty string. Add other fields as needed.
+The service always sets `session_id` to the current session ID. If `message` is still absent after merging, it is set to an empty string. Add other fields as needed. The merged fields become YAML content in a user message sent to the model.
 
 ## API and session records
 
@@ -70,7 +72,7 @@ The `status` in a `202` response indicates that the request was accepted. The `s
 | `id` | Session ID for subsequent requests |
 | `user_fields` | Default fields saved when the session was created |
 | `state` | Current session state, containing exactly one branch from the table below |
-| `messages` | Saved session history |
+| `messages` | Saved system and user messages, complete model output, and tool results |
 | `pending_inputs` | Accepted inputs not yet incorporated into the history |
 
 | `state` value | Meaning |
@@ -80,7 +82,15 @@ The `status` in a `202` response indicates that the request was accepted. The `s
 | `{"running":{}}` | Processing a model request or tool operation |
 | `{"failed":"ModelHttpFailure"}` | Execution failed; the branch value is the error name, shown here as `ModelHttpFailure` |
 
-The service returns `400` if a request body is not a JSON object. Requests to read a session or submit input return `404` if the session does not exist. HTTP error responses use `{"error":"error_code"}`.
+HTTP error responses use `{"error":"error_code"}`. Common errors are:
+
+| Status | Error code | Cause |
+| --- | --- | --- |
+| `400` | `invalid_user_fields` or `invalid_input` | Creation or input body is invalid JSON or is not an object |
+| `404` | `session_not_found` | Reading a session or submitting input to a session that does not exist |
+| `404` | `not_found` | Unrecognized endpoint or invalid session ID |
+| `405` | `method_not_allowed` | Endpoint does not support the HTTP method; the `Allow` header lists its supported method |
+| `409` | `session_not_available` | Resuming a running session or a session that does not exist |
 
 ## Behavior over time
 

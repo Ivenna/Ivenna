@@ -2,7 +2,7 @@
 
 Ivenna is an AI agent exploring how persistent conversations and autonomous memory can sustain a sense of self over time.
 
-The project is currently a prototype. It accepts input through an HTTP service and saves each session's history so you can continue the conversation later. Ivenna can organize shared [memory rooms](docs/memory.md), run commands on its deployment host, and discover [recommended shell tools](docs/host.md).
+The project is currently a prototype. It accepts input through an HTTP service and saves each session's history so you can continue the conversation later. Ivenna provides shared [memory rooms](docs/memory.md) and [host shell access](docs/host.md).
 
 ## Getting started
 

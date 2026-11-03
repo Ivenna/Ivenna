@@ -8,7 +8,6 @@
     },
     .paths = .{
         ".zig-version",
-        "mise.toml",
         "build.zig",
         "build.zig.zon",
         "apps/server/build.zig",

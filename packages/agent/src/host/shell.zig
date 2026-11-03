@@ -1,12 +1,11 @@
 const std = @import("std");
 const process = @import("process.zig");
 const output = @import("output.zig");
-const mise = @import("mise.zig");
 
 const Allocator = std.mem.Allocator;
 
-/// Owns host shell execution and control. Command execution is implemented;
-/// process sessions and terminal control will extend this runtime.
+/// Owns host shell command execution. Process sessions and terminal control
+/// are planned capabilities.
 pub const Shell = struct {
     io: std.Io,
     directory: []const u8,
@@ -14,8 +13,7 @@ pub const Shell = struct {
 
     const default_timeout_ms = 600_000;
 
-    /// Engine supplies this identity. Future process handles must be looked up
-    /// within the same conversation.
+    /// Engine supplies the conversation identity used to group command logs.
     pub const Context = struct { session_id: i64 };
 
     pub const Command = struct {
@@ -57,12 +55,11 @@ pub const Shell = struct {
         return .{ .cwd = self.directory };
     }
 
-    // TODO(process_sessions): add a service-owned runtime registry whose handles
-    // are bound to Context.session_id and outlive individual model-turn arenas.
-    // TODO(stdin, pty, process_control): extend that runtime with incremental
-    // output, input/EOF, terminal transport, interruption, and explicit cleanup.
-    // TODO(background_jobs): connect runtime completion to Engine scheduling;
-    // returning a process handle alone does not notify a paused conversation.
+    // TODO(process_sessions): design process state that outlives model-turn
+    // arenas, including how process handles relate to conversation identity.
+    // TODO(stdin, pty, process_control): design incremental output, input/EOF,
+    // terminal transport, interruption, and cleanup for that runtime.
+    // TODO(background_jobs): design completion delivery through Engine scheduling.
 
     pub fn run(self: Shell, a: Allocator, context: Context, args: Command) !Result {
         const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromMilliseconds(args.timeout_ms orelse default_timeout_ms), .clock = .awake });
@@ -106,10 +103,7 @@ pub const Shell = struct {
     }
 
     fn execute(self: Shell, a: Allocator, args: Command, stdout: std.Io.File, stderr: std.Io.File, deadline: std.Io.Clock.Timestamp) !process.Outcome {
-        var environment = mise.prepareEnvironment(a, self.io, self.directory, self.environ, deadline) catch |err| switch (err) {
-            error.Timeout => return .timed_out,
-            else => return err,
-        };
+        var environment = try self.environ.clone(a);
         defer environment.deinit();
         try environment.put("NO_COLOR", "1");
         try environment.put("TERM", "dumb");
