@@ -18,7 +18,7 @@ pub const Shell = struct {
     const default_timeout_ms = 600_000;
 
     /// Engine supplies the conversation identity used to group command logs.
-    pub const Context = struct { session_id: i64 };
+    pub const Context = struct { session_id: u64 };
 
     pub const Command = struct {
         command: []const u8,

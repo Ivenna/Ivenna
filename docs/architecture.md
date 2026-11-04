@@ -1,158 +1,161 @@
 # Architecture
 
-Ivenna receives input over HTTP and runs model requests and tool calls in persistent sessions. Embedded SQLite stores application state, host command output lives in local files, and autonomous memory lives in a file workspace accessed over SSH.
+Ivenna runs locally and uses mail for correspondence and work control. Stalwart stores and delivers letters; the kernel prepares model input, runs model and tool work, and records replies, reports, and handovers. Working transcripts live in memory. The mailbox, autonomous memory, and host artifacts provide continuity beyond a process's lifetime.
 
-This guide describes the current implementation of the project's [design intent](design.md), including module boundaries, model input, and session execution.
+## Core, conversations, and turns
 
-## Module responsibilities
+The runtime separates the purpose of work from the contexts and execution units used to carry it out:
 
-`apps/server` depends on `packages/agent`. It assembles the shared HTTP client, session store, and execution engine in [main.zig](../apps/server/src/main.zig) and manages the service lifecycle.
-
-Api accepts input and schedules session execution. Engine loads history from Store, interacts with the model through Provider, invokes tools, and checkpoints the model and tool results in Store.
-
-| Module | Responsibility |
+| Concept | Role and lifetime |
 | --- | --- |
-| [Api](../apps/server/src/api.zig) | Handle HTTP requests, schedule session tasks, and manage connection and task lifecycles |
-| [Engine](../packages/agent/src/root.zig) | Create sessions, run model and tool loops, and save each turn's results |
-| [Provider](../packages/agent/src/provider.zig) | Encode model requests and tool results, decode typed function calls, and apply local image request checks |
-| [Store](../packages/agent/src/store.zig) | Persist sessions, history, and the input inbox, and apply session state transitions |
-| [Memory](../packages/agent/src/memory.zig) | Resolve write sources, exchange structured requests with the remote handler, and return operation results |
-| [Host](../packages/agent/src/host.zig) | Parse and route shell requests with trusted conversation context, and select their returned content |
-| [content.zig](../packages/agent/src/content.zig) | Define shared content types and classify source bytes |
+| Task | A goal expressed through correspondence; it may remain open across many mail turns |
+| Core session | One working perspective retained for the kernel's lifetime |
+| Work conversation | The active owner of a mail thread's queued turns and use of a session |
+| Branch session | A separate working history owned by one work conversation |
+| Mail turn | Processing one input letter through one or more model rounds |
+| Model round | One model response followed by all tools it invoked |
 
-HTTP and concurrency use the Zig standard library. SQLite is compiled into the application, input serialization to YAML uses `yaml-zig`, and image format recognition uses [zignal](https://github.com/arrufat/zignal). Dependency versions are pinned in the [agent package manifest](../packages/agent/build.zig.zon). See the [development guide](development.md) for the repository layout and build commands.
+A new thread uses the core context when it is free. While the core is occupied, independent work forks a branch from its most recent complete history. A complete boundary contains a model response and every corresponding tool result. Later input in the same thread queues in its existing conversation.
 
-## Local data and diagnostics
+A response with no tool calls ends the current mail turn. The response may deliver a result, ask a question, or describe unfinished work. Ending that turn does not establish that the overall task is complete. New related mail supplies another turn.
 
-The service resolves `DATA_DIR` from its startup directory and creates it when needed. The default is `.ivenna`. Store opens `<DATA_DIR>/state.sqlite`; Shell writes output files under `<DATA_DIR>/host/`. The SSH memory workspace is configured separately. These locations hold the deployment user's data; see [local data](running.md#local-data) for setup and ownership.
+The successful execution path is:
 
-Session state and history are the records used to continue execution. Host output files retain command results beyond the model's bounded previews. Diagnostic messages currently go to the service's stderr. Dedicated diagnostic storage, retention controls, and telemetry export remain future work; their interfaces and formats are undecided.
-
-## Application state and autonomous memory
-
-Store updates session state, history, and the input inbox atomically in SQLite, using the current structure in [schema.sql](../packages/agent/src/schema.sql). A mutex serializes access to one connection, and transactions keep inbox merges and their state transitions together. Engine reads only saved history for each turn; full session snapshots serve the HTTP API.
-
-A session can be `waiting`, `pending`, `running`, or `failed`; a `failed` state also carries an error name. See [API and session records](usage.md#api-and-session-records) for the HTTP representation.
-
-Autonomous memory is shared across all sessions. The model chooses memory operations and supplies arguments through the structured tools defined in [tools.json](../packages/agent/src/tools.json). Memory encodes each request as a JSON object containing a single operation and sends it to the SSH process's standard input. For example, a read request is:
-
-```json
-{"read_memory":{"address":"languages/progress.md","expected":{"auto":{}}}}
+```mermaid
+flowchart TD
+    Core[Permanent core context] -->|free: lease| Conversation[Work conversation]
+    Core -->|occupied: fork complete history| Branch[Branch context]
+    Branch --> Conversation
+    Conversation --> Turn[Mail turn: one input letter]
+    Turn --> Round[Model response and complete tool batch]
+    Round -->|tool results feed next request| Round
+    Round -->|no tool calls| Complete[Complete mail turn]
+    Complete --> Queue{Queued input?}
+    Queue -->|yes| Turn
+    Queue -->|no| Archive[Save handover and archive processed letters]
 ```
 
-The remote handler, [memory.nu](../packages/agent/src/memory.nu), runs at a fixed path, fills in default values for omitted arguments, and checks that addresses resolve within the memory workspace. It uses [fd](https://github.com/sharkdp/fd) to find names, [ripgrep](https://github.com/BurntSushi/ripgrep) to search content, and Nushell built-ins to read, write, and organize entries. The handler runs predefined operations, treating content and match expressions supplied by the model as data.
+Archival retires the conversation and releases its branch context or lease on the core. The core context continues. A reply to archived work reconstructs a dedicated branch from that thread's handover and bounded history, even when the core is free.
 
-The memory tools use Nushell's operation boundaries as a reference. Like [`ls`](https://www.nushell.sh/commands/docs/ls.html), `browse_memory` combines listing and metadata queries, with recursive size measurement requested explicitly. Content reads use [`open --raw`](https://www.nushell.sh/commands/docs/open.html); recording uses [`save --raw`](https://www.nushell.sh/commands/docs/save.html) with create, append, or replace behavior. Name and content searches remain separate from literal-address browsing.
+`MAX_PARALLEL_ATTENTION` bounds concurrent execution. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core. Input that cannot be admitted remains in Inbox until capacity is available.
 
-For `remember`, Memory resolves the selected text or host-file source before starting SSH. Text becomes UTF-8 bytes; file contents are read without format detection or conversion. Both sources use base64 in the internal request's `data` field. The remote handler decodes these bytes and writes them according to the requested mode. Source-file paths stay local to the application. A local read failure returns `source_unavailable` without sending a remote request.
-
-The handler returns either a `result` branch with exit code `0` or an `error` branch with exit code `1`. A successful read carries the entry's raw bytes as base64 in `data`, together with its `address`. Memory decodes these bytes and uses the shared classifier to construct its tool result. Other operations retain their JSON result structure.
-
-Memory storage and address-based operations accept arbitrary file types. Text revision requires UTF-8 without NUL bytes; the handler rejects other content before writing. Model-facing reads support the content types described in [tool content](content.md).
-
-Reads and writes currently buffer complete files and JSON payloads in the application and remote handler. Transfer memory usage therefore grows with file size. Incremental transfers remain future work; the streaming protocol and buffering limits are undecided.
-
-Memory verifies that the response and exit code agree, then passes operation errors back to the model. If the SSH exchange ends without a complete, consistent reply, including malformed read data, Memory logs the diagnostics and returns an error indicating that memory is unavailable or that the outcome of a change is uncertain. Errors starting SSH, collecting its output, or waiting for it to exit propagate to session failure handling. See [memory rooms](memory.md) for tool usage and [using remote memory](running.md#using-remote-memory) for deployment.
-
-### Memory size and capacity
-
-`inspect_memory_space` follows the same Memory request path as the other memory tools. The remote handler measures the shared workspace against `MEMORY_CAPACITY_BYTES`; the deployment user sets this capacity in the [memory backend's environment](running.md#changing-configuration). The [memory guide](memory.md#memory-space) defines the model-facing result and capacity behavior.
-
-The handler recursively sums regular-file lengths, including hidden files and child directories. Directories, symlinks, and special files do not contribute to the total; each hard-linked name is counted separately. A scan failure returns an operation error instead of a partial total.
-
-`browse_memory` obtains file lengths from metadata. Directory sizes remain unmeasured unless `recursive_size` is requested, in which case it reuses the strict recursive count. `size_bytes` uses the same logical content lengths as capacity checks.
-
-Before recording or revising content, the handler projects the resulting total, accounting for hard-linked names affected by a change, and rejects growth beyond capacity. The [memory shell](../dev/memory/memory-shell.sh) holds a workspace lock through each handler invocation, keeping measurement, capacity checks, and writes together across SSH calls. Direct filesystem changes can bypass these checks, and storage failures use the normal operation error path.
-
-## Host execution
-
-Host validates tool arguments, routes requests, and selects the content returned to Engine. Its implementation is divided by responsibility:
+## Responsibilities
 
 | Component | Responsibility |
 | --- | --- |
-| [Shell](../packages/agent/src/host/shell.zig) | Describe shell capabilities and execute commands; own future process and terminal control |
-| [Reader](../packages/agent/src/host/reader.zig) | Classify captured stdout and return text previews, images, or URL references |
-| [process.zig](../packages/agent/src/host/process.zig) | Spawn subprocesses, enforce timeouts, stop process groups, and reap direct children |
-| [output.zig](../packages/agent/src/host/output.zig) | Read bounded file previews and preserve valid UTF-8 boundaries |
+| [Application](../apps/ivenna) | Load configuration, assemble shared dependencies, and own startup and shutdown |
+| [Conversation registry](../packages/agent/src/conversations.zig) | Own the core, conversations, queues, contexts, and synchronized scheduling state |
+| [Kernel](../packages/agent/src/kernel.zig) | Coordinate mailbox I/O, workers, model rounds, reports, handover, and archival |
+| [Engine](../packages/agent/src/engine.zig) | Execute one model response and its complete tool batch |
+| [Context](../packages/agent/src/context.zig) | Own history and copy complete contexts for forks and handover |
+| [Input](../packages/agent/src/input.zig) | Render structured YAML observations for the model |
+| [Compaction](../packages/agent/src/compaction.zig) | Construct and bound summary requests and validate their output |
+| [Mail](../packages/agent/src/mail.zig) | Decode the required JMAP operations into typed mailbox results |
+| [Provider](../packages/agent/src/provider.zig) | Encode model requests and tool replies and decode model output |
+| [Memory](../packages/agent/src/memory.zig) | Resolve write sources and exchange operations with the file workspace over SSH |
+| [Host](../packages/agent/src/host.zig) | Route shell operations and select their returned content |
 
-Shell returns a typed execution result containing the process outcome, output streams, and log paths. Host turns it into content for Engine. The [host guide](host.md#results-and-interruption) defines the model-facing replies.
+Registry methods serialize changes to queues and authoritative working histories. Workers obtain independently owned snapshots for inference and copy complete output and tool batches back through the registry before their model-round arenas end. The kernel owns the worker task group; shutdown cancels and joins those tasks before the application releases their shared HTTP client and other dependencies.
 
-### Command execution
+Mail uses Zig's `std.http` and `std.json` for a narrow JMAP interface. Stalwart handles MIME parsing, body decoding, message construction, native threading, and delivery. Its own storage retains correspondence; Ivenna keeps execution contexts in memory.
 
-Engine supplies the current session ID in `Host.Context`. Shell uses this trusted identity to group output files under `<DATA_DIR>/host/<session_id>/`. All sessions execute as the service's OS account and share its filesystem.
+The local deployment's Compose files define Stalwart and its persistent volume. The official CLI applies a native provisioning plan. See [local mail setup](running.md#configuring-local-mail) for the deployment flow.
 
-Shell executes one command per invocation with a copy of the service's inherited environment, including `PATH`, and overrides for batch output. Changing the command's working directory does not reload that environment. Each command runs through a noninteractive `/bin/sh` and writes full stdout and stderr to files. Reader classifies stdout according to the command's `expected` hint; stderr uses the text-preview helper. When the shell exits, times out, or is canceled, the process helper stops any remaining processes in the invocation's process group and reaps the direct child. The [host guide](host.md) defines the tool arguments and results; the [running guide](running.md#optional-host-tools) covers program availability.
+## Mail intake and structured input
 
-### Planned process control
+Unread Inbox letters request attention. The kernel polls through JMAP and routes by native thread ID. Message identifiers, reply headers, and normalized subjects let the mail service group related letters. Flagged input receives scheduling priority.
 
-Command execution is the first implementation of the Shell boundary. `Shell.Capabilities` marks it as available and reserves the following controls as planned:
+The mailbox's ordinary state remains part of this interface. Another client marking a letter read affects its eligibility for intake. Moving an active source out of Inbox withdraws further work at a complete model/tool boundary. A separate operator account keeps ordinary reading and replying apart from deliberate management of Ivenna's Inbox.
 
-| Capability | Responsibility |
+Each letter becomes a YAML user message carrying its body excerpt, source identifiers, sender and recipients, subject, observation time, and conversation context. The kernel materializes the full body at `<DATA_DIR>/mail/<sha256-of-mail-id>.txt` and supplies its path in `source.body_file`. Host tools can inspect omitted text.
+
+Historical inputs retain their original source meaning. Each ordinary model request also receives a fresh, request-local runtime snapshot:
+
+| Field | Observation |
 | --- | --- |
-| `process_sessions` | Keep live process handles and provide incremental output |
-| `stdin` | Send input and EOF to a running process |
-| `pty` | Provide terminal transport |
-| `process_control` | Interrupt or terminate a running process |
-| `background_jobs` | Schedule conversation work when a background process completes |
+| `session_id` | Current session's runtime identity |
+| `runtime.active_sessions` | Retained contexts, including the core |
+| `runtime.running_sessions` | Sessions currently executing work |
+| `runtime.active_conversations` | Registered work conversations |
+| `runtime.queued_turns` | Input turns waiting in their queues |
+| `conversation.parent_generation` | Core generation inherited by a branch, when applicable |
+| `conversation.role` | Core or branch role |
+| `conversation.thread_id` | Current native mail thread |
 
-These entries identify planned capabilities; no LLM operations implement them yet. A future design needs to address process state that outlives model-turn arenas, the relationship between process handles and conversation identity, and scheduling a paused conversation when background work completes. The operation interfaces and restart behavior remain undecided.
+Snapshots are refreshed for later rounds of the same mail turn and do not accumulate in retained history. Reconstructed correspondence, withdrawal observations, and summary tasks follow the same YAML input contract. The [system prompt](../packages/agent/src/system.md), [tool definitions](../packages/agent/src/tools.json), and input renderer together define the model-facing interface.
 
-[Pi's bash tool](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/bash.ts) provides a reference for bounded model output with full logs. [Codex's resumable execution tools](https://github.com/openai/codex/blob/main/codex-rs/core/src/tools/handlers/shell_spec.rs) inform process continuation and input; [OpenCode's background shell jobs](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/tool/plugin/shell.ts) illustrate completion scheduling. These references guide later shell controls.
+Intake prefers decoded plain text and falls back to UTF-8 HTML source. A letter without a supported complete body remains unread and produces a diagnostic; later supported letters can still proceed. Attachment intake is not implemented.
 
-## Tool content
+## Mail-turn completion, reports, and archiving
 
-[content.zig](../packages/agent/src/content.zig) defines shared content expectations and types. Its classifier inspects one byte sequence and returns text, an image, or an unavailable-content diagnostic. Image sources are encoded bytes or URL references. [image.zig](../packages/agent/src/image.zig) recognizes format signatures through zignal; the classifier applies the per-image byte limit and text checks. Classification borrows the source bytes without decoding pixels or fetching URL references. See [tool content](content.md) for expectations, URL interpretation, and supported types.
+Engine returns one result for each tool call. The kernel retains the complete batch and starts another model round so the model can use those results. Intermediate assistant text and tool exchanges stay in the transcript. A response without tool calls ends the current turn.
 
-Memory and Host return a `Content` value to Engine, which passes it to Provider for model protocol encoding.
+For an external input, the kernel submits available final text as a reply, preserves native reply references, and marks the source answered. It marks the input read after handling it. A response without text ends the turn without an external reply; the overall task can still need further input.
 
-Memory and Reader keep returned text, image bytes, and URL strings in the caller's turn arena. Memory copies or decodes data out of temporary SSH buffers before returning. Reader checks recognized image sizes before allocating their bytes.
+A branch also produces a self-addressed report carrying its final text, or a notice that no text was produced, together with the work subject and source and session identifiers. The kernel saves the report directly in Inbox through JMAP. Intake routes it to the core, which can incorporate it at a complete model/tool boundary. A queued report can require another model round before the current core mail turn is finalized. Processing a self-report does not automatically send another reply to self.
 
-Memory reads retain full text. Reader produces bounded shell text previews and, for large non-image output, checks only the head and tail used in the preview. An image expectation with URL representation reads stdout in full. Classifying omitted preview bytes incrementally remains future work.
+When a turn ends and no input remains queued, the kernel:
 
-## Model input and history
+1. Generates a bounded handover and saves it directly in Archive.
+2. Moves the conversation's processed Inbox letters to Archive, preserving other membership such as Sent.
+3. Rechecks the queue and retires the conversation if no new input has arrived.
 
-When creating a session, Engine saves its default input fields and initializes its history with the system message embedded from [system.md](../packages/agent/src/system.md).
+These operations use explicit processed IDs. An incoming letter accepted during archive I/O remains available and keeps the conversation active.
 
-Subsequent HTTP inputs are merged with the session defaults by [input.zig](../packages/agent/src/input.zig). The session ID is added, and the result is serialized to YAML as a user message for the model. See [input fields](usage.md#input-fields) for the merge rules.
+Handover notes retain the source's normalized `Re:` subject, `In-Reply-To`, and `References` so Stalwart keeps them in the same thread. `X-Ivenna-Purpose` distinguishes `handover` from `core_handover`. Both support thread restoration; startup selects the latest self-addressed `core_handover` across threads.
 
-Provider sends the compiled definitions in [tools.json](../packages/agent/src/tools.json) with every model request to DeepSeek's native `/responses` endpoint. It decodes the complete response and validates function-call envelopes before returning typed calls to Engine, so malformed output fails before any tool in that response executes. Returned data belongs to the turn's arena and survives cleanup of the HTTP response buffer.
+If report saving or archival fails after a result was delivered, the kernel logs the failure and retains the conversation's context. It does not automatically repeat the delivered result. These housekeeping failures have no automatic retry queue; later input can continue the conversation.
 
-Engine receives typed function calls and retains the complete `output`, including reasoning, messages, and function calls, for history replay. The selected tool validates its arguments; an unknown tool or invalid arguments produce a tool error that the model can act on.
+Archive membership preserves correspondence after its active resources are released. Coordinated deletion of that mail and its local artifacts remains a placeholder whose API returns `ArchiveDeletionUnavailable`. Deployment users can manage mail and artifact retention independently.
 
-Provider encodes each tool result in a `function_call_output` with the corresponding `call_id`. Text becomes an `output` string. An image becomes an `output` array containing one `input_image` part, following DeepSeek's [Responses image input format](https://api-docs.deepseek.com/guides/responses_api/#image-input). Engine appends the encoded results to history for the next model request.
+## Bounded model context
 
-Provider applies the [local image request checks](content.md#model-request-checks) as each image result is encoded. Before checkpointing, it checks the completed tool batch's request size and replaces new image results, newest first, with text `content_limit` errors until the request fits or no new images remain.
+`CONTEXT_REQUEST_BYTES` bounds the complete serialized ordinary request, including instructions, tools, YAML input, retained output, tool replies, and image encoding. `LLM_MAX_OUTPUT_TOKENS` separately bounds generated output.
 
-Earlier history and text results are preserved. They can exceed the request-size threshold on their own, and inputs merged by Store at checkpoint can increase request size after the checks.
+When another request would exceed the byte budget, Compaction builds a summary task from [compaction.md](../packages/agent/src/compaction.md). The task follows the input contract with `purpose: context_compaction`, the actual session identity, conversation context, and current runtime observations. Provider sends it with no tools and `tool_choice: none`.
 
-Provider embeds local image bytes as base64 data URLs before checkpointing, so replay is independent of the original files. Remote URLs are retained as supplied and fetched by DeepSeek on later requests; their content can change or become unavailable.
+`CONTEXT_COMPACTION_BYTES` bounds that complete request. Compaction requires nonempty assistant text within `HANDOVER_MAX_BYTES` and rejects tool calls. After checking that the replacement fits the ordinary request budget and saving the handover, the kernel installs it as the working context. The current policy retains no earlier raw transcript batches; Context can retain a tail only at complete batch boundaries.
 
-Engine reloads saved history from Store at the start of each loop iteration and sends it in full through Provider. Each iteration uses its own arena and releases its temporary data after saving a checkpoint. Persisted history continues to grow; it is not currently compacted or trimmed.
+Archival uses the same summary operation to record commitments, evidence, source references, completed effects, uncertainty, and remaining work before releasing a conversation. Source bodies and artifacts remain available by reference.
 
-## Sessions and checkpoints
+Serialized bytes are a measurable local bound. Model-specific token and image accounting remains planned. If a request or summary cannot meet its limit, execution fails explicitly; an unfinished tool exchange cannot be shortened by cutting away arbitrary messages.
 
-The session ID stays the same across subsequent inputs, pauses, and resumes. Creating a session only saves its initial data; submitting input or explicitly resuming the session schedules execution. The input and checkpoint flow updates the session at three points:
+## Startup and interruption
 
-1. Submitting input appends the message to `pending_inputs`. A `running` session keeps that state; any other state changes to `pending`.
-2. A worker claims a `pending` session by changing its state to `running`, merging the inbox into history, and clearing the inbox in the same update. Execution starts only if this update succeeds, so scheduling the same session repeatedly does not start multiple execution loops.
-3. After each model response and its tool calls, the complete model output and tool responses are saved together as a checkpoint. Inputs received during the turn are also merged into history, and the inbox is cleared.
+Startup rebuilds the core from its latest core handover and bounded observations of recent correspondence. Reopening an archived thread uses its latest handover and recent native history. Each observation set considers at most 32 letters with body excerpts of at most 512 bytes and stops when the request budget needs room for active input. Full bodies remain available through source-file references.
 
-Engine requests a pause if the model calls no tools or calls `wait_for_input`. It still processes the remaining tool calls in that turn, and later calls do not cancel the pause request. The session becomes `waiting` only when a pause was requested and the inbox is empty; otherwise, execution continues. The inbox merge and pause decision happen in the same database transaction, ensuring that input received during execution is included before the worker can pause.
+These letters supply evidence for continued work. Working transcripts, queued execution state, and suspended model/tool rounds belong to the previous process and are not restored exactly.
 
-## Service tasks and shutdown
+An execution failure pauses its input and retains the current in-process context. The kernel suppresses repeated automatic attempts at that letter; new related input can provide direction. After restart, unread work may be considered again with the reconstructed context.
 
-An HTTP request that submits input returns `202 Accepted` after saving the input and scheduling a task. The service manages session tasks, which use its shared dependencies and the session ID. Execution continues even after the submitting request's connection closes.
+A host command, memory change, or mail submission may have taken effect before an interruption was observed. Cancellation does not undo those effects. Inspect affected mail, files, and the observable world before repeating an action with an uncertain outcome.
 
-The service uses `std.Io.Select` to wait for the listener task or a shutdown signal. The listener owns two `std.Io.Group` instances, one for HTTP connections and one for session workers. During shutdown, the service first cancels and waits for connection tasks, stopping new work. It then cancels and waits for session workers before releasing the shared HTTP client and closing the database.
+One kernel owns an Ivenna account's runtime state. Mail operations, host effects, memory writes, and working context do not share a transaction.
 
-Model HTTP requests, SSH and host subprocesses, and execution loops use the same `std.Io`, with cancellation propagating through the task tree. Host command timeouts and cancellation terminate the command's process group. The local SSH process also ends with its session task, but this does not establish whether the remote operation completed.
+## Autonomous memory
 
-## Failure and recovery
+Memory is a file workspace shared by all sessions. The Memory component resolves local write sources and exchanges typed JSON operations over SSH with the fixed [memory.nu](../packages/agent/src/memory.nu) handler. The handler owns file operations and capacity enforcement. See [memory rooms](memory.md) for tool behavior and [remote memory setup](running.md#using-remote-memory) for deployment.
 
-A tool's `error` branch is saved in history as a tool result, leaving the model to decide what to do next. If a model request or the execution loop fails for a reason other than cancellation, Engine marks the session as `failed`. If saving that state also fails, the service logs the error. Cancellation ends execution without marking the session as failed.
+The [memory shell](../dev/memory/memory-shell.sh) locks the workspace for each handler invocation, including capacity checks and writes. Separate operations can observe changes made by another session. Direct filesystem changes can bypass this boundary.
 
-New input or an explicit resume lets a failed session continue from its saved history. At startup, the service first changes any remaining `running` sessions to `pending`, then schedules all pending sessions. Recovery currently assumes one service process per application state database.
+Transfers buffer complete files and payloads. Memory copies or decodes returned content into the caller's model-round arena before temporary SSH buffers are released. An incomplete exchange can leave the outcome of a write uncertain.
 
-Session checkpoints, remote memory operations, and host command effects do not share a transaction. If a tool changes memory or host files but the service stops before saving its checkpoint, recovery may repeat the operation. Losing the connection, timing out, or canceling the local wait also does not undo completed changes. When a tool's outcome is uncertain, inspect the current state before deciding what to do next.
+## Host execution
 
-Re-executing a `remember` file-source call reads the current host file again; session history retains the source path rather than the transferred bytes.
+All sessions execute as the kernel's OS account and share its filesystem and startup environment. Forking a model context leaves these resources shared, so a prior observation may need to be checked again after another session acts.
+
+Host validates and routes requests. [Shell](../packages/agent/src/host/shell.zig) executes a fresh noninteractive `/bin/sh` command; [process.zig](../packages/agent/src/host/process.zig) owns process groups, timeouts, cancellation, and reaping. Complete output remains in host files, while [Reader](../packages/agent/src/host/reader.zig) selects the content returned to the model.
+
+Persistent process sessions, live stdin, PTYs, explicit process control, and background completion scheduling are reserved capabilities with no model-facing operations yet. See [host shell](host.md) for the available tools, output, and interruption behavior.
+
+## Content and provider boundary
+
+[content.zig](../packages/agent/src/content.zig) defines shared content types and classifies bytes as text, a recognized image, or an unavailable-content diagnostic. [image.zig](../packages/agent/src/image.zig) recognizes signatures. Classification borrows the bytes and does not decode pixels or fetch URLs.
+
+Memory and Host return content in the model-round arena. Provider encodes it for the configured model protocol, matching each tool reply to its call ID. Local image bytes become request data; remote URLs remain references whose contents can change. Provider's image checks apply alongside the whole-context budget. See [tool content](content.md) for formats and limits.
+
+Provider validates complete function-call envelopes before Engine executes any tool in the response. Unknown tools and invalid arguments become tool errors available to the next model round. Registry copies accepted model output, including reasoning items, and tool results into retained history before the round arena ends.
+
+## Implementation notes
+
+The remaining placeholders are notification streaming, model-specific context estimation, mail attachment intake, and coordinated archive deletion with artifact cleanup. The host's reserved process controls are described in [host execution](#host-execution). Existing host and memory image handling is available independently of mail attachment intake.

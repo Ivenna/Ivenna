@@ -8,8 +8,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }).module("agent");
-    const server = b.addExecutable(.{
-        .name = "ivenna-server",
+    const app = b.addExecutable(.{
+        .name = "ivenna",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -17,8 +17,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "agent", .module = agent }},
         }),
     });
-    b.installArtifact(server);
+    b.installArtifact(app);
 
-    const run_server = b.addRunArtifact(server);
-    b.step("run", "Run the Ivenna HTTP service").dependOn(&run_server.step);
+    const run = b.addRunArtifact(app);
+    b.step("run", "Run Ivenna").dependOn(&run.step);
 }

@@ -2,7 +2,7 @@
 
 Ivenna stores persistent memory in rooms shared across sessions. The model uses tools to browse, find, recall, record, and revise memories. Ivenna chooses its own room hierarchy, entry names, formats, and cross-references.
 
-See the [running guide](running.md) for local setup or [using remote memory](running.md#using-remote-memory) to connect to another memory workspace. The [architecture guide](architecture.md#application-state-and-autonomous-memory) describes the execution protocol and module boundaries.
+See the [running guide](running.md) for local setup or [using remote memory](running.md#using-remote-memory) to connect to another memory workspace. The [architecture guide](architecture.md#autonomous-memory) describes the execution protocol and module boundaries.
 
 ## Addresses and organization
 
@@ -39,7 +39,7 @@ Moving a room or entry changes its address; references stored in memory content 
 
 For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content searches support `literal` and `regex`. Searches use literal, case-insensitive matching by default. Literal name searches match any part of a name. Set `case_sensitive: true` to make searches case-sensitive. Content searches match text in entries.
 
-`read_memory` accepts an optional `expected` object for the complete entry. Omit it for automatic classification as full text or a supported image. See [tool content](content.md) for the expectation branches, URL references, and limits.
+`read_memory` accepts an optional `expected` object for the complete entry. Omit it for automatic classification as full text or a supported image. An entry can store arbitrary bytes; a content diagnostic from reading it leaves the entry intact. See [tool content](content.md) for the expectation branches, URL references, and limits.
 
 `remember.content` selects exactly one source:
 
@@ -110,13 +110,13 @@ All rooms and sessions share one capacity. Call `inspect_memory_space` with `{}`
 }
 ```
 
-`used_bytes` is the combined size of memories across all rooms; `capacity_bytes` is their shared capacity.
+`used_bytes` counts regular-file lengths across all rooms, including hidden files. Each hard-linked name counts separately; directories, symlinks, and special files do not contribute. `capacity_bytes` is the shared limit for that total.
 
-`remaining_bytes` is capacity minus used space, with a minimum of zero. `used_ratio` is used space divided by capacity; multiply by 100 for a percentage. The deployment user [configures the capacity](running.md#changing-configuration). Lowering it below the size of existing memories leaves them intact and can produce a ratio above 1.
+`remaining_bytes` is capacity minus used space, with a minimum of zero. `used_ratio` is used space divided by capacity; multiply by 100 for a percentage. The deployment user [configures the capacity](running.md#local-middleware-settings). Lowering it below the size of existing memories leaves them intact and can produce a ratio above 1.
 
 Before `remember` or a content-changing `revise_memory`, Ivenna checks how much space the memories would occupy. Growth beyond the shared capacity returns `memory_capacity_exceeded` without changing the entry. A change can exactly fill the remaining space. Changes that shrink or preserve occupied space remain possible when already over capacity, as do reading, moving, and forgetting memories.
 
-The result describes the space at the time of the query. Another session can change it before a later recording or revision.
+The result describes the space at the time of the query. Another session can change it before a later recording or revision. Memory operations are serialized individually; a sequence of reads and writes does not reserve the entries or capacity between calls.
 
 ## Examples
 
@@ -200,4 +200,4 @@ On failure, `error` provides a `code` and `message` describing the problem. `sou
 
 `memory_unavailable` means a read-only operation ended without a complete response. `memory_change_uncertain` means memory may have changed, but the outcome is unknown.
 
-Resuming a session may repeat operations whose results were not yet saved in a checkpoint. See [failure and recovery](architecture.md#failure-and-recovery) for details.
+An interrupted operation may already have changed memory. Inspect the entry before deciding whether to repeat it; restarting the kernel does not restore the old tool transcript. See [startup and interruption](architecture.md#startup-and-interruption) for details.

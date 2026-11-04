@@ -1,6 +1,6 @@
 # Host shell
 
-Ivenna can inspect its deployment shell and execute commands. All sessions use the service's OS account and share its filesystem.
+Ivenna can inspect its deployment shell and execute commands. All sessions use the kernel's OS account and share its filesystem.
 
 The assistant has two shell tools, defined in [tools.json](../packages/agent/src/tools.json):
 
@@ -30,7 +30,7 @@ Call `get_host_shell` with `{}`. For a service started in `/path/to/deployment`,
 }
 ```
 
-The current implementation executes individual commands. Capabilities marked `planned` reserve future process and terminal controls; they have no callable operations yet. See [planned process control](architecture.md#planned-process-control) for their responsibilities and lifecycle.
+The current implementation executes individual commands. Capabilities marked `planned` reserve future process and terminal controls; they have no callable operations yet. See [host execution](architecture.md#host-execution) for their responsibilities and lifecycle.
 
 ## Running commands
 
@@ -49,7 +49,9 @@ Call `run_host_shell` with a command string:
 
 Each call starts a separate noninteractive shell with no terminal or live input. It inherits the service's startup environment, which remains the same when `cwd` changes. Changes to shell variables and the current directory last for that call; filesystem changes persist. Programs can be invoked by path or found through the service's `PATH`; see [optional host tools](running.md#optional-host-tools).
 
-The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled.
+Commands from separate conversations can run concurrently against the same files. A prior read describes the file at that time; another session may change it before a later command.
+
+The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled. A shell background job does not provide persistent job control or later completion input to the model; those capabilities remain planned.
 
 ## Results and interruption
 
@@ -91,8 +93,8 @@ In a text summary, both `stdout` and `stderr` contain an absolute `path` to the 
 | `image` | Image metadata: either `data` with `format` and `byte_length`, or `url` with an empty object |
 | `unavailable` | `byte_length` and `reason` describing content that could not be supplied |
 
-Stderr's `content` contains either a `text` preview or an `unavailable` diagnostic. Content diagnostics do not change the command outcome. See [tool content](content.md) for classification, preview bounds, image handling, and request limits.
+Stderr's `content` contains either a `text` preview or an `unavailable` diagnostic. Content diagnostics do not change the command outcome. Model input limits can also replace a returned image with a `content_limit` error after the command has executed. See [tool content](content.md) for classification, preview bounds, image handling, and request limits.
 
-Full stdout and stderr remain in files under `<DATA_DIR>/host/<session_id>/`, including output omitted from the reply. These files can be read or removed through subsequent shell calls. `DATA_DIR` defaults to `.ivenna` in the startup directory; see [local data](running.md#local-data) for configuration.
+Full stdout and stderr remain in files under `<DATA_DIR>/host/<session_id>/`, including output omitted from the reply. Each invocation creates distinct log files, which remain after the conversation is archived. Subsequent shell calls can read or remove them. `DATA_DIR` defaults to `.ivenna` in the startup directory; see [local data](running.md#local-data) for configuration.
 
-A timeout returns a summary of the output captured so far. Completed command effects remain after a timeout or service cancellation. A restart may repeat a command whose result was not checkpointed; see [failure and recovery](architecture.md#failure-and-recovery).
+A timeout returns a summary of the output captured so far. Completed command effects remain after a timeout or kernel cancellation. Restarting does not restore the old runtime transcript. Inspect an interrupted command's effects before deciding whether to run it again; see [startup and interruption](architecture.md#startup-and-interruption).

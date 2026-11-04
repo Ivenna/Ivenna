@@ -33,27 +33,27 @@ Supported image formats are JPEG, PNG, GIF, and WebP, identified by their format
 
 Memory reads retain the full text of an entry. Shell text previews contain at most 16 KiB, retaining the beginning and end when truncated. For larger non-image shell output, text detection checks only the previewed bytes. URL-reference classification reads the full stdout so that the reference is not truncated.
 
-Content that cannot be supplied as text or a supported image produces an `unsupported_binary` text diagnostic with its byte length. Recognized images exceeding the byte limit produce an `image_too_large` diagnostic.
+Content that cannot be supplied as text or a supported image produces an `unavailable` description with its byte length and reason `unsupported_binary`. Recognized images exceeding the byte limit use reason `image_too_large`. These descriptions report what content can be supplied; they do not change the command outcome or remove a stored memory entry.
 
 The [memory](memory.md#results-and-errors) and [shell](host.md#results-and-interruption) guides describe how content appears in each tool's reply. Shell stdout and stderr remain in full in their log files.
 
 ## Model request checks
 
-When adding newly returned images to history, Ivenna applies these local checks:
+When adding newly returned images to a session's context, Ivenna applies these local checks:
 
 | Local check | Limit |
 | --- | --- |
-| Image count, including saved images and URL references | 600 |
+| Image count, including retained images and URL references | 600 |
 | Serialized model request body, including history, tool definitions, and base64 image data | 48 MiB |
 
-An image rejected by these checks is replaced by a text `content_limit` error before history is saved. Existing history and text results remain intact. See [model input and history](architecture.md#model-input-and-history) for the check timing and scope.
+An image rejected by these checks is replaced by a text `content_limit` error. The tool has already run: this error means its image was omitted from model input. Existing context and text results remain intact at this step.
+
+The [whole-context budget](architecture.md#bounded-model-context) applies separately and may be smaller than these image limits. It accounts for the complete request, including text and images. An oversized history can require a handover or produce a context-budget failure before the next model round.
 
 The model service handles image decoding, dimensions, URL retrieval, and limits on fetched content. Local checks do not ensure that the complete request meets every service limit.
 
-## History and recovery
+## Context and continuity
 
-Session history saves accepted image bytes, so later requests reuse them even if the source file changes or is removed. URL results save the supplied address; their content can change or become unavailable.
+A session's runtime context retains accepted image bytes, so subsequent requests can reuse them even if the source file changes or is removed. URL results retain the supplied address; their content can change or become unavailable.
 
-Saved images remain in the full history sent on later requests and contribute to request size and context limits. See [model input and history](architecture.md#model-input-and-history) for replay behavior.
-
-[Resuming](usage.md#continuing-and-resuming) a failed session reuses its saved content. Changing the source file does not replace a saved image. To retry without that image in history, start a new session and read the corrected source.
+Retained images contribute to request size and context limits. A handover can replace older context, and a restart rebuilds understanding from letters rather than restoring these image bytes. Keep an artifact or memory entry when later work needs to read the image again, and include its location in the handover. See [bounded model context](architecture.md#bounded-model-context).

@@ -12,6 +12,7 @@ pub const Provider = struct {
     base_url: []const u8 = default_base_url,
     api_key: []const u8 = "",
     model: []const u8 = default_model,
+    max_output_tokens: u32 = 8192,
 
     pub const FunctionCall = struct {
         call_id: []const u8,
@@ -39,14 +40,14 @@ pub const Provider = struct {
         const input = try arena.alloc(Value, history.len + 1);
         @memcpy(input[0..history.len], history);
         input[history.len] = reply;
-        if (try self.requestSize(arena, input) > 48 * 1024 * 1024)
+        if (try self.requestBytes(arena, input) > 48 * 1024 * 1024)
             return contentLimitReply(arena, call_id, "Image omitted: the model request would exceed 48 MiB.");
         return reply;
     }
 
     /// Replace image replies in history[reply_start..] with text errors, newest
     /// first, until the request fits or no new images remain. Earlier history
-    /// and text stay intact; queued inputs merged at checkpoint can increase size.
+    /// and text stay intact; later observations can increase the next request.
     pub fn limitToolReplies(self: Provider, arena: Allocator, history: []Value, reply_start: usize) !void {
         var has_image = false;
         for (history[reply_start..]) |reply| {
@@ -55,20 +56,30 @@ pub const Provider = struct {
                 break;
             }
         }
-        if (!has_image or try self.requestSize(arena, history) <= 48 * 1024 * 1024) return;
+        if (!has_image or try self.requestBytes(arena, history) <= 48 * 1024 * 1024) return;
         var index = history.len;
         while (index > reply_start) {
             index -= 1;
             if (!hasImage(history[index])) continue;
             history[index] = try contentLimitReply(arena, try textField(history[index], "call_id"), "Image omitted: the model request would exceed 48 MiB.");
-            if (try self.requestSize(arena, history) <= 48 * 1024 * 1024) return;
+            if (try self.requestBytes(arena, history) <= 48 * 1024 * 1024) return;
         }
     }
 
-    fn requestSize(self: Provider, arena: Allocator, input: []const Value) !u64 {
+    /// The complete serialized request, including tools and output settings.
+    /// Byte budgets bound request bodies; they are not model token estimates.
+    pub fn requestBytes(self: Provider, arena: Allocator, input: []const Value) !u64 {
+        return payloadBytes(try self.requestPayload(arena, input));
+    }
+
+    pub fn requestBytesWithoutTools(self: Provider, arena: Allocator, input: []const Value) !u64 {
+        return payloadBytes(self.withoutToolsPayload(arena, input));
+    }
+
+    fn payloadBytes(payload: Payload) !u64 {
         var buffer: [4096]u8 = undefined;
         var counter = std.Io.Writer.Discarding.init(&buffer);
-        try std.json.Stringify.value(try self.requestPayload(arena, input), .{}, &counter.writer);
+        try std.json.Stringify.value(payload, .{}, &counter.writer);
         return counter.fullCount();
     }
 
@@ -76,6 +87,8 @@ pub const Provider = struct {
         model: []const u8,
         input: []const Value,
         tools: Value,
+        tool_choice: []const u8 = "auto",
+        max_output_tokens: u32,
         stream: bool = false,
     };
 
@@ -84,13 +97,34 @@ pub const Provider = struct {
             .model = self.model,
             .input = input,
             .tools = try std.json.parseFromSliceLeaky(Value, arena, @embedFile("tools.json"), .{}),
+            .max_output_tokens = self.max_output_tokens,
         };
     }
 
     pub fn next(self: Provider, arena: Allocator, input: []const Value) !Response {
+        return self.send(arena, try self.requestPayload(arena, input));
+    }
+
+    /// Request with no tool declarations and tool_choice set to none.
+    /// The caller supplies the task and validates its result.
+    pub fn nextWithoutTools(self: Provider, arena: Allocator, input: []const Value) !Response {
+        return self.send(arena, self.withoutToolsPayload(arena, input));
+    }
+
+    fn withoutToolsPayload(self: Provider, arena: Allocator, input: []const Value) Payload {
+        return .{
+            .model = self.model,
+            .input = input,
+            .tools = .{ .array = std.array_list.Managed(Value).init(arena) },
+            .tool_choice = "none",
+            .max_output_tokens = self.max_output_tokens,
+        };
+    }
+
+    fn send(self: Provider, arena: Allocator, request_payload: Payload) !Response {
         try self.client.io.checkCancel();
 
-        const payload = try std.json.Stringify.valueAlloc(arena, try self.requestPayload(arena, input), .{});
+        const payload = try std.json.Stringify.valueAlloc(arena, request_payload, .{});
         const url = try std.fmt.allocPrint(arena, "{s}/responses", .{std.mem.trimEnd(u8, self.base_url, "/")});
         const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{self.api_key});
         var output = std.Io.Writer.Allocating.init(arena);
@@ -133,11 +167,18 @@ pub const Provider = struct {
         if (!std.mem.eql(u8, decoded.status, "completed")) return error.ModelResponseNotCompleted;
         var calls: std.ArrayList(FunctionCall) = .empty;
         defer calls.deinit(arena);
-        // Validate the complete batch before Engine can execute any tool.
+        // Validate the complete batch before the execution loop runs any tool.
         for (decoded.output) |item| {
-            if (!std.mem.eql(u8, try textField(item, "type"), "function_call")) continue;
+            const kind = try textField(item, "type");
+            if (std.mem.eql(u8, kind, "function_call_output")) return error.InvalidModelResponse;
+            if (!std.mem.eql(u8, kind, "function_call")) continue;
+            const call_id = try textField(item, "call_id");
+            if (call_id.len == 0) return error.InvalidModelResponse;
+            for (calls.items) |previous| {
+                if (std.mem.eql(u8, previous.call_id, call_id)) return error.InvalidModelResponse;
+            }
             try calls.append(arena, .{
-                .call_id = try textField(item, "call_id"),
+                .call_id = call_id,
                 .name = try textField(item, "name"),
                 .arguments = try textField(item, "arguments"),
             });

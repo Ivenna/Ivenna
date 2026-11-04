@@ -1,6 +1,6 @@
 .{
-    .name = .server,
-    .fingerprint = 0x5a6dd5f6aa5c5c70,
+    .name = .ivenna_app,
+    .fingerprint = 0x3daee20af5fedbdd,
     .version = "0.1.0",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{

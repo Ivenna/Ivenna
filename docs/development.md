@@ -1,65 +1,66 @@
 # Development
 
-This guide defines development conventions and explains how to build and update Ivenna. The [design intent](design.md) guides product and interface decisions; the [architecture guide](architecture.md) describes the current implementation. Follow the [running guide](running.md) for environment setup and configuration.
+The [design intent](design.md) guides product and interface decisions; the [architecture guide](architecture.md) explains implementation responsibilities and ownership. Follow the [running guide](running.md) for deployment and configuration.
 
 ## Development conventions
 
-The project is still in an exploratory phase. Data structures, database tables, interfaces, and module boundaries are not yet settled; change them directly to match the current design.
+The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design. Work from intended behavior down to responsibilities, interfaces, and implementation. Explain choices through the behavior they establish and the reasons for choosing them.
 
-Work from the design intent down to responsibilities, interfaces, and implementation. Explain design choices through the behavior and relationships they establish and the reasons for choosing them. Include implementation details where they help assess a choice or support work on the current code.
-
-Establish the shape of a change first, then implement it in useful increments. Complex or future areas may remain explicit placeholders; describe what works now and what remains undecided.
-
-Do not retain compatibility code paths for superseded designs. Do not design or maintain migration workflows. Maintain only the current SQLite schema. When it changes, rebuild the local development database as needed, without introducing versioned migrations, upgrade chains, or migration frameworks.
+Establish the shape of a change first, then implement it in useful increments. Complex or future areas may remain explicit placeholders; describe what works and what remains undecided. Do not retain compatibility paths for superseded designs or introduce migration frameworks.
 
 During development, do not write tests in advance or introduce test frameworks. Run the application locally; containerize only middleware.
 
 ## Implementation boundaries
 
-Keep protocol decoding in the component that owns the external interface, and give execution code typed operations. Select data according to the consumer's responsibility; a full API record need not be the unit used by the execution loop.
+Keep protocol decoding in the component that owns the external interface, and give execution code typed operations. Mail owns the JMAP subset used by the kernel; Stalwart handles MIME and delivery. [Input](../packages/agent/src/input.zig) renders observations with their source, body, context, and current runtime state.
 
-Model coexisting fields together and mutually exclusive alternatives as distinct variants in both language types and structured data such as JSON. Keep variant-specific fields tied to their discriminator; variants with the same payload shape can share fields.
+Treat prompts and tool descriptions as editable interfaces. Put ongoing behavioral instructions in the system prompt, operation behavior in tool descriptions, and task facts and observations in user input. Revise the owning resource, renderer, and documentation together when their contract changes.
 
-Make the owner and lifetime of returned data explicit. Copy or transfer ownership of values that must outlive temporary storage; copy borrowed database values before their statement ends. Manage concurrent work through `std.Io` task scopes, arranging cancellation and completion before releasing dependencies. Keep synchronization inside the component that owns the shared state.
+[compaction.md](../packages/agent/src/compaction.md) owns the summary instructions. [Compaction](../packages/agent/src/compaction.zig) constructs the YAML task with the actual session and runtime snapshot, enforces the request budget, and validates the output. Provider owns model protocol encoding and decoding, including requests without tools.
+
+Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
+
+The registry owns contexts, queues, and synchronization; the kernel owns external orchestration and worker task scopes. Copy or transfer values that must outlive a model-round arena. Cancel and join workers before releasing their dependencies.
+
+A mail turn's end and an overall task's completion are separate events. When the turn ends and its queue is empty, archive through the registry's ownership boundary so its branch context or core lease is released together with the active conversation. The permanent core context continues.
 
 ## Repository and build
 
-Applications live in `apps/`, and reusable modules live in `packages/`:
-
 | Location | Responsibility |
 | --- | --- |
-| [apps/server](../apps/server) | HTTP API, configuration, and service lifecycle |
-| [packages/agent](../packages/agent) | Session execution, model and tool integration, and application state storage |
-| [dev/memory](../dev/memory) | Memory container build, SSH entry point, and local startup |
+| [apps/ivenna](../apps/ivenna) | Configuration and application startup |
+| [packages/agent](../packages/agent) | Conversation registry, mail, structured input, model execution, host and memory tools |
+| [dev/mail](../dev/mail) | Stalwart Compose deployment and native provisioning plan |
+| [dev/memory](../dev/memory) | Memory container, SSH entry point, and local startup |
 
-The root build compiles `apps/server` and its dependency, `packages/agent`. Run it from the repository root:
+The application and mail integration build with Zig:
 
 ```sh
 zig build
 ```
 
-Build artifacts are installed to `zig-out`; SQLite is compiled into the server. After loading the configuration and preparing the memory workspace, run the service from the same directory:
+The executable is installed at `zig-out/bin/ivenna`. After loading configuration and preparing middleware, run from the repository root:
 
 ```sh
-zig build serve
+zig build run
 ```
 
-## Updating the service and memory container
+## Updating the kernel and middleware
 
-The service code, [system.md](../packages/agent/src/system.md), [tools.json](../packages/agent/src/tools.json), and [schema.sql](../packages/agent/src/schema.sql) are compiled into the local application. After editing them, stop the service and run `zig build serve` to rebuild and restart it. Database schema changes also require the steps in the next section.
+The executable embeds [system.md](../packages/agent/src/system.md), [tools.json](../packages/agent/src/tools.json), and [compaction.md](../packages/agent/src/compaction.md). Stop the kernel and run `zig build run` after editing code or these resources. Restart follows the [mail-based continuity contract](architecture.md#startup-and-interruption).
 
-The agent package implements remote memory operations in [memory.nu](../packages/agent/src/memory.nu), which the [Containerfile](../dev/memory/Containerfile) installs in the memory container. After editing this handler, the container build file, the SSH server configuration, or the container's entry point, stop the local service, recreate the memory container, and restart the service:
+The memory [Containerfile](../dev/memory/Containerfile) installs [memory.nu](../packages/agent/src/memory.nu). After changing the handler, container contents, or SSH entry point, stop the kernel and recreate the memory container:
 
 ```sh
 dev/memory/start.sh down
 dev/memory/start.sh up
-zig build serve
+zig build run
 ```
 
-If no container exists, `up` rebuilds the image and creates a container using the same memory volume and SSH keys. For other remote workspaces, update the handler and entry point at the locations described in [using remote memory](running.md#using-remote-memory). See [memory rooms](memory.md) for memory tool usage.
+This retains the memory volume and SSH keys. For another workspace, update its handler and entry point as described in [remote memory setup](running.md#using-remote-memory).
 
-## Changing application data structures
+In [dev/mail](../dev/mail), `compose.yaml` defines normal Stalwart operation and `setup.yaml` enables the official CLI provisioning flow. Configuration lives in Stalwart's data store; `config.json` holds the store connection. Changes to the local provisioning plan can update server settings and account credentials. Apply them through the setup flow, then return to normal operation, retaining the mail volume. See [local mail setup](running.md#configuring-local-mail).
 
-[schema.sql](../packages/agent/src/schema.sql) defines the application's current session tables. The service creates missing tables at startup; editing this file does not update existing tables.
+## Validation
 
-To apply the updated schema locally, stop the service and remove the `state.sqlite` database and any `state.sqlite-journal` file beside it from the configured `DATA_DIR`. On restart, the service creates a database using the current schema. This resets sessions and their history; host output files and the separate memory workspace remain. See [local data](running.md#local-data) for the current layout.
+Build the application and exercise the changed behavior through real letters and model/tool work. For execution changes, check tool-result continuation, reply threading, reopening, and release of conversation resources after archival. For model-facing changes, inspect complete serialized requests, including YAML frames, runtime snapshots, tool selection, and budget accounting. Report the checks performed and distinguish reconstructed understanding from exact execution recovery.

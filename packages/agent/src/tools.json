@@ -13,7 +13,7 @@
   {
     "type": "function",
     "name": "run_host_shell",
-    "description": "Run a host shell command and wait for completion or timeout. Each call uses a fresh noninteractive /bin/sh with no terminal, live input, or persistent process session. Returns the command outcome and captured output. Text is previewed with paths to full logs; successful image stdout is returned directly.",
+    "description": "Run a host shell command and wait for completion or timeout. Each call uses a fresh noninteractive /bin/sh and the shared host filesystem. It has no terminal, live input, or persistent process session; processes left in its process group are stopped when the call ends. Text results include the command outcome, output previews, and paths to full logs. Successful image stdout is returned directly. Content limits can omit an image after the command has run.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -125,7 +125,7 @@
   {
     "type": "function",
     "name": "inspect_memory_space",
-    "description": "Inspect the space occupied by memories across all rooms and the capacity they share across sessions. Returns used bytes, capacity, remaining bytes, and used ratio.",
+    "description": "Inspect the space occupied by memories across all rooms and the capacity they share across sessions. Returns used bytes, capacity, remaining bytes, and used ratio. This reports current usage; another session can change it before a later write.",
     "parameters": {
       "type": "object",
       "properties": {},
@@ -448,17 +448,6 @@
       "required": [
         "address"
       ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "type": "function",
-    "name": "wait_for_input",
-    "description": "Wait for new input or a resume request after the current tool calls finish.",
-    "parameters": {
-      "type": "object",
-      "properties": {},
-      "required": [],
       "additionalProperties": false
     }
   }
