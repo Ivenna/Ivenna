@@ -48,7 +48,7 @@ The [host shell](host.md) inherits the environment used to launch the service. I
 
 ## Changing configuration
 
-The service reads exported process variables; the startup commands load them from `.env`. To change a setting, stop the service, edit `.env`, then repeat the startup steps in a new terminal.
+The startup commands export process variables from `.env`. The service reads its settings at startup. To change them, stop the service, edit `.env`, load the variables in a new terminal, and run `zig build serve` again. Memory backend settings follow the separate instructions below.
 
 | Variable | Purpose | Default when unset |
 | --- | --- | --- |
@@ -60,12 +60,15 @@ The service reads exported process variables; the startup commands load them fro
 | `DATA_DIR` | Local application data directory | `.ivenna`, relative to the startup directory |
 | `MEMORY_SSH_TARGET` | Memory workspace SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration; the local template sets `.ivenna/dev-memory/config` |
+| `MEMORY_CAPACITY_BYTES` | Shared memory-room capacity in bytes; a positive integer set on the memory backend | `1073741824` (1 GiB) |
 
 Relative paths such as `DATA_DIR` and the template's `MEMORY_SSH_CONFIG` resolve from the service's working directory. These instructions use the repository root. If you start the service elsewhere, adjust those paths or use absolute paths to continue using the same data and memory connection. Host commands also use the startup directory as their default working directory; their output files live under `DATA_DIR`.
 
-For the local memory container, use `MEMORY_SSH_PORT` to change the port, and `MEMORY_CONTAINER_NAME`, `MEMORY_VOLUME_NAME`, and `MEMORY_IMAGE` to choose the container, memory volume, and image names.
+`MEMORY_CAPACITY_BYTES` configures the capacity shared by all memory rooms. For a remote workspace, set it in the remote entry point's environment as described in [using remote memory](#using-remote-memory). The [memory guide](memory.md#memory-space) describes how Ivenna observes and enforces that capacity.
 
-These settings take effect when the container is created. Run `dev/memory/start.sh down` with the original configuration, update `.env`, load it in a new terminal, then run `dev/memory/start.sh up`. To update the image contents, see [updating the service and memory container](development.md#updating-the-service-and-memory-container).
+The local memory startup script passes `MEMORY_CAPACITY_BYTES` to the container when creating it. Use `MEMORY_SSH_PORT` to change the port, and `MEMORY_CONTAINER_NAME`, `MEMORY_VOLUME_NAME`, and `MEMORY_IMAGE` to choose the container, memory volume, and image names.
+
+Changes to any of these local memory settings require recreating the container. Stop the service, run `dev/memory/start.sh down` with the original configuration, edit `.env`, load the variables in a new terminal, then run `dev/memory/start.sh up` and `zig build serve`. The memory volume and SSH keys are retained; choosing a different volume selects different memory content. To update the image contents after source changes, see [updating the service and memory container](development.md#updating-the-service-and-memory-container).
 
 ## Using remote memory
 
@@ -73,10 +76,12 @@ To connect to an existing remote workspace, configure SSH first, then follow the
 
 The application uses the `ivenna-memory` SSH target by default. Set `MEMORY_SSH_TARGET` to use another target. To use your standard OpenSSH configuration, remove the template's `MEMORY_SSH_CONFIG` from `.env`; to use a dedicated configuration file, set it to that file's path. SSH configuration controls the user, hostname, keys, connection timeout, and host key verification.
 
-The remote host needs Nushell, ripgrep, and fd installed, along with two files at fixed locations:
+The remote host needs Nushell, ripgrep, fd, `flock`, and GNU or BusyBox `stat` installed, along with two files at fixed locations:
 
 - Install [memory.nu](../packages/agent/src/memory.nu) at `/usr/local/lib/ivenna/memory.nu`.
-- Install `/usr/local/bin/memory-shell` using [memory-shell.sh](../dev/memory/memory-shell.sh) as a reference. This script must change to `/memory` before running the handler. The SSH account needs read and write access to this workspace.
+- Install `/usr/local/bin/memory-shell` using [memory-shell.sh](../dev/memory/memory-shell.sh) as a reference. This script changes to `/memory` and holds `/run/ivenna/memory.lock` while running the handler. Set `MEMORY_CAPACITY_BYTES` for these SSH sessions by exporting it in this script or configuring the SSH server's `SetEnv`.
+
+The SSH account needs read and write access to the workspace and lock file. Create `/run/ivenna/` and its `memory.lock` file with access for that account when starting the memory service; the local container's [entry point](../dev/memory/entrypoint.sh) provides an example. All backend processes sharing a workspace must use the same lock file.
 
 The application invokes this fixed entry point over SSH. Use the container's [Containerfile](../dev/memory/Containerfile) and [sshd_config](../dev/memory/sshd_config) as references for installation and SSH server configuration on a remote host.
 

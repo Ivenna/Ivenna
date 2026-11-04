@@ -14,7 +14,12 @@ pub const Memory = struct {
     const MatchMode = enum { literal, regex };
 
     pub const Request = union(enum) {
-        browse_memory_room: struct { room: ?[]const u8 = null },
+        inspect_memory_space: struct {},
+        browse_memory: struct {
+            address: []const u8 = ".",
+            entry_only: bool = false,
+            recursive_size: bool = false,
+        },
         find_memory: struct {
             query: []const u8,
             room: ?[]const u8 = null,

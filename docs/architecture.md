@@ -8,7 +8,7 @@ This guide describes the current implementation of the project's [design intent]
 
 `apps/server` depends on `packages/agent`. It assembles the shared HTTP client, session store, and execution engine in [main.zig](../apps/server/src/main.zig) and manages the service lifecycle.
 
-Api accepts input and schedules session execution. Engine loads history from Store, interacts with the model through Provider, invokes Memory and Host, and checkpoints the model and tool results in Store.
+Api accepts input and schedules session execution. Engine loads history from Store, interacts with the model through Provider, invokes tools, and checkpoints the model and tool results in Store.
 
 | Module | Responsibility |
 | --- | --- |
@@ -42,6 +42,8 @@ Autonomous memory is shared across all sessions. The model chooses memory operat
 
 The remote handler, [memory.nu](../packages/agent/src/memory.nu), runs at a fixed path, fills in default values for omitted arguments, and checks that addresses resolve within the memory workspace. It uses [fd](https://github.com/sharkdp/fd) to find names, [ripgrep](https://github.com/BurntSushi/ripgrep) to search content, and Nushell built-ins to read, write, and organize entries. The handler runs predefined operations, treating content and match expressions supplied by the model as data.
 
+The memory tools use Nushell's operation boundaries as a reference. Like [`ls`](https://www.nushell.sh/commands/docs/ls.html), `browse_memory` combines listing and metadata queries, with recursive size measurement requested explicitly. Content reads use [`open --raw`](https://www.nushell.sh/commands/docs/open.html); recording uses [`save --raw`](https://www.nushell.sh/commands/docs/save.html) with create, append, or replace behavior. Name and content searches remain separate from literal-address browsing.
+
 For `remember`, Memory resolves the selected text or host-file source before starting SSH. Text becomes UTF-8 bytes; file contents are read without format detection or conversion. Both sources use base64 in the internal request's `data` field. The remote handler decodes these bytes and writes them according to the requested mode. Source-file paths stay local to the application. A local read failure returns `source_unavailable` without sending a remote request.
 
 The handler returns either a `result` branch with exit code `0` or an `error` branch with exit code `1`. A successful read carries the entry's raw bytes as base64 in `data`, together with its `address`. Memory decodes these bytes and uses the shared classifier to construct its tool result. Other operations retain their JSON result structure.
@@ -51,6 +53,16 @@ Memory storage and address-based operations accept arbitrary file types. Text re
 Reads and writes currently buffer complete files and JSON payloads in the application and remote handler. Transfer memory usage therefore grows with file size. Incremental transfers remain future work; the streaming protocol and buffering limits are undecided.
 
 Memory verifies that the response and exit code agree, then passes operation errors back to the model. If the SSH exchange ends without a complete, consistent reply, including malformed read data, Memory logs the diagnostics and returns an error indicating that memory is unavailable or that the outcome of a change is uncertain. Errors starting SSH, collecting its output, or waiting for it to exit propagate to session failure handling. See [memory rooms](memory.md) for tool usage and [using remote memory](running.md#using-remote-memory) for deployment.
+
+### Memory size and capacity
+
+`inspect_memory_space` follows the same Memory request path as the other memory tools. The remote handler measures the shared workspace against `MEMORY_CAPACITY_BYTES`; the deployment user sets this capacity in the [memory backend's environment](running.md#changing-configuration). The [memory guide](memory.md#memory-space) defines the model-facing result and capacity behavior.
+
+The handler recursively sums regular-file lengths, including hidden files and child directories. Directories, symlinks, and special files do not contribute to the total; each hard-linked name is counted separately. A scan failure returns an operation error instead of a partial total.
+
+`browse_memory` obtains file lengths from metadata. Directory sizes remain unmeasured unless `recursive_size` is requested, in which case it reuses the strict recursive count. `size_bytes` uses the same logical content lengths as capacity checks.
+
+Before recording or revising content, the handler projects the resulting total, accounting for hard-linked names affected by a change, and rejects growth beyond capacity. The [memory shell](../dev/memory/memory-shell.sh) holds a workspace lock through each handler invocation, keeping measurement, capacity checks, and writes together across SSH calls. Direct filesystem changes can bypass these checks, and storage failures use the normal operation error path.
 
 ## Host execution
 

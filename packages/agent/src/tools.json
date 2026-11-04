@@ -100,16 +100,35 @@
   },
   {
     "type": "function",
-    "name": "browse_memory_room",
-    "description": "List a memory room's entries and child rooms. Memory is persistent and shared across sessions.",
+    "name": "browse_memory",
+    "description": "Return metadata for a memory entry or list a room's immediate entries. Each record has address, name, kind, and size_bytes; memory contents are not read. Memory is persistent and shared across sessions.",
     "parameters": {
       "type": "object",
       "properties": {
-        "room": {
+        "address": {
           "type": "string",
-          "description": "The room location, relative to the shared entrance. Omit to use the entrance, \".\"."
+          "description": "Literal address of a memory entry or room, relative to the shared entrance. Omit to use the entrance, '.'."
+        },
+        "entry_only": {
+          "type": "boolean",
+          "description": "Return one metadata record for the addressed entry or room. Defaults to false, which lists a room's immediate entries."
+        },
+        "recursive_size": {
+          "type": "boolean",
+          "description": "Calculate sizes for returned rooms, including memories in all child rooms. Defaults to false; room size_bytes is then null for this call. Memory entry sizes are always reported."
         }
       },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "inspect_memory_space",
+    "description": "Inspect the space occupied by memories across all rooms and the capacity they share across sessions. Returns used bytes, capacity, remaining bytes, and used ratio.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
       "required": [],
       "additionalProperties": false
     }

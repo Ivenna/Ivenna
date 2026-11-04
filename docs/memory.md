@@ -14,7 +14,11 @@ See the [running guide](running.md) for local setup or [using remote memory](run
 | Name query | Literal text, a glob pattern, or a regular expression used by `find_memory` |
 | Content clue | Literal text or a regular expression used by `recall_memory` |
 
-All addresses are relative to the shared entrance, including those returned by tools. The `room` argument limits where a tool browses or searches; it does not change the base for addresses in later calls. Moving a room or entry changes its address. References stored in memory content are not rewritten automatically.
+All addresses are relative to the shared entrance, including those returned by tools. An `address` identifies one entry or room by its literal location; use `find_memory` for name patterns.
+
+`find_memory` and `recall_memory` search within a `room` and its child rooms. The scope defaults to `.` and does not change the base for addresses in later calls.
+
+Moving a room or entry changes its address; references stored in memory content are not rewritten automatically.
 
 ## Tools and arguments
 
@@ -22,7 +26,8 @@ All addresses are relative to the shared entrance, including those returned by t
 
 | Tool | Required arguments | Purpose |
 | --- | --- | --- |
-| `browse_memory_room` | None | Browse a room's entries and child rooms |
+| `browse_memory` | None | List a room's entries or inspect an entry or room's metadata |
+| `inspect_memory_space` | None | Inspect occupied space and remaining shared capacity across all rooms |
 | `find_memory` | `query` | Find entries and rooms by name |
 | `recall_memory` | `clue` | Recall relevant entries by content |
 | `read_memory` | `address` | Read an entry as text or an image |
@@ -31,8 +36,6 @@ All addresses are relative to the shared entrance, including those returned by t
 | `create_memory_room` | `address` | Create a room and any missing parent rooms |
 | `move_memory` | `address`, `destination` | Move or rename entries and rooms |
 | `forget_memory` | `address` | Remove an entry or room |
-
-Use `room` to limit browsing and searches to a room; it defaults to the shared entrance. Both `find_memory` and `recall_memory` also search child rooms.
 
 For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content searches support `literal` and `regex`. Searches use literal, case-insensitive matching by default. Literal name searches match any part of a name. Set `case_sensitive: true` to make searches case-sensitive. Content searches match text in entries.
 
@@ -52,6 +55,68 @@ For `remember`, `mode` defaults to `create`, which returns an error if the addre
 `revise_memory` requires the entry to contain UTF-8 text without NUL bytes. Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
 
 When moving an entry or room, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists. By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance cannot be moved or removed.
+
+## Browsing and metadata
+
+`browse_memory` accepts a literal `address`, defaulting to `.`. By default, a room address lists its immediate entries and child rooms; a memory entry address returns one record for that entry. Browsing returns metadata without retrieving memory contents. For example, `{"address":"languages"}` can return:
+
+```json
+{
+  "result": {
+    "address": "languages",
+    "entries": [
+      {
+        "address": "languages/progress.md",
+        "name": "progress.md",
+        "kind": "memory",
+        "size_bytes": 128
+      },
+      {
+        "address": "languages/practice",
+        "name": "practice",
+        "kind": "room",
+        "size_bytes": null
+      }
+    ]
+  }
+}
+```
+
+The result's `address` identifies the selected entry or room; addresses in `entries` remain relative to the shared entrance. Each record has an `address`, `name`, `kind`, and `size_bytes`. Listing an empty room returns `entries: []`.
+
+A memory entry's `size_bytes` is its content length in bytes. A room's size is `null` when `recursive_size` is omitted or `false`: it was not measured in this call. Set `recursive_size: true` to measure the combined size of memories in each returned room and its descendants. An empty measured room has size `0`. Size calculation failures return an error.
+
+Set `entry_only: true` to return one record for the selected entry or room. The shared entrance's own record has `address: "."` and `name: "."`. Both options default to `false`; recursive size calculation leaves the set of returned entries unchanged.
+
+| Call | Result |
+| --- | --- |
+| `{"address":"languages/progress.md"}` | One memory entry record with its size |
+| `{"address":"languages","entry_only":true}` | One room record with `size_bytes: null` |
+| `{"address":"languages","entry_only":true,"recursive_size":true}` | One room record with the combined size of all its memories |
+| `{"address":"languages","recursive_size":true}` | Immediate entries and child rooms, with each child room's combined size |
+
+## Memory space
+
+All rooms and sessions share one capacity. Call `inspect_memory_space` with `{}` to see how much space their memories occupy and how much remains:
+
+```json
+{
+  "result": {
+    "used_bytes": 4096,
+    "capacity_bytes": 8192,
+    "remaining_bytes": 4096,
+    "used_ratio": 0.5
+  }
+}
+```
+
+`used_bytes` is the combined size of memories across all rooms; `capacity_bytes` is their shared capacity.
+
+`remaining_bytes` is capacity minus used space, with a minimum of zero. `used_ratio` is used space divided by capacity; multiply by 100 for a percentage. The deployment user [configures the capacity](running.md#changing-configuration). Lowering it below the size of existing memories leaves them intact and can produce a ratio above 1.
+
+Before `remember` or a content-changing `revise_memory`, Ivenna checks how much space the memories would occupy. Growth beyond the shared capacity returns `memory_capacity_exceeded` without changing the entry. A change can exactly fill the remaining space. Changes that shrink or preserve occupied space remain possible when already over capacity, as do reading, moving, and forgetting memories.
+
+The result describes the space at the time of the query. Another session can change it before a later recording or revision.
 
 ## Examples
 
@@ -113,7 +178,8 @@ Image reads return native image content. Text reads and other operations return 
 
 | Operation | Contents of `result` |
 | --- | --- |
-| Browse | `room` and `entries`; each entry has `address`, `name`, and `kind` |
+| Browse | `address` and `entries`; each entry has `address`, `name`, `kind`, and `size_bytes` |
+| Inspect space | `used_bytes`, `capacity_bytes`, `remaining_bytes`, and `used_ratio` |
 | Find by name | `room`, `query`, and `matches`; each match has `address`, `name`, and `kind` |
 | Recall by content | `room`, `clue`, and `matches`; each match has `address`, `line`, and `text` |
 | Read (text response) | `address` and `content`: full text, or `unavailable` with `byte_length` and `reason` |
@@ -129,6 +195,8 @@ The `kind` field is `room` for a memory room and `memory` for a memory entry. A 
 | `revised` | The content was revised |
 
 On failure, `error` provides a `code` and `message` describing the problem. `source_unavailable` means a host source file could not be read; this invocation sent no remote memory request. `unsupported_content` from a revision means the entry was not UTF-8 text without NUL bytes, so no revision was written.
+
+`memory_capacity_exceeded` means the proposed change would increase occupied space beyond the rooms' shared capacity; the entry did not change. See [memory space](#memory-space) for the measurements and permitted changes.
 
 `memory_unavailable` means a read-only operation ended without a complete response. `memory_change_uncertain` means memory may have changed, but the outcome is unknown.
 

@@ -77,14 +77,99 @@ def entry [root: string, path: string] {
     }
 }
 
-def dispatch [root: string, operation: string, args: record] {
+def file-identity [path: string] {
+    let identity = ^stat -c "%d:%i" -- $path | complete
+    if $identity.exit_code != 0 { fail operation_failed "Could not inspect a memory entry." }
+    $identity.stdout | str trim
+}
+
+# Scan regular files directly so unreadable directories fail the observation
+# rather than yielding a partial total.
+def workspace-usage [path: string, target: record = {inode: -1, identity: ""}] {
+    mut logical_bytes = 0
+    mut target_names = 0
+    for item in (ls --all --long $path) {
+        match $item.type {
+            "file" => {
+                $logical_bytes = $logical_bytes + ($item.size | into int)
+                if $item.inode == $target.inode and (file-identity $item.name) == $target.identity {
+                    $target_names = $target_names + 1
+                }
+            },
+            "dir" => {
+                let child = workspace-usage $item.name $target
+                $logical_bytes = $logical_bytes + $child.logical_bytes
+                $target_names = $target_names + $child.target_names
+            },
+            _ => {}
+        }
+    }
+    {logical_bytes: $logical_bytes, target_names: $target_names}
+}
+
+def describe-entry [root: string, item: record, recursive_size: bool] {
+    let target = existing $root $item.address
+    let size = if $item.kind == "memory" {
+        ls $target.path | first | get size | into int
+    } else if $recursive_size {
+        (workspace-usage $target.path).logical_bytes
+    } else { null }
+    $item | merge {
+        name: (if $item.address == "." { "." } else { $item.name }),
+        size_bytes: $size
+    }
+}
+
+def memory-capacity [] {
+    let capacity = try { $env.MEMORY_CAPACITY_BYTES? | default "1073741824" | into int } catch {
+        fail invalid_capacity "MEMORY_CAPACITY_BYTES must be a positive integer."
+    }
+    if $capacity <= 0 { fail invalid_capacity "MEMORY_CAPACITY_BYTES must be a positive integer." }
+    $capacity
+}
+
+# The entry point holds the workspace lock across this check and the write.
+def check-write [root: string, path: string, byte_length: int, capacity: int] {
+    let current = if ($path | path type) == "file" { ls --long $path | first } else { null }
+    let target = if $current != null and $current.num_links > 1 {
+        {inode: $current.inode, identity: (file-identity $path)}
+    } else { {inode: -1, identity: ""} }
+    let usage = workspace-usage $root $target
+    let old_length = if $current == null { 0 } else { $current.size | into int }
+    let names = if $target.inode == -1 { 1 } else { $usage.target_names }
+    let projected = $usage.logical_bytes + (($byte_length - $old_length) * $names)
+    if $projected > $capacity and $projected > $usage.logical_bytes {
+        fail memory_capacity_exceeded $"The memories in all rooms would need ($projected) bytes, exceeding their shared capacity of ($capacity) bytes."
+    }
+}
+
+def dispatch [root: string, operation: string, args: record, capacity: int] {
     match $operation {
-        "browse_memory_room" => {
-            let room = memory-room $root ($args.room? | default ".")
-            let entries = ls --all $room.path
-                | each {|item| try { entry $root $item.name } catch { null } }
-                | compact
-            {room: $room.address, entries: $entries}
+        "inspect_memory_space" => {
+            let usage = workspace-usage $root
+            {
+                used_bytes: $usage.logical_bytes,
+                capacity_bytes: $capacity,
+                remaining_bytes: ([0 ($capacity - $usage.logical_bytes)] | math max),
+                used_ratio: ($usage.logical_bytes / $capacity)
+            }
+        },
+        "browse_memory" => {
+            let target = existing $root ($args.address? | default ".")
+            let kind = match ($target.path | path type) {
+                "file" => "memory",
+                "dir" => "room",
+                _ => { fail invalid_address "This address is not a memory entry or room." }
+            }
+            let entries = if $kind == "memory" or ($args.entry_only? | default false) {
+                [(entry $root $target.entry_path)]
+            } else {
+                ls --all $target.path
+                    | each {|item| try { entry $root $item.name } catch { null } }
+                    | compact
+            }
+            let described = $entries | each {|item| describe-entry $root $item ($args.recursive_size? | default false) }
+            {address: $target.address, entries: $described}
         },
         "find_memory" => {
             let room = memory-room $root ($args.room? | default ".")
@@ -138,10 +223,18 @@ def dispatch [root: string, operation: string, args: record] {
                     if ($target.path | path exists) {
                         fail already_exists $"Address '($target.address)' already exists."
                     }
+                    check-write $root $target.path ($content | bytes length) $capacity
                     $content | save --raw $target.path
                 },
-                "append" => { $content | save --raw --append $target.path },
-                "replace" => { $content | save --raw --force $target.path },
+                "append" => {
+                    let before = if ($target.path | path type) == "file" { ls $target.path | first | get size | into int } else { 0 }
+                    check-write $root $target.path ($before + ($content | bytes length)) $capacity
+                    $content | save --raw --append $target.path
+                },
+                "replace" => {
+                    check-write $root $target.path ($content | bytes length) $capacity
+                    $content | save --raw --force $target.path
+                },
                 _ => { fail invalid_argument "The mode argument must be create, append, or replace." }
             }
             {address: $target.address}
@@ -166,7 +259,10 @@ def dispatch [root: string, operation: string, args: record] {
             } else {
                 "revised"
             }
-            if $revision == "revised" { $after | save --raw --force $target.path }
+            if $revision == "revised" {
+                check-write $root $target.path ($after | into binary | bytes length) $capacity
+                $after | save --raw --force $target.path
+            }
             {address: $target.address, revision: $revision}
         },
         "create_memory_room" => {
@@ -211,7 +307,7 @@ def main [] {
             fail invalid_request "Operation arguments must be a JSON object matching the tool definition."
         }
         let root = $env.PWD | path expand --strict
-        {result: (dispatch $root $operation $arguments)}
+        {result: (dispatch $root $operation $arguments (memory-capacity))}
     } catch {|error|
         let code = $error.details.code? | default "operation_failed"
         {

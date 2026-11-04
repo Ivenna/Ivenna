@@ -80,6 +80,7 @@ case "${1:-up}" in
             fi
             engine run --detach --name "$container_name" \
                 --label io.ivenna.dev-memory=true \
+                --env MEMORY_CAPACITY_BYTES \
                 --publish "127.0.0.1:${ssh_port}:22" \
                 --volume "${volume_name}:/memory" \
                 --volume "$state_dir/id_ed25519.pub:/run/memory-client.pub:ro,Z" \
@@ -103,7 +104,7 @@ Host ivenna-memory
     StrictHostKeyChecking yes
 EOF
         attempts=0
-        until printf '%s\n' '{"browse_memory_room":{}}' | ssh -F "$state_dir/config" \
+        until printf '%s\n' '{"browse_memory":{}}' | ssh -F "$state_dir/config" \
             -o BatchMode=yes -o ConnectTimeout=1 -T ivenna-memory >/dev/null 2>&1; do
             attempts=$((attempts + 1))
             if [ "$attempts" -ge 30 ]; then

@@ -34,7 +34,7 @@ If `state` contains the `pending` or `running` branch, processing is still in pr
 
 When the session reaches `waiting`, read any new assistant messages in `messages`. The model requests a pause by returning no tool calls or by calling `wait_for_input`; queued inputs keep execution running. If the session reaches `failed`, its state carries the error name; see [continuing and resuming](#continuing-and-resuming) to try again after addressing the failure.
 
-The model accesses resources through its [memory](memory.md) and [host tools](host.md), which can return [text and image content](content.md).
+The model uses [memory tools](memory.md) to organize memories and inspect their [shared space](memory.md#memory-space), and [host tools](host.md) to run commands. Memory reads and command output can return [text and images](content.md).
 
 ## Continuing and resuming
 
