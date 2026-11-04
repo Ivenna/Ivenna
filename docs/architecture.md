@@ -111,9 +111,7 @@ Memory reads retain full text. Reader produces bounded shell text previews and, 
 
 ## Model input and history
 
-When creating a session, Engine saves its default input fields and adds the sole system message:
-
-> Je pense, donc je suis.
+When creating a session, Engine saves its default input fields and initializes its history with the system message embedded from [system.md](../packages/agent/src/system.md).
 
 Subsequent HTTP inputs are merged with the session defaults by [input.zig](../packages/agent/src/input.zig). The session ID is added, and the result is serialized to YAML as a user message for the model. See [input fields](usage.md#input-fields) for the merge rules.
 

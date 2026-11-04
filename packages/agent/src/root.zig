@@ -20,7 +20,7 @@ pub const Engine = struct {
 
     pub fn createSession(self: *Engine, a: Allocator, user_fields: Value) !i64 {
         const messages = [_]struct { role: []const u8, content: []const u8 }{
-            .{ .role = "system", .content = "Je pense, donc je suis." },
+            .{ .role = "system", .content = @embedFile("system.md") },
         };
         return self.store.createSession(
             try std.json.Stringify.valueAlloc(a, user_fields, .{}),

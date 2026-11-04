@@ -46,7 +46,7 @@ zig build serve
 
 ## Updating the service and memory container
 
-The service code, [schema.sql](../packages/agent/src/schema.sql), and [tools.json](../packages/agent/src/tools.json) are compiled into the local application. After editing them, stop the service and run `zig build serve` to rebuild and restart it. Database schema changes also require the steps in the next section.
+The service code, [system.md](../packages/agent/src/system.md), [tools.json](../packages/agent/src/tools.json), and [schema.sql](../packages/agent/src/schema.sql) are compiled into the local application. After editing them, stop the service and run `zig build serve` to rebuild and restart it. Database schema changes also require the steps in the next section.
 
 The agent package implements remote memory operations in [memory.nu](../packages/agent/src/memory.nu), which the [Containerfile](../dev/memory/Containerfile) installs in the memory container. After editing this handler, the container build file, the SSH server configuration, or the container's entry point, stop the local service, recreate the memory container, and restart the service:
 
