@@ -34,7 +34,7 @@ build_image() (
         "$repo_dir/dev/memory/memory-shell.sh" "$repo_dir/dev/memory/sshd_config" \
         "$build_context/dev/memory/"
     cp -p "$repo_dir/packages/agent/src/memory.nu" "$build_context/packages/agent/src/"
-    engine build --tag "$image_name" \
+    engine build --pull --no-cache --tag "$image_name" \
         --file "$build_context/dev/memory/Containerfile" "$build_context"
 )
 

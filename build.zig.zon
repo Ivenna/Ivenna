@@ -2,7 +2,7 @@
     .name = .ivenna,
     .version = "0.1.0",
     .fingerprint = 0x67d11ca2aeb63bd0,
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .server = .{ .path = "apps/server" },
     },

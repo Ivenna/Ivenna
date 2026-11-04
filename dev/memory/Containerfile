@@ -1,7 +1,8 @@
 FROM ghcr.io/nushell/nushell:0.116.1-alpine
 
 USER root
-RUN apk add --no-cache openssh-server ripgrep fd \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache openssh-server ripgrep fd \
     && adduser -D -h /home/memory -s /bin/sh memory \
     && passwd -d memory \
     && mkdir -p /memory /run/sshd /home/memory/.ssh \
