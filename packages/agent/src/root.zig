@@ -68,7 +68,7 @@ pub const Engine = struct {
             for (response.calls) |call| {
                 const outcome = self.invoke(a, id, call.name, call.arguments) catch |err| switch (err) {
                     error.InvalidToolArguments, error.UnknownTool => Outcome{
-                        .reply = try textContent(a, try std.json.Stringify.valueAlloc(a, .{
+                        .reply = .{ .text = try std.json.Stringify.valueAlloc(a, .{
                             .@"error" = .{
                                 .code = if (err == error.InvalidToolArguments) "invalid_arguments" else "unknown_tool",
                                 .message = if (err == error.InvalidToolArguments)
@@ -76,7 +76,7 @@ pub const Engine = struct {
                                 else
                                     "This tool is not available.",
                             },
-                        }, .{})),
+                        }, .{}) },
                     },
                     else => return err,
                 };
@@ -84,7 +84,7 @@ pub const Engine = struct {
                     .reply => |content| content,
                     .wait_for_input => blk: {
                         pause_requested = true;
-                        break :blk try textContent(a, "{\"result\":\"waiting_for_input\"}");
+                        break :blk Content{ .text = "{\"result\":\"waiting_for_input\"}" };
                     },
                 };
                 try messages.append(try self.provider.toolReply(a, call.call_id, content, messages.items));
@@ -97,7 +97,7 @@ pub const Engine = struct {
         }
     }
 
-    const Outcome = union(enum) { reply: []const Content, wait_for_input };
+    const Outcome = union(enum) { reply: Content, wait_for_input };
 
     fn invoke(self: *Engine, a: Allocator, session_id: i64, name: []const u8, arguments: []const u8) !Outcome {
         if (try Memory.Request.parse(a, name, arguments)) |request| {
@@ -113,10 +113,6 @@ pub const Engine = struct {
         return error.UnknownTool;
     }
 };
-
-fn textContent(a: Allocator, text: []const u8) ![]const Content {
-    return a.dupe(Content, &.{.{ .text = text }});
-}
 
 fn parseArgs(comptime T: type, a: Allocator, text: []const u8) !T {
     return std.json.parseFromSliceLeaky(T, a, text, .{}) catch |err| switch (err) {

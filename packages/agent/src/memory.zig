@@ -87,7 +87,7 @@ pub const Memory = struct {
 
     /// Returned content and image bytes belong to allocator, independently of
     /// the temporary SSH request and response buffers.
-    pub fn invoke(self: Memory, allocator: Allocator, request: Request) ![]const Content {
+    pub fn invoke(self: Memory, allocator: Allocator, request: Request) !Content {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const scratch = arena.allocator();
@@ -99,12 +99,12 @@ pub const Memory = struct {
                     .text => |text| text,
                     .file => |source| std.Io.Dir.cwd().readFileAlloc(self.io, source.path, scratch, .unlimited) catch |err| switch (err) {
                         error.Canceled, error.OutOfMemory => return err,
-                        else => return textReply(allocator, try std.json.Stringify.valueAlloc(allocator, .{
+                        else => return .{ .text = try std.json.Stringify.valueAlloc(allocator, .{
                             .@"error" = .{
                                 .code = "source_unavailable",
                                 .message = try std.fmt.allocPrint(allocator, "Could not read host file '{s}': {s}. This write was not sent to memory.", .{ source.path, @errorName(err) }),
                             },
-                        }, .{})),
+                        }, .{}) },
                     },
                 };
                 const encoder = std.base64.standard.Encoder;
@@ -183,16 +183,16 @@ pub const Memory = struct {
                 };
                 if (term.exited == expected_exit) {
                     if (request == .read_memory and response == .result) {
-                        const parts = readReply(allocator, response.result, request.read_memory.expected) catch |err| switch (err) {
+                        const read_content = readReply(allocator, response.result, request.read_memory.expected) catch |err| switch (err) {
                             error.OutOfMemory => return err,
                             else => blk: {
                                 reply_error = @errorName(err);
                                 break :blk null;
                             },
                         };
-                        if (parts) |value| return value;
+                        if (read_content) |value| return value;
                     } else {
-                        return textReply(allocator, try allocator.dupe(u8, stdout));
+                        return .{ .text = try allocator.dupe(u8, stdout) };
                     }
                 }
             }
@@ -208,11 +208,11 @@ pub const Memory = struct {
             .code = "memory_unavailable",
             .message = "The memory room did not return a complete response.",
         } };
-        return textReply(allocator, try std.json.Stringify.valueAlloc(allocator, failure, .{}));
+        return .{ .text = try std.json.Stringify.valueAlloc(allocator, failure, .{}) };
     }
 };
 
-fn readReply(allocator: Allocator, value: Value, expected: Expected) ![]const Content {
+fn readReply(allocator: Allocator, value: Value, expected: Expected) !Content {
     if (value != .object) return error.InvalidMemoryReply;
     const address = value.object.get("address") orelse return error.InvalidMemoryReply;
     const data = value.object.get("data") orelse return error.InvalidMemoryReply;
@@ -226,39 +226,17 @@ fn readReply(allocator: Allocator, value: Value, expected: Expected) ![]const Co
     decoder.decode(bytes, data.string) catch return error.InvalidMemoryReply;
 
     return switch (content.classify(bytes, expected)) {
-        .text => |text| textReply(allocator, try std.json.Stringify.valueAlloc(allocator, .{
+        .text => |text| .{ .text = try std.json.Stringify.valueAlloc(allocator, .{
             .result = .{ .address = address.string, .content = text },
-        }, .{})),
+        }, .{}) },
         .image => |image| blk: {
-            const Description = union(enum) {
-                data: struct {
-                    format: content.Image.Format,
-                    byte_length: usize,
-                },
-                url: struct {},
-            };
-            const description: Description = switch (image) {
-                .data => |inline_image| .{ .data = .{
-                    .format = inline_image.format,
-                    .byte_length = inline_image.bytes.len,
-                } },
-                .url => .{ .url = .{} },
-            };
-            const metadata = try std.json.Stringify.valueAlloc(allocator, .{
-                .result = .{ .address = address.string, .content = .{ .image = description } },
-            }, .{});
-            const parts = try allocator.dupe(Content, &.{ .{ .text = metadata }, .{ .image = image } });
             retain_bytes = true;
-            break :blk parts;
+            break :blk .{ .image = image };
         },
-        .unavailable => |unavailable| textReply(allocator, try std.json.Stringify.valueAlloc(allocator, .{
+        .unavailable => |unavailable| .{ .text = try std.json.Stringify.valueAlloc(allocator, .{
             .result = .{ .address = address.string, .content = .{ .unavailable = unavailable } },
-        }, .{})),
+        }, .{}) },
     };
-}
-
-fn textReply(allocator: Allocator, text: []const u8) ![]const Content {
-    return allocator.dupe(Content, &.{.{ .text = text }});
 }
 
 fn writeRequest(io: std.Io, file: std.Io.File, payload: []const u8) std.Io.File.Writer.Error!void {

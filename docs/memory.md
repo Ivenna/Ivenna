@@ -9,7 +9,7 @@ See the [running guide](running.md) for local setup or [using remote memory](run
 | Concept | Meaning |
 | --- | --- |
 | Memory room | A space containing related entries and child rooms |
-| Memory entry | A file stored at an address, with content and format chosen by Ivenna |
+| Memory entry | A file of any type stored at an address, with content and format chosen by Ivenna |
 | Address | A path relative to the shared entrance, such as `languages/progress.md`; `.` is the entrance |
 | Name query | Literal text, a glob pattern, or a regular expression used by `find_memory` |
 | Content clue | Literal text or a regular expression used by `recall_memory` |
@@ -45,7 +45,7 @@ For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content
 | `{"text":"..."}` | Write the supplied text as UTF-8 |
 | `{"file":{"path":"..."}}` | Copy a file's original bytes from the service's filesystem |
 
-A source file path can be absolute or relative to the service's startup directory. The destination `address` remains relative to the memory entrance. Browsing, name searches, moving, and removal work with entries of any format. See [tool content](content.md) for the types currently returned to the model by `read_memory`.
+A source file path can be absolute or relative to the service's startup directory. The destination `address` remains relative to the memory entrance.
 
 For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to append the source bytes without inserting a separator, or `replace` to write the full content. Both modes can also create a missing entry. Create and append require an existing containing room; replace also creates missing parent rooms.
 
@@ -105,7 +105,7 @@ A regular expression can revise several passages at once. For example, update bo
 
 ## Results and errors
 
-Every response starts with a JSON text part containing either `result` or `error`. Successful responses put the operation's output in `result`; image reads add native image content after that text part. For example, `remember` returns the entry's address:
+Image reads return native image content. Text reads and other operations return JSON containing either `result` or `error`. For example, `remember` returns the entry's address:
 
 ```json
 {"result":{"address":"languages/progress.md"}}
@@ -116,11 +116,9 @@ Every response starts with a JSON text part containing either `result` or `error
 | Browse | `room` and `entries`; each entry has `address`, `name`, and `kind` |
 | Find by name | `room`, `query`, and `matches`; each match has `address`, `name`, and `kind` |
 | Recall by content | `room`, `clue`, and `matches`; each match has `address`, `line`, and `text` |
-| Read | `address` and `content`: full text, image metadata, or an unavailable-content diagnostic |
+| Read (text response) | `address` and `content`: full text, or `unavailable` with `byte_length` and `reason` |
 | Revise | `address` and `revision` |
 | Record, create a room, move, or remove | `address`; moving returns the actual new address |
-
-For an image read, `content` is `{"image":{"data":{"format":"png","byte_length":12345}}}` for image bytes, or `{"image":{"url":{}}}` for a URL reference. Content that cannot be supplied returns `{"unavailable":{"byte_length":12345,"reason":"unsupported_binary"}}`; images exceeding the byte limit use `image_too_large`. These diagnostics preserve the entry's address. The [content guide](content.md) describes model request checks and history.
 
 The `kind` field is `room` for a memory room and `memory` for a memory entry. A search with no matches returns an empty `matches` list. In content matches, `line` is a line number starting at 1. The `revision` field has three possible values:
 

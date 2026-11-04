@@ -13,7 +13,7 @@
   {
     "type": "function",
     "name": "run_host_shell",
-    "description": "Run a command as the service account in a fresh, noninteractive /bin/sh on Ivenna's host, with no terminal or live stdin. Waits for completion or timeout, then stops processes remaining in the invocation's process group. Returns the process outcome, stdout content, stderr diagnostics, and paths to full output logs. Each text preview is limited to 16 KiB; JPEG, PNG, GIF, and WebP stdout is returned as native image content. Image data over 32 MiB and content detected as unsupported return diagnostics.",
+    "description": "Run a host shell command and wait for completion or timeout. Each call uses a fresh noninteractive /bin/sh with no terminal, live input, or persistent process session. Returns the command outcome and captured output. Text is previewed with paths to full logs; successful image stdout is returned directly.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -77,7 +77,7 @@
                         "url"
                       ],
                       "default": "data",
-                      "description": "Image representation; omit for data. url passes the entire nonempty text unchanged as one image URL, without fetching or validating the address. Image bytes remain image data."
+                      "description": "Image data by default. Use url when the complete text output is an image URL."
                     }
                   },
                   "additionalProperties": false
@@ -89,7 +89,7 @@
               "additionalProperties": false
             }
           ],
-          "description": "Expected stdout content; omit for auto. Actual content determines the result without conversion or requiring a match. Does not apply to stderr."
+          "description": "Content hint for stdout; omit for automatic detection. Does not apply to stderr."
         }
       },
       "required": [
@@ -101,7 +101,7 @@
   {
     "type": "function",
     "name": "browse_memory_room",
-    "description": "List a memory room's entries and child rooms. Memory is persistent and shared across sessions. Returns room and entries; each entry has address, name, and kind (room or memory).",
+    "description": "List a memory room's entries and child rooms. Memory is persistent and shared across sessions.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -117,7 +117,7 @@
   {
     "type": "function",
     "name": "find_memory",
-    "description": "Find memory entries and rooms by name within a room and its descendants. Returns room, query, and matches; each match has address, name, and kind.",
+    "description": "Find memory entries and rooms by name within a room and its descendants.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -152,7 +152,7 @@
   {
     "type": "function",
     "name": "recall_memory",
-    "description": "Search text in memory entries within a room and its descendants. Returns room, clue, and matches; each match has address, line, and text.",
+    "description": "Search text in memory entries within a room and its descendants.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -186,7 +186,7 @@
   {
     "type": "function",
     "name": "read_memory",
-    "description": "Read a memory entry. Returns its address and full text, or image metadata with native JPEG, PNG, GIF, or WebP content. Unsupported content or image data over 32 MiB returns a diagnostic.",
+    "description": "Read a memory entry and return its full text or image content. Unsupported content returns a diagnostic.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -238,7 +238,7 @@
                         "url"
                       ],
                       "default": "data",
-                      "description": "Image representation; omit for data. url passes the entire nonempty text unchanged as one image URL, without fetching or validating the address. Image bytes remain image data."
+                      "description": "Image data by default. Use url when the complete text output is an image URL."
                     }
                   },
                   "additionalProperties": false
@@ -250,7 +250,7 @@
               "additionalProperties": false
             }
           ],
-          "description": "Expected entry content; omit for auto. Actual content determines the result without conversion or requiring a match."
+          "description": "Content hint for the entry; omit for automatic detection."
         }
       },
       "required": [
@@ -262,7 +262,7 @@
   {
     "type": "function",
     "name": "remember",
-    "description": "Store text or the bytes of a host file in a memory entry. Returns its address.",
+    "description": "Write text or copy a host file into a memory entry.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -295,7 +295,7 @@
                     "path": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Source file on the service host, absolute or relative to the service startup directory. Its bytes are copied without conversion."
+                      "description": "Source file on the service host, absolute or relative to the service startup directory."
                     }
                   },
                   "required": [
@@ -332,7 +332,7 @@
   {
     "type": "function",
     "name": "revise_memory",
-    "description": "Revise matching text in an existing UTF-8 memory entry without NUL bytes. Other content returns unsupported_content. The result contains address and revision (no_match, unchanged, or revised).",
+    "description": "Replace matching text in a memory entry and report whether a match was found and whether the content changed.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -372,7 +372,7 @@
   {
     "type": "function",
     "name": "create_memory_room",
-    "description": "Create a memory room and any missing parent rooms. An existing room is reused. Returns its address.",
+    "description": "Create a memory room and any missing parent rooms. An existing room is reused.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -390,7 +390,7 @@
   {
     "type": "function",
     "name": "move_memory",
-    "description": "Move or rename a memory entry or a room and its contents. An occupied target is reported as an error. The result contains the actual new address. References in memory content are not rewritten automatically.",
+    "description": "Move or rename a memory entry or a room and its contents. An occupied target is reported as an error. References in memory content are not rewritten automatically.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -413,7 +413,7 @@
   {
     "type": "function",
     "name": "forget_memory",
-    "description": "Remove a memory entry or an empty room. The shared entrance is retained. The result contains address.",
+    "description": "Remove a memory entry or an empty room.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -435,7 +435,7 @@
   {
     "type": "function",
     "name": "wait_for_input",
-    "description": "Request a pause when this tool batch finishes and no input is queued. New input or an explicit resume continues the same session and history.",
+    "description": "Wait for new input or a resume request after the current tool calls finish.",
     "parameters": {
       "type": "object",
       "properties": {},

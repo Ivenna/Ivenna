@@ -6,7 +6,9 @@ This guide defines development conventions and explains how to build and update 
 
 The project is still in an exploratory phase. Data structures, database tables, interfaces, and module boundaries are not yet settled; change them directly to match the current design.
 
-Work from the design intent down to responsibilities, interfaces, and implementation. Establish the shape of a change first, then implement it in useful increments. Complex or future areas may remain explicit placeholders; describe what works now and what remains undecided.
+Work from the design intent down to responsibilities, interfaces, and implementation. Explain design choices through the behavior and relationships they establish and the reasons for choosing them. Include implementation details where they help assess a choice or support work on the current code.
+
+Establish the shape of a change first, then implement it in useful increments. Complex or future areas may remain explicit placeholders; describe what works now and what remains undecided.
 
 Do not retain compatibility code paths for superseded designs. Do not design or maintain migration workflows. Maintain only the current SQLite schema. When it changes, rebuild the local development database as needed, without introducing versioned migrations, upgrade chains, or migration frameworks.
 

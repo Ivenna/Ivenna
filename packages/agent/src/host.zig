@@ -40,28 +40,32 @@ pub const Host = struct {
         }
     };
 
-    pub fn invoke(self: *Host, a: Allocator, context: Context, request: Request) ![]const Content {
+    pub fn invoke(self: *Host, a: Allocator, context: Context, request: Request) !Content {
         return self.respond(a, context, request) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,
-            else => try textReply(a, try failure(a, "host_unavailable", switch (request) {
+            else => .{ .text = try failure(a, "host_unavailable", switch (request) {
                 .run_host_shell => try std.fmt.allocPrint(a, "Could not return the command result: {s}. The host may have changed.", .{@errorName(err)}),
                 .get_host_shell => try std.fmt.allocPrint(a, "Could not describe the host shell: {s}.", .{@errorName(err)}),
-            })),
+            }) },
         };
     }
 
-    fn respond(self: *Host, a: Allocator, context: Context, request: Request) ![]const Content {
+    fn respond(self: *Host, a: Allocator, context: Context, request: Request) !Content {
         return switch (request) {
-            .get_host_shell => textReply(a, try success(a, self.shell.describe())),
+            .get_host_shell => .{ .text = try success(a, self.shell.describe()) },
             .run_host_shell => |args| blk: {
                 const result = try self.shell.run(a, context, args);
-                var parts: std.array_list.Managed(Content) = .init(a);
-                try parts.append(.{ .text = try success(a, result.describe()) });
-                switch (result.stdout.content) {
-                    .image => |image| try parts.append(.{ .image = image }),
-                    .text, .unavailable => {},
+                const succeeded = switch (result.outcome) {
+                    .completed => |term| term == .exited and term.exited == 0,
+                    .timed_out => false,
+                };
+                if (succeeded) {
+                    switch (result.stdout.content) {
+                        .image => |image| break :blk .{ .image = image },
+                        .text, .unavailable => {},
+                    }
                 }
-                break :blk try parts.toOwnedSlice();
+                break :blk .{ .text = try success(a, result.describe()) };
             },
         };
     }
@@ -79,10 +83,6 @@ fn success(a: Allocator, value: anytype) ![]const u8 {
 
 fn failure(a: Allocator, code: []const u8, message: []const u8) ![]const u8 {
     return std.json.Stringify.valueAlloc(a, Reply(void){ .@"error" = .{ .code = code, .message = message } }, .{});
-}
-
-fn textReply(a: Allocator, text: []const u8) ![]const Content {
-    return a.dupe(Content, &.{.{ .text = text }});
 }
 
 fn validText(value: []const u8) bool {

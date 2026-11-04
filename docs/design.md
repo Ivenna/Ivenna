@@ -10,7 +10,7 @@ Program choices and general tool use draw on the model's prior knowledge and wha
 
 ## Model-facing descriptions and results
 
-Tool descriptions explain what an operation does, how to invoke it, and any interface-specific behavior needed before use or to interpret its results. Include enough information for reliable use; description length follows that need.
+Tool descriptions help the model choose an operation, invoke it, and interpret its result. Select details and explanation length according to those needs.
 
 Results convey the state and outcome of the particular invocation. Implementation explanations belong in developer documentation unless they affect how the interface is used or interpreted.
 

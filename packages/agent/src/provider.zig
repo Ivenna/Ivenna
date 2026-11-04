@@ -25,29 +25,28 @@ pub const Provider = struct {
         calls: []const FunctionCall,
     };
 
-    /// Encode tool content and reject locally detectable limit violations.
+    /// Encode one tool result, replacing an image with a text error when adding
+    /// it would exceed the image-count or request-body limit. Text results
+    /// bypass these checks; image decoding belongs to the model service.
     /// JSON storage and encoded local images use arena; call_id, text, and
     /// remote URL strings borrow their inputs.
-    pub fn toolReply(self: Provider, arena: Allocator, call_id: []const u8, content: []const Content, history: []const Value) !Value {
-        var has_image = false;
-        for (content) |part| {
-            if (part == .image) has_image = true;
-        }
-        if (!has_image) return encodeToolReply(arena, call_id, content);
-        if (imageLimit(content, history)) |message|
-            return contentLimitReply(arena, call_id, content, message);
+    pub fn toolReply(self: Provider, arena: Allocator, call_id: []const u8, content: Content, history: []const Value) !Value {
+        if (content == .text) return encodeToolReply(arena, call_id, content);
+        if (imageLimit(history)) |message|
+            return contentLimitReply(arena, call_id, message);
 
         const reply = try encodeToolReply(arena, call_id, content);
         const input = try arena.alloc(Value, history.len + 1);
         @memcpy(input[0..history.len], history);
         input[history.len] = reply;
         if (try self.requestSize(arena, input) > 48 * 1024 * 1024)
-            return contentLimitReply(arena, call_id, content, "Images omitted: the next model request would exceed 48 MiB.");
+            return contentLimitReply(arena, call_id, "Image omitted: the model request would exceed 48 MiB.");
         return reply;
     }
 
-    /// Remove image parts in history[reply_start..], newest first, until the
-    /// request fits or no new images remain.
+    /// Replace image replies in history[reply_start..] with text errors, newest
+    /// first, until the request fits or no new images remain. Earlier history
+    /// and text stay intact; queued inputs merged at checkpoint can increase size.
     pub fn limitToolReplies(self: Provider, arena: Allocator, history: []Value, reply_start: usize) !void {
         var has_image = false;
         for (history[reply_start..]) |reply| {
@@ -61,13 +60,7 @@ pub const Provider = struct {
         while (index > reply_start) {
             index -= 1;
             if (!hasImage(history[index])) continue;
-            const rejection = try contentLimitReply(arena, try textField(history[index], "call_id"), &.{}, "Images omitted: the completed tool results would make the next model request exceed 48 MiB.");
-            var parts: std.array_list.Managed(Value) = .init(arena);
-            for (contentParts(history[index])) |part| {
-                if (imageUrl(part) == null) try parts.append(part);
-            }
-            try parts.appendSlice(contentParts(rejection));
-            try history[index].object.put(arena, "output", .{ .array = parts });
+            history[index] = try contentLimitReply(arena, try textField(history[index], "call_id"), "Image omitted: the model request would exceed 48 MiB.");
             if (try self.requestSize(arena, history) <= 48 * 1024 * 1024) return;
         }
     }
@@ -153,65 +146,52 @@ pub const Provider = struct {
     }
 };
 
-fn encodeToolReply(arena: Allocator, call_id: []const u8, content: []const Content) !Value {
-    var parts: std.array_list.Managed(Value) = .init(arena);
-    for (content) |part| {
-        var encoded: std.json.ObjectMap = .empty;
-        switch (part) {
-            .text => |value| {
-                try encoded.put(arena, "type", .{ .string = "input_text" });
-                try encoded.put(arena, "text", .{ .string = value });
-            },
-            .image => |source| {
-                const url = switch (source) {
-                    .url => |url| url,
-                    .data => |image| blk: {
-                        const encoder = std.base64.standard.Encoder;
-                        const mime = image.mimeType();
-                        const prefix_length = "data:".len + mime.len + ";base64,".len;
-                        const url = try arena.alloc(u8, prefix_length + encoder.calcSize(image.bytes.len));
-                        _ = try std.fmt.bufPrint(url[0..prefix_length], "data:{s};base64,", .{mime});
-                        _ = encoder.encode(url[prefix_length..], image.bytes);
-                        break :blk url;
-                    },
-                };
-                try encoded.put(arena, "type", .{ .string = "input_image" });
-                try encoded.put(arena, "image_url", .{ .string = url });
-            },
-        }
-        try parts.append(.{ .object = encoded });
-    }
+fn encodeToolReply(arena: Allocator, call_id: []const u8, content: Content) !Value {
+    const output: Value = switch (content) {
+        .text => |text| .{ .string = text },
+        .image => |source| image_output: {
+            var encoded: std.json.ObjectMap = .empty;
+            const url = switch (source) {
+                .url => |url| url,
+                .data => |image| blk: {
+                    const encoder = std.base64.standard.Encoder;
+                    const mime = image.mimeType();
+                    const prefix_length = "data:".len + mime.len + ";base64,".len;
+                    const url = try arena.alloc(u8, prefix_length + encoder.calcSize(image.bytes.len));
+                    _ = try std.fmt.bufPrint(url[0..prefix_length], "data:{s};base64,", .{mime});
+                    _ = encoder.encode(url[prefix_length..], image.bytes);
+                    break :blk url;
+                },
+            };
+            try encoded.put(arena, "type", .{ .string = "input_image" });
+            try encoded.put(arena, "image_url", .{ .string = url });
+            const parts = try arena.dupe(Value, &.{.{ .object = encoded }});
+            break :image_output .{ .array = std.array_list.Managed(Value).fromOwnedSlice(arena, parts) };
+        },
+    };
     var reply: std.json.ObjectMap = .empty;
     try reply.put(arena, "type", .{ .string = "function_call_output" });
     try reply.put(arena, "call_id", .{ .string = call_id });
-    try reply.put(arena, "output", .{ .array = parts });
+    try reply.put(arena, "output", output);
     return .{ .object = reply };
 }
 
-fn contentLimitReply(arena: Allocator, call_id: []const u8, content: []const Content, message: []const u8) !Value {
+fn contentLimitReply(arena: Allocator, call_id: []const u8, message: []const u8) !Value {
     const text = try std.json.Stringify.valueAlloc(arena, .{
         .@"error" = .{ .code = "content_limit", .message = message },
     }, .{});
-    var parts: std.array_list.Managed(Content) = .init(arena);
-    for (content) |part| {
-        if (part == .text) try parts.append(part);
-    }
-    try parts.append(.{ .text = text });
-    return encodeToolReply(arena, call_id, parts.items);
+    return encodeToolReply(arena, call_id, .{ .text = text });
 }
 
 /// Count image parts without interpreting their URLs.
-fn imageLimit(content: []const Content, history: []const Value) ?[]const u8 {
-    var count: usize = 0;
-    for (content) |part| {
-        if (part == .image) count += 1;
-    }
+fn imageLimit(history: []const Value) ?[]const u8 {
+    var count: usize = 1;
     for (history) |item| {
         for (contentParts(item)) |part| {
             if (imageUrl(part) != null) count += 1;
         }
     }
-    if (count > 600) return "Images omitted: this result would exceed 600 images in one model request.";
+    if (count > 600) return "Image omitted: the model request would contain more than 600 images.";
     return null;
 }
 

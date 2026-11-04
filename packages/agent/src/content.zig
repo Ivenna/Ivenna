@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const image_size_limit = 32 * 1024 * 1024;
 
-/// Content expected from a tool's data output.
+/// Content hint for a complete memory entry or stdout capture.
 pub const Expected = union(enum) {
     auto: struct {},
     text: struct {},
@@ -18,8 +18,7 @@ pub const Expected = union(enum) {
     }
 };
 
-/// Tool content shared by execution and model encoding. Data is borrowed for
-/// the current turn.
+/// One tool's model-facing result. Payload slices are borrowed for the current turn.
 pub const Content = union(enum) {
     text: []const u8,
     image: ImageContent,
@@ -43,7 +42,8 @@ pub const Classified = union(enum) {
     unavailable: Unavailable,
 };
 
-/// Inspect one original content unit. URL expectations interpret nonempty text
+/// Classify bytes by image signature or UTF-8 text, without requiring a match
+/// to a text or image-data expectation. URL expectations interpret nonempty text
 /// as a reference without fetching, changing, or validating the address.
 pub fn classify(bytes: []const u8, expected: Expected) Classified {
     if (Image.fromBytes(bytes)) |image| {
