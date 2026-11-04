@@ -166,40 +166,35 @@ pub const Memory = struct {
         const term = try child.wait(self.io);
         const stdout = try reader.toOwnedSlice(0);
         const stderr = try reader.toOwnedSlice(1);
-        var reply_error: ?[]const u8 = null;
-        const reply: ?Reply = std.json.parseFromSliceLeaky(Reply, scratch, stdout, .{}) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => blk: {
-                reply_error = @errorName(err);
-                break :blk null;
-            },
-        };
+        var reply: anyerror!Reply = std.json.parseFromSliceLeaky(Reply, scratch, stdout, .{});
 
-        if (input_error == null and term == .exited) {
-            if (reply) |response| {
+        if (reply) |response| {
+            if (input_error == null and term == .exited) {
                 const expected_exit: u8 = switch (response) {
                     .result => 0,
                     .@"error" => 1,
                 };
                 if (term.exited == expected_exit) {
                     if (request == .read_memory and response == .result) {
-                        const read_content = readReply(allocator, response.result, request.read_memory.expected) catch |err| switch (err) {
+                        if (readReply(allocator, response.result, request.read_memory.expected)) |value| {
+                            return value;
+                        } else |err| switch (err) {
                             error.OutOfMemory => return err,
-                            else => blk: {
-                                reply_error = @errorName(err);
-                                break :blk null;
-                            },
-                        };
-                        if (read_content) |value| return value;
+                            else => reply = err,
+                        }
                     } else {
                         return .{ .text = try allocator.dupe(u8, stdout) };
                     }
                 }
             }
+        } else |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
         }
 
+        const reply_error = if (reply) |_| "none" else |err| @errorName(err);
         std.log.warn("memory room request {s}: SSH {f}; input error: {s}; reply error: {s}; {s}", .{
-            @tagName(request), term, input_error orelse "none", reply_error orelse "none", stderr,
+            @tagName(request), term, input_error orelse "none", reply_error, stderr,
         });
         const failure: Reply = .{ .@"error" = if (request.changesMemory()) .{
             .code = "memory_change_uncertain",

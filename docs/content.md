@@ -4,7 +4,7 @@ Memory reads and host commands can supply text or images to the model. This guid
 
 ## Expected content
 
-`read_memory` and `run_host_shell` accept an optional `expected` argument for the complete entry or stdout capture. Omit it for automatic classification. An image expectation defaults to `representation: "data"`.
+`read_memory` and `run_host_shell` accept an optional `expected` argument for the complete entry or stdout capture. Omit it for automatic classification, or select exactly one branch below. An image expectation defaults to `representation: "data"`.
 
 | Value | Meaning |
 | --- | --- |
@@ -56,4 +56,4 @@ Session history saves accepted image bytes, so later requests reuse them even if
 
 Saved images remain in the full history sent on later requests and contribute to request size and context limits. See [model input and history](architecture.md#model-input-and-history) for replay behavior.
 
-[Resuming](usage.md#continuing-and-resuming) a failed session reuses its saved content. To retry corrected image bytes, start a new session; changing the source file does not replace a saved image.
+[Resuming](usage.md#continuing-and-resuming) a failed session reuses its saved content. Changing the source file does not replace a saved image. To retry without that image in history, start a new session and read the corrected source.

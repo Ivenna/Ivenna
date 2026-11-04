@@ -50,7 +50,7 @@ Memory storage and address-based operations accept arbitrary file types. Text re
 
 Reads and writes currently buffer complete files and JSON payloads in the application and remote handler. Transfer memory usage therefore grows with file size. Incremental transfers remain future work; the streaming protocol and buffering limits are undecided.
 
-Memory verifies that the response and exit code agree, then passes operation errors back to the model. If the SSH exchange ends without a complete, consistent reply, including malformed read data, Memory logs the diagnostics and returns an error indicating that memory is unavailable or that the outcome of a change is uncertain. Other failures, such as an inability to start the SSH process, propagate to session failure handling. See [memory rooms](memory.md) for tool usage and [using remote memory](running.md#using-remote-memory) for deployment.
+Memory verifies that the response and exit code agree, then passes operation errors back to the model. If the SSH exchange ends without a complete, consistent reply, including malformed read data, Memory logs the diagnostics and returns an error indicating that memory is unavailable or that the outcome of a change is uncertain. Errors starting SSH, collecting its output, or waiting for it to exit propagate to session failure handling. See [memory rooms](memory.md) for tool usage and [using remote memory](running.md#using-remote-memory) for deployment.
 
 ## Host execution
 

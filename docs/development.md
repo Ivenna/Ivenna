@@ -18,6 +18,8 @@ During development, do not write tests in advance or introduce test frameworks. 
 
 Keep protocol decoding in the component that owns the external interface, and give execution code typed operations. Select data according to the consumer's responsibility; a full API record need not be the unit used by the execution loop.
 
+Model coexisting fields together and mutually exclusive alternatives as distinct variants in both language types and structured data such as JSON. Keep variant-specific fields tied to their discriminator; variants with the same payload shape can share fields.
+
 Make the owner and lifetime of returned data explicit. Copy or transfer ownership of values that must outlive temporary storage; copy borrowed database values before their statement ends. Manage concurrent work through `std.Io` task scopes, arranging cancellation and completion before releasing dependencies. Keep synchronization inside the component that owns the shared state.
 
 ## Repository and build
