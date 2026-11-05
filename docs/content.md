@@ -1,6 +1,6 @@
 # Tool content
 
-Memory reads and host commands can supply text and images together to the model. This guide covers shared content handling; see [memory rooms](memory.md) and [host shell](host.md) for tool arguments and results.
+Memory reads and host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#content-source-and-context) separately defines native input text and excerpts. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
 
 ## Automatic classification
 
@@ -49,4 +49,4 @@ The model service handles image decoding, dimensions, URL retrieval, and limits 
 
 A session's runtime context retains accepted image bytes, so subsequent requests can reuse them even if the source file changes or is removed. URL results retain the supplied address; their content can change or become unavailable.
 
-Retained images contribute to request size and context limits. Compaction or session release can discard these bytes; a restart rebuilds understanding from letters rather than restoring them. An artifact or memory entry provides a source for reading the image again, and its location can be retained in the handover. See [bounded model context](architecture.md#bounded-model-context).
+Retained images contribute to request size and context limits. Compaction or session release can discard these bytes; a restart rebuilds understanding from handovers and evidence rather than restoring them. An artifact or memory entry provides a source for reading the image again, and its location can be retained in the handover. See [bounded model context](architecture.md#bounded-model-context).

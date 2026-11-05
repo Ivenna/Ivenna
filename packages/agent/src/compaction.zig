@@ -9,7 +9,7 @@ const Value = std.json.Value;
 /// history; the caller owns storage and context replacement.
 pub fn summarize(provider: Provider, arena: Allocator, history: []const Value, snapshot: Input.Snapshot, max_request_bytes: u64, max_summary_bytes: usize) ![]const u8 {
     var state = snapshot.state;
-    state.response.audience = .internal;
+    state.response = .{ .summary = .{} };
     const rendered = try Input.serialize(arena, snapshot.session_id, .{ .context_compaction = .{
         .instructions = @embedFile("compaction.md"),
         .state = state,

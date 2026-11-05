@@ -2,9 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
-pub const Purpose = enum { report, handover, core_handover };
-pub const Destination = enum { inbox, archive };
-
 pub const Address = struct {
     name: ?[]const u8 = null,
     email: []const u8,
@@ -21,7 +18,8 @@ pub const Letter = struct {
     to: []const Address,
     subject: []const u8,
     body: []const u8,
-    purpose: ?Purpose,
+    state_key: ?[]const u8 = null,
+    state_record: bool = false,
     flagged: bool = false,
     in_inbox: bool = true,
     in_archive: bool = false,
@@ -35,37 +33,32 @@ pub const Outgoing = struct {
     references: []const []const u8 = &.{},
 };
 
-/// Internal continuity and coordination never supply submission recipients.
-/// Mailbox constructs the self address and stores these letters locally.
-pub const InternalOutgoing = struct {
-    subject: []const u8,
-    body: []const u8,
-    in_reply_to: ?[]const u8 = null,
-    references: []const []const u8 = &.{},
-    purpose: Purpose,
+pub const Submission = struct {
+    mail_id: []const u8,
+    sent_copy: enum { updated, unconfirmed },
 };
 
 pub const Thread = struct {
     id: []const u8,
     letters: []const Letter,
-    handover: ?Letter,
 };
 
 const core_capability = "urn:ietf:params:jmap:core";
 const mail_capability = "urn:ietf:params:jmap:mail";
 const submission_capability = "urn:ietf:params:jmap:submission";
-const purpose_property = "header:X-Ivenna-Purpose:asText";
+const state_key_property = "header:X-Ivenna-State-Key:asText";
+const state_record_keyword = "ivenna-state";
 const metadata_properties: []const []const u8 = &.{
-    "id",             "threadId",   "mailboxIds", "keywords", "messageId",
-    "inReplyTo",      "references", "from",       "to",       "subject",
-    purpose_property,
+    "id",               "threadId",   "mailboxIds", "keywords", "messageId",
+    "inReplyTo",        "references", "from",       "to",       "subject",
+    state_key_property,
 };
 const body_properties = metadata_properties ++ &[_][]const u8{
     "textBody", "htmlBody", "bodyValues",
 };
 
-/// A JMAP Mail adapter for kernel operations. Stalwart decodes MIME and structured
-/// headers; this component owns JSON protocol decoding and typed mail results.
+/// Typed JMAP operations shared by the email boundary and internal mail state.
+/// Stalwart decodes MIME and headers; this component decodes protocol results.
 /// Discover once using an allocator that outlives every operation and worker.
 pub const Mailbox = struct {
     client: *std.http.Client,
@@ -166,7 +159,7 @@ pub const Mailbox = struct {
     }
 
     /// Submission acceptance does not establish final recipient delivery.
-    pub fn send(self: Mailbox, a: Allocator, outgoing: Outgoing) ![]const u8 {
+    pub fn send(self: Mailbox, a: Allocator, outgoing: Outgoing) !Submission {
         const id = try self.create(a, outgoing, self.drafts_id, true, null);
         var patch: std.json.ObjectMap = .empty;
         try patch.put(a, "keywords/$draft", .null);
@@ -178,28 +171,23 @@ pub const Mailbox = struct {
             .onSuccessUpdateEmail = .{ .@"#submission" = Value{ .object = patch } },
         });
         _ = try createdId(submitted.result, "submission");
-        if (!hasKey(submitted.email_update orelse return error.InvalidMailReply, "updated", id))
-            return error.InvalidMailReply;
-        return id;
+        const updated = if (submitted.email_update) |update| hasKey(update, "updated", id) else false;
+        return .{ .mail_id = id, .sent_copy = if (updated) .updated else .unconfirmed };
     }
 
-    /// Save one ordinary self letter directly. It has no SMTP delivery copy.
-    pub fn saveInternal(self: Mailbox, a: Allocator, outgoing: InternalOutgoing, destination: Destination) !Letter {
-        const folder = switch (destination) {
-            .inbox => self.inbox_id,
-            .archive => self.archive_id,
-        };
+    /// Persist one independent self state record locally. State keys select
+    /// continuity; neither the subject nor RFC reply headers link external mail.
+    pub fn saveState(self: Mailbox, a: Allocator, key: []const u8, summary: []const u8) !Letter {
+        try validStateKey(key);
         const id = try self.create(a, .{
             .to = &.{.{ .email = self.address }},
-            .subject = outgoing.subject,
-            .body = outgoing.body,
-            .in_reply_to = outgoing.in_reply_to,
-            .references = outgoing.references,
-        }, folder, false, outgoing.purpose);
+            .subject = try std.fmt.allocPrint(a, "Ivenna state: {s}", .{key}),
+            .body = summary,
+        }, self.archive_id, false, key);
         return self.read(a, id);
     }
 
-    fn create(self: Mailbox, a: Allocator, outgoing: Outgoing, folder: []const u8, draft: bool, internal_purpose: ?Purpose) ![]const u8 {
+    fn create(self: Mailbox, a: Allocator, outgoing: Outgoing, folder: []const u8, draft: bool, state_key: ?[]const u8) ![]const u8 {
         if (outgoing.to.len == 0) return error.MailRecipientRequired;
         var folders: std.json.ObjectMap = .empty;
         try folders.put(a, folder, .{ .bool = true });
@@ -207,6 +195,8 @@ pub const Mailbox = struct {
         if (draft) try keywords.put(a, "$draft", .{ .bool = true });
         if (draft or std.mem.eql(u8, folder, self.archive_id))
             try keywords.put(a, "$seen", .{ .bool = true });
+        if (state_key != null)
+            try keywords.put(a, state_record_keyword, .{ .bool = true });
         var message = try value(a, .{
             .mailboxIds = Value{ .object = folders },
             .keywords = Value{ .object = keywords },
@@ -220,8 +210,8 @@ pub const Mailbox = struct {
             try message.object.put(a, "inReplyTo", try value(a, &[_][]const u8{id}));
         if (outgoing.references.len != 0)
             try message.object.put(a, "references", try value(a, outgoing.references));
-        if (internal_purpose) |purpose|
-            try message.object.put(a, purpose_property, .{ .string = @tagName(purpose) });
+        if (state_key) |key|
+            try message.object.put(a, state_key_property, .{ .string = key });
         const result = try self.call(a, "Email/set", .{
             .accountId = self.account_id,
             .create = .{ .letter = message },
@@ -266,8 +256,8 @@ pub const Mailbox = struct {
         return error.ArchiveDeletionUnavailable;
     }
 
-    /// Thread/get supplies chronological IDs. Inspect all metadata to find its
-    /// latest handover, then fetch bodies only for the bounded recent tail.
+    /// Thread.emailIds is oldest first by receivedAt (RFC 8621, section 3).
+    /// Exclude internal state records even if the service groups them here.
     pub fn thread(self: Mailbox, a: Allocator, thread_id: []const u8, limit: usize) !Thread {
         const result = try self.call(a, "Thread/get", .{
             .accountId = self.account_id,
@@ -277,15 +267,13 @@ pub const Mailbox = struct {
         if (threads.len == 0) return error.MailNotFound;
         const ids = try strings(a, try field(threads[0], "emailIds"));
         var recent_ids: std.ArrayList([]const u8) = .empty;
-        var handover_id: ?[]const u8 = null;
         var offset: usize = 0;
         while (offset < ids.len) {
             const end = offset + @min(self.max_get, ids.len - offset);
             for (try self.getRecords(a, ids[offset..end], false)) |record| {
                 const letter = try self.decode(a, record, false);
-                if (isHandover(letter) and self.isSelf(letter)) {
-                    handover_id = letter.id;
-                } else if (limit != 0) {
+                if (self.isState(letter)) continue;
+                if (limit != 0) {
                     if (recent_ids.items.len == limit) _ = recent_ids.orderedRemove(0);
                     try recent_ids.append(a, letter.id);
                 }
@@ -299,26 +287,29 @@ pub const Mailbox = struct {
             try self.appendAvailable(a, &letters, recent_ids.items[offset..end]);
             offset = end;
         }
-        const handover = if (handover_id) |id| self.read(a, id) catch |err| switch (err) {
-            error.MailNotFound, error.MailBodyUnavailable => null,
-            else => return err,
-        } else null;
-        return .{
-            .id = try a.dupe(u8, thread_id),
-            .letters = try letters.toOwnedSlice(a),
-            .handover = handover,
-        };
+        return .{ .id = try a.dupe(u8, thread_id), .letters = try letters.toOwnedSlice(a) };
     }
 
-    pub fn latestHandover(self: Mailbox, a: Allocator) !?Letter {
+    /// Find the most recent usable self state record whose key matches exactly.
+    /// Query by marker and header, then check the exact key and self identities
+    /// before fetching the complete body.
+    pub fn latestState(self: Mailbox, a: Allocator, key: []const u8) !?Letter {
+        try validStateKey(key);
         var position: usize = 0;
-        const filter = try self.recentFilter(a);
+        const filter = try value(a, .{
+            .operator = "AND",
+            .conditions = .{
+                try self.recentFilter(a),
+                try value(a, .{ .hasKeyword = state_record_keyword }),
+                try value(a, .{ .header = &[_][]const u8{ "X-Ivenna-State-Key", key } }),
+            },
+        });
         while (true) {
             const ids = try self.queryIds(a, filter, false, position, self.max_get);
             if (ids.len == 0) return null;
             for (try self.getRecords(a, ids, false)) |record| {
                 const letter = try self.decode(a, record, false);
-                if (letter.purpose != .core_handover or !self.isSelf(letter)) continue;
+                if (!self.isState(letter) or !std.mem.eql(u8, letter.state_key.?, key)) continue;
                 return self.read(a, letter.id) catch |err| switch (err) {
                     error.MailNotFound, error.MailBodyUnavailable => continue,
                     else => return err,
@@ -341,7 +332,7 @@ pub const Mailbox = struct {
             var available: std.ArrayList(Letter) = .empty;
             try self.appendAvailable(a, &available, ids);
             for (available.items) |letter| {
-                if (isHandover(letter) and self.isSelf(letter)) continue;
+                if (self.isState(letter)) continue;
                 try letters.append(a, letter);
                 if (letters.items.len == limit) break;
             }
@@ -417,9 +408,6 @@ pub const Mailbox = struct {
         const folders = try field(record, "mailboxIds");
         const keywords = try field(record, "keywords");
         if (folders != .object or keywords != .object) return error.InvalidMailReply;
-        var purpose: ?Purpose = null;
-        if (optionalText(record, purpose_property)) |text|
-            purpose = std.meta.stringToEnum(Purpose, std.mem.trim(u8, text, " \t\r\n"));
         return .{
             .id = try textField(record, "id"),
             .thread_id = try textField(record, "threadId"),
@@ -430,23 +418,25 @@ pub const Mailbox = struct {
             .to = try addresses(a, record, "to"),
             .subject = optionalText(record, "subject") orelse "",
             .body = if (body) try bodyText(a, record) else "",
-            .purpose = purpose,
+            .state_key = optionalText(record, state_key_property),
+            .state_record = boolean(keywords, state_record_keyword),
             .flagged = keywords.object.contains("$flagged"),
             .in_inbox = folders.object.contains(self.inbox_id),
             .in_archive = folders.object.contains(self.archive_id),
         };
     }
 
-    fn isSelf(self: Mailbox, letter: Letter) bool {
-        if (letter.from.len != 1 or !std.ascii.eqlIgnoreCase(letter.from[0].email, self.address)) return false;
+    fn isState(self: Mailbox, letter: Letter) bool {
+        const key = letter.state_key orelse return false;
+        if (!letter.state_record or key.len == 0 or letter.from.len != 1 or !std.ascii.eqlIgnoreCase(letter.from[0].email, self.address)) return false;
         for (letter.to) |recipient|
             if (std.ascii.eqlIgnoreCase(recipient.email, self.address)) return true;
         return false;
     }
 
-    /// Each call uses one invocation. Submission may additionally return an
-    /// implicit Email/set result; method and object errors in every result
-    /// must be checked before any success is returned.
+    /// Validate the requested operation independently of the implicit Email/set
+    /// result accompanying submission. That result describes sent-copy upkeep
+    /// and cannot undo acceptance of the submission itself.
     const Invocation = struct { result: Value, email_update: ?Value };
 
     fn call(self: Mailbox, a: Allocator, method: []const u8, arguments: anytype) !Value {
@@ -467,10 +457,16 @@ pub const Mailbox = struct {
             const parts = invocation.array.items;
             if (parts[0] != .string or parts[2] != .string or !std.mem.eql(u8, parts[2].string, "0"))
                 return error.InvalidMailReply;
-            if (std.mem.eql(u8, parts[0].string, "error")) return error.MailMethodFailed;
-            try checkObjectErrors(parts[1]);
+            if (std.mem.eql(u8, parts[0].string, "error")) {
+                if (std.mem.eql(u8, method, "EmailSubmission/set") and matched != null and email_update == null) {
+                    email_update = parts[1];
+                    continue;
+                }
+                return error.MailMethodFailed;
+            }
             if (std.mem.eql(u8, parts[0].string, method)) {
                 if (matched != null) return error.InvalidMailReply;
+                try checkObjectErrors(parts[1]);
                 matched = parts[1];
             } else if (std.mem.eql(u8, method, "EmailSubmission/set") and
                 std.mem.eql(u8, parts[0].string, "Email/set"))
@@ -521,8 +517,12 @@ fn objectLimit(record: Value, name: []const u8) !usize {
     return @intCast(@min(item.integer, 32));
 }
 
-fn isHandover(letter: Letter) bool {
-    return letter.purpose == .handover or letter.purpose == .core_handover;
+fn validStateKey(key: []const u8) !void {
+    if (key.len == 0) return error.InvalidStateKey;
+    for (key) |byte| switch (byte) {
+        0, '\r', '\n' => return error.InvalidStateKey,
+        else => {},
+    };
 }
 
 fn bodyText(a: Allocator, record: Value) ![]const u8 {

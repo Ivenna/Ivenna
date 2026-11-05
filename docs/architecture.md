@@ -1,159 +1,157 @@
 # Architecture
 
-Ivenna runs locally and uses mail for correspondence and work control. Stalwart stores and delivers letters; the kernel coordinates model sessions, tools, replies, and handovers. Working transcripts and child findings live in memory. Mail, autonomous memory, and host artifacts provide continuity beyond a process's lifetime.
+Ivenna coordinates model sessions, tools, and typed work. Execution histories live in memory. External correspondence and work state use separate mail components: EmailTransport receives and submits correspondence, while MailState interprets work controls and stores keyed handovers. Both use the shared mail client and source records.
 
-This guide describes ownership and execution. The [design intent](design.md) explains the behavior they serve, the [input contract](input.md) defines model observations, and the [usage guide](usage.md) explains correspondence and work control.
+The [design intent](design.md) explains these choices, the [input contract](input.md) defines model observations, and the [usage guide](usage.md) explains correspondence and available controls.
 
-## Core, conversations, and turns
-
-The runtime separates the purpose of work from the contexts and execution units used to carry it out:
+## Sessions, work, and communication
 
 | Concept | Role and lifetime |
 | --- | --- |
-| Task | A goal expressed through correspondence; it may remain open across many mail turns |
-| Core session | Permanent coordinating context with its own input queue and execution lane |
-| Work session | A fork with its own working history, queue, parent, and any children |
-| Work conversation | Correspondence in a native mail thread, routed to its responsible session |
-| Activation | One session handling queued mail or an assignment, including any wait for requested findings |
-| Mail turn | Work on one input letter, which can pass between sessions through handoff |
+| Task | Work to be accomplished; it may continue across activations |
+| Core session | Permanent coordinating context with its own queue and execution lane |
+| Work session | A fork with an independent history, queue, parent, and any children |
+| Input | Content with optional source information and context |
+| Delivery | An owned input or assignment being queued or executed, with any reply target and source control |
+| Activation | One session handling a delivery, including any wait for requested findings |
 | Model round | One model response followed by all tools it invoked |
 
-New correspondence enters the core's queue unless a session already owns that thread. The core can answer directly or transfer the work through `fork_session`. Its tool interface exposes handoff; work sessions have the full tool interface and can fork further sessions. Later input follows the thread's responsible session and queues while its current activation continues. Receipt does not interrupt that work; explicit steering remains unimplemented.
+Inputs carry content, optional provenance, and supporting context. Sessions own execution histories and queues; a producer can supply an opaque route for continuing work. New work enters the core unless that route identifies an existing owner. Follow-ups queue while an activation continues; explicit steering remains unimplemented.
 
-A response with no tool calls ends the current activation. For external correspondence, its final text can deliver a result, ask a question, or describe unfinished work. An internal subtask instead supplies findings when requested. Ending a mail turn does not establish that the overall task is complete; later correspondence can continue it.
-
-The external correspondence path is:
+The core can answer directly or hand work to another session through `fork_session`. Its tool interface exposes handoff; work sessions have the full tool interface and can fork further sessions. A response without tool calls ends the current activation. Its response destination determines whether text is a reply, requested findings, or an internal result; the broader task can remain open.
 
 ```mermaid
-flowchart TD
-    Mail[External Inbox letter] --> Route{Work session owns thread?}
-    Route -->|yes| Owner[Work session's queue]
-    Route -->|no| Core[Permanent core queue]
-    Owner --> Turn[Process the letter]
-    Core -->|direct answer| Reply[External reply when text is available]
-    Core -->|fork_session: handoff| Work[Work session owns correspondence]
-    Work --> Turn
-    Turn --> Round[Model response and complete tool batch]
-    Round -->|ordinary tool results| Round
-    Round -->|handoff| Work
-    Round -->|requested subtask findings| Wait[Wait without occupying a work slot]
-    Wait -->|findings arrive| Round
-    Round -->|no tool calls| Complete[Complete mail turn]
-    Complete --> Reply
-    Complete --> Handover[Save work-session handover]
-    Handover --> Queue{Queued input or active children?}
-    Queue -->|queued input| Turn
-    Queue -->|children remain| Retain[Retain context without occupying a work slot]
-    Retain -->|children finish| Queue
-    Queue -->|neither| Release[Release work context]
+flowchart LR
+    Kernel[Kernel] <--> Sessions[Sessions and work]
+    Kernel <--> Email[EmailTransport: external correspondence]
+    Kernel <--> State[MailState: controls and handovers]
+    Email --> Shared[Shared mail client and source records]
+    State --> Shared
+    Kernel --> Engine[Model round and tools]
+    Engine --> Kernel
 ```
 
-Context release leaves mail in its existing folders. A later reply can reconstruct the thread's working understanding from its handover and bounded correspondence, whether its source letters are in Inbox or Archive. The core context continues throughout.
+`MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core, and sets each session's normal input-queue capacity. Input that cannot be admitted stays with its producer; the mail integration leaves it available for later polling. Waiting parents retain context without consuming a work slot. The core still processes its requests serially, so responsiveness also depends on short coordination turns and service latency.
 
-`MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core, and sets each session's normal input-queue capacity. Mail that cannot be admitted remains in Inbox. A parent waiting for children retains its context without consuming a work execution slot. The core processes its own requests serially, so its lane remains subject to model and mail-service latency.
-
-## Forks and correspondence ownership
+## Forks and work ownership
 
 `fork_session` accepts a `task` and an optional `mode` object. The [tool definitions](../packages/agent/src/tools.json) own its parameters.
 
 | Mode | Meaning |
 | --- | --- |
-| `{"handoff":{}}` | Transfer the current work and response scope; this is the default |
+| `{"handoff":{}}` | Transfer the current work and its responsibilities; this is the default |
 | `{"subtask":{"report_to_parent":false}}` | Start internal work; enable `report_to_parent` to request findings |
 
-A fork copies the caller's complete current working context, including any compaction handover, then receives its own assignment and fresh runtime scope. Subsequent histories grow independently; host files, memory, mail, and world effects remain shared.
+A fork copies the caller's complete current context, including any compaction handover. It receives an assignment and fresh runtime state. Histories then grow independently while the host, memory, and world effects remain shared. The [input contract](input.md#assignments-and-handovers) defines assignment and provenance fields.
 
-In `handoff` mode, the child takes responsibility for the current work and response scope. For correspondence, it also takes queued input and ownership of later follow-ups in that thread. It replies directly to the correspondent. The parent can return to other input without repeating the child's answer or waiting for its completion. Handoff of an internal assignment preserves its internal response scope.
+Work gives each delivery two independent optional bindings:
 
-In `subtask` mode, the child receives an internal assignment. By default, the parent continues without receiving the child's result. Enabling `report_to_parent` suspends the parent's activation and retains its original delivery and response audience. After all requested findings arrive, that activation resumes. Results go to the requesting parent and do not pass through the core. Core subtasks remain unimplemented; the core exposes only handoff mode.
+| Binding | Responsibility |
+| --- | --- |
+| `ReplyTarget` | Bind the result to a private delivery receipt and a model-visible audience |
+| `SourceControl` | Keep the private receipt, input deduplication key, optional route, and optional persistent state key |
 
-For example, the core can transfer a letter with `{"task":"Investigate the request and reply to its sender.","mode":{"handoff":{}}}`. A work session can request supporting findings with `{"task":"Inspect the relevant source files.","mode":{"subtask":{"report_to_parent":true}}}`.
+Either binding can be present on its own. A plain native input can have neither. Model response state projects the audience or reporting destination; receipt and control values stay in Work.
 
-During tool invocation, the registry reserves the child's identity and capacity. After the model output and every corresponding tool result have been committed, it copies that complete context and makes the child ready to run. Handoff ends the parent's activation without another inference to conclude the transfer. A handoff is the only fork allowed in its model round; a work session can request several subtasks in one round.
+A handoff transfers the active delivery's responsibilities, including queued follow-ups for its route when present. The child can answer directly; the parent returns to its queue without another inference to conclude the transfer. An internal handoff preserves its internal destination.
+
+A subtask does not acquire the parent's reply target or source control. By default, its parent continues without receiving findings. Enabling `report_to_parent` suspends the parent's activation until all requested findings arrive, then resumes its retained work. Results go to that parent without passing through the core. Core subtasks remain unavailable; the core exposes only handoff mode.
+
+Sessions reserves child identity and capacity during tool invocation. It publishes a fork only after committing model output and one result for every tool call, so inherited history contains a complete exchange. A handoff is the only fork allowed in its model round; a work session can request several subtasks in one round.
 
 ## Responsibilities
 
 | Component | Responsibility |
 | --- | --- |
-| [Application](../apps/ivenna) | Load configuration, assemble shared dependencies, and own startup and shutdown |
-| [Conversation registry](../packages/agent/src/conversations.zig) | Own sessions, thread routing, queues, contexts, fork publication, and synchronized scheduling state |
-| [Kernel](../packages/agent/src/kernel.zig) | Coordinate mailbox I/O, workers, model rounds, fork operations, handover, and context release |
+| [Application](../apps/ivenna) | Load configuration, assemble shared and domain components, and own startup and shutdown |
+| [Work](../packages/agent/src/work.zig) | Own inputs, assignments, deliveries, reply targets, source controls, and completion phases |
+| [Sessions](../packages/agent/src/sessions.zig) | Own contexts, queues, opaque routes, fork publication, and synchronized scheduling |
+| [Kernel](../packages/agent/src/kernel.zig) | Coordinate execution, email, internal state, and worker scopes |
+| [Email transport](../packages/agent/src/email_transport.zig) | Project external correspondence into input material and submit replies |
+| [Mail state](../packages/agent/src/mail_state.zig) | Interpret Inbox and flags as work controls and store handovers by state key |
+| [Mail sources](../packages/agent/src/mail_sources.zig) | Own shared source records, opaque receipts, caching, and immutable source artifacts |
+| [Mail client](../packages/agent/src/mail.zig) | Decode the required JMAP operations into typed results |
+| [Input](../packages/agent/src/input.zig) | Own native observation types and render them as YAML |
 | [Engine](../packages/agent/src/engine.zig) | Execute one model response and its complete tool batch |
-| [Context](../packages/agent/src/context.zig) | Own history and copy complete contexts for forks and handover |
-| [Input](../packages/agent/src/input.zig) | Own the observation union and payload types; render them as YAML for the model |
-| [Compaction](../packages/agent/src/compaction.zig) | Construct and bound summary requests and validate their output |
-| [Mail](../packages/agent/src/mail.zig) | Decode the required JMAP operations into typed mailbox results |
-| [Provider](../packages/agent/src/provider.zig) | Encode model requests and tool replies and decode model output |
-| [Memory](../packages/agent/src/memory.zig) | Resolve write sources and exchange operations with the file workspace over SSH |
-| [Host](../packages/agent/src/host.zig) | Route shell operations and select their returned content |
+| [Context](../packages/agent/src/context.zig) | Own histories and copy complete contexts for forks and handovers |
+| [Compaction](../packages/agent/src/compaction.zig) | Construct and bound summary requests and validate output |
+| [Provider](../packages/agent/src/provider.zig) | Encode model requests and tool replies and decode output |
+| [Memory](../packages/agent/src/memory.zig) | Exchange operations with the shared file workspace over SSH |
+| [Host](../packages/agent/src/host.zig) | Route shell operations and select returned content |
 
-Registry methods serialize changes to queues and authoritative working histories. Workers use independently owned snapshots for inference and commit complete output and tool batches before their model-round arenas end. A worker's borrow keeps its session alive through handoff and completion. The kernel owns the worker task group; shutdown cancels and joins those tasks before the application releases their shared HTTP client and other dependencies.
+Sessions compares opaque control and route values. The kernel connects an incoming letter's projected content and reply target to the work controls supplied by MailState. Work, Sessions, and Input depend on those typed values; native mail decoding belongs to the mail client and its adapters.
 
-Mail uses Zig's `std.http` and `std.json` for a narrow JMAP interface. Stalwart handles MIME parsing, body decoding, message construction, native threading, and delivery. Its own storage retains correspondence; Ivenna keeps execution contexts in memory.
+Sessions serializes queue and history changes. Workers infer from owned snapshots and commit complete rounds before their arenas end. A worker's borrow keeps its session alive through completion or handoff. Shutdown cancels and joins the kernel's worker group before shared dependencies are released.
 
-## Mail intake and structured input
+## Email boundary and source materials
 
-Unread Inbox letters request attention. The kernel polls through JMAP and routes by native thread ID; notification streaming remains unimplemented. Message identifiers, reply headers, and normalized subjects let the mail service group related letters. Flagged input receives scheduling priority.
+EmailTransport renders a nonempty subject, a blank line, and the body as input text; with an empty subject it uses the body alone. It supplies author descriptions as provenance and names the reply audience in response state. The adapter retains native reply headers and delivery identifiers for submission and source inspection.
 
-The mailbox's ordinary state remains part of this interface. Another client marking a letter read affects its eligibility for intake. Moving an active source out of Inbox withdraws its correspondence work at a complete model/tool boundary. This does not cancel internal subtasks already started from that source. A separate operator account keeps ordinary correspondence apart from deliberate management of Ivenna's Inbox.
+Material within the excerpt budget is supplied inline. Longer material includes an excerpt and a reference to the complete projection. The boundary captures source artifacts for both representations.
 
-Input renders a typed observation union inside a common session envelope. Mail observations carry a body excerpt and an origin record identifying the correspondence and full decoded body on the host. Assignments, findings, handovers, runtime state, source updates, and summary tasks each have their own payload type. The [input contract](input.md) defines these variants and their fields.
+EmailTransport derives source references from an available Message-ID, trimming surrounding whitespace and angle brackets before hashing; its fallback includes the service, account, and native letter identifier. Routes group correspondence by service, account, and native thread. MailSources derives physical receipts from the service endpoint, account, and native letter. Copies sharing a Message-ID can therefore share provenance while retaining separate receipts for flag and delivery effects.
 
-Historical inputs retain their original source meaning. Each ordinary model request also receives a fresh runtime snapshot identifying the session, its parent and children, current execution counts, and the response's source and audience. The [input contract](input.md#current-state-and-output-audience) defines these fields.
+Shared source-cache cleanup checks receipts still retained by work. It does not delete mail or artifacts. Under `<DATA_DIR>/sources/`, projected content uses `receipt-<receipt-hash>-<content-hash>.txt` and decoded details use `receipt-<receipt-hash>.json`. Both hashes use SHA-256; the content hash covers the projected bytes. The text resource contains the same full material represented inline or excerpted in input, and its hash distinguishes different projections of one receipt. Each file is published once through an atomic link, so later reads and polling do not truncate or rewrite it. The details file preserves the first captured snapshot of selected `Mail.Letter` fields, including its body, rather than original MIME or current mailbox state.
 
-Snapshots are request-local and do not accumulate in retained history. Reconstructed correspondence, assignments, findings, withdrawal observations, and summary tasks use the same envelope. The [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+The boundary prefers decoded plain text and falls back to UTF-8 HTML source. Unsupported or incomplete bodies remain unavailable for intake, with a diagnostic. Mail attachment intake and notification streaming remain unimplemented.
 
-Intake prefers decoded plain text and falls back to UTF-8 HTML source. A letter without a supported complete body remains unread and produces a diagnostic; later supported letters can still proceed. Attachment intake is not implemented.
+## Internal mail state
+
+MailState interprets Inbox membership and flags as execution controls. Eligible input can be queued, flagged input receives priority, and withdrawal stops the active delivery at a complete model/tool boundary. The kernel records that change as a work update. Completed effects remain, and already-started internal subtasks continue under their own control.
+
+The current application uses each incoming letter's mailbox state as its control record. EmailTransport supplies its material and reply target; MailState checks eligibility, withdrawal, and acknowledgment. The kernel assigns the work route and persistent state association.
+
+Handovers are internal state records with their own mail identity. MailState creates self-addressed letters in Archive with subject `Ivenna state: <key>`, header `X-Ivenna-State-Key`, and the private `ivenna-state` keyword. The mail client stores them through `Email/set` without submitting them for delivery or adding an external reply chain. State lookup narrows candidates by header and keyword, then checks the exact key and private keyword. The sole From address and at least one To address must match Ivenna, ignoring case. Recognized state records are excluded from ordinary input and email history. Loading one returns the summary and its resource reference as a native handover.
+
+The core uses the fixed key `core`. For communication work, the kernel assigns `conversation/<route-ref>` to `SourceControl.state_key`. This key selects continuity storage independently of input provenance and reply destination.
+
+Work without a persistent state key can compact in memory, but has no cross-restart handover lookup contract. Durable identities and lifetimes for independent internal work remain undecided; source references do not supply them.
+
+## Structured observations and response destinations
+
+Input renders typed observations inside a common session envelope. The [input contract](input.md) owns their payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+
+An ordinary request appends a fresh runtime observation to its inference snapshot. It describes the current session, execution counts, and result destination, and is discarded with that request view. Retained observations supply history; they do not override this current state. Compaction supplies current state inside its dedicated summary request.
 
 ## Turn completion and context release
 
-Engine returns one result for each tool call. Ordinary results feed another model round; a handoff transfers the current work, and a request for subtask findings suspends the current activation. Intermediate assistant text and complete tool exchanges stay in the transcript.
+Engine returns one result per tool call. Ordinary results feed another round; handoff transfers work, and requested findings suspend its activation. Intermediate assistant text and complete exchanges remain in history.
 
-For an external input, the kernel submits available final text as a reply, preserves native reply references, and marks the source answered. External submission and internal mail storage use distinct typed operations. External reply bodies contain the final model text; internal identifiers and housekeeping prose are not appended. The kernel marks the input read after handling it. A response without text ends the turn without an external reply; the overall task can still need further input.
+A final response without tool calls moves `Work.Delivery.completion` from `pending` to `ready`, retaining optional text in the delivery arena. If text and a reply target exist, the kernel submits the reply through EmailTransport and records confirmed acceptance. If source control exists, it then asks MailState to acknowledge that input. A failure during acknowledgment preserves the ready result and submission phase in the paused delivery. When scheduled again, that delivery continues finalization using the retained result. Requested findings return to the waiting parent; other internal completion produces no external reply.
 
-A work session replies directly to its external source without automatically reporting to the core. An internal subtask owns no external correspondence route; requested findings resume the parent's retained delivery. Self-addressed mail is handled as ordinary input with an internal audience. These response scopes are described in the [input contract](input.md#current-state-and-output-audience).
+`Mail.Submission` separates `mail_id` from a `sent_copy` outcome of `updated` or `unconfirmed`. Submission acceptance and the following implicit `Email/set` result are distinct under [RFC 8621 §7.5](https://www.rfc-editor.org/rfc/rfc8621.html#section-7.5). A failed sent-copy update does not erase confirmed acceptance. EmailTransport records the uncertainty diagnostically, without adding operational prose to the reply. Service acceptance does not establish final recipient delivery.
 
-When a work session finishes handling a source letter, the kernel saves a bounded handover. The registry completes that activation and checks the session's queue and children:
+When a work context with a state key needs a handover, the kernel saves it through MailState. Sessions completes the activation and checks queued input, children, and worker ownership before releasing context. Queued work can continue; children keep an idle parent retained without occupying a work slot. A worker's final borrow prevents release before it returns.
 
-1. Queued input can start another activation.
-2. Active children keep the parent context retained without occupying an execution slot.
-3. When neither remains, the context can be released after its worker returns and the registry rechecks ownership.
-
-The permanent core is never released by this path and does not request a summary after each turn. Internal subtasks finish without marking the source letter read or creating a turn-end handover. Input accepted while a handover is being saved keeps its work session available.
-
-Correspondence handovers contain the bounded model summary and retain the source's normalized `Re:` subject, `In-Reply-To`, and `References` so Stalwart keeps them in the same thread. Compaction of the core stores a standalone `Core handover` letter. `X-Ivenna-Purpose` distinguishes `handover` from `core_handover`; startup selects the latest self-addressed `core_handover` across threads.
-
-If handover generation or storage fails after a result was delivered, the kernel logs the failure and retains the working context. It does not repeat the delivered result merely to release resources.
+The permanent core remains available between activations and does not request a summary after each one. Internal subtasks keep their own result and control bindings. Input accepted during summary storage keeps its work session available. A failed summary or storage operation retains context; a confirmed reply submission remains recorded in the delivery.
 
 ## Mail retention
 
-Archival and later deletion manage retained mail and mailbox capacity. They are separate from context release. A handover is a self-addressed letter saved in Archive; choosing that folder for the note does not archive the source correspondence.
+External correspondence and internal state records have their own retention lifecycles. Normal completion updates source flags while leaving folder membership unchanged; handover storage creates a separate record in Archive.
 
-The normal execution path marks processed input read and leaves its folder membership unchanged. Automatic retention and deletion remain unimplemented. Mail provides an archive helper, while its deletion placeholder returns `ArchiveDeletionUnavailable`. Deployment users can manage mail and artifacts through their existing services and files.
+Automatic retention and deletion remain unimplemented. The low-level mail client has an archive helper and an explicit deletion placeholder. Operators manage retained records and source artifacts through their services and files; context release and cache cleanup do not delete either.
 
 ## Bounded model context
 
-`CONTEXT_REQUEST_BYTES` bounds the complete serialized ordinary request, including instructions, tools, YAML input, retained output, tool replies, and image encoding. `LLM_MAX_OUTPUT_TOKENS` separately bounds generated output.
+`CONTEXT_REQUEST_BYTES` bounds the complete ordinary request, including instructions, tools, native observations, retained output, tool replies, and encoded images. `LLM_MAX_OUTPUT_TOKENS` separately bounds generated output.
 
-When another request would exceed the byte budget, Compaction builds a `context_compaction` observation with instructions from [compaction.md](../packages/agent/src/compaction.md) and the current state, setting its response audience to internal. The frame retains the actual session identity. Provider sends it with no tools and `tool_choice: none`.
+Compaction builds a `context_compaction` observation from [compaction.md](../packages/agent/src/compaction.md) and current state with response `summary`. The frame retains session identity. Provider disables tools with `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
 
-`CONTEXT_COMPACTION_BYTES` bounds that complete request. Compaction requires nonempty assistant text within `HANDOVER_MAX_BYTES` and rejects tool calls. After checking that the replacement fits the ordinary request budget and saving the handover, the kernel installs it as the working context. The current policy retains no earlier raw transcript batches; Context can retain a tail only at complete batch boundaries.
+The kernel checks that the replacement fits the ordinary budget, saves it when a persistent state key exists, and installs the native handover in working context. Work without a key uses the same in-memory replacement. The current policy retains no earlier raw transcript batches; any retained tail must end at complete batch boundaries.
 
-Work sessions use the same summary operation after handling a source letter to support context release and reopening. Source correspondence and artifacts remain available by reference.
-
-Serialized bytes are a measurable local bound. Model-specific token and image accounting remains planned. If a request or summary cannot meet its limit, execution fails explicitly; an unfinished tool exchange cannot be shortened by cutting away arbitrary messages.
+Byte counts are local measurements, not model-token estimates. Model-specific accounting remains planned. If a request or summary cannot meet its bound, execution fails explicitly rather than cutting an unfinished exchange.
 
 ## Startup and interruption
 
-Startup rebuilds the core from its latest core handover and observations of at most 32 recent letters, using excerpts of at most 512 bytes and stopping when the request budget needs room for active input. Input for a thread without an active owner enters the core with its handover and up to 32 recent letters, independent of Inbox or Archive membership. These history excerpts also use at most 512 bytes; the normal complete-request check and compaction apply before inference. A subsequent handoff inherits that reconstructed understanding in the core's complete current context. Full bodies remain available through source-file references.
+MailState supplies the latest handover for the fixed core key. The email boundary supplies recent external material as evidence, and communication work can recall a keyed handover through the kernel's route association. Startup and reconstruction respect excerpt and complete-request budgets. A later fork inherits that reconstructed context rather than a restored execution checkpoint.
 
-These letters supply evidence for continued work. The previous process's working transcripts, queued execution state, and branch tree are not restored. In-flight model and tool operations do not resume from their interruption point.
+Restart reconstructs understanding from the available keyed handovers and external material. It does not restore transcripts, delivery queues, completion phases, source caches, or the branch tree. In-flight model and tool operations do not resume from their interruption point.
 
-An execution failure in tracked correspondence pauses its input and retains the current in-process context. The kernel suppresses repeated automatic attempts at that letter; new related input can provide direction. An internal subtask failure instead returns a failed report when findings were requested, then releases its context when no child remains. After restart, unread mail may be considered again with reconstructed understanding.
+A delivery with source control or a reply target pauses on failure, retaining its context and any ready result; paused work is not automatically retried. A delivery with neither completes as internal failure, returning requested findings as a failed report and releasing context once children and worker ownership allow it.
 
-A host command, memory change, or mail submission may have taken effect before an interruption was observed. Cancellation does not undo those effects. Inspect affected mail, files, and the observable world before repeating an action with an uncertain outcome.
+A host command, memory change, or submission may have taken effect before interruption was observed. Losing a submission response can leave acceptance unknown; repeating it can produce a duplicate. Completion phases protect confirmed submissions within retained in-process deliveries, not exactly-once delivery across network failures or restart. Inspect uncertain effects before repeating work.
 
-One kernel owns an Ivenna account's runtime state. Mail operations, host effects, memory writes, and working context do not share a transaction.
+One kernel owns an Ivenna account's execution state. External submission, internal state changes, host effects, memory writes, and working context do not share a transaction.
 
 ## Autonomous memory
 
@@ -165,16 +163,16 @@ Transfers buffer complete files and payloads. Memory copies or decodes returned 
 
 ## Host execution
 
-All sessions execute as the kernel's OS account and share its filesystem and startup environment. Forking a model context leaves these resources shared, so a prior observation may need to be checked again after another session acts.
+Work sessions execute as the kernel's OS account and share its filesystem and startup environment. Forking a model context leaves these resources shared, so a prior observation may need to be checked again after another session acts.
 
 Host validates and routes requests. [Shell](../packages/agent/src/host/shell.zig) executes a fresh noninteractive `/bin/sh` command; [process.zig](../packages/agent/src/host/process.zig) owns process groups, timeouts, cancellation, and reaping. Complete output remains in host files, while [Reader](../packages/agent/src/host/reader.zig) selects the content returned to the model.
 
-Persistent process sessions, live stdin, PTYs, explicit process control, and background completion scheduling are reserved capabilities with no model-facing operations yet. See [host shell](host.md) for the available tools, output, and interruption behavior.
+Persistent process sessions, live stdin, PTYs, explicit process control, and background completion scheduling are reserved capabilities with no model-facing operations yet. See [host shell](host.md) for available tools, output, and interruption behavior.
 
 ## Content and provider boundary
 
-[content.zig](../packages/agent/src/content.zig) defines text and image parts and classifies individual byte sources. The owning tool renders unavailable-content diagnostics as text. [image.zig](../packages/agent/src/image.zig) recognizes image signatures. Classification borrows bytes and can interpret a source as an image reference; pixel decoding and URL retrieval belong to the model service.
+[content.zig](../packages/agent/src/content.zig) defines text and image parts and classifies individual byte sources. The owning tool renders unavailable-content diagnostics as text. [image.zig](../packages/agent/src/image.zig) recognizes image signatures. Classification borrows bytes; a separate explicit interpretation can present source text as an image reference. Pixel decoding and URL retrieval belong to the model service.
 
 Memory and Host return content in the model-round arena. Provider encodes the supplied parts for the configured model protocol, matching each tool reply to its call ID. Local image bytes become request data; remote URLs remain references whose contents can change. Image rejection preserves accompanying text and reports the omitted image. Provider's image checks apply alongside the whole-context budget. See [tool content](content.md) for formats and limits.
 
-Provider validates complete function-call envelopes before Engine executes any tool in the response. Unknown tools and invalid arguments become tool errors available to the next model round. Registry copies accepted model output, including reasoning items, and tool results into retained history before the round arena ends.
+Provider validates complete function-call envelopes before Engine executes any tool in the response. Unknown tools and invalid arguments become tool errors available to the next model round. Sessions copies accepted model output, including reasoning items, and tool results into retained history before the round arena ends.

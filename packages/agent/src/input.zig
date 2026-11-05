@@ -1,37 +1,54 @@
 const std = @import("std");
 const yaml = @import("yaml");
-const Mail = @import("mail.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Role = enum { core, branch };
-pub const Audience = enum { external, internal };
 
-pub const MailOrigin = struct {
-    mail_id: []const u8,
-    thread_id: []const u8,
-    message_id: ?[]const u8 = null,
-    in_reply_to: ?[]const u8 = null,
-    references: []const []const u8 = &.{},
-    purpose: ?Mail.Purpose = null,
-    from: []const Mail.Address,
-    to: []const Mail.Address,
-    subject: []const u8,
-    observed_at_unix_ms: i64,
-    body_file: []const u8,
-    body_bytes: usize,
+pub const Resource = struct {
+    file: []const u8,
+    byte_length: usize,
 };
 
-pub const MailRecord = struct {
-    origin: MailOrigin,
-    excerpt: []const u8,
-    excerpt_bytes: usize,
+pub const Content = union(enum) {
+    text: []const u8,
+    excerpt: struct {
+        text: []const u8,
+        full: Resource,
+    },
 };
 
-/// Historical mail carries evidence, without another frame's session identity
-/// or the authority of a current assignment or runtime observation.
+pub const Source = struct {
+    reference: []const u8,
+    description: ?[]const u8 = null,
+    observed_at_unix_ms: ?i64 = null,
+    details: ?Resource = null,
+};
+
+pub const Evidence = struct {
+    content: Content,
+    source: ?Source = null,
+};
+
+pub const Input = struct {
+    content: Content,
+    source: ?Source = null,
+    context: []const Background = &.{},
+};
+
+pub const Handover = struct {
+    summary: []const u8,
+    source: ?Resource = null,
+};
+
+pub const Assignment = struct {
+    task: []const u8,
+    from_session: u64,
+    source_refs: []const []const u8 = &.{},
+};
+
 pub const Background = union(enum) {
-    history: MailRecord,
-    handover: MailRecord,
+    evidence: Evidence,
+    handover: Handover,
 };
 
 pub const ReportOutcome = union(enum) {
@@ -39,56 +56,48 @@ pub const ReportOutcome = union(enum) {
     failed: []const u8,
 };
 
+pub const Response = union(enum) {
+    reply: struct { audience: []const []const u8 },
+    report: struct { session_id: u64 },
+    internal: struct {},
+    summary: struct {},
+};
+
 pub const State = struct {
-    conversation: struct {
+    session: struct {
         role: Role,
         parent_generation: ?u64 = null,
         parent_session_id: ?u64 = null,
         active_children: usize = 0,
-        thread_id: []const u8,
     },
     runtime: struct {
         active_sessions: usize,
         running_sessions: usize,
-        active_conversations: usize,
-        queued_turns: usize,
+        queued_inputs: usize,
     },
-    response: struct {
-        audience: Audience = .internal,
-        source_mail_id: ?[]const u8 = null,
-    } = .{},
+    response: Response = .{ .internal = .{} },
 };
 
-/// Current state for one model request. Strings borrow the active delivery or
-/// session and must be rendered while their owner remains live.
+/// Current state for one model request. Reply audience descriptions borrow the
+/// active delivery and must be rendered while it remains live.
 pub const Snapshot = struct {
     session_id: u64,
     state: State,
 };
 
 pub const Observation = union(enum) {
-    input: struct {
-        letter: MailRecord,
-        background: []const Background = &.{},
-    },
-    assignment: struct {
-        task: []const u8,
-        origin: MailOrigin,
-    },
+    input: Input,
+    assignment: Assignment,
     report: struct {
         from_session: u64,
         outcome: ReportOutcome,
     },
-    handover: struct {
-        summary: []const u8,
-        thread_id: []const u8,
-    },
+    handover: Handover,
     background: struct {
         items: []const Background,
     },
     runtime: State,
-    source_update: struct {
-        mail_id: []const u8,
+    work_update: struct {
         state: enum { withdrawn },
     },
     context_compaction: struct {
@@ -115,7 +124,6 @@ pub fn serialize(arena: Allocator, session_id: u64, observation: Observation) ![
     return output.toOwnedSlice();
 }
 
-/// Runtime state is request-local and does not accumulate in working history.
 pub fn serializeSnapshot(arena: Allocator, snapshot: Snapshot) ![]const u8 {
     return serialize(arena, snapshot.session_id, .{ .runtime = snapshot.state });
 }

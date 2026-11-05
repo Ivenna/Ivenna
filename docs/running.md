@@ -89,7 +89,7 @@ dev/memory/start.sh status
 
 ## Stopping and restarting
 
-Press `Ctrl+C` in the kernel terminal. With the same environment and middleware still running, use `zig build run` again to continue corresponding. The kernel reconstructs its understanding from mail and handovers; suspended model requests and individual tool results remain part of the previous process's runtime history.
+Press `Ctrl+C` in the kernel terminal. With the same environment and middleware still running, use `zig build run` again to continue corresponding. Startup reconstructs working understanding from stored handovers and correspondence. It does not resume suspended model requests or tool calls.
 
 To remove the local middleware containers while retaining mail, memory, and SSH keys:
 
@@ -127,7 +127,7 @@ The kernel reads the settings below at startup. Stop it, edit `.env`, load the v
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. Numeric kernel settings must be positive. `CONTEXT_COMPACTION_BYTES` must be at least `CONTEXT_REQUEST_BYTES`. The work execution limit and retained-context limit are independent.
 
-The context limit includes parents waiting for children; these contexts do not occupy work execution slots. A limit of one leaves room only for the core, so no fork can be admitted. Mail that cannot be admitted remains in Inbox. See [session capacity](architecture.md#core-conversations-and-turns) for scheduling behavior.
+The context limit includes parents waiting for children; these contexts do not occupy work execution slots. A limit of one leaves room only for the core, so no fork can be admitted. Mail that cannot be admitted remains in Inbox. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
 
 Request byte limits cover the whole serialized body, including instructions, tool definitions, history, and encoded images. They do not estimate model tokens. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
 
@@ -164,13 +164,15 @@ Memory port, image, and capacity changes take effect when the memory container i
 | Stalwart volume, `ivenna-mail` by default | Mail, handovers, accounts, and Stalwart configuration |
 | `dev/mail/provision.ndjson` | Private mail configuration plan |
 | `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
-| `<DATA_DIR>/mail/<sha256-of-mail-id>.txt` | Full input bodies for model context and host inspection |
+| `<DATA_DIR>/sources/` | Captured input text and decoded mail snapshots |
 | `.ivenna/dev-memory/` | Local memory SSH configuration and keys |
 | Memory workspace selected by SSH configuration | Shared memory rooms and entries |
 
 Changing `DATA_DIR` changes where the kernel writes artifacts; it does not move existing files, middleware volumes, or the memory script's state under the repository's `.ivenna/dev-memory/` directory.
 
-Correspondence handovers are saved in Archive, while source letters stay in their existing folders. Context release does not remove mail or artifacts. Automatic mail retention and coordinated artifact cleanup are not implemented; see [mail retention](architecture.md#mail-retention).
+Source files let a work session retrieve the complete material behind an excerpt and inspect mail details when needed. Correspondence text includes the subject and body supplied as input; JSON snapshots contain decoded fields rather than original MIME or live mailbox state. These files remain after the work finishes. See [source materials](architecture.md#email-boundary-and-source-materials) for their naming and publication contract.
+
+Handovers are self-addressed state records saved locally in Archive. Saving them or releasing working context leaves source letters in their existing folders. Automatic mail retention and coordinated artifact cleanup are not implemented; see [mail retention](architecture.md#mail-retention).
 
 ## Using an existing mail service
 
@@ -178,7 +180,7 @@ Use a dedicated account with JMAP Mail and Submission capabilities and a sending
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in `.env`, then skip local mail provisioning and startup. Use another account to send requests and read replies. Marking letters read in Ivenna's account affects intake.
 
-The service owns delivery and retention policy. Keep source correspondence and handovers when preserving the basis for later continuation.
+This deployment uses the same mailbox for correspondence and internal state records, with Inbox membership and source-letter flags controlling work. Configure service retention to preserve correspondence and handovers needed for later continuation.
 
 ## Using remote memory
 

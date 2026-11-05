@@ -48,7 +48,7 @@ Moving a room or entry changes its address; references stored in memory content 
 | `{"text":"..."}` | Write the supplied text as UTF-8 |
 | `{"file":{"path":"..."}}` | Copy a file's original bytes from Ivenna's host filesystem |
 
-A source file path can be absolute or relative to the service's startup directory. The destination `address` remains relative to the memory entrance.
+A source file path can be absolute or relative to Ivenna's startup directory. The file is read on Ivenna's host and copied to the memory workspace; the destination `address` remains relative to the memory entrance.
 
 For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to append the source bytes without inserting a separator, or `replace` to write the full content. Both modes can also create a missing entry. Create and append require an existing containing room; replace also creates missing parent rooms.
 
@@ -196,7 +196,7 @@ The `kind` field is `room` for a memory room and `memory` for a memory entry. A 
 | `unchanged` | A match was found, but the content did not change |
 | `revised` | The content was revised |
 
-On failure, `error` provides a `code` and `message` describing the problem. `source_unavailable` means a host source file could not be read; this invocation sent no remote memory request. `unsupported_content` from a revision means the entry was not UTF-8 text without NUL bytes, so no revision was written.
+An error reply provides a `code` and `message` describing the problem. `source_unavailable` means a host source file could not be read; this invocation sent no remote memory request. `unsupported_content` from a revision means the entry was not UTF-8 text without NUL bytes, so no revision was written.
 
 `memory_capacity_exceeded` means the proposed change would increase occupied space beyond the rooms' shared capacity; the entry did not change. See [memory space](#memory-space) for the measurements and permitted changes.
 

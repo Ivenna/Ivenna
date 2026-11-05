@@ -42,10 +42,10 @@ pub const Context = struct {
         return self.copy(allocator, 0, 0);
     }
 
-    pub fn appendInput(self: *Context, rendered_mail: []const u8) !void {
+    pub fn appendInput(self: *Context, rendered_input: []const u8) !void {
         var next = try self.copy(self.allocator, 1, 0);
         errdefer next.deinit();
-        next.messages[self.messages.len] = try message(next.arena.allocator(), "user", rendered_mail);
+        next.messages[self.messages.len] = try message(next.arena.allocator(), "user", rendered_input);
         self.replace(next);
     }
 
@@ -75,13 +75,13 @@ pub const Context = struct {
     }
 
     /// Prepare a bounded replacement candidate. The caller validates the full
-    /// provider request, sends the handover mail, and only then installs it.
-    /// The handover is a user observation, keeping recalled correspondence
-    /// separate from system instructions.
+    /// provider request and, when a state key exists, persists the handover
+    /// before installing it. The handover is a user observation, keeping
+    /// recalled material separate from system instructions.
     /// Keeping zero batches replaces the entire earlier working view. Keeping
     /// a tail preserves complete model outputs together with all their results.
-    pub fn withHandover(self: *const Context, allocator: Allocator, rendered_handover_mail: []const u8, keep_recent_batches: usize) !Context {
-        if (std.mem.trim(u8, rendered_handover_mail, " \t\r\n").len == 0) return error.EmptyHandover;
+    pub fn withHandover(self: *const Context, allocator: Allocator, rendered_handover: []const u8, keep_recent_batches: usize) !Context {
+        if (std.mem.trim(u8, rendered_handover, " \t\r\n").len == 0) return error.EmptyHandover;
         const retained_count = @min(keep_recent_batches, self.batch_starts.len);
         const first_batch = self.batch_starts.len - retained_count;
         const tail_start = if (retained_count == 0) self.messages.len else self.batch_starts[first_batch];
@@ -91,7 +91,7 @@ pub const Context = struct {
         const a = arena.allocator();
         const messages = try a.alloc(Value, 2 + tail.len);
         messages[0] = try cloneValue(a, self.messages[0]);
-        messages[1] = try message(a, "user", rendered_handover_mail);
+        messages[1] = try message(a, "user", rendered_handover);
         for (tail, 0..) |item, i| messages[2 + i] = try cloneValue(a, item);
         const batch_starts = try a.alloc(usize, retained_count);
         for (self.batch_starts[first_batch..], 0..) |start, i| batch_starts[i] = 2 + start - tail_start;
@@ -103,8 +103,8 @@ pub const Context = struct {
         };
     }
 
-    pub fn replaceWithHandover(self: *Context, rendered_handover_mail: []const u8, keep_recent_batches: usize) !void {
-        self.replace(try self.withHandover(self.allocator, rendered_handover_mail, keep_recent_batches));
+    pub fn replaceWithHandover(self: *Context, rendered_handover: []const u8, keep_recent_batches: usize) !void {
+        self.replace(try self.withHandover(self.allocator, rendered_handover, keep_recent_batches));
     }
 
     fn copy(self: *const Context, allocator: Allocator, extra_messages: usize, extra_batches: usize) !Context {

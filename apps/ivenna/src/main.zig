@@ -37,7 +37,11 @@ pub fn main(init: std.process.Init) !void {
             .max_output_tokens = config.llm_max_output_tokens,
         },
     };
-    var kernel = try agent.Kernel.init(init.gpa, io, &engine, &mailbox, config.context_limits, config.mail_poll_interval_ms, config.max_parallel_attention, config.max_attention_contexts);
+    var sources = agent.MailSources.init(init.gpa, io, &mailbox, data_directory);
+    defer sources.deinit();
+    var email = agent.EmailTransport.init(io, &mailbox, &sources);
+    var state = agent.MailState.init(io, &mailbox, &sources);
+    var kernel = try agent.Kernel.init(init.gpa, io, &engine, &email, &state, &sources, config.context_limits, config.mail_poll_interval_ms, config.max_parallel_attention, config.max_attention_contexts);
     defer kernel.deinit();
 
     const action: std.posix.Sigaction = .{

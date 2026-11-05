@@ -12,11 +12,11 @@ During development, do not write tests in advance or introduce test frameworks. 
 
 ## Implementation boundaries
 
-Follow the component boundaries in the [architecture guide](architecture.md#responsibilities). Decode external protocols in their owning components and give execution code typed operations.
+Follow the component boundaries in the [architecture guide](architecture.md#responsibilities). Decode external protocols in their owning components and give execution code typed operations. Work, session scheduling, and model observations must not depend on mail records, headers, folders, or native thread identifiers.
 
 Treat prompts and tool descriptions as editable interfaces. Put ongoing behavioral instructions in [system.md](../packages/agent/src/system.md), operation behavior in [tools.json](../packages/agent/src/tools.json), and task facts and observations in user input. Keep descriptions concise, with detailed field references in the [input contract](input.md). Revise the owning resource, renderer, and documentation together when their contract changes.
 
-[Input](../packages/agent/src/input.zig) owns the closed observation union and its payload types. Construct those variants directly; the renderer serializes them without merging arbitrary fields. The system prompt describes the shared envelope and variant meanings, while tool definitions explain available operations.
+[Input](../packages/agent/src/input.zig) owns the closed observation union and its payload types. Construct those variants directly; the renderer serializes them without merging arbitrary fields. Native inputs carry content, optional provenance, and optional context. Do not require communication metadata or source files for work that has none. Original email details are source material to inspect when relevant, not fields in session state. The system prompt describes the shared envelope and variant meanings, while tool definitions explain available operations.
 
 Keep external correspondence, internal work reports, continuity handovers, and diagnostics distinct at their owning interfaces. Delivery code submits the intended answer without adding operational prose. Content handling preserves text, media, and source descriptions together; see [tool content](content.md) for classification and interpretation.
 
@@ -24,16 +24,18 @@ Keep external correspondence, internal work reports, continuity handovers, and d
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
-The registry owns contexts, queues, and synchronization; the kernel owns external orchestration and worker task scopes. Copy or transfer values that must outlive a model-round arena. Cancel and join workers before releasing their dependencies.
+[Work](../packages/agent/src/work.zig) keeps input, reply targets, and source control independent. Derive routing, response destinations, and persistence from their explicit bindings. Email projection and submission belong to EmailTransport; programmatic controls and keyed handovers belong to MailState. Both use the shared mail client and source records described in the [component responsibilities](architecture.md#responsibilities).
 
-Keep activation completion, task completion, context release, and mail retention distinct. The registry owns context release and rechecks queued input, children, and worker ownership. Mail owns archival and deletion; saving a handover does not move source correspondence to Archive.
+Sessions synchronizes contexts, queues, and routes. The kernel coordinates adapter operations and owns worker task scopes. Retain final text and confirmed submission state before later acknowledgment work can fail. Copy or transfer values that must outlive a model-round arena, and cancel and join workers before releasing their dependencies.
+
+Keep activation completion, task completion, context release, source-control lifetime, and mail retention distinct. The sessions registry checks queues, children, and worker ownership before releasing contexts. Shared source-cache cleanup checks the receipts still in use; it does not delete artifacts or change folders. Source artifacts retain their first captured content and are published atomically. Internal handovers use state keys rather than external reply chains. Work without a persistent state key has no cross-restart recovery contract yet. In-process completion state covers confirmed outcomes, not unknown network effects or execution recovery after restart.
 
 ## Repository and build
 
 | Location | Responsibility |
 | --- | --- |
 | [apps/ivenna](../apps/ivenna) | Configuration and application startup |
-| [packages/agent](../packages/agent) | Conversation registry, mail, structured input, model execution, host and memory tools |
+| [packages/agent](../packages/agent) | Work and session execution, email boundary, internal mail state, native observations, model provider, host and memory tools |
 | [dev/mail](../dev/mail) | Stalwart Compose deployment and native provisioning plan |
 | [dev/memory](../dev/memory) | Memory container, SSH entry point, and local startup |
 
@@ -51,7 +53,7 @@ zig build run
 
 ## Updating the kernel and middleware
 
-The executable embeds [system.md](../packages/agent/src/system.md), [tools.json](../packages/agent/src/tools.json), and [compaction.md](../packages/agent/src/compaction.md). Stop the kernel and run `zig build run` after editing code or these resources. Restart follows the [mail-based continuity contract](architecture.md#startup-and-interruption).
+The executable embeds [system.md](../packages/agent/src/system.md), [tools.json](../packages/agent/src/tools.json), and [compaction.md](../packages/agent/src/compaction.md). Stop the kernel and run `zig build run` after editing code or these resources. Restart follows the [continuity contract](architecture.md#startup-and-interruption).
 
 The memory [Containerfile](../dev/memory/Containerfile) installs [memory.nu](../packages/agent/src/memory.nu). After changing the handler, container contents, or SSH entry point, stop the kernel and recreate the memory container:
 
@@ -67,4 +69,4 @@ In [dev/mail](../dev/mail), `compose.yaml` defines normal Stalwart operation and
 
 ## Validation
 
-Build the application and exercise the changed behavior through real letters and model/tool work. For execution changes, check tool-result continuation, reply threading, reopening, and working context release. Check mail retention behavior when it changes. For model-facing changes, inspect complete serialized requests, including YAML frames, runtime snapshots, tool selection, and budget accounting. Report the checks performed and distinguish reconstructed understanding from exact execution recovery.
+Build the application and exercise the changed behavior through communication and model/tool work. For execution changes, check tool-result continuation, handoff and requested findings, follow-up routing, reopening, and working-context release. For email changes, check reply threading and material projection. For state changes, check flags, keyed handovers, receipt cleanup, and any affected retention behavior. For model-facing changes, inspect complete serialized requests, including YAML observations, response variants, tool selection, and budget accounting. Report the checks performed and distinguish reconstructed understanding from exact execution recovery.

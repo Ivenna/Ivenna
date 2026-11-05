@@ -10,56 +10,60 @@ Program choices and general tool use draw on the model's prior knowledge and wha
 
 ## Model-facing descriptions and results
 
-Tool descriptions explain how to choose and invoke an operation and interpret its result. Model input identifies each observation's source, body, and context, with the runtime state needed to understand ongoing work. Results convey the state and outcome of the particular invocation.
+Tool descriptions explain how to choose and invoke an operation and interpret its result. Model input identifies each observation's source, content, and context, with the runtime state needed to understand ongoing work. Results convey the state and outcome of the particular invocation.
 
 Keep these interfaces concise and leave room for the model's knowledge and judgment. Detailed field references and implementation explanations belong in developer documentation unless they affect how the interface is used or interpreted.
 
-Model input has a common session envelope and a closed set of observation variants, each with its own payload. The system prompt describes this structure and the variants' meaning and audience. Task text and source content remain open within those fields. Runtime observations, external requests, recalled correspondence, and internal work reports retain distinct roles even when all arrive as user messages.
+Model input has a common session envelope and a closed set of observation variants, each with its own payload. Incoming content carries optional provenance and context; assignments, findings, handovers, current state, and summary requests have distinct forms. The system prompt describes their meaning and response scope, while task text and source material remain open within those fields. Original source details are available by reference when relevant to the work.
 
 Tool results can combine text, media, and information about an operation's outcome and source. Classifying or interpreting one source preserves the other observations in the result. When a provider or budget cannot carry content, retain its source information and describe the omission.
 
-## Mail control and correspondence
+## External communication
 
-Ivenna has a mailbox through which people and programs provide input and control ongoing work. The runtime uses native folders, flags, and reply relationships to manage attention. A request body supplies the task; the runtime owns reception, scheduling, and delivery.
+People and programs communicate with Ivenna through email. This boundary receives material, identifies correspondents, preserves reply relationships, and submits answers to the intended audience. Email provides asynchronous correspondence through existing clients and services.
 
-A work conversation follows a mail thread. Processing one input letter is a mail turn, which may require many model and tool rounds. A response without tool calls ends that turn. It can provide a result, ask a question, or describe unfinished work; the overall task may continue through later correspondence.
+The email boundary supplies content and source information to the input protocol. Subjects, bodies, and correspondent identities provide material for understanding a request. The boundary owns the headers and delivery records used to submit the model's answer. Reply text carries that answer without appended session state or housekeeping prose.
 
-Unread Inbox mail requests attention, replies continue the conversation, and withdrawing an active input from Inbox stops further work at a complete execution boundary. Ordinary receipt supplies another observation or follow-up; it does not by itself cancel ongoing work or require a new branch. Deliberate steering changes the direction of ongoing work and needs an explicit interface.
+## Internal work and state
 
-Mail archival and later deletion manage accumulated correspondence and mailbox capacity. Archival retains letters for reference; deletion reduces retained mail. These operations have their own retention lifecycle, separate from the runtime's decision to keep or release a working context.
+Work is defined by a task and the understanding needed to continue it. A session owns a working context and a queue. An activation handles one input or assignment and can span many model and tool rounds. Ordinary arrival supplies another input; it does not interrupt ongoing work or create a fork. Deliberate steering needs an explicit interface.
 
-External replies, internal work reports, continuity handovers, and diagnostic records serve different audiences. Their routing and storage retain that distinction. External correspondence carries the model's answer for its recipient; the program does not append internal session state, report wrappers, or housekeeping explanations. Reports and handovers remain understandable communication that the deployment user can inspect.
+Internal state makes input eligible, controls activations, and retains understanding for continuation. Mail records and explicit flags provide inspectable state for this asynchronous work. State keys and transitions belong to the execution design, independently of external reply relationships.
+
+External correspondence and internal state are separate uses of mail, each with its own responsibilities and lifecycle. They can share a service and low-level operations. The communication boundary owns replies; internal state owns work controls and durable handovers.
+
+A response without tool calls ends the current activation while the broader task may remain open. Reply submission, internal findings, state acknowledgment, handover storage, and context release have distinct outcomes and lifetimes. Mail retention manages accumulated records separately from working-context lifetime.
 
 ## Core and concurrent attention
 
 One core session coordinates Ivenna throughout the kernel's lifetime. It handles a queue of observations and keeps its turns focused on reception, assignment, and coordination. It can answer a brief request directly; sustained work moves to separate sessions so the core can receive further input.
 
-Forking is an explicit model decision available to core and work sessions alike. A fork is another focus of Ivenna's attention, continuing from the caller's complete current working context, including any earlier handover. It receives its assignment and current runtime state. The assignment can transfer correspondence, including replies and follow-up input, or request findings for the parent. Work sessions can answer their correspondents directly and report findings to a parent when requested.
+Forking is an explicit model decision available to core and work sessions alike. A fork is another focus of Ivenna's attention, continuing from the caller's complete current working context, including any earlier handover. It receives an assignment, any source references, and current runtime state. A handoff transfers the active work, reply target, and source control when present. A subtask can return requested findings to its parent. Work sessions can reply directly to the people they are responsible for answering.
 
 After a fork, the histories grow independently. The core retains its reception and coordination history; execution detail accumulates in the session carrying out the work. This keeps the core's context useful for further coordination and forks.
 
 The runtime bounds retained contexts and concurrent work globally and preserves scheduling opportunities for the core. Handoffs return the core to its queue without waiting for the work session. A single LLM session still processes one request at a time; core responsiveness depends on keeping coordination turns short as well as scheduling them promptly.
 
-These contexts share a body and its effects on the world. Forking reasoning history does not isolate files, memory, mail, or host processes. Sessions account for effects another session may already have produced and exchange findings relevant to their work.
+These contexts share a body and its effects on the world. Forking reasoning history does not isolate files, memory, communication, or host processes. Sessions account for effects another session may already have produced and exchange findings relevant to their work.
 
-A work session's context lifetime depends on the work and input it still owns. A context can be released while the broader task awaits further correspondence. Mail archival and deletion follow the mailbox's separate retention lifecycle.
+A work session's context lifetime depends on the work, input, and children it still owns. A context can be released while the broader task awaits more input. Retention of external correspondence and internal state records follows their own lifecycles.
 
 ## Context and continuity
 
-Runtime transcripts hold the detail needed for model and tool execution. They have bounded lifetimes and sizes. Bound the complete model request, including instructions, tool definitions, correspondence, and tool results, and bound the generated response. State what each limit measures; a byte count does not establish token usage.
+Runtime transcripts hold the detail needed for model and tool execution. They have bounded lifetimes and sizes. Bound the complete model request, including instructions, tool definitions, observations, and tool results, and bound the generated response. State what each limit measures; a byte count does not establish token usage.
 
-When context needs to be shortened, the kernel asks the model for a summary and stores it as a self-handover letter. The replacement context should preserve commitments, relevant uncertainty, completed effects, and source references needed for continued work. Any retained transcript tail must contain complete model and tool exchanges.
+When context needs to be shortened, the kernel asks the model for a handover. The replacement context should preserve commitments, relevant uncertainty, completed effects, and source references needed for continued work. Internal state persists handovers under stable keys. Work without a persistent key can compact in memory; durable recovery for independently created internal work remains to be defined. Any retained transcript tail must contain complete model and tool exchanges.
 
-After a restart or a conversation's reopening, Ivenna rebuilds its working understanding from mail and handovers. This sustains continuity without restoring every intermediate model or tool state. An interrupted action may already have affected the world, so uncertain outcomes need inspection before repetition.
+After a restart or a conversation's reopening, Ivenna rebuilds its working understanding from communication and handovers. This sustains continuity without restoring every intermediate model or tool state. An interrupted action may already have affected the world, so uncertain outcomes need inspection before repetition.
 
 ## Local data and ownership
 
-The deployment user owns Ivenna's mailbox, artifacts, and autonomous memory, and chooses where they live. Mail is the durable record of correspondence and self-handover. Artifacts and autonomous memory remain files. Keep these forms open to inspection, retention, and management within the user's deployment.
+The deployment user owns Ivenna's mailbox, artifacts, and autonomous memory, and chooses where they live. External correspondence and internal state records both use mail storage, with their ownership and retention kept distinct. Artifacts and autonomous memory remain files. Keep these forms open to inspection, retention, and management within the user's deployment.
 
-Diagnostic records support troubleshooting and analysis, with their own retention and export lifecycle. They are separate from the letters and handovers used for continuity. Dedicated diagnostic interfaces and storage formats can develop as their uses become clear.
+Diagnostic records support troubleshooting and analysis, with their own retention and export lifecycle. They are separate from the source material and handovers used for continuity. Dedicated diagnostic interfaces and storage formats can develop as their uses become clear.
 
 ## Reference designs
 
-[OpenAI Agents SDK handoffs](https://developers.openai.com/api/docs/guides/agents/orchestration#use-handoffs-for-delegated-ownership) provide a reference for transferring conversation responsibility. [Codex thread forks](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread) provide a reference for continuing stored history in a separate thread. Ivenna's handoff combines context inheritance with correspondence ownership.
+[OpenAI Agents SDK handoffs](https://developers.openai.com/api/docs/guides/agents/orchestration#use-handoffs-for-delegated-ownership) provide a reference for transferring conversation responsibility. [Codex thread forks](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread) provide a reference for continuing stored history in a separate thread. Ivenna's handoff combines context inheritance with communication responsibility.
 
 [pi's sessions and context](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md) distinguish stored history from the active branch supplied to a model request. Its [agent interface](https://github.com/earendil-works/pi/blob/main/packages/agent/README.md) also distinguishes steering from queued follow-up input.

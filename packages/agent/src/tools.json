@@ -352,7 +352,7 @@
   {
     "type": "function",
     "name": "fork_session",
-    "description": "Continue work in another focus of Ivenna with the current context. A handoff transfers the active input and correspondence; a subtask keeps them with the parent. Both share the host and memory.",
+    "description": "Continue work in another focus of Ivenna with the current context. A handoff transfers the active input and its responsibilities; a subtask keeps them with the parent. Both share the host and memory.",
     "parameters": {
       "type": "object",
       "properties": {

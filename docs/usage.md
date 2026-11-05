@@ -30,7 +30,7 @@ Read replies through a JMAP-capable client or mail API using the operator accoun
 
 SMTP acceptance means the service accepted the request for delivery. Allow time for Ivenna to process it, including any tool work. A reply can provide a result, ask for clarification, or describe unfinished work.
 
-Plain-text bodies are preferred; HTML-only letters supply their HTML source. The model receives a bounded excerpt and a reference to the full body under `DATA_DIR/mail/`, which host tools can inspect. Mail attachment intake remains a placeholder; host and memory tools can work with [text and images](content.md) in their workspaces.
+Plain-text bodies are preferred; HTML-only letters supply their HTML source. Ivenna receives the subject and body as text. Longer content includes an excerpt and a reference to the full material, which it can retrieve when needed. The deployment keeps these [source files](running.md#local-data) for inspection. Mail attachment intake remains a placeholder; host and memory tools can work with [text and images](content.md) in their workspaces.
 
 ## Continuing a conversation
 
@@ -66,23 +66,25 @@ Use normal folders, flags, and replies in Ivenna's account to manage attention:
 
 Use the operator account for ordinary correspondence. A client marking letters read in Ivenna's account changes which input is eligible; it is separate from reading the replies in the operator account.
 
+Ordinary self-addressed input follows the same intake and withdrawal rules. Ivenna's saved handover records are excluded from task intake.
+
 To withdraw ongoing work, move its input letter out of Ivenna's Inbox. The current model response and its tool batch finish before withdrawal takes effect. This stops further work on that letter; internal helper work that has already started can continue. Completed commands, memory changes, and submitted replies retain their effects. A related follow-up can describe the known outcome and provide the next direction.
 
-Mail archival and later deletion manage retained correspondence and mailbox capacity. They do not decide a session's context lifetime. Automatic retention policy is not implemented. Ordinary mail clients can archive and delete letters; local body files and host logs have their own cleanup lifecycle.
+Archive and later delete correspondence to manage mailbox capacity. This is separate from releasing working context. Automatic retention policy is not implemented; source files and host logs also need their own retention and cleanup.
 
 ## Work sessions and handovers
 
-Ivenna decides when to hand work to another session or ask an internal helper for findings. The session responsible for your thread replies directly; it does not need another core turn to deliver its answer. The [architecture guide](architecture.md#forks-and-correspondence-ownership) explains how these sessions share context and coordinate work.
+Ivenna decides when to hand work to another session or ask an internal helper for findings. The session responsible for your thread replies directly; it does not need another core turn to deliver its answer. The [architecture guide](architecture.md#forks-and-work-ownership) explains how these sessions share context and coordinate work.
 
-After a work session finishes processing a letter, Ivenna saves a handover summarizing its understanding. It can release the working context once no queued input or child session remains. Processed source letters are marked read and stay in their existing folders.
+After a work session finishes processing a thread's input, Ivenna saves a handover summarizing its understanding. It can release the working context once no queued input or child session remains. Processed source letters are marked read and stay in their existing folders.
 
-Correspondence handovers are readable self-addressed letters saved directly in Archive, linked to the original thread by their subject and reply headers. Saving the note does not archive the source letters. Ivenna also records handovers when shortening a model context. These notes preserve the understanding needed to continue; individual reasoning and tool exchanges remain in runtime history.
+Handovers are readable self-addressed state records saved directly in Archive. Ivenna associates them with work independently of the external reply chain; reply to the ordinary correspondence to continue it. Saving a note does not archive source letters. Ivenna also records handovers when shortening a model context.
 
 If a handover cannot be saved after a reply was submitted, Ivenna logs the failure and keeps the working context. Retain handovers, source correspondence, and referenced files when preserving continuity. See [bounded model context](architecture.md#bounded-model-context) for the summary and reconstruction limits.
 
 ## After interruption
 
-Restart with the same mailbox, artifacts, and memory workspace. Ivenna rebuilds its core understanding from handover and recent correspondence, takes up waiting input, and can continue existing threads. Suspended model requests and individual tool results belong to the previous process's working history.
+Restart with the same mailbox, artifacts, and memory workspace. Ivenna rebuilds its understanding from handovers and recent correspondence, takes up unread Inbox input, and can continue existing threads. Interrupted model requests and tool calls do not resume from their previous execution point.
 
 An interrupted operation may already have changed files, memory, or mail. Inspect those effects before repeating uncertain work. A follow-up letter can explain what is known and ask Ivenna to continue. Execution failure pauses that conversation and retains its input while suppressing repeated automatic attempts in the current process; new related input can supply direction.
 

@@ -223,7 +223,7 @@ fn coordinationTool(arena: Allocator, tool: Value) !Value {
     var default_mode: std.json.ObjectMap = .empty;
     try default_mode.put(arena, "handoff", .{ .object = .empty });
     try mode.object.put(arena, "default", .{ .object = default_mode });
-    try mode.object.put(arena, "description", .{ .string = "Transfer the current input and any associated correspondence." });
+    try mode.object.put(arena, "description", .{ .string = "Transfer the current input and responsibilities to the new session." });
     return scoped;
 }
 
