@@ -8,19 +8,12 @@ const Value = std.json.Value;
 /// runtime observations. Return validated handover text without mutating
 /// history; the caller owns storage and context replacement.
 pub fn summarize(provider: Provider, arena: Allocator, history: []const Value, snapshot: Input.Snapshot, max_request_bytes: u64, max_summary_bytes: usize) ![]const u8 {
-    const defaults = try jsonValue(arena, .{
-        .conversation = .{
-            .role = snapshot.role,
-            .parent_generation = snapshot.parent_generation,
-            .thread_id = snapshot.thread_id,
-        },
-        .runtime = snapshot.runtime,
-    });
-    const task = try jsonValue(arena, .{
-        .purpose = "context_compaction",
-        .message = @embedFile("compaction.md"),
-    });
-    const rendered = try Input.serialize(arena, snapshot.session_id, defaults, task);
+    var state = snapshot.state;
+    state.response.audience = .internal;
+    const rendered = try Input.serialize(arena, snapshot.session_id, .{ .context_compaction = .{
+        .instructions = @embedFile("compaction.md"),
+        .state = state,
+    } });
     var user_message: std.json.ObjectMap = .empty;
     try user_message.put(arena, "role", .{ .string = "user" });
     try user_message.put(arena, "content", .{ .string = rendered });
@@ -53,10 +46,6 @@ pub fn summarize(provider: Provider, arena: Allocator, history: []const Value, s
     const text = std.mem.trim(u8, try summary.toOwnedSlice(), " \t\r\n");
     if (text.len == 0) return error.EmptyHandover;
     return text;
-}
-
-fn jsonValue(arena: Allocator, value: anytype) !Value {
-    return std.json.parseFromSliceLeaky(Value, arena, try std.json.Stringify.valueAlloc(arena, value, .{}), .{});
 }
 
 fn field(value: Value, name: []const u8) !Value {

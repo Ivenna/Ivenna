@@ -6,15 +6,19 @@ The [design intent](design.md) guides product and interface decisions; the [arch
 
 The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design. Work from intended behavior down to responsibilities, interfaces, and implementation. Explain choices through the behavior they establish and the reasons for choosing them.
 
-Establish the shape of a change first, then implement it in useful increments. Complex or future areas may remain explicit placeholders; describe what works and what remains undecided. Do not retain compatibility paths for superseded designs or introduce migration frameworks.
+Establish responsibilities and interfaces first, then implement in useful increments. Complex or future areas may remain explicit placeholders; describe what works and what remains undecided. Keep unresolved behavior unavailable or explicitly limited, rather than inventing it to complete test coverage. Do not retain compatibility paths for superseded designs or introduce migration frameworks.
 
 During development, do not write tests in advance or introduce test frameworks. Run the application locally; containerize only middleware.
 
 ## Implementation boundaries
 
-Keep protocol decoding in the component that owns the external interface, and give execution code typed operations. Mail owns the JMAP subset used by the kernel; Stalwart handles MIME and delivery. [Input](../packages/agent/src/input.zig) renders observations with their source, body, context, and current runtime state.
+Follow the component boundaries in the [architecture guide](architecture.md#responsibilities). Decode external protocols in their owning components and give execution code typed operations.
 
-Treat prompts and tool descriptions as editable interfaces. Put ongoing behavioral instructions in the system prompt, operation behavior in tool descriptions, and task facts and observations in user input. Revise the owning resource, renderer, and documentation together when their contract changes.
+Treat prompts and tool descriptions as editable interfaces. Put ongoing behavioral instructions in [system.md](../packages/agent/src/system.md), operation behavior in [tools.json](../packages/agent/src/tools.json), and task facts and observations in user input. Keep descriptions concise, with detailed field references in the [input contract](input.md). Revise the owning resource, renderer, and documentation together when their contract changes.
+
+[Input](../packages/agent/src/input.zig) owns the closed observation union and its payload types. Construct those variants directly; the renderer serializes them without merging arbitrary fields. The system prompt describes the shared envelope and variant meanings, while tool definitions explain available operations.
+
+Keep external correspondence, internal work reports, continuity handovers, and diagnostics distinct at their owning interfaces. Delivery code submits the intended answer without adding operational prose. Content handling preserves text, media, and source descriptions together; see [tool content](content.md) for classification and interpretation.
 
 [compaction.md](../packages/agent/src/compaction.md) owns the summary instructions. [Compaction](../packages/agent/src/compaction.zig) constructs the YAML task with the actual session and runtime snapshot, enforces the request budget, and validates the output. Provider owns model protocol encoding and decoding, including requests without tools.
 
@@ -22,7 +26,7 @@ Model coexisting fields together and mutually exclusive alternatives as distinct
 
 The registry owns contexts, queues, and synchronization; the kernel owns external orchestration and worker task scopes. Copy or transfer values that must outlive a model-round arena. Cancel and join workers before releasing their dependencies.
 
-A mail turn's end and an overall task's completion are separate events. When the turn ends and its queue is empty, archive through the registry's ownership boundary so its branch context or core lease is released together with the active conversation. The permanent core context continues.
+Keep activation completion, task completion, context release, and mail retention distinct. The registry owns context release and rechecks queued input, children, and worker ownership. Mail owns archival and deletion; saving a handover does not move source correspondence to Archive.
 
 ## Repository and build
 
@@ -63,4 +67,4 @@ In [dev/mail](../dev/mail), `compose.yaml` defines normal Stalwart operation and
 
 ## Validation
 
-Build the application and exercise the changed behavior through real letters and model/tool work. For execution changes, check tool-result continuation, reply threading, reopening, and release of conversation resources after archival. For model-facing changes, inspect complete serialized requests, including YAML frames, runtime snapshots, tool selection, and budget accounting. Report the checks performed and distinguish reconstructed understanding from exact execution recovery.
+Build the application and exercise the changed behavior through real letters and model/tool work. For execution changes, check tool-result continuation, reply threading, reopening, and working context release. Check mail retention behavior when it changes. For model-facing changes, inspect complete serialized requests, including YAML frames, runtime snapshots, tool selection, and budget accounting. Report the checks performed and distinguish reconstructed understanding from exact execution recovery.

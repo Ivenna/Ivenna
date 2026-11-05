@@ -2,7 +2,7 @@ const std = @import("std");
 const process = @import("process.zig");
 const Reader = @import("reader.zig").Reader;
 const output = @import("output.zig");
-const Expected = @import("../content.zig").Expected;
+const Interpretation = @import("../content.zig").Interpretation;
 const Image = @import("../content.zig").Image;
 
 const Allocator = std.mem.Allocator;
@@ -17,14 +17,14 @@ pub const Shell = struct {
 
     const default_timeout_ms = 600_000;
 
-    /// Engine supplies the conversation identity used to group command logs.
+    /// Engine supplies the session identity used to group command logs.
     pub const Context = struct { session_id: u64 };
 
     pub const Command = struct {
         command: []const u8,
         cwd: ?[]const u8 = null,
         timeout_ms: ?u32 = null,
-        expected: Expected = .{ .auto = .{} },
+        interpretation: ?Interpretation = null,
     };
 
     pub const Stream = struct {
@@ -164,7 +164,7 @@ pub const Shell = struct {
             .outcome = outcome,
             .stdout = .{
                 .path = stdout_path,
-                .content = try reader.readFile(a, stdout, args.expected),
+                .content = try reader.readFile(a, stdout, args.interpretation),
             },
             .stderr = diagnostics,
         };

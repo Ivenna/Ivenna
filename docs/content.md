@@ -1,41 +1,34 @@
 # Tool content
 
-Memory reads and host commands can supply text or images to the model. This guide covers shared content handling; see [memory rooms](memory.md) and [host shell](host.md) for tool arguments and results.
+Memory reads and host commands can supply text and images together to the model. This guide covers shared content handling; see [memory rooms](memory.md) and [host shell](host.md) for tool arguments and results.
 
-## Expected content
+## Automatic classification
 
-`read_memory` and `run_host_shell` accept an optional `expected` argument for the complete entry or stdout capture. Omit it for automatic classification, or select exactly one branch below. An image expectation defaults to `representation: "data"`.
+`read_memory` and `run_host_shell` identify the content they return from entry or stdout bytes. The current implementation recognizes JPEG, PNG, GIF, and WebP by their signatures, with a limit of 32 MiB per image. Signature recognition does not validate a complete image or decode its pixels. Supplied text is valid UTF-8 without NUL bytes.
 
-| Value | Meaning |
-| --- | --- |
-| `{"auto":{}}` | Identify text or a supported image from the output bytes |
-| `{"text":{}}` | Expect text |
-| `{"image":{}}` | Expect image data |
-| `{"image":{"representation":"url"}}` | Expect an image URL reference |
-
-Text and image-data expectations are hints; the actual bytes determine the content type.
+Each entry or stdout capture is treated as one source; classification does not split an arbitrary byte stream into multiple media parts. A URL remains text unless the caller explicitly asks to present it as an image reference. A filename or URL suffix does not select a media type.
 
 ## Image URL references
 
-With `expected: {"image":{"representation":"url"}}`, classification treats the entire nonempty text output as one image URL reference. Ivenna passes the text unchanged, without fetching or validating the address. Recognized image bytes still return as image data, and empty output remains text. Retrieval and validation of a reference belong to the configured model service.
+Set `interpretation: "image_url"` to present the complete nonempty text of a memory entry or stdout capture as one image URL reference. This declares how the text should be used; Ivenna passes it unchanged, without fetching or validating the address or referenced media. Recognized image bytes still return as image data, and empty output remains text. The configured model service handles the reference.
 
 For example, a shell command can return an image reference:
 
 ```json
-{"command":"printf '%s' 'https://example.com/image.png'","expected":{"image":{"representation":"url"}}}
+{"command":"printf '%s' 'https://example.com/image.png'","interpretation":"image_url"}
 ```
 
-With automatic, text, or image-data expectations, URLs remain text.
+Omit `interpretation` when the entry or command already supplies image bytes, or when a URL should remain text.
 
 ## Content and results
 
-Supported image formats are JPEG, PNG, GIF, and WebP, identified by their format signatures. Image data is limited to 32 MiB per image. Signature recognition does not validate the complete image or decode its pixels. Text requires valid UTF-8 without NUL bytes.
+Each tool combines source content with its operation's result description. Image reads include the memory address; shell results include the command outcome and both stream descriptions, including on nonzero exits and timeouts. Supported images are supplied as native content parts alongside these descriptions.
 
-Memory reads retain the full text of an entry. Shell text previews contain at most 16 KiB, retaining the beginning and end when truncated. For larger non-image shell output, text detection checks only the previewed bytes. URL-reference classification reads the full stdout so that the reference is not truncated.
+An image description has either `data` with `format` and `byte_length`, or `url` with an empty object. The native content part carries the encoded image bytes or URL itself. The [memory](memory.md#results-and-errors) and [shell](host.md#results-and-interruption) guides describe their surrounding result fields.
 
-Content that cannot be supplied as text or a supported image produces an `unavailable` description with its byte length and reason `unsupported_binary`. Recognized images exceeding the byte limit use reason `image_too_large`. These descriptions report what content can be supplied; they do not change the command outcome or remove a stored memory entry.
+Memory reads retain the full text of an entry. Shell text previews contain at most 16 KiB, retaining the beginning and end when truncated. For larger non-image shell output, text detection checks only the previewed bytes. Image URL interpretation reads the full stdout so that the reference is not truncated.
 
-The [memory](memory.md#results-and-errors) and [shell](host.md#results-and-interruption) guides describe how content appears in each tool's reply. Shell stdout and stderr remain in full in their log files.
+The current readers return an `unavailable` description for content they cannot supply, with `byte_length` and reason `unsupported_binary` or `image_too_large`. This diagnostic concerns the returned content; it leaves the command outcome and stored memory entry unchanged. Shell stdout and stderr remain in full in their log files.
 
 ## Model request checks
 
@@ -46,7 +39,7 @@ When adding newly returned images to a session's context, Ivenna applies these l
 | Image count, including retained images and URL references | 600 |
 | Serialized model request body, including history, tool definitions, and base64 image data | 48 MiB |
 
-An image rejected by these checks is replaced by a text `content_limit` error. The tool has already run: this error means its image was omitted from model input. Existing context and text results remain intact at this step.
+An image rejected by these checks is replaced by a text `content_limit` error after the tool has run. Text descriptions, command outcomes, diagnostics, and earlier context remain available. For an oversized request, the current implementation omits newly returned images from the end until it fits or no new images remain. This removal policy does not rank their importance.
 
 The [whole-context budget](architecture.md#bounded-model-context) applies separately and may be smaller than these image limits. It accounts for the complete request, including text and images. An oversized history can require a handover or produce a context-budget failure before the next model round.
 
@@ -56,4 +49,4 @@ The model service handles image decoding, dimensions, URL retrieval, and limits 
 
 A session's runtime context retains accepted image bytes, so subsequent requests can reuse them even if the source file changes or is removed. URL results retain the supplied address; their content can change or become unavailable.
 
-Retained images contribute to request size and context limits. A handover can replace older context, and a restart rebuilds understanding from letters rather than restoring these image bytes. Keep an artifact or memory entry when later work needs to read the image again, and include its location in the handover. See [bounded model context](architecture.md#bounded-model-context).
+Retained images contribute to request size and context limits. Compaction or session release can discard these bytes; a restart rebuilds understanding from letters rather than restoring them. An artifact or memory entry provides a source for reading the image again, and its location can be retained in the handover. See [bounded model context](architecture.md#bounded-model-context).

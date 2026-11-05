@@ -3,7 +3,7 @@ const content = @import("../content.zig");
 const output = @import("output.zig");
 
 const Allocator = std.mem.Allocator;
-const Expected = content.Expected;
+const Interpretation = content.Interpretation;
 const Image = content.Image;
 
 /// Reads command stdout as text or native image content.
@@ -17,7 +17,7 @@ pub const Reader = struct {
     };
 
     /// Returned content uses the current turn's allocator.
-    pub fn readFile(self: Reader, a: Allocator, file: std.Io.File, expected: Expected) !FileContent {
+    pub fn readFile(self: Reader, a: Allocator, file: std.Io.File, interpretation: ?Interpretation) !FileContent {
         const length = try file.length(self.io);
         var header: [16]u8 = undefined;
         const header_read = try file.readPositionalAll(self.io, &header, 0);
@@ -25,10 +25,10 @@ pub const Reader = struct {
         if (is_image and length > content.image_size_limit)
             return .{ .unavailable = .{ .byte_length = length, .reason = .image_too_large } };
 
-        if (is_image or expected.isUrlReference()) {
+        if (is_image or interpretation == .image_url) {
             const bytes = try a.alloc(u8, @intCast(length));
             const byte_count = try file.readPositionalAll(self.io, bytes, 0);
-            return switch (content.classify(bytes[0..byte_count], expected)) {
+            return switch (content.interpret(bytes[0..byte_count], interpretation)) {
                 .text => .{ .text = try output.preview(a, self.io, file) },
                 .image => |image| .{ .image = image },
                 .unavailable => |unavailable| .{ .unavailable = unavailable },

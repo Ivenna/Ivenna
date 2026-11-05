@@ -1,12 +1,12 @@
 # Corresponding with Ivenna
 
-Send ordinary mail to `MAIL_ADDRESS` after [starting the kernel](running.md#starting-the-kernel). The kernel receives the letter, prepares model input, runs tools as needed, and submits a reply. A mail thread carries a work conversation; each incoming letter starts a turn that can require several model and tool rounds.
+Send ordinary mail to `MAIL_ADDRESS` after [starting the kernel](running.md#starting-the-kernel). Ivenna's core receives new correspondence and can answer directly or hand work to a separate session. That session uses tools and replies in the same mail thread, while the core remains available for other correspondence.
 
 ## Sending a request
 
 Use the operator account configured during [mail setup](running.md#configuring-local-mail), or another account that can reach Ivenna. Give the request a useful subject and put the task and relevant context in its body.
 
-For the supplied local service, submit through authenticated SMTP from a second terminal at the repository root:
+The following example requires `curl` and submits through the supplied local service's authenticated SMTP endpoint. Run it from a second terminal at the repository root:
 
 ```sh
 set -a
@@ -28,7 +28,7 @@ EOF
 
 Read replies through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. The [configuration reference](running.md#changing-configuration) lists that endpoint and its default. For another service, use its submission and client settings.
 
-SMTP acceptance means the service accepted the request for delivery. Allow time for Ivenna to process it. Tool results feed further model rounds until the model produces a response with no tool calls. The reply can provide a result, ask for clarification, or describe unfinished work. Intermediate assistant text remains in the working transcript.
+SMTP acceptance means the service accepted the request for delivery. Allow time for Ivenna to process it, including any tool work. A reply can provide a result, ask for clarification, or describe unfinished work.
 
 Plain-text bodies are preferred; HTML-only letters supply their HTML source. The model receives a bounded excerpt and a reference to the full body under `DATA_DIR/mail/`, which host tools can inspect. Mail attachment intake remains a placeholder; host and memory tools can work with [text and images](content.md) in their workspaces.
 
@@ -46,11 +46,9 @@ References: <french-practice-1@example.local> <ivenna-reply-being-answered@examp
 Use Tuesday and Saturday, and keep each session to 20 minutes.
 ```
 
-Related input queues in its conversation while the current turn continues. Independent threads can run concurrently. Reusing a subject alone does not reliably establish a reply relationship.
+Related input queues with the session handling that thread while its current work continues. Independent threads can run concurrently. Reusing a subject alone does not reliably establish a reply relationship.
 
-When a turn ends and no input remains queued, Ivenna records a handover and archives its processed input. The handover preserves the understanding needed to reopen the thread in a dedicated working context. The core perspective continues while these work conversations come and go.
-
-A conversation can be archived after a clarification question while its broader task remains open. Reply in the same thread to supply the answer or continue the work; the old letter can stay archived.
+Reply in the same thread even after a clarification question or a gap in the work. Ivenna can continue from the thread's handover and recent correspondence after releasing its old working context. Older letters can remain in Inbox or be archived.
 
 ## Managing work through mail
 
@@ -64,25 +62,27 @@ Use normal folders, flags, and replies in Ivenna's account to manage attention:
 | Read input (`$seen`) | Excluded from intake; Ivenna sets this after handling a letter |
 | Answered input (`$answered`) | Ivenna submitted a reply for delivery |
 | Active input removed from Inbox | Withdraw further work at the next complete model/tool boundary |
-| Processed input moved to Archive by Ivenna | The turn ended and a handover was saved |
+| Archive finished correspondence | Keep it for reference; later replies can still continue the thread |
 
 Use the operator account for ordinary correspondence. A client marking letters read in Ivenna's account changes which input is eligible; it is separate from reading the replies in the operator account.
 
-To withdraw ongoing work, move its input letter out of Ivenna's Inbox. The current model response and its tool batch finish before withdrawal takes effect. Completed commands, memory changes, and submitted replies retain their effects. A related follow-up can describe the known outcome and provide the next direction.
+To withdraw ongoing work, move its input letter out of Ivenna's Inbox. The current model response and its tool batch finish before withdrawal takes effect. This stops further work on that letter; internal helper work that has already started can continue. Completed commands, memory changes, and submitted replies retain their effects. A related follow-up can describe the known outcome and provide the next direction.
 
-After archiving, Ivenna releases the branch context or the conversation's temporary use of the core if no input remains queued. It archives explicit processed letters, so newly arriving input stays available. Coordinated deletion of archived correspondence and its local artifacts is not implemented. Ordinary mail clients can still delete letters; local body files and host logs need separate cleanup.
+Mail archival and later deletion manage retained correspondence and mailbox capacity. They do not decide a session's context lifetime. Automatic retention policy is not implemented. Ordinary mail clients can archive and delete letters; local body files and host logs have their own cleanup lifecycle.
 
-## Reports and handovers
+## Work sessions and handovers
 
-While the core is occupied, independent work can use a branch of its most recent complete context. The runtime packages the branch's final text with its work subject, source reference, and session identity in a self-addressed report. The core receives reports at complete execution boundaries.
+Ivenna decides when to hand work to another session or ask an internal helper for findings. The session responsible for your thread replies directly; it does not need another core turn to deliver its answer. The [architecture guide](architecture.md#forks-and-correspondence-ownership) explains how these sessions share context and coordinate work.
 
-Handovers summarize working understanding when context is shortened and when a conversation is archived. They retain the subject and native reply headers so they remain with the original thread in Archive. Reports enter Inbox. The runtime writes these readable letters directly through the mail API; model reasoning and individual tool calls remain in runtime history.
+After a work session finishes processing a letter, Ivenna saves a handover summarizing its understanding. It can release the working context once no queued input or child session remains. Processed source letters are marked read and stay in their existing folders.
 
-If report delivery or archival fails after a reply was submitted, Ivenna logs the failure and keeps the conversation's context. Later input can continue from that understanding; the failed operation has no automatic retry. Retain handovers, source correspondence, and referenced files when preserving continuity. The [architecture guide](architecture.md#bounded-model-context) explains the context bounds and reconstruction process.
+Correspondence handovers are readable self-addressed letters saved directly in Archive, linked to the original thread by their subject and reply headers. Saving the note does not archive the source letters. Ivenna also records handovers when shortening a model context. These notes preserve the understanding needed to continue; individual reasoning and tool exchanges remain in runtime history.
+
+If a handover cannot be saved after a reply was submitted, Ivenna logs the failure and keeps the working context. Retain handovers, source correspondence, and referenced files when preserving continuity. See [bounded model context](architecture.md#bounded-model-context) for the summary and reconstruction limits.
 
 ## After interruption
 
-Restart with the same mailbox, artifacts, and memory workspace. Ivenna rebuilds its core understanding from handover and bounded recent correspondence, takes up waiting input, and can reopen archived threads. Suspended model requests and individual tool results belong to the previous process's working history.
+Restart with the same mailbox, artifacts, and memory workspace. Ivenna rebuilds its core understanding from handover and recent correspondence, takes up waiting input, and can continue existing threads. Suspended model requests and individual tool results belong to the previous process's working history.
 
 An interrupted operation may already have changed files, memory, or mail. Inspect those effects before repeating uncertain work. A follow-up letter can explain what is known and ask Ivenna to continue. Execution failure pauses that conversation and retains its input while suppressing repeated automatic attempts in the current process; new related input can supply direction.
 

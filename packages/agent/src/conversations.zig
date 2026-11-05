@@ -6,19 +6,31 @@ const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
 pub const Delivery = struct {
+    pub const Kind = union(enum) {
+        input,
+        assignment: []const u8,
+    };
+
     arena: std.heap.ArenaAllocator,
     letter: Mail.Letter,
+    kind: Kind,
+    audience: Input.Audience,
+    tracks_mail: bool,
+    background: []const Input.Background = &.{},
     supplied: bool = false,
-    kind: enum { input, report } = .input,
 
-    fn create(allocator: Allocator, letter: Mail.Letter, report: bool) !*Delivery {
+    fn create(allocator: Allocator, letter: Mail.Letter, kind: Kind, audience: Input.Audience, tracks_mail: bool, background: []const Input.Background) !*Delivery {
         const self = try allocator.create(Delivery);
         errdefer allocator.destroy(self);
-        self.* = .{ .arena = .init(allocator), .letter = undefined, .kind = if (report) .report else .input };
+        self.* = .{ .arena = .init(allocator), .letter = undefined, .kind = undefined, .audience = audience, .tracks_mail = tracks_mail };
         errdefer self.arena.deinit();
         const a = self.arena.allocator();
-        const encoded = try std.json.Stringify.valueAlloc(a, letter, .{});
-        self.letter = try std.json.parseFromSliceLeaky(Mail.Letter, a, encoded, .{ .allocate = .alloc_always });
+        self.letter = try std.json.parseFromSliceLeaky(Mail.Letter, a, try std.json.Stringify.valueAlloc(a, letter, .{}), .{ .allocate = .alloc_always });
+        self.kind = switch (kind) {
+            .input => .input,
+            .assignment => |task| .{ .assignment = try a.dupe(u8, task) },
+        };
+        self.background = try std.json.parseFromSliceLeaky([]const Input.Background, a, try std.json.Stringify.valueAlloc(a, background, .{}), .{ .allocate = .alloc_always });
         return self;
     }
 
@@ -28,60 +40,79 @@ pub const Delivery = struct {
     }
 };
 
+/// A session owns reasoning history independently of mail-thread routing.
+/// The core is permanent; branch sessions may retain an idle context while
+/// their children continue without occupying an execution slot.
 pub const Conversation = struct {
     session_id: u64,
+    role: Input.Role,
+    context: Context,
     thread_id: []const u8,
-    role: union(enum) { core, branch: Context },
-    parent_generation: ?u64,
-    state: union(enum) { ready, running: *Delivery, paused, archiving: *Delivery } = .ready,
+    parent_session_id: ?u64 = null,
+    parent_generation: ?u64 = null,
+    generation: u64 = 0,
+    state: enum { ready, running, waiting, paused } = .ready,
+    active: ?*Delivery = null,
     pending: std.ArrayList(*Delivery) = .empty,
-    processed_ids: std.ArrayList([]const u8) = .empty,
-    borrowed_reports: usize = 0,
+    borrowed_workers: usize = 0,
+    children: usize = 0,
+    waiting_reports: usize = 0,
+    report_to: ?u64 = null,
+    releasable: bool = true,
 };
 
-/// A worker borrows the conversation and owns this delivery until finish or a
-/// successful retire. Kernel must end its workers before deinitializing Registry.
-pub const Work = struct {
-    conversation: *Conversation,
-    delivery: *Delivery,
+pub const Work = struct { conversation: *Conversation, delivery: *Delivery };
+
+pub const ForkRequest = struct {
+    task: []const u8,
+    mode: union(enum) { handoff: struct {}, subtask: struct { report_to_parent: bool = false } } = .{ .handoff = .{} },
 };
 
-/// The core outlives correspondence. Only active correspondence owns entries
-/// here; archived threads are restored from the mailbox when new mail arrives.
+/// Reserved during tool invocation, materialized only after the complete batch.
+pub const ForkPlan = struct {
+    child: *Conversation,
+    request: ForkRequest,
+};
+
+pub const Commit = struct { handed_off: bool = false, waiting: bool = false };
+
 pub const Registry = struct {
     allocator: Allocator,
     io: std.Io,
     max_contexts: usize,
     mutex: std.Io.Mutex = .init,
-    core: Context,
-    core_generation: u64 = 0,
-    core_owner: ?*Conversation = null,
-    live: std.StringHashMapUnmanaged(*Conversation) = .empty,
+    core: *Conversation,
+    sessions: std.AutoHashMapUnmanaged(u64, *Conversation) = .empty,
+    routes: std.StringHashMapUnmanaged(u64) = .empty,
     noticed: std.StringHashMapUnmanaged(enum { scheduled, handled }) = .empty,
+    reserved: usize = 0,
     next_session_id: u64 = 2,
-
-    pub const deletion = enum { planned }.planned;
 
     pub fn init(allocator: Allocator, io: std.Io, max_contexts: usize) !Registry {
         if (max_contexts == 0) return error.InvalidConversationLimit;
-        return .{ .allocator = allocator, .io = io, .max_contexts = max_contexts, .core = try Context.init(allocator, @embedFile("system.md")) };
+        const core = try allocator.create(Conversation);
+        errdefer allocator.destroy(core);
+        var context = try Context.init(allocator, @embedFile("system.md"));
+        errdefer context.deinit();
+        const thread = try allocator.dupe(u8, "");
+        errdefer allocator.free(thread);
+        core.* = .{ .session_id = 1, .role = .core, .context = context, .thread_id = thread };
+        var self: Registry = .{ .allocator = allocator, .io = io, .max_contexts = max_contexts, .core = core };
+        try self.sessions.put(allocator, 1, core);
+        return self;
     }
 
     pub fn deinit(self: *Registry) void {
-        var conversations = self.live.valueIterator();
-        while (conversations.next()) |conversation| self.destroyConversation(conversation.*);
-        self.live.deinit(self.allocator);
-        var keys = self.noticed.keyIterator();
-        while (keys.next()) |key| self.allocator.free(key.*);
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |session| self.destroySession(session.*);
+        self.sessions.deinit(self.allocator);
+        var route_keys = self.routes.keyIterator();
+        while (route_keys.next()) |key| self.allocator.free(key.*);
+        self.routes.deinit(self.allocator);
+        var notice_keys = self.noticed.keyIterator();
+        while (notice_keys.next()) |key| self.allocator.free(key.*);
         self.noticed.deinit(self.allocator);
-        self.core.deinit();
         self.* = undefined;
-    }
-
-    pub fn contains(self: *Registry, thread_id: []const u8) !bool {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.live.contains(thread_id);
     }
 
     pub fn intakeLimit(self: *Registry) !usize {
@@ -90,273 +121,287 @@ pub const Registry = struct {
         return self.noticed.count() + @max(32, self.max_contexts * 2);
     }
 
-    /// A non-null accepted result takes ownership of restored, even when an
-    /// existing live thread made that prepared restoration unnecessary. Rejected
-    /// input leaves restored owned by the caller. New restored threads always
-    /// get a dedicated branch, while new threads otherwise use a free core.
-    pub fn accept(self: *Registry, letter: Mail.Letter, restored: ?Context) !?*Conversation {
-        return self.acceptLetter(letter, restored, false);
-    }
-
-    /// True means the live thread was found, including duplicate or deferred
-    /// input. Lookup and admission share the retirement lock, so callers never
-    /// accidentally reopen a retired thread without its archived background.
-    pub fn acceptExisting(self: *Registry, letter: Mail.Letter) !bool {
+    pub fn acceptExisting(self: *Registry, letter: Mail.Letter, audience: Input.Audience) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        if (!self.live.contains(letter.thread_id)) return false;
-        _ = try self.acceptLetterLocked(letter, null, false);
+        const owner = self.routes.get(letter.thread_id) orelse return false;
+        _ = try self.acceptLocked(self.sessions.get(owner).?, letter, audience, &.{});
         return true;
     }
 
-    /// Kernel has already checked that this is a report for the core. It joins
-    /// the current core conversation without becoming another routing alias.
-    pub fn acceptCore(self: *Registry, letter: Mail.Letter) !?*Conversation {
-        return self.acceptLetter(letter, null, true);
-    }
-
-    fn acceptLetter(self: *Registry, letter: Mail.Letter, restored: ?Context, report: bool) !?*Conversation {
+    /// An unknown thread always enters the permanent coordinator. Thread
+    /// reconstruction is observation background, never an implicit fork.
+    pub fn accept(self: *Registry, letter: Mail.Letter, audience: Input.Audience, background: []const Input.Background) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        return self.acceptLetterLocked(letter, restored, report);
+        const session = if (self.routes.get(letter.thread_id)) |owner| self.sessions.get(owner).? else self.core;
+        return self.acceptLocked(session, letter, audience, background);
     }
 
-    fn acceptLetterLocked(self: *Registry, letter: Mail.Letter, restored: ?Context, report: bool) !?*Conversation {
-        const notice_key = letter.message_id orelse letter.id;
-        if (self.noticed.contains(notice_key)) return null;
-        var target = if (report) self.core_owner else self.live.get(letter.thread_id);
-        var created = false;
-        var takes_restored = false;
-        if (target == null) {
-            if (self.live.contains(letter.thread_id)) return error.CoreThreadAlreadyActive;
-            const branch = restored != null or self.core_owner != null;
-            if (branch and self.contextCount() >= self.max_contexts) return null;
-            const conversation = try self.allocator.create(Conversation);
-            errdefer self.allocator.destroy(conversation);
-            const thread_id = try self.allocator.dupe(u8, letter.thread_id);
-            errdefer self.allocator.free(thread_id);
-            var role: @FieldType(Conversation, "role") = .core;
-            if (branch) role = .{ .branch = if (restored) |restored_view| restored_view else try self.core.fork(self.allocator) };
-            errdefer if (branch and restored == null) role.branch.deinit();
-            conversation.* = .{
-                .session_id = if (branch) self.next_session_id else 1,
-                .thread_id = thread_id,
-                .role = role,
-                .parent_generation = if (branch and restored == null) self.core_generation else null,
-            };
-            try self.live.put(self.allocator, thread_id, conversation);
-            if (branch) self.next_session_id += 1 else self.core_owner = conversation;
-            target = conversation;
-            created = true;
-            takes_restored = restored != null;
-        }
-        const conversation = target.?;
-        // Capacity reserves every borrowed delivery, allowing failure cleanup to
-        // return it without allocating. One new direction can wake a full pause.
-        const held = conversation.borrowed_reports + @as(usize, @intFromBool(isWorking(conversation)));
-        const waking = conversation.state == .paused;
-        if (conversation.pending.items.len + held >= self.max_contexts and !waking) return null;
-        errdefer if (created) {
-            _ = self.live.remove(conversation.thread_id);
-            if (conversation.role == .core) self.core_owner = null;
-            // A restored context remains caller-owned if admission fails.
-            if (takes_restored) conversation.role = .core;
-            self.destroyConversation(conversation);
-        };
-        try conversation.pending.ensureUnusedCapacity(self.allocator, 1 + held);
-        const delivery = try Delivery.create(self.allocator, letter, report);
+    fn acceptLocked(self: *Registry, session: *Conversation, letter: Mail.Letter, audience: Input.Audience, background: []const Input.Background) !bool {
+        const notice = letter.message_id orelse letter.id;
+        if (self.noticed.contains(notice)) return false;
+        if (session.pending.items.len + @as(usize, @intFromBool(session.active != null)) >= self.max_contexts and session.state != .paused) return false;
+        const delivery = try Delivery.create(self.allocator, letter, .input, audience, true, background);
         errdefer delivery.destroy(self.allocator);
-        const key = try self.allocator.dupe(u8, notice_key);
+        try session.pending.ensureUnusedCapacity(self.allocator, 1 + @as(usize, @intFromBool(session.active != null)));
+        const key = try self.allocator.dupe(u8, notice);
         errdefer self.allocator.free(key);
-        try self.noticed.put(self.allocator, key, .scheduled);
-        if (letter.flagged or waking) conversation.pending.insertAssumeCapacity(0, delivery) else conversation.pending.appendAssumeCapacity(delivery);
-        if (waking) conversation.state = .ready;
-        if (restored != null and !takes_restored) {
-            var unused = restored.?;
-            unused.deinit();
+        var added_route = false;
+        if (!self.routes.contains(letter.thread_id)) {
+            const thread = try self.allocator.dupe(u8, letter.thread_id);
+            errdefer self.allocator.free(thread);
+            try self.routes.put(self.allocator, thread, session.session_id);
+            added_route = true;
         }
-        return conversation;
+        errdefer if (added_route) self.removeRoute(letter.thread_id, session.session_id);
+        try self.noticed.put(self.allocator, key, .scheduled);
+        if (letter.flagged or session.state == .paused) session.pending.insertAssumeCapacity(0, delivery) else session.pending.appendAssumeCapacity(delivery);
+        if (session.state == .paused) session.state = .ready;
+        return true;
     }
 
+    /// The coordinator has its own serialized execution lane. max_parallel
+    /// bounds work sessions independently, so a long work tool cannot take the
+    /// coordinator's execution slot.
     pub fn nextReady(self: *Registry, max_parallel: usize) !?Work {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.runningCount() >= max_parallel) return null;
+        if (ready(self.core)) return take(self.core);
+        if (self.runningWorkers() >= max_parallel) return null;
         var chosen: ?*Conversation = null;
-        var conversations = self.live.valueIterator();
-        while (conversations.next()) |entry| {
-            const conversation = entry.*;
-            if (conversation.state != .ready or conversation.pending.items.len == 0) continue;
-            if (chosen == null or (conversation.pending.items[0].letter.flagged and !chosen.?.pending.items[0].letter.flagged)) chosen = conversation;
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |entry| {
+            const session = entry.*;
+            if (session == self.core or !ready(session)) continue;
+            if (chosen == null or (session.pending.items[0].letter.flagged and !chosen.?.pending.items[0].letter.flagged)) chosen = session;
         }
-        const conversation = chosen orelse return null;
-        const delivery = conversation.pending.orderedRemove(0);
-        conversation.state = .{ .running = delivery };
-        return .{ .conversation = conversation, .delivery = delivery };
+        return if (chosen) |session| take(session) else null;
     }
 
-    pub fn snapshot(self: *Registry, conversation: *Conversation) !Context {
+    pub fn prepareFork(self: *Registry, work: Work, request: ForkRequest) !ForkPlan {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        return self.context(conversation).fork(self.allocator);
+        try validateWork(work);
+        if (request.task.len == 0 or std.mem.indexOfScalar(u8, request.task, 0) != null) return error.InvalidForkArguments;
+        if (work.conversation == self.core and request.mode != .handoff) return error.CoreRequiresHandoff;
+        if (self.sessions.count() + self.reserved >= self.max_contexts) return error.AttentionCapacityUnavailable;
+        const child = try self.allocator.create(Conversation);
+        errdefer self.allocator.destroy(child);
+        const thread = try self.allocator.dupe(u8, work.delivery.letter.thread_id);
+        errdefer self.allocator.free(thread);
+        const delivery = try Delivery.create(self.allocator, work.delivery.letter, .{ .assignment = request.task }, if (request.mode == .handoff) work.delivery.audience else .internal, request.mode == .handoff and work.delivery.tracks_mail, &.{});
+        errdefer delivery.destroy(self.allocator);
+        child.* = .{
+            .session_id = self.next_session_id,
+            .role = .branch,
+            .context = undefined,
+            .thread_id = thread,
+            .parent_session_id = work.conversation.session_id,
+        };
+        try child.pending.append(self.allocator, delivery);
+        self.next_session_id += 1;
+        self.reserved += 1;
+        return .{ .child = child, .request = .{ .task = delivery.kind.assignment, .mode = request.mode } };
+    }
+
+    pub fn abandonForks(self: *Registry, plans: []const ForkPlan) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (plans) |plan| {
+            self.reserved -= 1;
+            for (plan.child.pending.items) |delivery| delivery.destroy(self.allocator);
+            plan.child.pending.deinit(self.allocator);
+            self.allocator.free(plan.child.thread_id);
+            self.allocator.destroy(plan.child);
+        }
+    }
+
+    /// Commit before child execution: every fork includes this response and
+    /// exactly one result per call, never an unfinished exchange. All plans
+    /// remain caller-owned on failure; success consumes them together.
+    pub fn commitRound(self: *Registry, work: Work, output: []const Value, replies: []const Value, plans: []const ForkPlan) !Commit {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        try validateWork(work);
+        const parent = work.conversation;
+        var completed = try parent.context.fork(self.allocator);
+        errdefer completed.deinit();
+        try completed.appendBatch(output, replies);
+        try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(plans.len));
+        try parent.pending.ensureUnusedCapacity(self.allocator, 1);
+        var prepared: usize = 0;
+        errdefer for (plans[0..prepared]) |plan| plan.child.context.deinit();
+        for (plans) |plan| {
+            try plan.child.pending.ensureUnusedCapacity(self.allocator, parent.pending.items.len);
+            plan.child.context = try completed.fork(self.allocator);
+            prepared += 1;
+        }
+        parent.context.deinit();
+        parent.context = completed;
+        parent.generation += 1;
+        var result: Commit = .{};
+        for (plans) |plan| {
+            const child = plan.child;
+            child.parent_generation = parent.generation;
+            self.sessions.putAssumeCapacity(child.session_id, child);
+            self.reserved -= 1;
+            parent.children += 1;
+            switch (plan.request.mode) {
+                .handoff => {
+                    child.report_to = parent.report_to;
+                    parent.report_to = null;
+                    if (work.delivery.tracks_mail) {
+                        self.routes.getPtr(work.delivery.letter.thread_id).?.* = child.session_id;
+                        var index: usize = 0;
+                        while (index < parent.pending.items.len) {
+                            if (std.mem.eql(u8, parent.pending.items[index].letter.thread_id, work.delivery.letter.thread_id)) {
+                                child.pending.appendAssumeCapacity(parent.pending.orderedRemove(index));
+                            } else index += 1;
+                        }
+                    }
+                    parent.active = null;
+                    parent.state = .ready;
+                    work.delivery.destroy(self.allocator);
+                    result.handed_off = true;
+                },
+                .subtask => |subtask| if (subtask.report_to_parent) {
+                    child.report_to = parent.session_id;
+                    parent.waiting_reports += 1;
+                },
+            }
+        }
+        if (!result.handed_off and parent.waiting_reports != 0) {
+            parent.state = .waiting;
+            result.waiting = true;
+        }
+        return result;
+    }
+
+    pub fn snapshot(self: *Registry, session: *Conversation) !Context {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        return session.context.fork(self.allocator);
     }
 
     pub fn snapshotCore(self: *Registry) !Context {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.core.fork(self.allocator);
+        return self.snapshot(self.core);
     }
 
     pub fn appendCoreInput(self: *Registry, text: []const u8) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        try self.core.appendInput(text);
-        self.core_generation += 1;
+        try self.appendInput(self.core, text);
     }
 
-    pub fn appendInput(self: *Registry, conversation: *Conversation, text: []const u8) !void {
+    pub fn appendInput(self: *Registry, session: *Conversation, text: []const u8) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try self.context(conversation).appendInput(text);
-        if (conversation.role == .core) self.core_generation += 1;
+        try session.context.appendInput(text);
+        session.generation += 1;
     }
 
-    pub fn appendBatch(self: *Registry, conversation: *Conversation, output: []const Value, replies: []const Value) !void {
+    pub fn replaceContext(self: *Registry, session: *Conversation, replacement: Context) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try self.context(conversation).appendBatch(output, replies);
-        if (conversation.role == .core) self.core_generation += 1;
+        session.context.deinit();
+        session.context = replacement;
+        session.generation += 1;
     }
 
-    /// Ownership transfers only on success.
-    pub fn replaceContext(self: *Registry, conversation: *Conversation, replacement: Context) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        const current = self.context(conversation);
-        current.deinit();
-        current.* = replacement;
-        if (conversation.role == .core) self.core_generation += 1;
-    }
-
-    pub fn runtimeSnapshot(self: *Registry, conversation: *Conversation) !Input.Snapshot {
+    pub fn runtimeSnapshot(self: *Registry, session: *Conversation) !Input.Snapshot {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         var queued: usize = 0;
-        var conversations = self.live.valueIterator();
-        while (conversations.next()) |entry| queued += entry.*.pending.items.len;
+        var running: usize = 0;
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |entry| {
+            queued += entry.*.pending.items.len;
+            running += @intFromBool(entry.*.state == .running);
+        }
+        const active = session.active;
         return .{
-            .session_id = conversation.session_id,
-            .role = if (conversation.role == .core) .core else .branch,
-            .parent_generation = conversation.parent_generation,
-            .thread_id = conversation.thread_id,
-            .runtime = .{
-                .active_sessions = self.contextCount(),
-                .running_sessions = self.runningCount(),
-                .active_conversations = self.live.count(),
-                .queued_turns = queued,
+            .session_id = session.session_id,
+            .state = .{
+                .conversation = .{
+                    .role = session.role,
+                    .parent_generation = session.parent_generation,
+                    .parent_session_id = session.parent_session_id,
+                    .active_children = session.children,
+                    .thread_id = if (active) |delivery| delivery.letter.thread_id else session.thread_id,
+                },
+                .response = .{
+                    .audience = if (active) |delivery| delivery.audience else .internal,
+                    .source_mail_id = if (active) |delivery| delivery.letter.id else null,
+                },
+                .runtime = .{
+                    .active_sessions = self.sessions.count(),
+                    .running_sessions = running,
+                    .active_conversations = self.routes.count(),
+                    .queued_turns = queued,
+                },
             },
         };
     }
 
-    pub fn recordLetterID(self: *Registry, conversation: *Conversation, id: []const u8) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        for (conversation.processed_ids.items) |known| if (std.mem.eql(u8, known, id)) return;
-        const copy = try self.allocator.dupe(u8, id);
-        errdefer self.allocator.free(copy);
-        try conversation.processed_ids.append(self.allocator, copy);
-    }
-
-    /// Copies IDs because archive I/O must not borrow registry-owned buffers.
-    pub fn processedIDs(self: *Registry, a: Allocator, conversation: *Conversation) ![]const []const u8 {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        const ids = try a.alloc([]const u8, conversation.processed_ids.items.len);
-        for (ids, conversation.processed_ids.items) |*copy, id| copy.* = try a.dupe(u8, id);
-        return ids;
-    }
-
-    pub fn beginArchive(self: *Registry, conversation: *Conversation) !bool {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        if (conversation.pending.items.len != 0 or conversation.borrowed_reports != 0) return false;
-        switch (conversation.state) {
-            .running => |delivery| conversation.state = .{ .archiving = delivery },
-            .archiving => {},
-            else => return false,
-        }
-        return true;
-    }
-
-    /// True consumes Work and releases the whole active conversation. False
-    /// leaves Work with its caller, who can finish it and schedule queued mail.
-    /// The permanent core context is never retired with correspondence.
-    pub fn retire(self: *Registry, work: Work) !bool {
+    /// A completed activation can release its working context without moving
+    /// any source correspondence out of Inbox. A failed handover keeps context.
+    pub fn finish(self: *Registry, work: Work, text: ?[]const u8, releasable: bool) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         try validateWork(work);
-        const conversation = work.conversation;
-        if (conversation.state != .archiving) return error.ConversationNotArchiving;
-        if (conversation.pending.items.len != 0 or conversation.borrowed_reports != 0) {
-            conversation.state = .{ .running = work.delivery };
-            return false;
-        }
-        self.markHandled(work.delivery.letter);
-        _ = self.live.remove(conversation.thread_id);
-        if (conversation.role == .core) self.core_owner = null;
+        const session = work.conversation;
+        try self.notifyParent(session, .{ .completed = text orelse "" });
+        if (work.delivery.tracks_mail) self.markHandled(work.delivery.letter);
+        const finished_thread = work.delivery.letter.thread_id;
+        if (session == self.core and !hasPendingThread(session, finished_thread)) self.removeRoute(finished_thread, session.session_id);
+        session.active = null;
+        session.state = .ready;
+        session.releasable = releasable;
         work.delivery.destroy(self.allocator);
-        conversation.state = .ready;
-        self.destroyConversation(conversation);
-        return true;
+        self.releaseIdle(session);
     }
 
-    pub fn finish(self: *Registry, work: Work, success: bool) !void {
+    pub fn fail(self: *Registry, work: Work, failure: []const u8) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        try validateWork(work);
-        const conversation = work.conversation;
-        if (conversation.borrowed_reports != 0) return error.ReportStillBorrowed;
-        if (success) {
-            self.markHandled(work.delivery.letter);
+        validateWork(work) catch return;
+        if (!work.delivery.tracks_mail) {
+            try self.notifyParent(work.conversation, .{ .failed = failure });
+            work.conversation.active = null;
+            work.conversation.state = .ready;
             work.delivery.destroy(self.allocator);
-            conversation.state = .ready;
+            self.releaseIdle(work.conversation);
         } else {
-            conversation.pending.insertAssumeCapacity(0, work.delivery);
-            conversation.state = .paused;
+            work.conversation.pending.insertAssumeCapacity(0, work.delivery);
+            work.conversation.active = null;
+            work.conversation.state = .paused;
         }
     }
 
-    pub fn takeCoreReport(self: *Registry, conversation: *Conversation) !?*Delivery {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        if (conversation.role != .core) return null;
-        for (conversation.pending.items, 0..) |delivery, index| {
-            if (delivery.kind != .report) continue;
-            _ = conversation.pending.orderedRemove(index);
-            conversation.borrowed_reports += 1;
-            return delivery;
-        }
-        return null;
-    }
-
-    /// Takes ownership only after the source frame has been copied. Read means
-    /// incorporation into context, not completed model interpretation. Report
-    /// IDs are not part of this external thread's archive set.
-    pub fn consumeReport(self: *Registry, conversation: *Conversation, delivery: *Delivery, rendered_yaml: []const u8) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        try self.context(conversation).appendInput(rendered_yaml);
-        self.core_generation += 1;
-        self.markHandled(delivery.letter);
-        conversation.borrowed_reports -= 1;
-        delivery.destroy(self.allocator);
-    }
-
-    pub fn returnReport(self: *Registry, conversation: *Conversation, delivery: *Delivery) void {
+    /// Keeps session pointers alive until their Kernel worker has returned,
+    /// including handoff workers whose active delivery moved to another session.
+    pub fn endWorker(self: *Registry, session_id: u64) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        conversation.pending.insertAssumeCapacity(0, delivery);
-        conversation.borrowed_reports -= 1;
+        const session = self.sessions.get(session_id) orelse return;
+        session.borrowed_workers -= 1;
+        self.releaseIdle(session);
+    }
+
+    fn notifyParent(self: *Registry, session: *Conversation, outcome: Input.ReportOutcome) !void {
+        const target = session.report_to orelse return;
+        const parent = self.sessions.get(target) orelse return error.ReportParentUnavailable;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        try parent.context.appendInput(try Input.serialize(a, parent.session_id, .{ .report = .{ .from_session = session.session_id, .outcome = outcome } }));
+        parent.generation += 1;
+        parent.waiting_reports -= 1;
+        if (parent.waiting_reports == 0 and parent.state == .waiting) {
+            parent.pending.insertAssumeCapacity(0, parent.active.?);
+            parent.active = null;
+            parent.state = .ready;
+        }
+        session.report_to = null;
     }
 
     pub fn handled(self: *Registry, letter: Mail.Letter) !bool {
@@ -365,8 +410,6 @@ pub const Registry = struct {
         return self.noticed.get(letter.message_id orelse letter.id) == .handled;
     }
 
-    /// Keep completion notices through stale unread snapshots. Seeing absence
-    /// permits a later deliberate mark-unread operation to submit the mail again.
     pub fn reconcile(self: *Registry, waiting: []const Mail.Letter) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -383,53 +426,63 @@ pub const Registry = struct {
         for (absent.items) |key| if (self.noticed.fetchRemove(key)) |entry| self.allocator.free(entry.key);
     }
 
-    fn context(self: *Registry, conversation: *Conversation) *Context {
-        return switch (conversation.role) {
-            .core => &self.core,
-            .branch => |*branch| branch,
+    fn releaseIdle(self: *Registry, session: *Conversation) void {
+        if (session == self.core or session.state != .ready or session.active != null or session.pending.items.len != 0 or session.children != 0 or session.borrowed_workers != 0 or !session.releasable) return;
+        const parent_id = session.parent_session_id;
+        self.removeRoute(session.thread_id, session.session_id);
+        _ = self.sessions.remove(session.session_id);
+        self.destroySession(session);
+        if (parent_id) |id| if (self.sessions.get(id)) |parent| {
+            parent.children -= 1;
+            self.releaseIdle(parent);
         };
     }
 
-    fn contextCount(self: *Registry) usize {
-        var count: usize = 1;
-        var conversations = self.live.valueIterator();
-        while (conversations.next()) |entry| if (entry.*.role == .branch) {
-            count += 1;
-        };
-        return count;
+    fn removeRoute(self: *Registry, thread_id: []const u8, owner: u64) void {
+        if (self.routes.get(thread_id) != owner) return;
+        if (self.routes.fetchRemove(thread_id)) |entry| self.allocator.free(entry.key);
     }
 
-    fn runningCount(self: *Registry) usize {
-        var count: usize = 0;
-        var conversations = self.live.valueIterator();
-        while (conversations.next()) |entry| if (isWorking(entry.*)) {
-            count += 1;
+    fn runningWorkers(self: *Registry) usize {
+        var running: usize = 0;
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |entry| if (entry.* != self.core and entry.*.state == .running) {
+            running += 1;
         };
-        return count;
+        return running;
     }
 
     fn markHandled(self: *Registry, letter: Mail.Letter) void {
         if (self.noticed.getPtr(letter.message_id orelse letter.id)) |notice| notice.* = .handled;
     }
 
-    fn destroyConversation(self: *Registry, conversation: *Conversation) void {
-        for (conversation.pending.items) |delivery| delivery.destroy(self.allocator);
-        conversation.pending.deinit(self.allocator);
-        for (conversation.processed_ids.items) |id| self.allocator.free(id);
-        conversation.processed_ids.deinit(self.allocator);
-        if (conversation.role == .branch) conversation.role.branch.deinit();
-        self.allocator.free(conversation.thread_id);
-        self.allocator.destroy(conversation);
+    fn destroySession(self: *Registry, session: *Conversation) void {
+        if (session.active) |delivery| delivery.destroy(self.allocator);
+        for (session.pending.items) |delivery| delivery.destroy(self.allocator);
+        session.pending.deinit(self.allocator);
+        session.context.deinit();
+        self.allocator.free(session.thread_id);
+        self.allocator.destroy(session);
     }
 };
 
-fn isWorking(conversation: *const Conversation) bool {
-    return conversation.state == .running or conversation.state == .archiving;
+fn ready(session: *const Conversation) bool {
+    return session.state == .ready and session.pending.items.len != 0;
+}
+
+fn take(session: *Conversation) Work {
+    const delivery = session.pending.orderedRemove(0);
+    session.active = delivery;
+    session.borrowed_workers += 1;
+    session.state = .running;
+    return .{ .conversation = session, .delivery = delivery };
+}
+
+fn hasPendingThread(session: *const Conversation, thread_id: []const u8) bool {
+    for (session.pending.items) |delivery| if (std.mem.eql(u8, delivery.letter.thread_id, thread_id)) return true;
+    return false;
 }
 
 fn validateWork(work: Work) !void {
-    switch (work.conversation.state) {
-        .running, .archiving => |delivery| if (delivery != work.delivery) return error.InvalidConversationWork,
-        else => return error.InvalidConversationWork,
-    }
+    if (work.conversation.state != .running or work.conversation.active != work.delivery) return error.InvalidConversationWork;
 }

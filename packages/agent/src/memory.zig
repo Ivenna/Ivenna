@@ -4,7 +4,7 @@ const content = @import("content.zig");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 const Content = content.Content;
-const Expected = content.Expected;
+const Interpretation = content.Interpretation;
 
 pub const Memory = struct {
     io: std.Io,
@@ -34,7 +34,7 @@ pub const Memory = struct {
         },
         read_memory: struct {
             address: []const u8,
-            expected: Expected = .{ .auto = .{} },
+            interpretation: ?Interpretation = null,
         },
         remember: struct {
             address: []const u8,
@@ -104,12 +104,12 @@ pub const Memory = struct {
                     .text => |text| text,
                     .file => |source| std.Io.Dir.cwd().readFileAlloc(self.io, source.path, scratch, .unlimited) catch |err| switch (err) {
                         error.Canceled, error.OutOfMemory => return err,
-                        else => return .{ .text = try std.json.Stringify.valueAlloc(allocator, .{
+                        else => return Content.fromText(allocator, try std.json.Stringify.valueAlloc(allocator, .{
                             .@"error" = .{
                                 .code = "source_unavailable",
                                 .message = try std.fmt.allocPrint(allocator, "Could not read host file '{s}': {s}. This write was not sent to memory.", .{ source.path, @errorName(err) }),
                             },
-                        }, .{}) },
+                        }, .{})),
                     },
                 };
                 const encoder = std.base64.standard.Encoder;
@@ -181,14 +181,14 @@ pub const Memory = struct {
                 };
                 if (term.exited == expected_exit) {
                     if (request == .read_memory and response == .result) {
-                        if (readReply(allocator, response.result, request.read_memory.expected)) |value| {
+                        if (readReply(allocator, response.result, request.read_memory.interpretation)) |value| {
                             return value;
                         } else |err| switch (err) {
                             error.OutOfMemory => return err,
                             else => reply = err,
                         }
                     } else {
-                        return .{ .text = try allocator.dupe(u8, stdout) };
+                        return Content.fromText(allocator, try allocator.dupe(u8, stdout));
                     }
                 }
             }
@@ -208,11 +208,11 @@ pub const Memory = struct {
             .code = "memory_unavailable",
             .message = "The memory room did not return a complete response.",
         } };
-        return .{ .text = try std.json.Stringify.valueAlloc(allocator, failure, .{}) };
+        return Content.fromText(allocator, try std.json.Stringify.valueAlloc(allocator, failure, .{}));
     }
 };
 
-fn readReply(allocator: Allocator, value: Value, expected: Expected) !Content {
+fn readReply(allocator: Allocator, value: Value, interpretation: ?Interpretation) !Content {
     if (value != .object) return error.InvalidMemoryReply;
     const address = value.object.get("address") orelse return error.InvalidMemoryReply;
     const data = value.object.get("data") orelse return error.InvalidMemoryReply;
@@ -225,17 +225,23 @@ fn readReply(allocator: Allocator, value: Value, expected: Expected) !Content {
     defer if (!retain_bytes) allocator.free(bytes);
     decoder.decode(bytes, data.string) catch return error.InvalidMemoryReply;
 
-    return switch (content.classify(bytes, expected)) {
-        .text => |text| .{ .text = try std.json.Stringify.valueAlloc(allocator, .{
+    return switch (content.interpret(bytes, interpretation)) {
+        .text => |text| Content.fromText(allocator, try std.json.Stringify.valueAlloc(allocator, .{
             .result = .{ .address = address.string, .content = text },
-        }, .{}) },
+        }, .{})),
         .image => |image| blk: {
+            const result = try Content.fromParts(allocator, &.{
+                .{ .text = try std.json.Stringify.valueAlloc(allocator, .{
+                    .result = .{ .address = address.string, .content = .{ .image = image.describe() } },
+                }, .{}) },
+                .{ .image = image },
+            });
             retain_bytes = true;
-            break :blk .{ .image = image };
+            break :blk result;
         },
-        .unavailable => |unavailable| .{ .text = try std.json.Stringify.valueAlloc(allocator, .{
+        .unavailable => |unavailable| Content.fromText(allocator, try std.json.Stringify.valueAlloc(allocator, .{
             .result = .{ .address = address.string, .content = .{ .unavailable = unavailable } },
-        }, .{}) },
+        }, .{})),
     };
 }
 

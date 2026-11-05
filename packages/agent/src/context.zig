@@ -76,8 +76,8 @@ pub const Context = struct {
 
     /// Prepare a bounded replacement candidate. The caller validates the full
     /// provider request, sends the handover mail, and only then installs it.
-    /// The handover text contains its mail references and retained commitments;
-    /// it is a user message, so remembered mail cannot become system authority.
+    /// The handover is a user observation, keeping recalled correspondence
+    /// separate from system instructions.
     /// Keeping zero batches replaces the entire earlier working view. Keeping
     /// a tail preserves complete model outputs together with all their results.
     pub fn withHandover(self: *const Context, allocator: Allocator, rendered_handover_mail: []const u8, keep_recent_batches: usize) !Context {

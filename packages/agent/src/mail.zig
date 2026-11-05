@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
-pub const Purpose = enum { correspondence, report, handover, core_handover };
+pub const Purpose = enum { report, handover, core_handover };
 pub const Destination = enum { inbox, archive };
 
 pub const Address = struct {
@@ -33,15 +33,22 @@ pub const Outgoing = struct {
     body: []const u8,
     in_reply_to: ?[]const u8 = null,
     references: []const []const u8 = &.{},
-    purpose: ?Purpose = null,
+};
+
+/// Internal continuity and coordination never supply submission recipients.
+/// Mailbox constructs the self address and stores these letters locally.
+pub const InternalOutgoing = struct {
+    subject: []const u8,
+    body: []const u8,
+    in_reply_to: ?[]const u8 = null,
+    references: []const []const u8 = &.{},
+    purpose: Purpose,
 };
 
 pub const Thread = struct {
     id: []const u8,
     letters: []const Letter,
     handover: ?Letter,
-    archived: bool,
-    has_archived_history: bool,
 };
 
 const core_capability = "urn:ietf:params:jmap:core";
@@ -160,7 +167,7 @@ pub const Mailbox = struct {
 
     /// Submission acceptance does not establish final recipient delivery.
     pub fn send(self: Mailbox, a: Allocator, outgoing: Outgoing) ![]const u8 {
-        const id = try self.create(a, outgoing, self.drafts_id, true);
+        const id = try self.create(a, outgoing, self.drafts_id, true, null);
         var patch: std.json.ObjectMap = .empty;
         try patch.put(a, "keywords/$draft", .null);
         try patch.put(a, try std.fmt.allocPrint(a, "mailboxIds/{s}", .{self.drafts_id}), .null);
@@ -177,21 +184,22 @@ pub const Mailbox = struct {
     }
 
     /// Save one ordinary self letter directly. It has no SMTP delivery copy.
-    pub fn saveInternal(self: Mailbox, a: Allocator, outgoing: Outgoing, destination: Destination) !Letter {
-        if (outgoing.to.len == 0) return error.MailRecipientRequired;
-        for (outgoing.to) |recipient| {
-            if (!std.ascii.eqlIgnoreCase(recipient.email, self.address))
-                return error.InternalMailMustBeSelfAddressed;
-        }
+    pub fn saveInternal(self: Mailbox, a: Allocator, outgoing: InternalOutgoing, destination: Destination) !Letter {
         const folder = switch (destination) {
             .inbox => self.inbox_id,
             .archive => self.archive_id,
         };
-        const id = try self.create(a, outgoing, folder, false);
+        const id = try self.create(a, .{
+            .to = &.{.{ .email = self.address }},
+            .subject = outgoing.subject,
+            .body = outgoing.body,
+            .in_reply_to = outgoing.in_reply_to,
+            .references = outgoing.references,
+        }, folder, false, outgoing.purpose);
         return self.read(a, id);
     }
 
-    fn create(self: Mailbox, a: Allocator, outgoing: Outgoing, folder: []const u8, draft: bool) ![]const u8 {
+    fn create(self: Mailbox, a: Allocator, outgoing: Outgoing, folder: []const u8, draft: bool, internal_purpose: ?Purpose) ![]const u8 {
         if (outgoing.to.len == 0) return error.MailRecipientRequired;
         var folders: std.json.ObjectMap = .empty;
         try folders.put(a, folder, .{ .bool = true });
@@ -212,7 +220,7 @@ pub const Mailbox = struct {
             try message.object.put(a, "inReplyTo", try value(a, &[_][]const u8{id}));
         if (outgoing.references.len != 0)
             try message.object.put(a, "references", try value(a, outgoing.references));
-        if (outgoing.purpose) |purpose|
+        if (internal_purpose) |purpose|
             try message.object.put(a, purpose_property, .{ .string = @tagName(purpose) });
         const result = try self.call(a, "Email/set", .{
             .accountId = self.account_id,
@@ -270,15 +278,11 @@ pub const Mailbox = struct {
         const ids = try strings(a, try field(threads[0], "emailIds"));
         var recent_ids: std.ArrayList([]const u8) = .empty;
         var handover_id: ?[]const u8 = null;
-        var has_inbox = false;
-        var has_archive = false;
         var offset: usize = 0;
         while (offset < ids.len) {
             const end = offset + @min(self.max_get, ids.len - offset);
             for (try self.getRecords(a, ids[offset..end], false)) |record| {
                 const letter = try self.decode(a, record, false);
-                has_inbox = has_inbox or letter.in_inbox;
-                has_archive = has_archive or letter.in_archive;
                 if (isHandover(letter) and self.isSelf(letter)) {
                     handover_id = letter.id;
                 } else if (limit != 0) {
@@ -303,8 +307,6 @@ pub const Mailbox = struct {
             .id = try a.dupe(u8, thread_id),
             .letters = try letters.toOwnedSlice(a),
             .handover = handover,
-            .archived = has_archive and !has_inbox,
-            .has_archived_history = has_archive,
         };
     }
 

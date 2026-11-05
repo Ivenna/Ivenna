@@ -2,31 +2,43 @@ const std = @import("std");
 
 pub const image_size_limit = 32 * 1024 * 1024;
 
-/// Content hint for a complete memory entry or stdout capture.
-pub const Expected = union(enum) {
-    auto: struct {},
-    text: struct {},
-    image: struct {
-        representation: enum { data, url } = .data,
-    },
+/// Explicit interpretation of a complete text source as a resource reference.
+pub const Interpretation = enum { image_url };
 
-    pub fn isUrlReference(self: Expected) bool {
-        return switch (self) {
-            .image => |image| image.representation == .url,
-            .auto, .text => false,
-        };
+/// One tool's model-facing result. Parts and their payloads belong to
+/// the current turn; classification of one source does not remove sibling parts.
+pub const Content = struct {
+    parts: []const Part,
+
+    pub const Part = union(enum) {
+        text: []const u8,
+        image: ImageContent,
+    };
+
+    pub fn fromText(allocator: std.mem.Allocator, text: []const u8) !Content {
+        return fromParts(allocator, &.{.{ .text = text }});
     }
-};
 
-/// One tool's model-facing result. Payload slices are borrowed for the current turn.
-pub const Content = union(enum) {
-    text: []const u8,
-    image: ImageContent,
+    pub fn fromParts(allocator: std.mem.Allocator, parts: []const Part) !Content {
+        return .{ .parts = try allocator.dupe(Part, parts) };
+    }
 };
 
 pub const ImageContent = union(enum) {
     data: Image,
     url: []const u8,
+
+    pub const Description = union(enum) {
+        data: struct { format: Image.Format, byte_length: u64 },
+        url: struct {},
+    };
+
+    pub fn describe(self: ImageContent) Description {
+        return switch (self) {
+            .data => |image| .{ .data = .{ .format = image.format, .byte_length = image.bytes.len } },
+            .url => .{ .url = .{} },
+        };
+    }
 };
 
 pub const Image = @import("image.zig").Image;
@@ -42,10 +54,8 @@ pub const Classified = union(enum) {
     unavailable: Unavailable,
 };
 
-/// Classify bytes by image signature or UTF-8 text, without requiring a match
-/// to a text or image-data expectation. URL expectations interpret nonempty text
-/// as a reference without fetching, changing, or validating the address.
-pub fn classify(bytes: []const u8, expected: Expected) Classified {
+/// Classify bytes by image signature or UTF-8 text. A textual address stays text.
+pub fn classify(bytes: []const u8) Classified {
     if (Image.fromBytes(bytes)) |image| {
         if (bytes.len > image_size_limit)
             return .{ .unavailable = .{ .byte_length = bytes.len, .reason = .image_too_large } };
@@ -53,8 +63,16 @@ pub fn classify(bytes: []const u8, expected: Expected) Classified {
     }
     if (!isText(bytes))
         return .{ .unavailable = .{ .byte_length = bytes.len, .reason = .unsupported_binary } };
-    if (expected.isUrlReference() and bytes.len != 0) return .{ .image = .{ .url = bytes } };
     return .{ .text = bytes };
+}
+
+/// Present a caller-declared image reference without fetching or validating it.
+/// Recognized image bytes keep their data representation; empty text stays text.
+pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Classified {
+    const classified = classify(bytes);
+    if (interpretation == .image_url and classified == .text and bytes.len != 0)
+        return .{ .image = .{ .url = bytes } };
+    return classified;
 }
 
 pub fn isText(bytes: []const u8) bool {

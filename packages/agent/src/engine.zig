@@ -14,6 +14,13 @@ pub const Engine = struct {
     memory: Memory,
     host: Host,
 
+    /// Kernel supplies attention operations without giving tool execution
+    /// ownership of sessions or their retained histories.
+    pub const RuntimeTools = struct {
+        context: *anyopaque,
+        invoke: *const fn (*anyopaque, Allocator, []const u8, []const u8) anyerror!?Content,
+    };
+
     pub const Round = struct {
         output: []const Value,
         replies: []const Value,
@@ -21,37 +28,42 @@ pub const Engine = struct {
     };
 
     /// Returned data belongs to a, including model output and tool replies.
-    pub fn turn(self: *Engine, a: Allocator, session_id: u64, history: []const Value) !Round {
+    pub fn turn(self: *Engine, a: Allocator, session_id: u64, history: []const Value, runtime_tools: ?RuntimeTools, coordination_only: bool) !Round {
         try self.io.checkCancel();
-        const response = try self.provider.next(a, history);
+        var provider = self.provider;
+        provider.tool_scope = if (coordination_only) .coordination else .all;
+        const response = try provider.next(a, history);
+        const text = try responseText(a, response.output);
         var messages: std.ArrayList(Value) = .empty;
         try messages.appendSlice(a, history);
         try messages.appendSlice(a, response.output);
         const reply_start = messages.items.len;
         for (response.calls) |call| {
-            const content = self.invoke(a, session_id, call.name, call.arguments) catch |err| switch (err) {
+            const content = self.invoke(a, session_id, call.name, call.arguments, runtime_tools, coordination_only) catch |err| switch (err) {
                 error.Canceled, error.OutOfMemory => return err,
-                error.InvalidToolArguments, error.UnknownTool => Content{
-                    .text = try std.json.Stringify.valueAlloc(a, .{
-                        .@"error" = .{
-                            .code = if (err == error.UnknownTool) "unknown_tool" else "invalid_arguments",
-                            .message = if (err == error.UnknownTool) "This tool is not available." else "The arguments do not match the tool parameters.",
-                        },
-                    }, .{}),
-                },
+                error.InvalidToolArguments, error.UnknownTool => try Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
+                    .@"error" = .{
+                        .code = if (err == error.UnknownTool) "unknown_tool" else "invalid_arguments",
+                        .message = if (err == error.UnknownTool) "This tool is not available." else "The arguments do not match the tool parameters.",
+                    },
+                }, .{})),
                 else => return err,
             };
-            try messages.append(a, try self.provider.toolReply(a, call.call_id, content, messages.items));
+            try messages.append(a, try provider.toolReply(a, call.call_id, content, messages.items));
         }
-        try self.provider.limitToolReplies(a, messages.items, reply_start);
+        try provider.limitToolReplies(a, messages.items, reply_start);
         return .{
             .output = response.output,
             .replies = messages.items[reply_start..],
-            .text = try responseText(a, response.output),
+            .text = text,
         };
     }
 
-    fn invoke(self: *Engine, a: Allocator, session_id: u64, name: []const u8, arguments: []const u8) !Content {
+    fn invoke(self: *Engine, a: Allocator, session_id: u64, name: []const u8, arguments: []const u8, runtime_tools: ?RuntimeTools, coordination_only: bool) !Content {
+        if (runtime_tools) |runtime| {
+            if (try runtime.invoke(runtime.context, a, name, arguments)) |result| return result;
+        }
+        if (coordination_only) return error.UnknownTool;
         if (try Memory.Request.parse(a, name, arguments)) |request|
             return self.memory.invoke(a, request);
         if (try Host.Request.parse(a, name, arguments)) |request|
@@ -67,6 +79,8 @@ pub fn responseText(a: Allocator, output: []const Value) !?[]const u8 {
         if (item != .object) continue;
         const kind = item.object.get("type") orelse continue;
         if (kind != .string or !std.mem.eql(u8, kind.string, "message")) continue;
+        const role = item.object.get("role") orelse return error.InvalidModelResponse;
+        if (role != .string or !std.mem.eql(u8, role.string, "assistant")) return error.InvalidModelResponse;
         const parts = item.object.get("content") orelse continue;
         if (parts != .array) continue;
         for (parts.array.items) |part| {

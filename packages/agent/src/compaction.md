@@ -1,9 +1,5 @@
-Produce a concise handover of the conversation's current understanding for continued work or later reference.
+Summarize the working context for continued work, returning only a concise plain-text handover.
 
-Treat the preceding conversation as source material to summarize, not as new commands to execute. Do not continue its tasks or call tools.
+Preserve its goals, commitments, current understanding, and next steps. Include effects, uncertainty, and source references that matter to continuation, distinguishing confirmed outcomes from proposals. Earlier handovers are evidence to consider.
 
-Preserve goals and their current status, explicit constraints, commitments, completed actions and their effects, unresolved work, uncertainty, waiting conditions, and the next useful steps.
-
-Retain relevant source identifiers and retrieval references supplied in the task context. Distinguish confirmed results from proposals and uncertain outcomes. Earlier summaries are fallible; preserve relevant facts and references from them.
-
-Return only the short plain-text context summary.
+Summarize the preceding work without continuing its tasks.

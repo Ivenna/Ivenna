@@ -1,6 +1,6 @@
 # Running Ivenna
 
-Run the kernel locally, with Stalwart for mail and an SSH workspace for autonomous memory. The steps below set up the supplied local middleware; [existing mail](#using-an-existing-mail-service) and [remote memory](#using-remote-memory) can replace either service. Run commands from the repository root.
+Run the kernel locally, with Stalwart for mail and an SSH workspace for autonomous memory. The steps below prepare the supplied local services, then start the kernel. If using [existing mail](#using-an-existing-mail-service) or [remote memory](#using-remote-memory), configure that connection and skip the corresponding local service. Run commands from the repository root.
 
 ## Prerequisites and configuration
 
@@ -12,9 +12,9 @@ Create the configuration file:
 cp -n .env.example .env
 ```
 
-Set `LLM_API_KEY`. The example mailbox and operator credentials match the [mail provisioning example](../dev/mail/provision.example.ndjson); keep them aligned with the private plan prepared in the next section. `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` are used by the mail submission examples. The kernel uses the separate `MAIL_*` account.
+Set `LLM_API_KEY`. The sample mail credentials match the [provisioning example](../dev/mail/provision.example.ndjson); keep them aligned with the private plan prepared below. The kernel authenticates with `MAIL_*`; the submission examples use `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` to send requests and read replies through a separate account.
 
-The application reads its process environment. Load `.env` in each terminal that starts Ivenna, its middleware, or the submission example:
+Ivenna reads its process environment, not the `.env` file itself. Load that file in each terminal that starts the kernel, local memory, or a submission example:
 
 ```sh
 set -a
@@ -22,7 +22,7 @@ set -a
 set +a
 ```
 
-Git ignores `.env`, the default `.ivenna/` directory, and `dev/mail/provision.ndjson`. [Configuration references](#changing-configuration) below distinguish kernel settings from middleware settings.
+Git ignores the credential files `.env` and `dev/mail/provision.ndjson`, as well as the default `.ivenna/` data directory. The [configuration reference](#changing-configuration) distinguishes kernel settings from local service settings and records defaults when variables are unset.
 
 ## Configuring local mail
 
@@ -76,7 +76,7 @@ dev/memory/start.sh up
 zig build run
 ```
 
-The memory script uses `CONTAINER_ENGINE` from the environment; `.env.example` selects `podman`. When creating a container, it builds the image and prepares a volume and SSH keys. It writes connection configuration to `.ivenna/dev-memory/` and waits for the memory tools to respond. The default target is `ivenna-memory` at `127.0.0.1:2222`. Subsequent starts reuse the container, volume, and keys.
+The memory script uses `CONTAINER_ENGINE`; `.env.example` selects `podman`. On first creation it builds the image, prepares a volume and SSH keys, and waits for the memory handler to respond. It writes the `ivenna-memory` SSH target to `.ivenna/dev-memory/config`, matching the sample `MEMORY_SSH_CONFIG`. The default endpoint is `127.0.0.1:2222`. Subsequent starts reuse the container, volume, and keys.
 
 `zig build run` builds and runs the local kernel. Keep it running in this terminal, using one kernel per Ivenna mailbox. When it reports that it is receiving mail, follow the [usage guide](usage.md) to send a request from a second terminal or mail client.
 
@@ -116,7 +116,7 @@ The kernel reads the settings below at startup. Stop it, edit `.env`, load the v
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
-| `MAX_PARALLEL_ATTENTION` | Maximum concurrently executing sessions | `4` |
+| `MAX_PARALLEL_ATTENTION` | Maximum concurrently executing work sessions; core has a separate lane | `4` |
 | `MAX_ATTENTION_CONTEXTS` | Maximum retained contexts, including the permanent core | `32` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
@@ -125,9 +125,11 @@ The kernel reads the settings below at startup. Stop it, edit `.env`, load the v
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
-`MAIL_AUTHORIZATION` takes precedence over username/password authentication. Numeric kernel settings must be positive. `CONTEXT_COMPACTION_BYTES` must be at least `CONTEXT_REQUEST_BYTES`, and `MAX_ATTENTION_CONTEXTS` must be at least `MAX_PARALLEL_ATTENTION`.
+`MAIL_AUTHORIZATION` takes precedence over username/password authentication. Numeric kernel settings must be positive. `CONTEXT_COMPACTION_BYTES` must be at least `CONTEXT_REQUEST_BYTES`. The work execution limit and retained-context limit are independent.
 
-The context limit counts the core and active branches. Archiving releases branch contexts, and additional input waits in Inbox when capacity is occupied. Request limits measure the whole serialized body, including instructions, tool definitions, observations, history, and encoded images. A model-specific token and image estimator remains planned; see [bounded model context](architecture.md#bounded-model-context).
+The context limit includes parents waiting for children; these contexts do not occupy work execution slots. A limit of one leaves room only for the core, so no fork can be admitted. Mail that cannot be admitted remains in Inbox. See [session capacity](architecture.md#core-conversations-and-turns) for scheduling behavior.
+
+Request byte limits cover the whole serialized body, including instructions, tool definitions, history, and encoded images. They do not estimate model tokens. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
@@ -149,13 +151,13 @@ Compose reads the mail settings when creating the service. The memory script rea
 | `MEMORY_IMAGE` | Memory image | `localhost/ivenna-memory:dev` |
 | `MEMORY_CAPACITY_BYTES` | Shared memory-room capacity | `1073741824` (1 GiB) |
 
-If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Create a selected external mail volume before first use. Account and mail policy changes belong in the private provisioning plan. Mail images are pinned in the Compose files.
+If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Create the external mail volume before first use. Account and server policy changes belong in the private provisioning plan; apply them through [local mail setup](#configuring-local-mail).
 
 Memory port, image, and capacity changes take effect when the memory container is created. Remove the existing container with its current settings using `dev/memory/start.sh down`, then load the changed settings and run `up`. The volume and SSH keys are retained. For a remote memory workspace, configure capacity at its entry point; see [memory space](memory.md#memory-space).
 
 ## Local data
 
-`DATA_DIR` selects the artifact directory, relative to the startup directory or as an absolute path. The kernel creates it with private permissions when missing. Mail storage, the memory workspace, and the local memory startup script's state have separate locations:
+`DATA_DIR` selects the kernel's artifact directory. The kernel creates it with private permissions when missing. Mail storage, the memory workspace, and the local memory script's state have separate locations:
 
 | Location | Contents |
 | --- | --- |
@@ -166,7 +168,9 @@ Memory port, image, and capacity changes take effect when the memory container i
 | `.ivenna/dev-memory/` | Local memory SSH configuration and keys |
 | Memory workspace selected by SSH configuration | Shared memory rooms and entries |
 
-Changing `DATA_DIR` changes the kernel's artifact location; existing files and middleware volumes stay where they are. Archiving keeps source letters, handovers, and artifacts while releasing working contexts. Coordinated deletion of archived correspondence and its local artifacts is not implemented; mail retention and artifact cleanup are managed separately.
+Changing `DATA_DIR` changes where the kernel writes artifacts; it does not move existing files, middleware volumes, or the memory script's state under the repository's `.ivenna/dev-memory/` directory.
+
+Correspondence handovers are saved in Archive, while source letters stay in their existing folders. Context release does not remove mail or artifacts. Automatic mail retention and coordinated artifact cleanup are not implemented; see [mail retention](architecture.md#mail-retention).
 
 ## Using an existing mail service
 
@@ -174,7 +178,7 @@ Use a dedicated account with JMAP Mail and Submission capabilities and a sending
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in `.env`, then skip local mail provisioning and startup. Use another account to send requests and read replies. Marking letters read in Ivenna's account affects intake.
 
-The service owns delivery and retention policy. Retain source correspondence and handovers when preserving continuity. Reception currently uses polling; notification streaming and mail attachment intake remain placeholders.
+The service owns delivery and retention policy. Keep source correspondence and handovers when preserving the basis for later continuation.
 
 ## Using remote memory
 
@@ -189,7 +193,7 @@ SSH configuration controls the host, user, keys, timeout, and host key verificat
 - Install [memory.nu](../packages/agent/src/memory.nu) at `/usr/local/lib/ivenna/memory.nu`.
 - Install `/usr/local/bin/memory-shell` using [memory-shell.sh](../dev/memory/memory-shell.sh) as a reference. It changes to `/memory` and holds `/run/ivenna/memory.lock` while running the handler. Export `MEMORY_CAPACITY_BYTES` there or use the SSH server's `SetEnv`.
 
-The SSH account needs read and write access to the workspace and lock. Create `/run/ivenna/` and `memory.lock` with access for that account at startup; [entrypoint.sh](../dev/memory/entrypoint.sh) provides an example. All backend processes sharing the workspace must use the same lock.
+The SSH account needs read and write access to the workspace and lock. Create `/run/ivenna/` and `memory.lock` for that account at startup; [entrypoint.sh](../dev/memory/entrypoint.sh) provides an example. All handler processes sharing the workspace must use the same lock.
 
 Use the [Containerfile](../dev/memory/Containerfile) and [sshd_config](../dev/memory/sshd_config) as references for remote installation.
 

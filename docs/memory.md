@@ -1,6 +1,6 @@
 # Memory rooms
 
-Ivenna stores persistent memory in rooms shared across sessions. The model uses tools to browse, find, recall, record, and revise memories. Ivenna chooses its own room hierarchy, entry names, formats, and cross-references.
+Ivenna stores persistent memory in rooms shared across sessions. Work sessions use tools to browse, find, recall, record, and revise memories. Ivenna chooses its own room hierarchy, entry names, formats, and cross-references.
 
 See the [running guide](running.md) for local setup or [using remote memory](running.md#using-remote-memory) to connect to another memory workspace. The [architecture guide](architecture.md#autonomous-memory) describes the execution protocol and module boundaries.
 
@@ -22,7 +22,7 @@ Moving a room or entry changes its address; references stored in memory content 
 
 ## Tools and arguments
 
-[tools.json](../packages/agent/src/tools.json) defines the tools and arguments available to the model. The table below lists the required arguments. Omit optional arguments to use their defaults.
+[tools.json](../packages/agent/src/tools.json) defines the memory tools available to work sessions. The table below lists their required arguments. Omit optional arguments to use their defaults.
 
 | Tool | Required arguments | Purpose |
 | --- | --- | --- |
@@ -37,16 +37,16 @@ Moving a room or entry changes its address; references stored in memory content 
 | `move_memory` | `address`, `destination` | Move or rename entries and rooms |
 | `forget_memory` | `address` | Remove an entry or room |
 
-For name searches, `match_mode` supports `literal`, `glob`, and `regex`; content searches support `literal` and `regex`. Searches use literal, case-insensitive matching by default. Literal name searches match any part of a name. Set `case_sensitive: true` to make searches case-sensitive. Content searches match text in entries.
+`find_memory` searches names with `literal`, `glob`, or `regex` matching. `recall_memory` searches entry text with `literal` or `regex` matching. Both default to literal, case-insensitive matching; literal name searches match any part of a name. Set `case_sensitive: true` to make a search case-sensitive.
 
-`read_memory` accepts an optional `expected` object for the complete entry. Omit it for automatic classification as full text or a supported image. An entry can store arbitrary bytes; a content diagnostic from reading it leaves the entry intact. See [tool content](content.md) for the expectation branches, URL references, and limits.
+`read_memory` uses the shared [content handling](content.md) rules. Its optional `interpretation: "image_url"` presents the entry's complete text as an [image reference](content.md#image-url-references).
 
 `remember.content` selects exactly one source:
 
 | Content | Meaning |
 | --- | --- |
 | `{"text":"..."}` | Write the supplied text as UTF-8 |
-| `{"file":{"path":"..."}}` | Copy a file's original bytes from the service's filesystem |
+| `{"file":{"path":"..."}}` | Copy a file's original bytes from Ivenna's host filesystem |
 
 A source file path can be absolute or relative to the service's startup directory. The destination `address` remains relative to the memory entrance.
 
@@ -153,7 +153,7 @@ Call `find_memory` to find entries by a name pattern:
 Call `read_memory` to read an image entry:
 
 ```json
-{"address":"screenshots/dashboard.png","expected":{"image":{}}}
+{"address":"screenshots/dashboard.png"}
 ```
 
 Call `revise_memory` to update a passage:
@@ -170,7 +170,7 @@ A regular expression can revise several passages at once. For example, update bo
 
 ## Results and errors
 
-Image reads return native image content. Text reads and other operations return JSON containing either `result` or `error`. For example, `remember` returns the entry's address:
+Every operation returns a text part containing JSON with either `result` or `error`. Image reads add a native image part alongside a result description containing the entry's address and image metadata. Content limits can replace that image part with a diagnostic while preserving its source description. For example, `remember` returns the entry's address:
 
 ```json
 {"result":{"address":"languages/progress.md"}}
@@ -182,9 +182,11 @@ Image reads return native image content. Text reads and other operations return 
 | Inspect space | `used_bytes`, `capacity_bytes`, `remaining_bytes`, and `used_ratio` |
 | Find by name | `room`, `query`, and `matches`; each match has `address`, `name`, and `kind` |
 | Recall by content | `room`, `clue`, and `matches`; each match has `address`, `line`, and `text` |
-| Read (text response) | `address` and `content`: full text, or `unavailable` with `byte_length` and `reason` |
+| Read | `address` and `content`: full text, an `image` description, or `unavailable` with `byte_length` and `reason` |
 | Revise | `address` and `revision` |
 | Record, create a room, move, or remove | `address`; moving returns the actual new address |
+
+The shared [content guide](content.md#content-and-results) defines image descriptions and content diagnostics.
 
 The `kind` field is `room` for a memory room and `memory` for a memory entry. A search with no matches returns an empty `matches` list. In content matches, `line` is a line number starting at 1. The `revision` field has three possible values:
 

@@ -43,29 +43,27 @@ pub const Host = struct {
     pub fn invoke(self: *Host, a: Allocator, context: Context, request: Request) !Content {
         return self.respond(a, context, request) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,
-            else => .{ .text = try failure(a, "host_unavailable", switch (request) {
+            else => Content.fromText(a, try failure(a, "host_unavailable", switch (request) {
                 .run_host_shell => try std.fmt.allocPrint(a, "Could not return the command result: {s}. The host may have changed.", .{@errorName(err)}),
                 .get_host_shell => try std.fmt.allocPrint(a, "Could not describe the host shell: {s}.", .{@errorName(err)}),
-            }) },
+            })),
         };
     }
 
     fn respond(self: *Host, a: Allocator, context: Context, request: Request) !Content {
         return switch (request) {
-            .get_host_shell => .{ .text = try success(a, self.shell.describe()) },
+            .get_host_shell => Content.fromText(a, try success(a, self.shell.describe())),
             .run_host_shell => |args| blk: {
                 const result = try self.shell.run(a, context, args);
-                const succeeded = switch (result.outcome) {
-                    .completed => |term| term == .exited and term.exited == 0,
-                    .timed_out => false,
-                };
-                if (succeeded) {
-                    switch (result.stdout.content) {
-                        .image => |image| break :blk .{ .image = image },
-                        .text, .unavailable => {},
-                    }
+                const description = try success(a, result.describe());
+                switch (result.stdout.content) {
+                    .image => |image| break :blk Content.fromParts(a, &.{
+                        .{ .text = description },
+                        .{ .image = image },
+                    }),
+                    .text, .unavailable => {},
                 }
-                break :blk .{ .text = try success(a, result.describe()) };
+                break :blk Content.fromText(a, description);
             },
         };
     }

@@ -2,16 +2,16 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const Compaction = @import("compaction.zig");
 const Engine = @import("engine.zig").Engine;
+const Content = @import("content.zig").Content;
 const Input = @import("input.zig");
 const Conversations = @import("conversations.zig");
 const Mail = @import("mail.zig");
 const Allocator = std.mem.Allocator;
-const Value = std.json.Value;
 const Conversation = Conversations.Conversation;
 const Work = Conversations.Work;
 
-/// Owns external I/O and task scopes. Registry owns the permanent core and
-/// active correspondence; a worker handles one incoming letter's mail turn.
+/// Owns mail I/O and worker scopes. Core coordination and delegated work have
+/// independent execution lanes; Registry owns histories and task routing.
 pub const Kernel = struct {
     allocator: Allocator,
     io: std.Io,
@@ -23,8 +23,6 @@ pub const Kernel = struct {
     conversations: Conversations.Registry,
     workers: std.Io.Group = .init,
 
-    /// Whole serialized request bounds. Exact model-specific token and image
-    /// accounting is a separate, currently planned capability.
     pub const Limits = struct {
         request_bytes: u64 = 65536,
         compaction_bytes: u64 = 131072,
@@ -32,7 +30,7 @@ pub const Kernel = struct {
     };
 
     pub fn init(allocator: Allocator, io: std.Io, engine: *Engine, mailbox: *Mail.Mailbox, limits: Limits, poll_interval_ms: u32, max_parallel: usize, max_contexts: usize) !Kernel {
-        if (max_parallel == 0 or max_contexts < max_parallel or poll_interval_ms == 0 or
+        if (max_parallel == 0 or max_contexts == 0 or poll_interval_ms == 0 or
             limits.request_bytes == 0 or limits.compaction_bytes < limits.request_bytes or limits.handover_bytes == 0)
             return error.InvalidKernelConfiguration;
         return .{
@@ -82,26 +80,26 @@ pub const Kernel = struct {
         defer arena.deinit();
         const a = arena.allocator();
         if (try self.mailbox.latestHandover(a)) |letter| {
-            const fields = try self.source(a, letter, self.limits.handover_bytes, "handover");
-            try self.conversations.appendCoreInput(try Input.serialize(a, 1, .{ .object = .empty }, fields));
-            std.log.info("core recollected its handover", .{});
+            const record = try self.source(a, letter, self.limits.handover_bytes);
+            try self.conversations.appendCoreInput(try Input.serialize(a, 1, .{ .background = .{ .items = &.{.{ .handover = record }} } }));
         }
-        var background: std.ArrayList(Value) = .empty;
+        var background: std.ArrayList(Input.Background) = .empty;
         var base = try self.conversations.snapshotCore();
         defer base.deinit();
+        var provider = self.engine.provider;
+        provider.tool_scope = .coordination;
         const reserve = @min(4096, self.limits.request_bytes / 4);
         var selected: ?[]const u8 = null;
         for (try self.mailbox.recent(a, 32)) |letter| {
-            try background.append(a, try self.source(a, letter, 512, "correspondence"));
-            const fields = try jsonValue(a, .{ .message = "", .background = background.items });
-            const rendered_frame = try Input.serialize(a, 1, .{ .object = .empty }, fields);
+            try background.append(a, .{ .history = try self.source(a, letter, 512) });
+            const rendered = try Input.serialize(a, 1, .{ .background = .{ .items = background.items } });
             var candidate = try base.fork(self.allocator);
             defer candidate.deinit();
-            try candidate.appendInput(rendered_frame);
-            if (try self.engine.provider.requestBytes(a, candidate.history()) > self.limits.request_bytes - reserve) break;
-            selected = rendered_frame;
+            try candidate.appendInput(rendered);
+            if (try provider.requestBytes(a, candidate.history()) > self.limits.request_bytes - reserve) break;
+            selected = rendered;
         }
-        if (selected) |rendered_frame| try self.conversations.appendCoreInput(rendered_frame);
+        if (selected) |rendered| try self.conversations.appendCoreInput(rendered);
     }
 
     fn receive(self: *Kernel, a: Allocator, letter: Mail.Letter) !void {
@@ -109,230 +107,186 @@ pub const Kernel = struct {
             try self.mailbox.markRead(a, letter.id);
             return;
         }
-        if (letter.purpose == .report and self.isSelf(letter)) {
-            _ = try self.conversations.acceptCore(letter);
-            return;
-        }
-        if (try self.conversations.acceptExisting(letter)) return;
+        const audience: Input.Audience = if (self.isSelf(letter) or letter.from.len == 0) .internal else .external;
+        if (try self.conversations.acceptExisting(letter, audience)) return;
         const thread = try self.mailbox.thread(a, letter.thread_id, 32);
-        const reopening = thread.handover != null or thread.has_archived_history;
-        var restored: ?Context = if (reopening) try Context.init(self.allocator, @embedFile("system.md")) else null;
-        defer if (restored) |*view| view.deinit();
-        const conversation = try self.conversations.accept(letter, restored) orelse return;
-        restored = null;
-        if (!reopening) return;
+        var background: std.ArrayList(Input.Background) = .empty;
         if (thread.handover) |handover| {
-            try self.conversations.appendInput(conversation, try self.frame(a, conversation, handover, self.limits.handover_bytes, "handover"));
+            try background.append(a, .{ .handover = try self.source(a, handover, self.limits.handover_bytes) });
         }
-        // Prefer the newest evidence that fits, retaining chronological order.
-        // Historical correspondence never becomes queued active work.
-        var base = try self.conversations.snapshot(conversation);
-        defer base.deinit();
-        var frames: std.ArrayList([]const u8) = .empty;
-        var index = thread.letters.len;
-        while (index != 0) {
-            index -= 1;
-            const past = thread.letters[index];
+        for (thread.letters) |past| {
             if (std.mem.eql(u8, past.id, letter.id) or past.purpose == .handover or past.purpose == .core_handover) continue;
-            const rendered = try self.frame(a, conversation, past, 512, "history");
-            try frames.insert(a, 0, rendered);
-            var candidate = try base.fork(self.allocator);
-            errdefer candidate.deinit();
-            for (frames.items) |past_frame| try candidate.appendInput(past_frame);
-            if (try self.engine.provider.requestBytes(a, candidate.history()) > self.limits.request_bytes - @min(4096, self.limits.request_bytes / 4)) {
-                candidate.deinit();
-                break;
-            }
-            try self.conversations.replaceContext(conversation, candidate);
+            try background.append(a, .{ .history = try self.source(a, past, 512) });
         }
-        std.log.info("session {d} reopened archived correspondence", .{conversation.session_id});
+        _ = try self.conversations.accept(letter, audience, background.items);
     }
 
     fn dispatch(self: *Kernel) !void {
         while (try self.conversations.nextReady(self.max_parallel)) |work| {
             self.workers.concurrent(self.io, execute, .{ self, work }) catch |err| {
-                try self.conversations.finish(work, false);
+                self.conversations.fail(work, "Worker could not start.") catch {};
+                self.conversations.endWorker(work.conversation.session_id);
                 return err;
             };
         }
     }
 
     fn execute(self: *Kernel, work: Work) std.Io.Cancelable!void {
-        const retired = self.respond(work) catch |err| {
-            self.conversations.finish(work, false) catch |failure|
-                std.log.err("could not pause conversation: {s}", .{@errorName(failure)});
+        const session_id = work.conversation.session_id;
+        defer self.conversations.endWorker(session_id);
+        self.respond(work) catch |err| {
+            self.conversations.fail(work, @errorName(err)) catch |failure|
+                std.log.err("could not record session failure: {s}", .{@errorName(failure)});
             if (err == error.Canceled) return error.Canceled;
-            std.log.err("session {d} paused: {s}", .{ work.conversation.session_id, @errorName(err) });
-            return;
+            std.log.err("session {d} stopped: {s}", .{ session_id, @errorName(err) });
         };
-        if (!retired) self.conversations.finish(work, true) catch |err|
-            std.log.err("could not finish mail turn: {s}", .{@errorName(err)});
     }
 
-    fn respond(self: *Kernel, work: Work) !bool {
-        const conversation = work.conversation;
-        const origin = work.delivery.letter;
-        if (try self.withdrawn(origin)) {
-            if (!try self.conversations.beginArchive(conversation)) return false;
-            return self.conversations.retire(work);
+    const RuntimeRound = struct {
+        kernel: *Kernel,
+        work: Work,
+        plans: std.ArrayList(Conversations.ForkPlan) = .empty,
+        committed: bool = false,
+
+        fn deinit(self: *RuntimeRound) void {
+            if (!self.committed) self.kernel.conversations.abandonForks(self.plans.items);
+            self.plans.deinit(self.kernel.allocator);
         }
+
+        fn invoke(context: *anyopaque, a: Allocator, name: []const u8, arguments: []const u8) anyerror!?Content {
+            const self: *RuntimeRound = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, name, "fork_session")) return null;
+            const request = std.json.parseFromSliceLeaky(Conversations.ForkRequest, a, arguments, .{}) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return error.InvalidToolArguments,
+            };
+            if (self.plans.items.len != 0 and (request.mode == .handoff or self.plans.items[0].request.mode == .handoff))
+                return try runtimeError(a, "invalid_fork_batch", "A handoff must be the only fork in its round.");
+            try self.plans.ensureUnusedCapacity(self.kernel.allocator, 1);
+            const plan = self.kernel.conversations.prepareFork(self.work, request) catch |err| switch (err) {
+                error.Canceled, error.OutOfMemory => return err,
+                else => return try runtimeError(a, "fork_unavailable", @errorName(err)),
+            };
+            self.plans.appendAssumeCapacity(plan);
+            return try Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
+                .result = .{ .session_id = plan.child.session_id },
+            }, .{}));
+        }
+    };
+
+    fn respond(self: *Kernel, work: Work) !void {
+        const session = work.conversation;
+        const origin = work.delivery.letter;
         if (!work.delivery.supplied) {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
-            try self.conversations.appendInput(conversation, try self.frame(arena.allocator(), conversation, origin, @intCast(@min(4096, self.limits.request_bytes / 8)), if (work.delivery.kind == .report) "report" else "input"));
+            const a = arena.allocator();
+            const record = try self.source(a, origin, @intCast(@min(4096, self.limits.request_bytes / 8)));
+            const observation: Input.Observation = switch (work.delivery.kind) {
+                .input => .{ .input = .{ .letter = record, .background = work.delivery.background } },
+                .assignment => |task| .{ .assignment = .{ .task = task, .origin = record.origin } },
+            };
+            try self.conversations.appendInput(session, try Input.serialize(a, session.session_id, observation));
             work.delivery.supplied = true;
         }
-        try self.conversations.recordLetterID(conversation, origin.id);
         while (true) {
             try self.io.checkCancel();
-            if (try self.withdrawn(origin)) return self.withdraw(work);
+            if (work.delivery.tracks_mail and try self.withdrawn(origin)) {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                try self.conversations.appendInput(session, try Input.serialize(a, session.session_id, .{ .source_update = .{ .mail_id = origin.id, .state = .withdrawn } }));
+                const saved = try self.saveForRelease(work);
+                return self.conversations.finish(work, null, saved);
+            }
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var view = try self.requestContext(a, conversation, origin);
+            var view = try self.requestContext(a, session, work.delivery);
             defer view.deinit();
-            const round = try self.engine.turn(a, conversation.session_id, view.history());
-            try self.conversations.appendBatch(conversation, round.output, round.replies);
-            if (try self.takeReport(a, conversation)) continue;
-            // Continue with tool results; a response without tool calls ends
-            // the current mail turn.
+            var runtime: RuntimeRound = .{ .kernel = self, .work = work };
+            defer runtime.deinit();
+            const round = try self.engine.turn(a, session.session_id, view.history(), .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role == .core);
+            const committed = try self.conversations.commitRound(work, round.output, round.replies, runtime.plans.items);
+            runtime.committed = true;
+            if (committed.handed_off or committed.waiting) return;
             if (round.replies.len != 0) continue;
-            if (try self.withdrawn(origin)) return self.withdraw(work);
-            if (round.text) |text| {
-                if (!self.isSelf(origin) and origin.from.len != 0) {
-                    const id = try self.mailbox.send(a, .{
-                        .to = origin.from,
-                        .subject = try replySubject(a, origin.subject),
-                        .body = text,
-                        .in_reply_to = origin.message_id,
-                        .references = try replyReferences(a, origin),
-                    });
-                    try self.conversations.recordLetterID(conversation, id);
-                    try self.mailbox.markAnswered(a, origin.id);
-                }
-            }
-            try self.mailbox.markRead(a, origin.id);
-            const outcome = round.text orelse "No result text was produced.";
-            if (conversation.role == .branch) {
-                const body = try std.fmt.allocPrint(a, "Work: {s}\nSource: {s}\nSession: {d}\n\n{s}", .{ origin.subject, origin.message_id orelse origin.id, conversation.session_id, outcome });
-                _ = self.mailbox.saveInternal(a, .{
-                    .to = &.{.{ .email = self.mailbox.address }},
-                    .subject = try std.fmt.allocPrint(a, "Report: {s}", .{origin.subject}),
-                    .body = body,
-                    .purpose = .report,
-                }, .inbox) catch |err| {
-                    if (err == error.Canceled) return err;
-                    std.log.warn("core report delivery failed; conversation retained: {s}", .{@errorName(err)});
-                    return false;
-                };
-            }
-            return self.close(work, outcome);
+            if (work.delivery.tracks_mail and try self.withdrawn(origin)) continue;
+            if (round.text) |text| if (work.delivery.audience == .external) {
+                _ = try self.mailbox.send(a, .{
+                    .to = origin.from,
+                    .subject = try replySubject(a, origin.subject),
+                    .body = text,
+                    .in_reply_to = origin.message_id,
+                    .references = try replyReferences(a, origin),
+                });
+                try self.mailbox.markAnswered(a, origin.id);
+            };
+            if (work.delivery.tracks_mail) try self.mailbox.markRead(a, origin.id);
+            const saved = try self.saveForRelease(work);
+            return self.conversations.finish(work, round.text, saved);
         }
     }
 
-    fn takeReport(self: *Kernel, a: Allocator, conversation: *Conversation) !bool {
-        const report = try self.conversations.takeCoreReport(conversation) orelse return false;
-        const id = blk: {
-            errdefer self.conversations.returnReport(conversation, report);
-            const source_id = try a.dupe(u8, report.letter.id);
-            const rendered = try self.frame(a, conversation, report.letter, self.limits.handover_bytes, "report");
-            try self.conversations.consumeReport(conversation, report, rendered);
-            break :blk source_id;
-        };
-        try self.mailbox.markRead(a, id);
-        try self.mailbox.archive(a, &.{id});
-        return true;
-    }
-
-    fn withdraw(self: *Kernel, work: Work) !bool {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const fields = try jsonValue(a, .{ .message = "", .source_update = .{ .id = work.delivery.letter.id, .state = "withdrawn" } });
-        try self.conversations.appendInput(work.conversation, try Input.serialize(a, work.conversation.session_id, .{ .object = .empty }, fields));
-        return self.close(work, "The input was withdrawn; completed actions retain their effects.");
-    }
-
-    fn requestContext(self: *Kernel, a: Allocator, conversation: *Conversation, origin: Mail.Letter) !Context {
-        var view = try self.conversations.snapshot(conversation);
+    fn requestContext(self: *Kernel, a: Allocator, session: *Conversation, delivery: *Conversations.Delivery) !Context {
+        const origin = delivery.letter;
+        const correspondence = session.role == .branch and delivery.tracks_mail;
+        var provider = self.engine.provider;
+        provider.tool_scope = if (session.role == .core) .coordination else .all;
+        var view = try self.conversations.snapshot(session);
         errdefer view.deinit();
-        const current = try Input.serializeSnapshot(a, try self.conversations.runtimeSnapshot(conversation));
+        const current = try Input.serializeSnapshot(a, try self.conversations.runtimeSnapshot(session));
         try view.appendInput(current);
-        if (try self.engine.provider.requestBytes(a, view.history()) <= self.limits.request_bytes) return view;
-        const summary = try Compaction.summarize(self.engine.provider, a, view.history(), try self.conversations.runtimeSnapshot(conversation), self.limits.compaction_bytes, self.limits.handover_bytes);
-        const summary_fields = try jsonValue(a, .{ .message = summary, .kind = "handover", .source = .{ .thread_id = conversation.thread_id } });
-        const rendered = try Input.serialize(a, conversation.session_id, .{ .object = .empty }, summary_fields);
+        if (try provider.requestBytes(a, view.history()) <= self.limits.request_bytes) return view;
+        const summary = try Compaction.summarize(provider, a, view.history(), try self.conversations.runtimeSnapshot(session), self.limits.compaction_bytes, self.limits.handover_bytes);
+        const rendered = try Input.serialize(a, session.session_id, .{ .handover = .{ .summary = summary, .thread_id = origin.thread_id } });
         var candidate = try view.withHandover(self.allocator, rendered, 0);
         errdefer candidate.deinit();
         var request = try candidate.fork(self.allocator);
         errdefer request.deinit();
         try request.appendInput(current);
-        if (try self.engine.provider.requestBytes(a, request.history()) > self.limits.request_bytes) return error.ContextBudgetExhausted;
-        const note = try self.mailbox.saveInternal(a, .{
-            .to = &.{.{ .email = self.mailbox.address }},
-            .subject = try replySubject(a, origin.subject),
+        if (try provider.requestBytes(a, request.history()) > self.limits.request_bytes) return error.ContextBudgetExhausted;
+        _ = try self.mailbox.saveInternal(a, .{
+            .subject = if (correspondence) try replySubject(a, origin.subject) else if (session.role == .core) "Core handover" else try std.fmt.allocPrint(a, "Session {d} handover", .{session.session_id}),
             .body = summary,
-            .in_reply_to = origin.message_id,
-            .references = try replyReferences(a, origin),
-            .purpose = if (conversation.role == .core) .core_handover else .handover,
+            .in_reply_to = if (correspondence) origin.message_id else null,
+            .references = if (correspondence) try replyReferences(a, origin) else &.{},
+            .purpose = if (session.role == .core) .core_handover else .handover,
         }, .archive);
-        try self.conversations.recordLetterID(conversation, note.id);
-        try self.conversations.replaceContext(conversation, candidate);
+        try self.conversations.replaceContext(session, candidate);
         view.deinit();
-        std.log.info("session {d} compacted its working context", .{conversation.session_id});
         return request;
     }
 
-    /// Archival is correspondence housekeeping after the turn. A failure keeps
-    /// its active context available without repeating an already-delivered result.
-    fn close(self: *Kernel, work: Work, outcome: []const u8) !bool {
-        return self.archive(work, outcome) catch |err| {
-            if (err == error.Canceled) return err;
-            std.log.warn("correspondence kept active; archive unavailable: {s}", .{@errorName(err)});
-            return false;
-        };
-    }
-
-    fn archive(self: *Kernel, work: Work, outcome: []const u8) !bool {
-        const conversation = work.conversation;
-        if (!try self.conversations.beginArchive(conversation)) return false;
+    /// Save a correspondence handover without moving its source mail.
+    /// Internal subtasks do not replace the correspondence handover.
+    fn saveForRelease(self: *Kernel, work: Work) !bool {
+        if (work.conversation.role == .core or !work.delivery.tracks_mail) return true;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        var view = try self.conversations.snapshot(conversation);
+        var view = try self.conversations.snapshot(work.conversation);
         defer view.deinit();
-        const summary = try Compaction.summarize(self.engine.provider, a, view.history(), try self.conversations.runtimeSnapshot(conversation), self.limits.compaction_bytes, self.limits.handover_bytes);
-        const body = try std.fmt.allocPrint(a, "{s}\n\nLast outcome: {s}", .{ summary, outcome });
-        // The bounded summary is the handover; the complete last result already
-        // lives in the thread and must not silently inflate this context note.
-        const handover_body = if (body.len <= self.limits.handover_bytes) body else summary;
-        const origin = work.delivery.letter;
-        const note = try self.mailbox.saveInternal(a, .{
-            .to = &.{.{ .email = self.mailbox.address }},
-            .subject = try replySubject(a, origin.subject),
-            .body = handover_body,
-            .in_reply_to = origin.message_id,
-            .references = try replyReferences(a, origin),
-            .purpose = if (conversation.role == .core) .core_handover else .handover,
-        }, .archive);
-        try self.conversations.recordLetterID(conversation, note.id);
-        try self.mailbox.archive(a, try self.conversations.processedIDs(a, conversation));
-        const session_id = conversation.session_id;
-        const retired = try self.conversations.retire(work);
-        if (retired) std.log.info("session {d} correspondence archived", .{session_id});
-        return retired;
+        const summary = Compaction.summarize(self.engine.provider, a, view.history(), try self.conversations.runtimeSnapshot(work.conversation), self.limits.compaction_bytes, self.limits.handover_bytes) catch |err| {
+            if (err == error.Canceled) return err;
+            std.log.warn("session {d} retained; handover unavailable: {s}", .{ work.conversation.session_id, @errorName(err) });
+            return false;
+        };
+        _ = self.mailbox.saveInternal(a, .{
+            .subject = try replySubject(a, work.delivery.letter.subject),
+            .body = summary,
+            .in_reply_to = work.delivery.letter.message_id,
+            .references = try replyReferences(a, work.delivery.letter),
+            .purpose = .handover,
+        }, .archive) catch |err| {
+            if (err == error.Canceled) return err;
+            std.log.warn("session {d} retained; handover storage unavailable: {s}", .{ work.conversation.session_id, @errorName(err) });
+            return false;
+        };
+        return true;
     }
 
-    fn frame(self: *Kernel, a: Allocator, conversation: *Conversation, letter: Mail.Letter, limit: usize, kind: []const u8) ![]const u8 {
-        const snapshot = try self.conversations.runtimeSnapshot(conversation);
-        const fields = try self.source(a, letter, limit, kind);
-        return Input.serialize(a, snapshot.session_id, try jsonValue(a, .{
-            .conversation = .{ .role = snapshot.role, .thread_id = snapshot.thread_id, .parent_generation = snapshot.parent_generation },
-            .runtime = snapshot.runtime,
-        }), fields);
-    }
-
-    fn source(self: *Kernel, a: Allocator, letter: Mail.Letter, limit: usize, kind: []const u8) !Value {
+    fn source(self: *Kernel, a: Allocator, letter: Mail.Letter, limit: usize) !Input.MailRecord {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(letter.id, &hash, .{});
         const name = std.fmt.bytesToHex(hash, .lower);
@@ -344,22 +298,24 @@ pub const Kernel = struct {
         try file.writeStreamingAll(self.io, letter.body);
         var end = @min(limit, letter.body.len);
         while (end > 0 and end < letter.body.len and (letter.body[end] & 0xc0) == 0x80) end -= 1;
-        return jsonValue(a, .{
-            .message = letter.body[0..end],
-            .kind = kind,
-            .subject = letter.subject,
-            .observed_at_unix_ms = std.Io.Clock.real.now(self.io).toMilliseconds(),
-            .source = .{
+        return .{
+            .excerpt = letter.body[0..end],
+            .excerpt_bytes = end,
+            .origin = .{
+                .subject = letter.subject,
+                .observed_at_unix_ms = std.Io.Clock.real.now(self.io).toMilliseconds(),
                 .mail_id = letter.id,
                 .thread_id = letter.thread_id,
                 .message_id = letter.message_id,
+                .in_reply_to = letter.in_reply_to,
+                .references = letter.references,
+                .purpose = letter.purpose,
                 .from = letter.from,
                 .to = letter.to,
                 .body_file = path,
                 .body_bytes = letter.body.len,
-                .excerpt_bytes = end,
             },
-        });
+        };
     }
 
     fn withdrawn(self: *Kernel, origin: Mail.Letter) !bool {
@@ -378,8 +334,8 @@ pub const Kernel = struct {
     }
 };
 
-fn jsonValue(a: Allocator, value: anytype) !Value {
-    return std.json.parseFromSliceLeaky(Value, a, try std.json.Stringify.valueAlloc(a, value, .{}), .{});
+fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
+    return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .code = code, .message = message } }, .{}));
 }
 
 fn replySubject(a: Allocator, subject: []const u8) ![]const u8 {
