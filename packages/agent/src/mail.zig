@@ -16,6 +16,7 @@ pub const Letter = struct {
     references: []const []const u8,
     from: []const Address,
     to: []const Address,
+    reply_to: []const Address = &.{},
     subject: []const u8,
     body: []const u8,
     state_key: ?[]const u8 = null,
@@ -48,8 +49,9 @@ const state_record_keyword = "ivenna-state";
 const handled_keyword = "ivenna-handled";
 const outbound_keyword = "ivenna-outbound";
 const metadata_properties: []const []const u8 = &.{
-    "id",         "threadId", "keywords", "messageId", "inReplyTo",
-    "references", "from",     "to",       "subject",   state_key_property,
+    "id",               "threadId", "keywords", "messageId", "inReplyTo",
+    "references",       "from",     "to",       "replyTo",   "subject",
+    state_key_property,
 };
 const body_properties = metadata_properties ++ &[_][]const u8{
     "textBody", "htmlBody", "bodyValues",
@@ -168,14 +170,13 @@ pub const Mailbox = struct {
 
     /// Persist one independent self state record locally. State keys select
     /// continuity; neither the subject nor RFC reply headers link external mail.
-    pub fn saveState(self: Mailbox, a: Allocator, key: []const u8, summary: []const u8) !Letter {
+    pub fn saveState(self: Mailbox, a: Allocator, key: []const u8, summary: []const u8) !void {
         try validStateKey(key);
-        const id = try self.create(a, .{
+        _ = try self.create(a, .{
             .to = &.{.{ .email = self.address }},
             .subject = try std.fmt.allocPrint(a, "Ivenna state: {s}", .{key}),
             .body = summary,
         }, self.archive_id, false, key);
-        return self.read(a, id);
     }
 
     fn create(self: Mailbox, a: Allocator, outgoing: Outgoing, folder: []const u8, draft: bool, state_key: ?[]const u8) ![]const u8 {
@@ -247,7 +248,7 @@ pub const Mailbox = struct {
         return .{ .id = try a.dupe(u8, thread_id), .letters = try letters.toOwnedSlice(a) };
     }
 
-    /// Find the most recent usable self state record whose key matches exactly.
+    /// Find the most recent self state record whose key matches exactly.
     /// Query by marker and header, then check the exact key and self identities
     /// before fetching the complete body.
     pub fn latestState(self: Mailbox, a: Allocator, key: []const u8) !?Letter {
@@ -267,10 +268,7 @@ pub const Mailbox = struct {
             for (try self.getRecords(a, ids, false)) |record| {
                 const letter = try self.decode(a, record, false);
                 if (!self.isState(letter) or !std.mem.eql(u8, letter.state_key.?, key)) continue;
-                return self.read(a, letter.id) catch |err| switch (err) {
-                    error.MailNotFound, error.MailBodyUnavailable => continue,
-                    else => return err,
-                };
+                return try self.read(a, letter.id);
             }
             position += ids.len;
         }
@@ -369,6 +367,7 @@ pub const Mailbox = struct {
             .references = if (optionalField(record, "references")) |refs| try strings(a, refs) else &.{},
             .from = try addresses(a, record, "from"),
             .to = try addresses(a, record, "to"),
+            .reply_to = try addresses(a, record, "replyTo"),
             .subject = optionalText(record, "subject") orelse "",
             .body = if (body) try bodyText(a, record) else "",
             .state_key = optionalText(record, state_key_property),

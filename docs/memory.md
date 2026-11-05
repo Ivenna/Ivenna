@@ -2,7 +2,7 @@
 
 Ivenna stores persistent memory in rooms shared across sessions. Work sessions use tools to browse, find, recall, record, and revise memories. Ivenna chooses its own room hierarchy, entry names, formats, and cross-references.
 
-See the [running guide](running.md) for local setup or [using remote memory](running.md#using-remote-memory) to connect to another memory workspace. The [architecture guide](architecture.md#autonomous-memory) describes the execution protocol and module boundaries.
+Memory is a required runtime capability. The [running guide](running.md) covers local setup and [remote workspaces](running.md#using-remote-memory); the [architecture guide](architecture.md#autonomous-memory) explains its implementation responsibilities.
 
 ## Addresses and organization
 
@@ -11,16 +11,10 @@ See the [running guide](running.md) for local setup or [using remote memory](run
 | Memory room | A space containing related entries and child rooms |
 | Memory entry | A file of any type stored at an address, with content and format chosen by Ivenna |
 | Address | A path relative to the shared entrance, such as `languages/progress.md`; `.` is the entrance |
-| Name query | Literal text, a glob pattern, or a regular expression used by `find_memory` |
-| Content clue | Literal text or a regular expression used by `recall_memory` |
 
 All addresses are relative to the shared entrance, including those returned by tools. An `address` identifies one entry or room by its literal location; use `find_memory` for name patterns.
 
-`find_memory` and `recall_memory` search within a `room` and its child rooms. The scope defaults to `.` and does not change the base for addresses in later calls.
-
-Moving a room or entry changes its address; references stored in memory content are not rewritten automatically.
-
-## Tools and arguments
+## Tools
 
 [tools.json](../packages/agent/src/tools.json) defines the memory tools available to work sessions. The table below lists their required arguments. Omit optional arguments to use their defaults.
 
@@ -36,25 +30,6 @@ Moving a room or entry changes its address; references stored in memory content 
 | `create_memory_room` | `address` | Create a room and any missing parent rooms |
 | `move_memory` | `address`, `destination` | Move or rename entries and rooms |
 | `forget_memory` | `address` | Remove an entry or room |
-
-`find_memory` searches names with `literal`, `glob`, or `regex` matching. `recall_memory` searches entry text with `literal` or `regex` matching. Both default to literal, case-insensitive matching; literal name searches match any part of a name. Set `case_sensitive: true` to make a search case-sensitive.
-
-`read_memory` uses the shared [content handling](content.md) rules. Its optional `interpretation: "image_url"` presents the entry's complete text as an [image reference](content.md#image-url-references).
-
-`remember.content` selects exactly one source:
-
-| Content | Meaning |
-| --- | --- |
-| `{"text":"..."}` | Write the supplied text as UTF-8 |
-| `{"file":{"path":"..."}}` | Copy a file's original bytes from Ivenna's host filesystem |
-
-A source file path can be absolute or relative to Ivenna's startup directory. The file is read on Ivenna's host and copied to the memory workspace; the destination `address` remains relative to the memory entrance.
-
-For `remember`, `mode` defaults to `create`, which returns an error if the address already exists. Use `append` to append the source bytes without inserting a separator, or `replace` to write the full content. Both modes can also create a missing entry. Create and append require an existing containing room; replace also creates missing parent rooms.
-
-`revise_memory` requires the entry to contain UTF-8 text without NUL bytes. Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
-
-When moving an entry or room, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists. By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance cannot be moved or removed.
 
 ## Browsing and metadata
 
@@ -84,7 +59,7 @@ When moving an entry or room, `destination` can be a new address or an existing 
 
 The result's `address` identifies the selected entry or room; addresses in `entries` remain relative to the shared entrance. Each record has an `address`, `name`, `kind`, and `size_bytes`. Listing an empty room returns `entries: []`.
 
-A memory entry's `size_bytes` is its content length in bytes. A room's size is `null` when `recursive_size` is omitted or `false`: it was not measured in this call. Set `recursive_size: true` to measure the combined size of memories in each returned room and its descendants. An empty measured room has size `0`. Size calculation failures return an error.
+A memory entry's `size_bytes` is its content length in bytes. A room's size is `null` when `recursive_size` is omitted or `false`: it was not measured in this call. Set `recursive_size: true` to measure the combined size of memories in each returned room and its descendants. An empty measured room has size `0`.
 
 Set `entry_only: true` to return one record for the selected entry or room. The shared entrance's own record has `address: "."` and `name: "."`. Both options default to `false`; recursive size calculation leaves the set of returned entries unchanged.
 
@@ -94,6 +69,73 @@ Set `entry_only: true` to return one record for the selected entry or room. The 
 | `{"address":"languages","entry_only":true}` | One room record with `size_bytes: null` |
 | `{"address":"languages","entry_only":true,"recursive_size":true}` | One room record with the combined size of all its memories |
 | `{"address":"languages","recursive_size":true}` | Immediate entries and child rooms, with each child room's combined size |
+
+## Searching and reading
+
+`find_memory` and `recall_memory` search a `room` and its descendants. The room defaults to `.`; returned addresses remain relative to the shared entrance.
+
+`find_memory` searches names with `literal`, `glob`, or `regex` matching. `recall_memory` searches entry text with `literal` or `regex` matching. Both default to literal, case-insensitive matching; literal name searches match any part of a name. Set `case_sensitive: true` to make a search case-sensitive.
+
+`read_memory` uses the shared [content handling](content.md) rules. Its optional `interpretation: "image_url"` presents the entry's complete text as an [image reference](content.md#image-url-references).
+
+For example, call `find_memory` with a glob to find Markdown entries under `languages`:
+
+```json
+{"query":"*.md","room":"languages","match_mode":"glob"}
+```
+
+Call `recall_memory` to search text throughout the room:
+
+```json
+{"clue":"French","room":"languages"}
+```
+
+## Recording and revising
+
+`remember.content` selects exactly one source:
+
+| Content | Meaning |
+| --- | --- |
+| `{"text":"..."}` | Write the supplied text as UTF-8 |
+| `{"file":{"path":"..."}}` | Copy a file's original bytes from Ivenna's host filesystem |
+
+A source file path can be absolute or relative to Ivenna's startup directory. The file is read on Ivenna's host and copied to the memory workspace; the destination `address` remains relative to the memory entrance.
+
+`remember.mode` controls how the bytes are stored:
+
+| Mode | Behavior |
+| --- | --- |
+| `create` (default) | Write a new entry; report an error if the address exists |
+| `append` | Append bytes without a separator, creating the entry if missing |
+| `replace` | Write the full content, creating or overwriting the entry |
+
+Create and append require an existing containing room. Replace also creates missing parent rooms. Use `create_memory_room` to create rooms explicitly; an existing room is reused.
+
+`revise_memory` requires the entry to contain UTF-8 text without NUL bytes. Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
+
+For example, call `create_memory_room` with:
+
+```json
+{"address":"languages"}
+```
+
+Then call `remember` to write a text entry:
+
+```json
+{"address":"languages/progress.md","content":{"text":"French: practice twice a week. Japanese: practice once a week."}}
+```
+
+A later `revise_memory` call can update both labels using capture expansion:
+
+```json
+{"address":"languages/progress.md","old_text":"(French|Japanese):","new_text":"${1} study:","replace_all":true,"match_mode":"regex"}
+```
+
+## Moving and removing
+
+For `move_memory`, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists. References stored in memory content are not rewritten when an address changes.
+
+By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance cannot be moved or removed.
 
 ## Memory space
 
@@ -118,59 +160,9 @@ Before `remember` or a content-changing `revise_memory`, Ivenna checks how much 
 
 The result describes the space at the time of the query. Another session can change it before a later recording or revision. Memory operations are serialized individually; a sequence of reads and writes does not reserve the entries or capacity between calls.
 
-## Examples
-
-Call `create_memory_room` to create a room:
-
-```json
-{"address":"languages"}
-```
-
-Call `remember` to record an entry:
-
-```json
-{"address":"languages/progress.md","content":{"text":"French: practice twice a week. Japanese: practice once a week."}}
-```
-
-Call `remember` to store an audio recording from the host:
-
-```json
-{"address":"languages/practice.wav","content":{"file":{"path":"/path/to/practice.wav"}}}
-```
-
-Call `recall_memory` to search a room's remembered content:
-
-```json
-{"clue":"French","room":"languages"}
-```
-
-Call `find_memory` to find entries by a name pattern:
-
-```json
-{"query":"*.md","room":"languages","match_mode":"glob"}
-```
-
-Call `read_memory` to read an image entry:
-
-```json
-{"address":"screenshots/dashboard.png"}
-```
-
-Call `revise_memory` to update a passage:
-
-```json
-{"address":"languages/progress.md","old_text":"practice twice a week","new_text":"practice three times a week"}
-```
-
-A regular expression can revise several passages at once. For example, update both language labels:
-
-```json
-{"address":"languages/progress.md","old_text":"(French|Japanese):","new_text":"${1} study:","replace_all":true,"match_mode":"regex"}
-```
-
 ## Results and errors
 
-Every operation returns a text part containing JSON with either `result` or `error`. Image reads add a native image part alongside a result description containing the entry's address and image metadata. Content limits can replace that image part with a diagnostic while preserving its source description. For example, `remember` returns the entry's address:
+Tools return a text part containing JSON with either `result` or an operation `error`. For example, `remember` returns the entry's address:
 
 ```json
 {"result":{"address":"languages/progress.md"}}
@@ -186,7 +178,7 @@ Every operation returns a text part containing JSON with either `result` or `err
 | Revise | `address` and `revision` |
 | Record, create a room, move, or remove | `address`; moving returns the actual new address |
 
-The shared [content guide](content.md#content-and-results) defines image descriptions and content diagnostics.
+Image reads add native image content alongside the address and image description. The shared [content guide](content.md#content-and-results) defines image descriptions and omission diagnostics.
 
 The `kind` field is `room` for a memory room and `memory` for a memory entry. A search with no matches returns an empty `matches` list. In content matches, `line` is a line number starting at 1. The `revision` field has three possible values:
 
@@ -196,10 +188,15 @@ The `kind` field is `room` for a memory room and `memory` for a memory entry. A 
 | `unchanged` | A match was found, but the content did not change |
 | `revised` | The content was revised |
 
-An error reply provides a `code` and `message` describing the problem. `source_unavailable` means a host source file could not be read; this invocation sent no remote memory request. `unsupported_content` from a revision means the entry was not UTF-8 text without NUL bytes, so no revision was written.
+An operation error contains `code` and `message`. Common codes include:
 
-`memory_capacity_exceeded` means the proposed change would increase occupied space beyond the rooms' shared capacity; the entry did not change. See [memory space](#memory-space) for the measurements and permitted changes.
+| Code | Meaning |
+| --- | --- |
+| `not_found` | The addressed entry or room does not exist |
+| `already_exists` | The target is occupied for `remember` in create mode or for `move_memory` |
+| `invalid_address` | The address is outside the workspace or identifies the wrong kind of entry |
+| `source_unavailable` | The host source file could not be read; no memory request was sent |
+| `unsupported_content` | Revision requires UTF-8 text without NUL bytes; no revision was written |
+| `memory_capacity_exceeded` | The proposed growth exceeds shared capacity; the entry was not changed |
 
-`memory_unavailable` means a read-only operation ended without a complete response. `memory_change_uncertain` means memory may have changed, but the outcome is unknown.
-
-An interrupted operation may already have changed memory. Inspect the entry before deciding whether to repeat it; restarting the kernel does not restore the old tool transcript. See [startup and interruption](architecture.md#startup-and-interruption) for details.
+Connection and protocol failures, and handler failures without an operation-error reply, stop the kernel and its concurrent work. Finer error classification and execution recovery remain undefined; see [startup and interruption](architecture.md#startup-and-interruption).

@@ -37,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
             .max_output_tokens = config.llm_max_output_tokens,
         },
     };
+    try engine.memory.checkAvailable(a);
     var sources = agent.MailSources.init(init.gpa, io, &mailbox, data_directory);
     defer sources.deinit();
     var email = agent.EmailTransport.init(io, &mailbox, &sources);

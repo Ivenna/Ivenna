@@ -139,5 +139,33 @@ pub const MailSources = struct {
 };
 
 fn copyLetter(a: Allocator, letter: Mail.Letter) !Mail.Letter {
-    return std.json.parseFromSliceLeaky(Mail.Letter, a, try std.json.Stringify.valueAlloc(a, letter, .{}), .{ .allocate = .alloc_always });
+    const references = try a.alloc([]const u8, letter.references.len);
+    for (letter.references, references) |reference, *copy| copy.* = try a.dupe(u8, reference);
+    return .{
+        .id = try a.dupe(u8, letter.id),
+        .thread_id = try a.dupe(u8, letter.thread_id),
+        .message_id = try copyOptional(a, letter.message_id),
+        .in_reply_to = try copyOptional(a, letter.in_reply_to),
+        .references = references,
+        .from = try copyAddresses(a, letter.from),
+        .to = try copyAddresses(a, letter.to),
+        .reply_to = try copyAddresses(a, letter.reply_to),
+        .subject = try a.dupe(u8, letter.subject),
+        .body = try a.dupe(u8, letter.body),
+        .state_key = try copyOptional(a, letter.state_key),
+        .state_record = letter.state_record,
+    };
+}
+
+fn copyAddresses(a: Allocator, addresses: []const Mail.Address) ![]const Mail.Address {
+    const copies = try a.alloc(Mail.Address, addresses.len);
+    for (addresses, copies) |address, *copy| copy.* = .{
+        .name = try copyOptional(a, address.name),
+        .email = try a.dupe(u8, address.email),
+    };
+    return copies;
+}
+
+fn copyOptional(a: Allocator, text: ?[]const u8) !?[]const u8 {
+    return if (text) |bytes| try a.dupe(u8, bytes) else null;
 }

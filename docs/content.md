@@ -32,16 +32,16 @@ The current readers return an `unavailable` description for content they cannot 
 
 ## Model request checks
 
-When adding newly returned images to a session's context, Ivenna applies these local checks:
+At the end of each tool batch, the provider applies these local checks to retained and newly returned images:
 
 | Local check | Limit |
 | --- | --- |
 | Image count, including retained images and URL references | 600 |
 | Serialized model request body, including history, tool definitions, and base64 image data | 48 MiB |
 
-An image rejected by these checks is replaced by a text `content_limit` error after the tool has run. Text descriptions, command outcomes, diagnostics, and earlier context remain available. For an oversized request, the current implementation omits newly returned images from the end until it fits or no new images remain. This removal policy does not rank their importance.
+The provider keeps new images in order up to the count limit, replacing later images with text `content_limit` errors. If the serialized request exceeds the byte limit, newly returned images are then omitted from the end until it fits or no new images remain. Text descriptions, command outcomes, diagnostics, and earlier context remain available.
 
-The [whole-context budget](architecture.md#bounded-model-context) applies separately and may be smaller than these image limits. It accounts for the complete request, including text and images. An oversized history can require a handover or produce a context-budget failure before the next model round.
+The separate [whole-request budget](architecture.md#bounded-model-context) may require a handover before the next model round.
 
 The model service handles image decoding, dimensions, URL retrieval, and limits on fetched content. Local checks do not ensure that the complete request meets every service limit.
 
@@ -49,4 +49,4 @@ The model service handles image decoding, dimensions, URL retrieval, and limits 
 
 A session's runtime context retains accepted image bytes, so subsequent requests can reuse them even if the source file changes or is removed. URL results retain the supplied address; their content can change or become unavailable.
 
-Retained images contribute to request size and context limits. Compaction or session release can discard these bytes; a restart rebuilds understanding from handovers and evidence rather than restoring them. An artifact or memory entry provides a source for reading the image again, and its location can be retained in the handover. See [bounded model context](architecture.md#bounded-model-context).
+Compaction or session release can discard retained image bytes. An artifact or memory entry provides a source for reading the image again; keep its location in a handover when needed for continued work. See [startup and interruption](architecture.md#startup-and-interruption) for what a restart retains.

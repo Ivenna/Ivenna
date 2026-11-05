@@ -25,40 +25,38 @@ pub const Provider = struct {
     pub const Response = struct {
         output: []const Value,
         calls: []const FunctionCall,
+        text: ?[]const u8,
     };
 
-    /// Encode content parts, replacing only images that exceed the image-count
-    /// or request-body limit. Other content parts stay intact. Image decoding
-    /// belongs to the model service.
+    /// Encode content parts without changing their source descriptions.
+    /// limitToolReplies applies provider limits to the complete tool batch.
     /// JSON storage and encoded local images use arena; call_id, text, and
     /// remote URL strings borrow their inputs.
-    pub fn toolReply(self: Provider, arena: Allocator, call_id: []const u8, content: Content, history: []const Value) !Value {
-        const reply = try encodeToolReply(arena, call_id, content);
-        var count = imageCount(history);
-        for (contentParts(reply)) |*part| {
-            if (imageUrl(part.*) == null) continue;
-            if (count >= 600) {
-                part.* = try contentLimitPart(arena, "Image omitted: the model request would contain more than 600 images.");
-            } else count += 1;
-        }
-        if (!hasImage(reply)) return reply;
-
-        const input = try arena.alloc(Value, history.len + 1);
-        @memcpy(input[0..history.len], history);
-        input[history.len] = reply;
-        try self.limitToolReplies(arena, input, history.len);
-        return reply;
+    pub fn toolReply(arena: Allocator, call_id: []const u8, content: Content) !Value {
+        const parts = try arena.alloc(Value, content.parts.len);
+        for (content.parts, parts) |part, *encoded| encoded.* = try encodeContentPart(arena, part);
+        var reply: std.json.ObjectMap = .empty;
+        try reply.put(arena, "type", .{ .string = "function_call_output" });
+        try reply.put(arena, "call_id", .{ .string = call_id });
+        try reply.put(arena, "output", .{ .array = std.array_list.Managed(Value).fromOwnedSlice(arena, parts) });
+        return .{ .object = reply };
     }
 
-    /// Replace image parts in history[reply_start..] from the end until the
-    /// request fits or no new images remain. This is a deterministic removal
-    /// policy, not an importance ranking. Other parts and earlier history stay.
+    /// Limit new images in history[reply_start..], preserving all other parts
+    /// and earlier history. Keep images in order up to the count limit, then
+    /// remove from the end until the complete request fits the byte limit.
     pub fn limitToolReplies(self: Provider, arena: Allocator, history: []Value, reply_start: usize) !void {
+        var count = imageCount(history[0..reply_start]);
         var has_image = false;
         for (history[reply_start..]) |reply| {
-            if (hasImage(reply)) {
-                has_image = true;
-                break;
+            for (contentParts(reply)) |*part| {
+                if (imageUrl(part.*) == null) continue;
+                if (count >= 600) {
+                    part.* = try contentLimitPart(arena, "Image omitted: the model request would contain more than 600 images.");
+                } else {
+                    count += 1;
+                    has_image = true;
+                }
             }
         }
         if (!has_image or try self.requestBytes(arena, history) <= 48 * 1024 * 1024) return;
@@ -177,21 +175,42 @@ pub const Provider = struct {
         if (response.head.content_encoding != .identity) return error.UnsupportedModelEncoding;
         const reader = response.reader(&.{});
         _ = reader.streamRemaining(&output.writer) catch |err| return transportError(&request, err);
+        return decodeResponse(arena, output.written());
+    }
+
+    /// Decode and validate the complete response before any tool can run.
+    /// The raw output is retained for subsequent requests; execution consumes
+    /// only decoded calls and text.
+    fn decodeResponse(arena: Allocator, bytes: []const u8) !Response {
         const decoded = std.json.parseFromSliceLeaky(struct {
             status: []const u8,
             output: []const Value,
-        }, arena, output.written(), .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |err| switch (err) {
+        }, arena, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.InvalidModelResponse,
         };
         if (!std.mem.eql(u8, decoded.status, "completed")) return error.ModelResponseNotCompleted;
         var calls: std.ArrayList(FunctionCall) = .empty;
         defer calls.deinit(arena);
-        // Validate the complete batch before the execution loop runs any tool.
+        var text = std.Io.Writer.Allocating.init(arena);
+        defer text.deinit();
         for (decoded.output) |item| {
             const kind = try textField(item, "type");
-            if (std.mem.eql(u8, kind, "function_call_output")) return error.InvalidModelResponse;
-            if (!std.mem.eql(u8, kind, "function_call")) continue;
+            if (std.mem.eql(u8, kind, "reasoning")) continue;
+            if (std.mem.eql(u8, kind, "message")) {
+                if (!std.mem.eql(u8, try textField(item, "role"), "assistant")) return error.InvalidModelResponse;
+                const parts = try field(item, "content");
+                if (parts != .array) return error.InvalidModelResponse;
+                for (parts.array.items) |part| {
+                    if (!std.mem.eql(u8, try textField(part, "type"), "output_text")) return error.InvalidModelResponse;
+                    const value = try textField(part, "text");
+                    if (value.len == 0) continue;
+                    if (text.written().len != 0) try text.writer.writeAll("\n\n");
+                    try text.writer.writeAll(value);
+                }
+                continue;
+            }
+            if (!std.mem.eql(u8, kind, "function_call")) return error.InvalidModelResponse;
             const call_id = try textField(item, "call_id");
             if (call_id.len == 0) return error.InvalidModelResponse;
             for (calls.items) |previous| {
@@ -203,13 +222,16 @@ pub const Provider = struct {
                 .arguments = try textField(item, "arguments"),
             });
         }
-        return .{ .output = decoded.output, .calls = try calls.toOwnedSlice(arena) };
+        return .{
+            .output = decoded.output,
+            .calls = try calls.toOwnedSlice(arena),
+            .text = if (text.written().len == 0) null else try text.toOwnedSlice(),
+        };
     }
 };
 
 fn coordinationTool(arena: Allocator, tool: Value) !Value {
     var scoped = tool;
-    try scoped.object.put(arena, "description", .{ .string = "Continue the current work in another focus of Ivenna, freeing the core for coordination." });
     const parameters = scoped.object.getPtr("parameters").?;
     const properties = parameters.object.getPtr("properties").?;
     const mode = properties.object.getPtr("mode").?;
@@ -223,18 +245,7 @@ fn coordinationTool(arena: Allocator, tool: Value) !Value {
     var default_mode: std.json.ObjectMap = .empty;
     try default_mode.put(arena, "handoff", .{ .object = .empty });
     try mode.object.put(arena, "default", .{ .object = default_mode });
-    try mode.object.put(arena, "description", .{ .string = "Transfer the current work and responsibilities to the new session." });
     return scoped;
-}
-
-fn encodeToolReply(arena: Allocator, call_id: []const u8, content: Content) !Value {
-    const parts = try arena.alloc(Value, content.parts.len);
-    for (content.parts, parts) |part, *encoded| encoded.* = try encodeContentPart(arena, part);
-    var reply: std.json.ObjectMap = .empty;
-    try reply.put(arena, "type", .{ .string = "function_call_output" });
-    try reply.put(arena, "call_id", .{ .string = call_id });
-    try reply.put(arena, "output", .{ .array = std.array_list.Managed(Value).fromOwnedSlice(arena, parts) });
-    return .{ .object = reply };
 }
 
 fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
@@ -286,13 +297,6 @@ fn contentParts(item: Value) []Value {
     if (item != .object) return &.{};
     const parts = item.object.get("content") orelse item.object.get("output") orelse return &.{};
     return if (parts == .array) parts.array.items else &.{};
-}
-
-fn hasImage(item: Value) bool {
-    for (contentParts(item)) |part| {
-        if (imageUrl(part) != null) return true;
-    }
-    return false;
 }
 
 fn imageUrl(part: Value) ?[]const u8 {

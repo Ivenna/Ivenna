@@ -24,37 +24,9 @@ pub fn summarize(provider: Provider, arena: Allocator, history: []const Value, s
         return error.ContextBudgetExhausted;
     const response = try provider.nextWithoutTools(arena, messages);
     if (response.calls.len != 0) return error.UnexpectedSummaryToolCall;
-    var summary = std.Io.Writer.Allocating.init(arena);
-    defer summary.deinit();
-    for (response.output) |item| {
-        const kind = try textField(item, "type");
-        if (std.mem.eql(u8, kind, "reasoning")) continue;
-        if (!std.mem.eql(u8, kind, "message")) return error.UnexpectedSummaryToolCall;
-        if (!std.mem.eql(u8, try textField(item, "role"), "assistant")) return error.InvalidModelResponse;
-        const content = try field(item, "content");
-        if (content != .array) return error.InvalidModelResponse;
-        for (content.array.items) |part| {
-            if (!std.mem.eql(u8, try textField(part, "type"), "output_text")) return error.InvalidModelResponse;
-            const text = try textField(part, "text");
-            const separator: usize = if (summary.written().len == 0 or text.len == 0) 0 else 1;
-            if (separator > max_summary_bytes - summary.written().len or
-                text.len > max_summary_bytes - summary.written().len - separator) return error.HandoverTooLarge;
-            if (separator != 0) try summary.writer.writeByte('\n');
-            try summary.writer.writeAll(text);
-        }
-    }
-    const text = std.mem.trim(u8, try summary.toOwnedSlice(), " \t\r\n");
+    const summary = response.text orelse return error.EmptyHandover;
+    if (summary.len > max_summary_bytes) return error.HandoverTooLarge;
+    const text = std.mem.trim(u8, summary, " \t\r\n");
     if (text.len == 0) return error.EmptyHandover;
     return text;
-}
-
-fn field(value: Value, name: []const u8) !Value {
-    if (value != .object) return error.InvalidModelResponse;
-    return value.object.get(name) orelse error.InvalidModelResponse;
-}
-
-fn textField(value: Value, name: []const u8) ![]const u8 {
-    const found = try field(value, name);
-    if (found != .string) return error.InvalidModelResponse;
-    return found.string;
 }

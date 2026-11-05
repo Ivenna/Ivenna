@@ -13,7 +13,7 @@
   {
     "type": "function",
     "name": "run_host_shell",
-    "description": "Run a command in a fresh noninteractive /bin/sh on the shared host filesystem until completion or timeout. Returns the outcome, stdout/stderr descriptions, full log paths, and any stdout image. Remaining processes in the call's process group are stopped when it ends. Unavailable content is reported with a diagnostic.",
+    "description": "Run a command in a fresh noninteractive /bin/sh on the shared host. Return its outcome, stdout/stderr descriptions, full log paths, and any stdout image. The call ends on completion or timeout and stops remaining processes in its process group.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -231,7 +231,7 @@
         },
         "mode": {
           "type": "string",
-          "description": "create (default) fails if the address exists; append adds bytes without a separator; replace overwrites the entry. append and replace can create entries. Only replace creates missing parent rooms.",
+          "description": "create (default) requires a new address. append adds bytes without a separator. replace overwrites and creates missing parent rooms. All modes can create entries.",
           "enum": [
             "create",
             "append",
@@ -352,7 +352,7 @@
   {
     "type": "function",
     "name": "fork_session",
-    "description": "Continue work in another focus of Ivenna with the current context. A handoff transfers the current work and its responsibilities; a subtask keeps them with the parent. Both share the host and memory.",
+    "description": "Continue work in another focus of Ivenna with the complete current context. Sessions share the host and memory.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -363,7 +363,7 @@
         },
         "mode": {
           "type": "object",
-          "description": "Transfer the current work, or create an internal subtask.",
+          "description": "Choose how to assign the work; defaults to handoff. A handoff must be the only fork in its round.",
           "default": {
             "handoff": {}
           },
@@ -374,7 +374,8 @@
                 "handoff": {
                   "type": "object",
                   "properties": {},
-                  "additionalProperties": false
+                  "additionalProperties": false,
+                  "description": "Transfer the current work and responsibility for its result to the new session."
                 }
               },
               "required": [
@@ -391,10 +392,11 @@
                     "report_to_parent": {
                       "type": "boolean",
                       "default": false,
-                      "description": "When true, wait for the subtask's findings before resuming this work."
+                      "description": "When true, suspend this activation until the subtask returns its findings."
                     }
                   },
-                  "additionalProperties": false
+                  "additionalProperties": false,
+                  "description": "Assign internal work while retaining the current work and its responsibilities."
                 }
               },
               "required": [

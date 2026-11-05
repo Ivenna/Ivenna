@@ -76,13 +76,6 @@ pub const Memory = struct {
             }
             return request;
         }
-
-        fn changesMemory(request: Request) bool {
-            return switch (request) {
-                .remember, .revise_memory, .create_memory_room, .move_memory, .forget_memory => true,
-                else => false,
-            };
-        }
     };
 
     pub const Reply = union(enum) {
@@ -96,6 +89,32 @@ pub const Memory = struct {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const scratch = arena.allocator();
+        const reply = try self.exchange(scratch, request);
+        if (request == .read_memory and reply == .result)
+            return readReply(allocator, reply.result, request.read_memory.interpretation);
+        return Content.fromText(allocator, try std.json.Stringify.valueAlloc(allocator, reply, .{}));
+    }
+
+    /// Startup uses the same read-only operation as the model-facing space
+    /// inspection. Memory must be available before the kernel starts.
+    pub fn checkAvailable(self: Memory, allocator: Allocator) !void {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const reply = try self.exchange(scratch, .{ .inspect_memory_space = .{} });
+        switch (reply) {
+            .@"error" => |failure| {
+                std.log.err("memory startup check: {s}: {s}", .{ failure.code, failure.message });
+                return error.MemoryUnavailable;
+            },
+            .result => |result| {
+                const Space = struct { used_bytes: u64, capacity_bytes: u64, remaining_bytes: u64, used_ratio: f64 };
+                _ = try std.json.parseFromValueLeaky(Space, scratch, result, .{});
+            },
+        }
+    }
+
+    fn exchange(self: Memory, scratch: Allocator, request: Request) !Reply {
         // File sources belong to the service host; the remote handler receives
         // bytes rather than a host path. Missing modes retain remote defaults.
         const payload = switch (request) {
@@ -104,12 +123,10 @@ pub const Memory = struct {
                     .text => |text| text,
                     .file => |source| std.Io.Dir.cwd().readFileAlloc(self.io, source.path, scratch, .unlimited) catch |err| switch (err) {
                         error.Canceled, error.OutOfMemory => return err,
-                        else => return Content.fromText(allocator, try std.json.Stringify.valueAlloc(allocator, .{
-                            .@"error" = .{
-                                .code = "source_unavailable",
-                                .message = try std.fmt.allocPrint(allocator, "Could not read host file '{s}': {s}. This write was not sent to memory.", .{ source.path, @errorName(err) }),
-                            },
-                        }, .{})),
+                        else => return .{ .@"error" = .{
+                            .code = "source_unavailable",
+                            .message = try std.fmt.allocPrint(scratch, "Could not read host file '{s}': {s}. This write was not sent to memory.", .{ source.path, @errorName(err) }),
+                        } },
                     },
                 };
                 const encoder = std.base64.standard.Encoder;
@@ -162,53 +179,21 @@ pub const Memory = struct {
         }
         try reader.checkAnyError();
 
-        // A disconnected write may already have changed memory. Expose that
-        // uncertainty in memory terms while keeping SSH diagnostics in logs.
-        const input_error: ?[]const u8 = if (input.await(self.io)) |_| null else |err| switch (err) {
-            error.Canceled => return err,
-            else => @errorName(err),
-        };
+        try input.await(self.io);
         const term = try child.wait(self.io);
         const stdout = try reader.toOwnedSlice(0);
         const stderr = try reader.toOwnedSlice(1);
-        var reply: anyerror!Reply = std.json.parseFromSliceLeaky(Reply, scratch, stdout, .{});
-
-        if (reply) |response| {
-            if (input_error == null and term == .exited) {
-                const expected_exit: u8 = switch (response) {
-                    .result => 0,
-                    .@"error" => 1,
-                };
-                if (term.exited == expected_exit) {
-                    if (request == .read_memory and response == .result) {
-                        if (readReply(allocator, response.result, request.read_memory.interpretation)) |value| {
-                            return value;
-                        } else |err| switch (err) {
-                            error.OutOfMemory => return err,
-                            else => reply = err,
-                        }
-                    } else {
-                        return Content.fromText(allocator, try allocator.dupe(u8, stdout));
-                    }
-                }
-            }
-        } else |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => {},
+        if (term != .exited or (term.exited != 0 and term.exited != 1)) {
+            std.log.err("memory room request {s}: SSH {f}; {s}", .{ @tagName(request), term, stderr });
+            return error.MemoryConnectionFailed;
         }
-
-        const reply_error = if (reply) |_| "none" else |err| @errorName(err);
-        std.log.warn("memory room request {s}: SSH {f}; input error: {s}; reply error: {s}; {s}", .{
-            @tagName(request), term, input_error orelse "none", reply_error, stderr,
-        });
-        const failure: Reply = .{ .@"error" = if (request.changesMemory()) .{
-            .code = "memory_change_uncertain",
-            .message = "The memory room did not return a complete response. Memory may have changed.",
-        } else .{
-            .code = "memory_unavailable",
-            .message = "The memory room did not return a complete response.",
-        } };
-        return Content.fromText(allocator, try std.json.Stringify.valueAlloc(allocator, failure, .{}));
+        const reply = try std.json.parseFromSliceLeaky(Reply, scratch, stdout, .{});
+        const expected_exit: u8 = switch (reply) {
+            .result => 0,
+            .@"error" => 1,
+        };
+        if (term.exited != expected_exit) return error.InvalidMemoryReply;
+        return reply;
     }
 };
 

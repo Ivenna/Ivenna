@@ -11,7 +11,7 @@ A `Frame` has two fields:
 | `session_id` | `u64` | Session receiving the observation |
 | `observation` | `Observation` | Exactly one named observation branch |
 
-`Observation`, `Content`, `Background`, `Response`, and `ReportOutcome` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` below denotes a free-form string.
+`Observation`, `Content`, `Background`, and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` below denotes a free-form string.
 
 A fork inherits earlier frames with their original session identifiers. The latest runtime observation identifies the current session and state.
 
@@ -21,13 +21,13 @@ A fork inherits earlier frames with their original session identifiers. The late
 | --- | --- | --- |
 | `input` | `Input` | Content with optional provenance and supporting context |
 | `assignment` | `Assignment` | Work supplied by another session |
-| `report` | `from_session: u64`, `outcome: ReportOutcome` | Requested findings or failure from a child |
+| `report` | `from_session: u64`, `text: Text` | Requested findings from a child |
 | `handover` | `Handover` | Working understanding for continuation |
 | `background` | `items: Background[]` | Evidence and handovers supplied as context |
 | `runtime` | `State` | Current execution state and response destination |
 | `context_compaction` | `instructions: Text`, `state: State` | Summary task with current state |
 
-`ReportOutcome` contains `completed: Text` or `failed: Text`; its text may be empty. These outcomes describe the child's activation, while the broader task can remain open.
+Reports carry the child activation's final text, which may be empty; the broader task can remain open.
 
 ## Content, source, and context
 
@@ -46,7 +46,7 @@ A fork inherits earlier frames with their original session identifiers. The late
 | `text` | `Text` | Complete inline content |
 | `excerpt` | `text: Text`, `full: Resource` | Included text and a reference to the full material |
 
-The whole-request budget applies to either representation. The email boundary ends excerpts on UTF-8 boundaries and supplies a resource when material exceeds its excerpt budget.
+Both representations count toward the [whole-request budget](architecture.md#bounded-model-context).
 
 An optional `Source` contains:
 
@@ -57,11 +57,11 @@ An optional `Source` contains:
 | `observed_at_unix_ms` | `i64` or null | Observation time in Unix milliseconds, when known |
 | `details` | `Resource` or null | Additional source material available for inspection |
 
-A `Resource` has `file: Text` and `byte_length: usize`. It identifies a file and its content length. Work sessions can inspect that file through host tools when they need material omitted from the observation. Content can also be supplied entirely inline, with `source: null`.
+A `Resource` has `file: Text` and `byte_length: usize`. It identifies a file and its content length. Work sessions can inspect that file through host tools when they need material omitted from the observation.
 
-An `Evidence` record has `content: Content` and `source: Source | null`. `Background` contains either `evidence: Evidence` or `handover: Handover`. Both `Input.context` and startup `background.items` use these types. They supply context for continued work rather than starting earlier tasks again.
+An `Evidence` record has `content: Content` and `source: Source | null`. `Background` contains either `evidence: Evidence` or `handover: Handover`. Both `Input.context` and startup `background.items` use these types to supply context for current work.
 
-The [email boundary](architecture.md#email-boundary-and-source-materials) defines how correspondence becomes content and source resources. Its capture and storage details are separate from these payload types.
+The [email boundary](architecture.md#email-boundary-and-source-materials) defines how correspondence becomes content and source resources.
 
 ## Assignments and handovers
 
@@ -73,7 +73,7 @@ An `Assignment` contains:
 | `from_session` | Session that issued the assignment |
 | `source_refs` | References to relevant source material; defaults to an empty array |
 
-The assignment supplies work independently of any inherited observations. Its response destination arrives in current runtime state.
+The assignment defines the fork's work; current runtime state supplies its response destination.
 
 A `Handover` contains `summary: Text` and `source: Resource | null`. Generated summaries can have `source: null`; a recalled handover can reference its stored material. This type carries working understanding. Persistent lookup uses execution state keys, as described in [internal mail state](architecture.md#internal-mail-state).
 
@@ -100,10 +100,10 @@ A `Handover` contains `summary: Text` and `source: Resource | null`. Generated s
 | `internal` | Empty object | Complete internal work |
 | `summary` | Empty object | Produce a handover for the summary operation |
 
-The audience describes who the result addresses. The execution layer retains its delivery target separately; source descriptions and references provide provenance without selecting a response destination.
+The audience describes who the result addresses. The execution layer retains its delivery target separately; source descriptions and references supply provenance.
 
 Each ordinary request ends with a fresh `runtime` observation in its request view. These snapshots do not accumulate in retained history. For compaction, `context_compaction.state` supplies current state with response `summary`. Instructions come from the dedicated [summary resource](../packages/agent/src/compaction.md), and the model request disables tools.
 
-A response without tool calls ends the current activation. Available final text becomes its reply, requested report, internal result, or summary. Source content and earlier states do not redefine the current destination.
+A response without tool calls ends the current activation. Available final text becomes its reply, requested report, internal result, or summary, according to the current `response`.
 
 See [architecture](architecture.md) for session, delivery, and internal-state ownership, and [tool content](content.md) for text and media returned by tools.

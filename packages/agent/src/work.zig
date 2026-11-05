@@ -33,10 +33,6 @@ pub const Delivery = struct {
     reply: ?ReplyTarget,
     source_state: ?SourceState,
     supplied: bool = false,
-    completion: union(enum) {
-        pending,
-        ready: struct { text: ?[]const u8, submitted: bool = false },
-    } = .pending,
 
     /// Payload, result destination, and source state are independently copied
     /// into the delivery arena and do not borrow producer-owned storage.
@@ -67,9 +63,5 @@ pub const Delivery = struct {
     pub fn destroy(self: *Delivery, allocator: Allocator) void {
         self.arena.deinit();
         allocator.destroy(self);
-    }
-
-    pub fn recordResult(self: *Delivery, text: ?[]const u8) !void {
-        self.completion = .{ .ready = .{ .text = if (text) |value| try self.arena.allocator().dupe(u8, value) else null } };
     }
 };

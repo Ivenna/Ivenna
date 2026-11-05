@@ -28,9 +28,7 @@ def resolve [root: string, address: string] {
         $remaining = $remaining | prepend ($ancestor | path basename)
         $ancestor = $ancestor | path dirname
     }
-    let parent = try { $ancestor | path expand --strict } catch {
-        fail invalid_address "Cannot resolve the memory entry or room at this address."
-    }
+    let parent = $ancestor | path expand --strict
     if not (within $root $parent) {
         fail invalid_address "This address resolves outside the memory workspace."
     }
@@ -79,7 +77,7 @@ def entry [root: string, path: string] {
 
 def file-identity [path: string] {
     let identity = ^stat -c "%d:%i" -- $path | complete
-    if $identity.exit_code != 0 { fail operation_failed "Could not inspect a memory entry." }
+    if $identity.exit_code != 0 { error make {msg: "Could not inspect a memory entry."} }
     $identity.stdout | str trim
 }
 
@@ -121,10 +119,8 @@ def describe-entry [root: string, item: record, recursive_size: bool] {
 }
 
 def memory-capacity [] {
-    let capacity = try { $env.MEMORY_CAPACITY_BYTES? | default "1073741824" | into int } catch {
-        fail invalid_capacity "MEMORY_CAPACITY_BYTES must be a positive integer."
-    }
-    if $capacity <= 0 { fail invalid_capacity "MEMORY_CAPACITY_BYTES must be a positive integer." }
+    let capacity = $env.MEMORY_CAPACITY_BYTES? | default "1073741824" | into int
+    if $capacity <= 0 { error make {msg: "MEMORY_CAPACITY_BYTES must be a positive integer."} }
     $capacity
 }
 
@@ -165,7 +161,7 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
                 [(entry $root $target.entry_path)]
             } else {
                 ls --all $target.path
-                    | each {|item| try { entry $root $item.name } catch { null } }
+                    | each {|item| entry $root $item.name }
                     | compact
             }
             let described = $entries | each {|item| describe-entry $root $item ($args.recursive_size? | default false) }
@@ -182,11 +178,11 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
             let case = if ($args.case_sensitive? | default false) { "--case-sensitive" } else { "--ignore-case" }
             let found = ^fd --hidden --no-ignore --print0 --color never $mode $case -- $args.query $room.path | complete
             if $found.exit_code != 0 {
-                fail operation_failed ($found.stderr | str replace --all $root "." | str trim)
+                error make {msg: ($found.stderr | str trim)}
             }
             let matches = $found.stdout | split row (char nul)
                 | where {|path| $path != "" }
-                | each {|path| try { entry $root $path } catch { null } }
+                | each {|path| entry $root $path }
                 | compact
             {room: $room.address, query: $args.query, matches: $matches}
         },
@@ -200,7 +196,7 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
             let case = if ($args.case_sensitive? | default false) { "--case-sensitive" } else { "--ignore-case" }
             let recalled = ^rg --json --hidden --no-ignore --color never ...$mode $case -- $args.clue $room.path | complete
             if $recalled.exit_code > 1 {
-                fail operation_failed ($recalled.stderr | str replace --all $root "." | str trim)
+                error make {msg: ($recalled.stderr | str trim)}
             }
             let matches = $recalled.stdout | lines | each {|line| $line | from json }
                 | where type == "match"
@@ -295,6 +291,8 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
 
 def main [] {
     let input = $in
+    let root = $env.PWD | path expand --strict
+    let capacity = memory-capacity
     let response = try {
         let request = $input | from json
         let operations = $request | columns
@@ -306,13 +304,16 @@ def main [] {
         if not (($arguments | describe) | str starts-with "record") {
             fail invalid_request "Operation arguments must be a JSON object matching the tool definition."
         }
-        let root = $env.PWD | path expand --strict
-        {result: (dispatch $root $operation $arguments (memory-capacity))}
+        {result: (dispatch $root $operation $arguments $capacity)}
     } catch {|error|
-        let code = $error.details.code? | default "operation_failed"
+        let code = $error.details.code?
+        if $code == null or ($code | str starts-with "nu::") {
+            print --stderr $error.msg
+            exit 2
+        }
         {
             error: {
-                code: (if ($code | str starts-with "nu::") { "operation_failed" } else { $code }),
+                code: $code,
                 message: $error.msg
             }
         }

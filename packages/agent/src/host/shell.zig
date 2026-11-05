@@ -3,7 +3,7 @@ const process = @import("process.zig");
 const Reader = @import("reader.zig").Reader;
 const output = @import("output.zig");
 const Interpretation = @import("../content.zig").Interpretation;
-const Image = @import("../content.zig").Image;
+const ImageContent = @import("../content.zig").ImageContent;
 
 const Allocator = std.mem.Allocator;
 
@@ -35,13 +35,7 @@ pub const Shell = struct {
             path: []const u8,
             content: union(enum) {
                 text: @FieldType(Reader.FileContent, "text"),
-                image: union(enum) {
-                    data: struct {
-                        format: Image.Format,
-                        byte_length: u64,
-                    },
-                    url: struct {},
-                },
+                image: ImageContent.Description,
                 unavailable: @FieldType(Reader.FileContent, "unavailable"),
             },
         };
@@ -51,13 +45,7 @@ pub const Shell = struct {
                 .path = self.path,
                 .content = switch (self.content) {
                     .text => |preview| .{ .text = preview },
-                    .image => |source| .{ .image = switch (source) {
-                        .data => |image| .{ .data = .{
-                            .format = image.format,
-                            .byte_length = image.bytes.len,
-                        } },
-                        .url => .{ .url = .{} },
-                    } },
+                    .image => |source| .{ .image = source.describe() },
                     .unavailable => |unavailable| .{ .unavailable = unavailable },
                 },
             };

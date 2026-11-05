@@ -26,7 +26,6 @@ pub const Kernel = struct {
     poll_interval_ms: u32,
     max_parallel: usize,
     sessions: Sessions.Registry,
-    workers: std.Io.Group = .init,
 
     pub const Limits = struct {
         request_bytes: u64 = 65536,
@@ -35,9 +34,6 @@ pub const Kernel = struct {
     };
 
     pub fn init(allocator: Allocator, io: std.Io, engine: *Engine, email: *EmailTransport, state: *MailState, sources: *MailSources, limits: Limits, poll_interval_ms: u32, max_parallel: usize, max_contexts: usize) !Kernel {
-        if (max_parallel == 0 or max_contexts == 0 or poll_interval_ms == 0 or
-            limits.request_bytes == 0 or limits.compaction_bytes < limits.request_bytes or limits.handover_bytes == 0)
-            return error.InvalidKernelConfiguration;
         return .{
             .allocator = allocator,
             .io = io,
@@ -57,46 +53,49 @@ pub const Kernel = struct {
         self.* = undefined;
     }
 
+    const TaskResult = union(enum) { intake: anyerror!void, work: anyerror!void };
+    const Tasks = std.Io.Select(TaskResult);
+
     pub fn run(self: *Kernel) !void {
-        defer self.workers.cancel(self.io);
+        var results: [1]TaskResult = undefined;
+        var tasks = Tasks.init(self.io, &results);
+        defer tasks.cancelDiscard();
+        try tasks.concurrent(.intake, receiveLoop, .{ self, &tasks });
+        while (true) switch (try tasks.await()) {
+            .intake => |result| return result,
+            .work => |result| {
+                try result;
+                try self.dispatch(&tasks);
+            },
+        };
+    }
+
+    fn receiveLoop(self: *Kernel, tasks: *Tasks) !void {
         try self.recollect();
         while (true) {
             try self.io.checkCancel();
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            const pending = self.state.pending(a, try self.sessions.intakeLimit()) catch |err| {
-                if (err == error.Canceled) return err;
-                std.log.warn("could not check mail: {s}", .{@errorName(err)});
-                try self.dispatch();
-                try self.io.sleep(.fromMilliseconds(self.poll_interval_ms), .awake);
-                continue;
-            };
+            const pending = try self.state.pending(a, try self.sessions.intakeLimit());
             var waiting: std.ArrayList(WorkInput.Incoming) = .empty;
             for (pending) |candidate| {
-                const received = self.email.receive(a, candidate.receipt, @intCast(@min(4096, self.limits.request_bytes / 8))) catch |err| {
-                    if (err == error.Canceled) return err;
-                    std.log.warn("could not read communication: {s}", .{@errorName(err)});
-                    continue;
-                };
+                const received = try self.email.receive(a, candidate.receipt, @intCast(@min(4096, self.limits.request_bytes / 8)));
                 try waiting.append(a, .{
                     .input = received.input,
                     .reply = received.reply,
                     .source_state = .{
                         .receipt = candidate.receipt,
-                        .input_key = received.input_key,
+                        .input_key = candidate.input_key,
                         .route = received.route,
                         .state_key = try std.fmt.allocPrint(a, "conversation/{s}", .{received.route}),
                     },
                 });
             }
             try self.sessions.reconcile(waiting.items);
-            for (waiting.items) |incoming| self.receive(a, incoming) catch |err| {
-                if (err == error.Canceled) return err;
-                std.log.warn("could not receive source {s}: {s}", .{ incoming.source_state.?.input_key, @errorName(err) });
-            };
+            for (waiting.items) |incoming| try self.receive(a, incoming);
             try self.sources.sweep(try self.sessions.receiptsInUse(a));
-            try self.dispatch();
+            try self.dispatch(tasks);
             try self.io.sleep(.fromMilliseconds(self.poll_interval_ms), .awake);
         }
     }
@@ -130,10 +129,7 @@ pub const Kernel = struct {
     fn receive(self: *Kernel, a: Allocator, incoming: WorkInput.Incoming) !void {
         var prepared = incoming;
         if (incoming.source_state) |source| {
-            if (try self.sessions.handled(source.input_key)) {
-                try self.state.complete(a, source.receipt);
-                return;
-            }
+            if (try self.sessions.handled(source.input_key)) return;
             if (try self.sessions.acceptExisting(incoming)) return;
             var context: std.ArrayList(Input.Background) = .empty;
             try context.appendSlice(a, incoming.input.context);
@@ -148,24 +144,22 @@ pub const Kernel = struct {
         _ = try self.sessions.accept(prepared);
     }
 
-    fn dispatch(self: *Kernel) !void {
+    fn dispatch(self: *Kernel, tasks: *Tasks) !void {
         while (try self.sessions.nextReady(self.max_parallel)) |work| {
-            self.workers.concurrent(self.io, execute, .{ self, work }) catch |err| {
-                self.sessions.fail(work, "Worker could not start.") catch {};
+            tasks.concurrent(.work, execute, .{ self, work }) catch |err| {
                 self.sessions.endWorker(work.session.session_id);
                 return err;
             };
         }
     }
 
-    fn execute(self: *Kernel, work: Work) std.Io.Cancelable!void {
+    fn execute(self: *Kernel, work: Work) !void {
         const session_id = work.session.session_id;
         defer self.sessions.endWorker(session_id);
         self.respond(work) catch |err| {
-            self.sessions.fail(work, @errorName(err)) catch |failure|
-                std.log.err("could not record session failure: {s}", .{@errorName(failure)});
             if (err == error.Canceled) return error.Canceled;
             std.log.err("session {d} stopped: {s}", .{ session_id, @errorName(err) });
+            return err;
         };
     }
 
@@ -191,8 +185,8 @@ pub const Kernel = struct {
                 return try runtimeError(a, "invalid_fork_batch", "A handoff must be the only fork in its round.");
             try self.plans.ensureUnusedCapacity(self.kernel.allocator, 1);
             const plan = self.kernel.sessions.prepareFork(self.work, request) catch |err| switch (err) {
-                error.Canceled, error.OutOfMemory => return err,
-                else => return try runtimeError(a, "fork_unavailable", @errorName(err)),
+                error.InvalidForkArguments, error.CoreRequiresHandoff, error.AttentionCapacityUnavailable => return try runtimeError(a, "fork_unavailable", @errorName(err)),
+                else => return err,
             };
             self.plans.appendAssumeCapacity(plan);
             return try Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
@@ -203,7 +197,6 @@ pub const Kernel = struct {
 
     fn respond(self: *Kernel, work: Work) !void {
         const session = work.session;
-        if (work.delivery.completion == .ready) return self.finishResult(work);
         if (!work.delivery.supplied) {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
@@ -227,28 +220,22 @@ pub const Kernel = struct {
             const round = try self.engine.turn(a, session.session_id, view.history(), .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role == .core);
             const committed = try self.sessions.commitRound(work, round.output, round.replies, runtime.plans.items);
             runtime.committed = true;
-            if (committed.handed_off or committed.waiting) return;
+            if (committed != .continuing) return;
             if (round.replies.len != 0) continue;
-            try work.delivery.recordResult(round.text);
-            return self.finishResult(work);
+            return self.finishResult(work, round.text);
         }
     }
 
-    fn finishResult(self: *Kernel, work: Work) !void {
+    fn finishResult(self: *Kernel, work: Work, text: ?[]const u8) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const result = &work.delivery.completion.ready;
-        if (!result.submitted) {
-            if (work.delivery.reply) |target| if (result.text) |text| {
-                try self.email.reply(a, target.receipt, text);
-                result.submitted = true;
-            };
-        }
+        if (work.delivery.reply) |target| if (text) |answer|
+            try self.email.reply(a, target.receipt, answer);
         if (work.delivery.source_state) |source|
             try self.state.complete(a, source.receipt);
-        const saved = try self.saveForRelease(work);
-        return self.sessions.finish(work, result.text, saved);
+        try self.saveForRelease(work);
+        return self.sessions.finish(work, text);
     }
 
     fn requestContext(self: *Kernel, a: Allocator, session: *Session, delivery: *WorkInput.Delivery) !Context {
@@ -261,7 +248,7 @@ pub const Kernel = struct {
         if (try provider.requestBytes(a, view.history()) <= self.limits.request_bytes) return view;
         const summary = try Compaction.summarize(provider, a, view.history(), try self.sessions.runtimeSnapshot(session), self.limits.compaction_bytes, self.limits.handover_bytes);
         const rendered = try Input.serialize(a, session.session_id, .{ .handover = .{ .summary = summary } });
-        var candidate = try view.withHandover(self.allocator, rendered, 0);
+        var candidate = try view.withHandover(self.allocator, rendered);
         errdefer candidate.deinit();
         var request = try candidate.fork(self.allocator);
         errdefer request.deinit();
@@ -281,26 +268,17 @@ pub const Kernel = struct {
 
     /// Persist continuity only when work has an assigned state key. A result's
     /// reply destination does not determine its state-storage policy.
-    fn saveForRelease(self: *Kernel, work: Work) !bool {
-        if (work.session.role == .core) return true;
-        const source = work.delivery.source_state orelse return true;
-        const key = source.state_key orelse return true;
+    fn saveForRelease(self: *Kernel, work: Work) !void {
+        if (work.session.role == .core) return;
+        const source = work.delivery.source_state orelse return;
+        const key = source.state_key orelse return;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
         var view = try self.sessions.snapshot(work.session);
         defer view.deinit();
-        const summary = Compaction.summarize(self.engine.provider, a, view.history(), try self.sessions.runtimeSnapshot(work.session), self.limits.compaction_bytes, self.limits.handover_bytes) catch |err| {
-            if (err == error.Canceled) return err;
-            std.log.warn("session {d} retained; handover unavailable: {s}", .{ work.session.session_id, @errorName(err) });
-            return false;
-        };
-        self.state.saveHandover(a, key, summary) catch |err| {
-            if (err == error.Canceled) return err;
-            std.log.warn("session {d} retained; handover storage unavailable: {s}", .{ work.session.session_id, @errorName(err) });
-            return false;
-        };
-        return true;
+        const summary = try Compaction.summarize(self.engine.provider, a, view.history(), try self.sessions.runtimeSnapshot(work.session), self.limits.compaction_bytes, self.limits.handover_bytes);
+        try self.state.saveHandover(a, key, summary);
     }
 };
 

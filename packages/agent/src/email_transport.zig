@@ -14,7 +14,6 @@ pub const EmailTransport = struct {
 
     pub const Received = struct {
         input: Input.Input,
-        input_key: []const u8,
         route: []const u8,
         reply: ?Work.ReplyTarget,
     };
@@ -26,10 +25,9 @@ pub const EmailTransport = struct {
     pub fn receive(self: *EmailTransport, a: Allocator, receipt: []const u8, limit: usize) !Received {
         const letter = try self.sources.lookup(a, receipt);
         const material = try self.project(a, letter, limit);
-        const audience = try describe(a, letter.from);
+        const audience = try describe(a, replyAddresses(letter));
         return .{
             .input = .{ .content = material.content, .source = material.source },
-            .input_key = material.source.?.reference,
             .route = try reference(a, "route", &.{ self.mailbox.session_url, self.mailbox.account_id, letter.thread_id }),
             .reply = if (self.isSelf(letter) or audience.len == 0) null else .{ .receipt = receipt, .audience = audience },
         };
@@ -56,7 +54,7 @@ pub const EmailTransport = struct {
     pub fn reply(self: *EmailTransport, a: Allocator, receipt: []const u8, text: []const u8) !void {
         const origin = try self.sources.lookup(a, receipt);
         const submission = try self.mailbox.send(a, .{
-            .to = origin.from,
+            .to = replyAddresses(origin),
             .subject = try replySubject(a, origin.subject),
             .body = text,
             .in_reply_to = origin.message_id,
@@ -97,6 +95,10 @@ pub const EmailTransport = struct {
         return letter.from.len == 1 and std.ascii.eqlIgnoreCase(letter.from[0].email, self.mailbox.address);
     }
 };
+
+fn replyAddresses(letter: Mail.Letter) []const Mail.Address {
+    return if (letter.reply_to.len == 0) letter.from else letter.reply_to;
+}
 
 fn describe(a: Allocator, addresses: []const Mail.Address) ![]const []const u8 {
     const descriptions = try a.alloc([]const u8, addresses.len);

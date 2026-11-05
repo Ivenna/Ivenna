@@ -4,31 +4,43 @@ The [design intent](design.md) guides product and interface decisions; the [arch
 
 ## Development conventions
 
-The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design. Work from intended behavior down to responsibilities, interfaces, and implementation. Explain choices through the behavior they establish and the reasons for choosing them.
+The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design. Start from Ivenna's overall behavior, establish responsibilities and interfaces, then implement in useful increments. Explain choices through the behavior they establish and the reasons for choosing them.
 
-Establish responsibilities and interfaces first, then implement in useful increments. Complex or future areas may remain explicit placeholders; describe what works and what remains undecided. Keep unresolved behavior unavailable or explicitly limited, rather than inventing it to complete test coverage. Do not retain compatibility paths for superseded designs or introduce migration frameworks.
+Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided. When a design changes, remove superseded behavior and state; do not retain compatibility paths or introduce migration frameworks.
+
+Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 
 During development, do not write tests in advance or introduce test frameworks. Run the application locally; containerize only middleware.
 
 ## Implementation boundaries
 
+### Types and protocols
+
 Follow the component boundaries in the [architecture guide](architecture.md#responsibilities). Decode external protocols in their owning components and give execution code typed operations. Work, session scheduling, and model observations must not depend on mail records, headers, folders, or native thread identifiers.
-
-Treat prompts and tool descriptions as editable interfaces. Put ongoing behavioral instructions in [system.md](../packages/agent/src/system.md), operation behavior in [tools.json](../packages/agent/src/tools.json), and task facts and observations in user input. Keep descriptions concise, with detailed field references in the [input contract](input.md). Revise the owning resource, renderer, and documentation together when their contract changes.
-
-[Input](../packages/agent/src/input.zig) owns the closed observation union and its payload types. Construct those variants directly; the renderer serializes them without merging arbitrary fields. Native inputs carry content, optional provenance, and optional context. Do not require communication metadata or source files for work that has none. Original email details are source material to inspect when relevant, not fields in session state. The system prompt describes the shared envelope and variant meanings, while tool definitions explain available operations.
-
-Keep external correspondence, internal work reports, continuity handovers, and diagnostics distinct at their owning interfaces. Delivery code submits the intended answer without adding operational prose. Content handling preserves text, media, and source descriptions together; see [tool content](content.md) for classification and interpretation.
-
-[compaction.md](../packages/agent/src/compaction.md) owns the summary instructions. [Compaction](../packages/agent/src/compaction.zig) constructs the YAML task with the actual session and runtime snapshot, enforces the request budget, and validates the output. Provider owns model protocol encoding and decoding, including requests without tools.
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
-[Work](../packages/agent/src/work.zig) keeps input, reply targets, and source state independent. Derive routing, response destinations, and persistence from their explicit bindings. Source provenance supplies material for understanding; `SourceState` supplies program bookkeeping. Email projection and submission belong to EmailTransport; input consumption and keyed handovers belong to MailState. Both use the shared mail client and source records described in the [component responsibilities](architecture.md#responsibilities).
+[Input](../packages/agent/src/input.zig) defines the closed observation union and its payload types. Construct those variants directly and render their declared fields. Native input can have content alone or include provenance and context. Keep reply targets and source bookkeeping in [Work](../packages/agent/src/work.zig), independently of that provenance; derive routing, response destinations, and persistence from the explicit work bindings.
 
-Sessions synchronizes contexts, queues, and routes. The kernel coordinates adapter operations and owns worker task scopes. Retain final text and confirmed submission state before later acknowledgment work can fail. Copy or transfer values that must outlive a model-round arena, and cancel and join workers before releasing their dependencies.
+### Model-facing resources
 
-Keep activation completion, task completion, context release, source-state lifetime, and mail retention distinct. The sessions registry checks queues, children, and worker ownership before releasing contexts. Shared source-cache cleanup checks the receipts still in use; it does not delete artifacts or change folders. Source artifacts retain their first captured content and are published atomically. Internal handovers use state keys rather than external reply chains. Work without a persistent state key has no cross-restart recovery contract yet. In-process completion state covers confirmed outcomes, not unknown network effects or execution recovery after restart.
+Treat prompts and tool descriptions as editable interfaces:
+
+| Resource | Purpose |
+| --- | --- |
+| [system.md](../packages/agent/src/system.md) | Ongoing instructions, observation meanings, and response scope |
+| [tools.json](../packages/agent/src/tools.json) | Operation parameters, behavior, and results |
+| [compaction.md](../packages/agent/src/compaction.md) | Handover summary instructions |
+
+Put task facts and observations in user input. Keep model-facing descriptions concise; detailed field references belong in the [input contract](input.md). Update the owning resource, renderer, and documentation together when a contract changes.
+
+Keep external replies, internal findings, handovers, and diagnostics distinct. Submit reply text as the intended answer. Preserve text, media, and source descriptions together when handling [tool content](content.md).
+
+### Execution and storage
+
+Sessions synchronizes contexts, queues, and routes. The kernel coordinates adapter operations and owns worker task scopes. Infrastructure and execution failures propagate to the kernel's task scope, which cancels and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
+
+Keep context release and stored-record retention independent. Follow the architecture contracts for [source publication](architecture.md#email-boundary-and-source-materials), [internal state](architecture.md#internal-mail-state), and [context lifetime](architecture.md#turn-completion-and-context-release).
 
 ## Repository and build
 
@@ -69,4 +81,14 @@ In [dev/mail](../dev/mail), `compose.yaml` defines normal Stalwart operation and
 
 ## Validation
 
-Build the application and exercise the changed behavior through communication and model/tool work. For execution changes, check tool-result continuation, handoff and requested findings, follow-up routing, reopening, and working-context release. For email changes, check reply threading and material projection. For state changes, check private consumption and outbound markers, keyed handovers, receipt cleanup, and any affected retention behavior. Confirm that reading, starring, and archiving ordinary correspondence leave its processing unchanged. For model-facing changes, inspect complete serialized requests, including YAML observations, response variants, tool selection, and budget accounting. Report the checks performed and distinguish reconstructed understanding from exact execution recovery.
+Build the application and exercise the affected behavior through communication and model/tool work:
+
+| Area changed | Checks |
+| --- | --- |
+| Execution | Tool-result continuation, handoff, requested findings, follow-up routing, reopening, and context release |
+| Failure handling | Required-capability failures stop the runtime and join concurrent work; ordinary tool outcomes allow continuation |
+| Email | Reply recipients and threading, material projection, and intake independent of read, starred, or archived state |
+| Internal state | Private consumption and outbound markers, keyed handovers, receipt cleanup, and affected retention behavior |
+| Model-facing interfaces | Complete serialized requests, YAML observations, response variants, tool selection, and budget accounting |
+
+Report the checks performed. Distinguish reconstruction of understanding from execution recovery.

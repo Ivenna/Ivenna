@@ -2,11 +2,11 @@
 
 Ivenna is an agent runtime, designed as [a body for an LLM soul](docs/design.md). Through ongoing communication and autonomous activity, the project explores how interaction and memory can sustain a sense of self over time.
 
-People and programs communicate with Ivenna through email. Ivenna interprets correspondence in context and decides how to respond. A permanent core coordinates ongoing activity and can fork its current understanding into work sessions. These sessions use tools, answer their intended audience, and can fork further work.
+People and programs communicate with Ivenna through email. A permanent core interprets correspondence and coordinates ongoing activity, forking its current understanding into work sessions when needed. Work sessions use tools, answer their intended audience, and can fork further work.
 
-Internal mail records support execution state and continuity. External correspondence and internal state share mail storage, with distinct responsibilities and lifecycles.
+The kernel runs locally, combining email, [host commands](docs/host.md), and shared [memory rooms](docs/memory.md) accessed over SSH. Communication and memory must be available for it to run. Tools can return [text and images](docs/content.md).
 
-The kernel runs locally, with an SSH workspace for shared [memory rooms](docs/memory.md). Work sessions can use [host commands](docs/host.md) and receive [text and image results](docs/content.md). The deployment user owns the mailbox, state records, artifacts, and autonomous memory. Handovers and source material support reconstruction of understanding when working contexts are released or the kernel restarts.
+The deployment user owns the mailbox, state records, artifacts, and autonomous memory. Handovers and source material provide context for continuing work after a working context is released or the kernel restarts.
 
 ## Getting started
 

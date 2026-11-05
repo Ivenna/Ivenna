@@ -16,14 +16,13 @@ pub const Session = struct {
     parent_session_id: ?u64 = null,
     parent_generation: ?u64 = null,
     generation: u64 = 0,
-    state: enum { ready, running, waiting, paused } = .ready,
+    state: enum { ready, running, waiting } = .ready,
     active: ?*Delivery = null,
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
     children: usize = 0,
     waiting_reports: usize = 0,
     report_to: ?u64 = null,
-    releasable: bool = true,
 };
 
 pub const Work = struct { session: *Session, delivery: *Delivery };
@@ -39,7 +38,7 @@ pub const ForkPlan = struct {
     request: ForkRequest,
 };
 
-pub const Commit = struct { handed_off: bool = false, waiting: bool = false };
+pub const Commit = enum { continuing, handed_off, waiting };
 
 pub const Registry = struct {
     allocator: Allocator,
@@ -54,7 +53,6 @@ pub const Registry = struct {
     next_session_id: u64 = 2,
 
     pub fn init(allocator: Allocator, io: std.Io, max_contexts: usize) !Registry {
-        if (max_contexts == 0) return error.InvalidSessionLimit;
         const core = try allocator.create(Session);
         errdefer allocator.destroy(core);
         var context = try Context.init(allocator, @embedFile("system.md"));
@@ -107,7 +105,7 @@ pub const Registry = struct {
 
     fn acceptLocked(self: *Registry, session: *Session, incoming: WorkInput.Incoming) !bool {
         if (incoming.source_state) |source| if (self.noticed.contains(source.input_key)) return false;
-        if (session.pending.items.len + @as(usize, @intFromBool(session.active != null)) >= self.max_contexts and session.state != .paused) return false;
+        if (session.pending.items.len + @as(usize, @intFromBool(session.active != null)) >= self.max_contexts) return false;
         const delivery = try Delivery.fromIncoming(self.allocator, incoming);
         errdefer delivery.destroy(self.allocator);
         try session.pending.ensureUnusedCapacity(self.allocator, 1 + @as(usize, @intFromBool(session.active != null)));
@@ -126,8 +124,7 @@ pub const Registry = struct {
         };
         errdefer if (added_route) |route| self.removeRoute(route, session.session_id);
         if (notice_key) |key| try self.noticed.put(self.allocator, key, .scheduled);
-        if (session.state == .paused) session.pending.insertAssumeCapacity(0, delivery) else session.pending.appendAssumeCapacity(delivery);
-        if (session.state == .paused) session.state = .ready;
+        session.pending.appendAssumeCapacity(delivery);
         return true;
     }
 
@@ -137,13 +134,13 @@ pub const Registry = struct {
     pub fn nextReady(self: *Registry, max_parallel: usize) !?Work {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        if (ready(self.core)) return take(self.core);
+        if (takeReady(self.core)) |work| return work;
         if (self.runningWorkers() >= max_parallel) return null;
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
             const session = entry.*;
-            if (session == self.core or !ready(session)) continue;
-            return take(session);
+            if (session == self.core) continue;
+            if (takeReady(session)) |work| return work;
         }
         return null;
     }
@@ -151,8 +148,8 @@ pub const Registry = struct {
     pub fn prepareFork(self: *Registry, work: Work, request: ForkRequest) !ForkPlan {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try validateWork(work);
-        if (request.task.len == 0 or std.mem.indexOfScalar(u8, request.task, 0) != null) return error.InvalidForkArguments;
+        assertWork(work);
+        if (request.task.len == 0) return error.InvalidForkArguments;
         if (work.session == self.core and request.mode != .handoff) return error.CoreRequiresHandoff;
         if (self.sessions.count() + self.reserved >= self.max_contexts) return error.AttentionCapacityUnavailable;
         const child = try self.allocator.create(Session);
@@ -196,7 +193,7 @@ pub const Registry = struct {
     pub fn commitRound(self: *Registry, work: Work, output: []const Value, replies: []const Value, plans: []const ForkPlan) !Commit {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try validateWork(work);
+        assertWork(work);
         const parent = work.session;
         var completed = try parent.context.fork(self.allocator);
         errdefer completed.deinit();
@@ -213,7 +210,7 @@ pub const Registry = struct {
         parent.context.deinit();
         parent.context = completed;
         parent.generation += 1;
-        var result: Commit = .{};
+        var result: Commit = .continuing;
         for (plans) |plan| {
             const child = plan.child;
             child.parent_generation = parent.generation;
@@ -238,7 +235,7 @@ pub const Registry = struct {
                     parent.active = null;
                     parent.state = .ready;
                     work.delivery.destroy(self.allocator);
-                    result.handed_off = true;
+                    result = .handed_off;
                 },
                 .subtask => |subtask| if (subtask.report_to_parent) {
                     child.report_to = parent.session_id;
@@ -246,9 +243,9 @@ pub const Registry = struct {
                 },
             }
         }
-        if (!result.handed_off and parent.waiting_reports != 0) {
+        if (result != .handed_off and parent.waiting_reports != 0) {
             parent.state = .waiting;
-            result.waiting = true;
+            result = .waiting;
         }
         return result;
     }
@@ -313,13 +310,13 @@ pub const Registry = struct {
     }
 
     /// Finishing an activation releases context independently of transport
-    /// retention. A failed handover keeps the working context available.
-    pub fn finish(self: *Registry, work: Work, text: ?[]const u8, releasable: bool) !void {
+    /// retention. Kernel completes required handover storage before this call.
+    pub fn finish(self: *Registry, work: Work, text: ?[]const u8) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try validateWork(work);
+        assertWork(work);
         const session = work.session;
-        try self.notifyParent(session, .{ .completed = text orelse "" });
+        try self.notifyParent(session, text orelse "");
         if (work.delivery.source_state) |source| {
             self.markHandled(source.input_key);
             if (source.route) |route| if (session == self.core and !hasPendingRoute(session, route))
@@ -327,26 +324,8 @@ pub const Registry = struct {
         }
         session.active = null;
         session.state = .ready;
-        session.releasable = releasable;
         work.delivery.destroy(self.allocator);
         self.releaseIdle(session);
-    }
-
-    pub fn fail(self: *Registry, work: Work, failure: []const u8) !void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        validateWork(work) catch return;
-        if (work.delivery.source_state == null and work.delivery.reply == null) {
-            try self.notifyParent(work.session, .{ .failed = failure });
-            work.session.active = null;
-            work.session.state = .ready;
-            work.delivery.destroy(self.allocator);
-            self.releaseIdle(work.session);
-        } else {
-            work.session.pending.insertAssumeCapacity(0, work.delivery);
-            work.session.active = null;
-            work.session.state = .paused;
-        }
     }
 
     /// Keeps session pointers alive until their Kernel worker has returned,
@@ -354,18 +333,18 @@ pub const Registry = struct {
     pub fn endWorker(self: *Registry, session_id: u64) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const session = self.sessions.get(session_id) orelse return;
+        const session = self.sessions.get(session_id).?;
         session.borrowed_workers -= 1;
         self.releaseIdle(session);
     }
 
-    fn notifyParent(self: *Registry, session: *Session, outcome: Input.ReportOutcome) !void {
+    fn notifyParent(self: *Registry, session: *Session, text: []const u8) !void {
         const target = session.report_to orelse return;
-        const parent = self.sessions.get(target) orelse return error.ReportParentUnavailable;
+        const parent = self.sessions.get(target).?;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        try parent.context.appendInput(try Input.serialize(a, parent.session_id, .{ .report = .{ .from_session = session.session_id, .outcome = outcome } }));
+        try parent.context.appendInput(try Input.serialize(a, parent.session_id, .{ .report = .{ .from_session = session.session_id, .text = text } }));
         parent.generation += 1;
         parent.waiting_reports -= 1;
         if (parent.waiting_reports == 0 and parent.state == .waiting) {
@@ -418,7 +397,7 @@ pub const Registry = struct {
     }
 
     fn releaseIdle(self: *Registry, session: *Session) void {
-        if (session == self.core or session.state != .ready or session.active != null or session.pending.items.len != 0 or session.children != 0 or session.borrowed_workers != 0 or !session.releasable) return;
+        if (session == self.core or session.state != .ready or session.active != null or session.pending.items.len != 0 or session.children != 0 or session.borrowed_workers != 0) return;
         const parent_id = session.parent_session_id;
         self.removeOwnedRoutes(session.session_id);
         _ = self.sessions.remove(session.session_id);
@@ -454,7 +433,7 @@ pub const Registry = struct {
     }
 
     fn markHandled(self: *Registry, input_key: []const u8) void {
-        if (self.noticed.getPtr(input_key)) |notice| notice.* = .handled;
+        self.noticed.getPtr(input_key).?.* = .handled;
     }
 
     fn destroySession(self: *Registry, session: *Session) void {
@@ -466,11 +445,9 @@ pub const Registry = struct {
     }
 };
 
-fn ready(session: *const Session) bool {
-    return session.state == .ready and session.pending.items.len != 0;
-}
-
-fn take(session: *Session) Work {
+fn takeReady(session: *Session) ?Work {
+    if (session.state != .ready) return null;
+    if (session.pending.items.len == 0) return null;
     const delivery = session.pending.orderedRemove(0);
     session.active = delivery;
     session.borrowed_workers += 1;
@@ -504,6 +481,6 @@ fn retainReceipt(a: Allocator, receipts: *std.ArrayList([]const u8), value: []co
     receipts.appendAssumeCapacity(try a.dupe(u8, value));
 }
 
-fn validateWork(work: Work) !void {
-    if (work.session.state != .running or work.session.active != work.delivery) return error.InvalidSessionWork;
+fn assertWork(work: Work) void {
+    std.debug.assert(work.session.state == .running and work.session.active == work.delivery);
 }

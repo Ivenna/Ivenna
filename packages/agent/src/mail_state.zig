@@ -12,6 +12,7 @@ pub const MailState = struct {
 
     pub const Pending = struct {
         receipt: []const u8,
+        input_key: []const u8,
     };
 
     pub fn init(mailbox: *Mail.Mailbox, sources: *MailSources) MailState {
@@ -23,7 +24,7 @@ pub const MailState = struct {
         for (try self.mailbox.pending(a, limit)) |letter| {
             const receipt = try self.sources.receiptId(a, letter.id);
             try self.sources.retain(receipt, letter);
-            try result.append(a, .{ .receipt = receipt });
+            try result.append(a, .{ .receipt = receipt, .input_key = receipt });
         }
         return result.toOwnedSlice(a);
     }
@@ -43,7 +44,7 @@ pub const MailState = struct {
     }
 
     pub fn saveHandover(self: *MailState, a: Allocator, key: []const u8, summary: []const u8) !void {
-        _ = try self.mailbox.saveState(a, key, summary);
+        try self.mailbox.saveState(a, key, summary);
     }
 };
 

@@ -7,9 +7,10 @@ pub const Config = struct {
     memory_ssh_config: ?[]const u8,
     mail_session_url: []const u8,
     mail_address: []const u8,
-    mail_authorization: ?[]const u8,
-    mail_username: ?[]const u8,
-    mail_password: ?[]const u8,
+    mail_authentication: union(enum) {
+        authorization: []const u8,
+        credentials: struct { username: []const u8, password: []const u8 },
+    },
     mail_poll_interval_ms: u32,
     max_parallel_attention: usize,
     max_attention_contexts: usize,
@@ -22,21 +23,21 @@ pub const Config = struct {
     /// Text borrows the process environment, which outlives the application.
     pub fn load(env: *const std.process.Environ.Map) !Config {
         const mail_auth = env.get("MAIL_AUTHORIZATION");
-        const username = env.get("MAIL_USERNAME");
-        const password = env.get("MAIL_PASSWORD");
-        if (mail_auth) |value| {
-            if (value.len == 0) return error.MissingMailCredentials;
-        } else if (username == null or password == null or username.?.len == 0 or password.?.len == 0)
-            return error.MissingMailCredentials;
         const config: Config = .{
             .data_dir = try nonempty(env, "DATA_DIR", ".ivenna"),
             .memory_ssh_target = try nonempty(env, "MEMORY_SSH_TARGET", "ivenna-memory"),
             .memory_ssh_config = env.get("MEMORY_SSH_CONFIG"),
             .mail_session_url = try nonempty(env, "MAIL_SESSION_URL", "http://127.0.0.1:8088/jmap/session"),
             .mail_address = try nonempty(env, "MAIL_ADDRESS", "ivenna@ivenna.test"),
-            .mail_authorization = mail_auth,
-            .mail_username = username,
-            .mail_password = password,
+            .mail_authentication = if (mail_auth) |value| blk: {
+                if (value.len == 0) return error.MissingMailCredentials;
+                break :blk .{ .authorization = value };
+            } else blk: {
+                const username = env.get("MAIL_USERNAME") orelse return error.MissingMailCredentials;
+                const password = env.get("MAIL_PASSWORD") orelse return error.MissingMailCredentials;
+                if (username.len == 0 or password.len == 0) return error.MissingMailCredentials;
+                break :blk .{ .credentials = .{ .username = username, .password = password } };
+            },
             .mail_poll_interval_ms = try number(u32, env, "MAIL_POLL_INTERVAL_MS", 2000),
             .max_parallel_attention = try number(usize, env, "MAX_PARALLEL_ATTENTION", 4),
             .max_attention_contexts = try number(usize, env, "MAX_ATTENTION_CONTEXTS", 32),
@@ -57,8 +58,11 @@ pub const Config = struct {
     }
 
     pub fn authorization(self: Config, a: std.mem.Allocator) ![]const u8 {
-        if (self.mail_authorization) |value| return value;
-        const credentials = try std.fmt.allocPrint(a, "{s}:{s}", .{ self.mail_username.?, self.mail_password.? });
+        const account = switch (self.mail_authentication) {
+            .authorization => |value| return value,
+            .credentials => |value| value,
+        };
+        const credentials = try std.fmt.allocPrint(a, "{s}:{s}", .{ account.username, account.password });
         const encoder = std.base64.standard.Encoder;
         const value = try a.alloc(u8, "Basic ".len + encoder.calcSize(credentials.len));
         @memcpy(value[0.."Basic ".len], "Basic ");

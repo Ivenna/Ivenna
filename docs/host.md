@@ -1,6 +1,6 @@
 # Host shell
 
-Work sessions can inspect Ivenna's deployment shell and execute commands. They use the kernel's OS account and share its filesystem.
+Work sessions execute commands through the kernel's OS account and share its filesystem. Commands from different sessions can run concurrently.
 
 The shell tools are defined in [tools.json](../packages/agent/src/tools.json):
 
@@ -9,9 +9,9 @@ The shell tools are defined in [tools.json](../packages/agent/src/tools.json):
 | `get_host_shell` | Inspect the shell, default directory, and capability status |
 | `run_host_shell` | Execute a command and return its outcome, output descriptions, and any stdout image |
 
-## Discovering the shell entry
+## Shell description
 
-Call `get_host_shell` with `{}`. For a service started in `/path/to/deployment`, the result is:
+Call `get_host_shell` with `{}` to inspect the shell and default working directory. For a kernel started in `/path/to/deployment`, the result is:
 
 ```json
 {
@@ -30,7 +30,7 @@ Call `get_host_shell` with `{}`. For a service started in `/path/to/deployment`,
 }
 ```
 
-The current implementation executes individual commands. Capabilities marked `planned` reserve future process and terminal controls; they have no callable operations yet. See [host execution](architecture.md#host-execution) for their responsibilities and lifecycle.
+Command execution is available. The entries marked `planned` have no callable operations.
 
 ## Running commands
 
@@ -43,19 +43,17 @@ Call `run_host_shell` with a command string:
 | Argument | Meaning |
 | --- | --- |
 | `command` | Required command in `/bin/sh` syntax; supports pipes, redirection, and heredocs |
-| `cwd` | Working directory; absolute or relative to the service's startup directory, which is also the default |
+| `cwd` | Working directory; absolute or relative to the kernel's startup directory, which is also the default |
 | `timeout_ms` | Positive integer in milliseconds; defaults to `600000` (10 minutes) |
 | `interpretation` | Optional `"image_url"` to present complete stdout text as an [image reference](content.md#image-url-references) |
 
-Each call starts a separate noninteractive shell with no terminal or live input. It inherits the service's startup environment, which remains the same when `cwd` changes. Changes to shell variables and the current directory last for that call; filesystem changes persist. Programs can be invoked by path or found through the service's `PATH`; see [optional host tools](running.md#optional-host-tools).
+Each call starts a fresh noninteractive `/bin/sh` with no terminal or live input. It inherits the kernel's startup environment and finds programs through its `PATH` or an explicit path; see [optional host tools](running.md#optional-host-tools). Changing `cwd` does not reload the environment. Shell variables and directory changes last for that call; filesystem changes persist.
 
-Commands from separate sessions can run concurrently against the same files. A prior read describes the file at that time; another session may change it before a later command.
-
-The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled. A shell background job does not provide persistent job control or later completion input to the model; those capabilities remain planned.
+The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled. Background processes in that group end with the invocation; no later job-completion observation is supplied.
 
 ## Results and interruption
 
-Every command result includes a text part containing a JSON `result` with the outcome and both output stream descriptions. Image stdout adds a native image part alongside that description, including when the command exits with a nonzero code or times out. Nonzero exits and timeouts remain command results. If the tool cannot return a command result, it returns a text `error` with `code` and `message`.
+A command returns a text part containing a JSON `result` with its outcome and both stream descriptions. Nonzero exits and timeouts are command outcomes. Image stdout adds a native image part alongside the description. If an invocation fails to return a command result, it returns an `error` with code `host_unavailable` and a message. The [architecture guide](architecture.md#host-execution) describes the current failure boundary.
 
 For session `2` with the default data directory, the `pwd` command above returns a text summary such as:
 
@@ -64,11 +62,11 @@ For session `2` with the default data directory, the `pwd` command above returns
   "result": {
     "outcome": {"completed": {"exited": 0}},
     "stdout": {
-      "path": "/path/to/deployment/.ivenna/host/2/command.stdout.log",
+      "path": "/path/to/deployment/.ivenna/host/2/5a3cd1c04b1a4b1197b611f97c7032de.stdout.log",
       "content": {"text": {"text": "/path/to/project\n", "truncated": false}}
     },
     "stderr": {
-      "path": "/path/to/deployment/.ivenna/host/2/command.stderr.log",
+      "path": "/path/to/deployment/.ivenna/host/2/5a3cd1c04b1a4b1197b611f97c7032de.stderr.log",
       "content": {"text": {"text": "", "truncated": false}}
     }
   }
@@ -95,6 +93,6 @@ In the result description, both `stdout` and `stderr` contain an absolute `path`
 
 Stderr's `content` contains either a `text` preview or an `unavailable` diagnostic. See [tool content](content.md) for classification, image descriptions, preview bounds, and model-input limits. Content diagnostics leave the command outcome and stream descriptions available.
 
-Full stdout and stderr remain in files under `<DATA_DIR>/host/<session_id>/`, including output omitted from the reply. Each invocation creates distinct log files that outlive the working session; their retention is independent of mail folders and flags. Subsequent shell calls can read or remove them. `DATA_DIR` defaults to `.ivenna` in the startup directory; see [local data](running.md#local-data) for configuration.
+Each invocation creates distinct log files under `<DATA_DIR>/host/<session_id>/`. They contain the full streams, including output omitted from the reply, and outlive the working session. Later shell calls can read or remove them. See [local data](running.md#local-data) for `DATA_DIR` configuration.
 
-A timeout returns a summary of the output captured so far. Completed command effects remain after a timeout or kernel cancellation. Restarting does not restore the old runtime transcript. Inspect an interrupted command's effects before deciding whether to run it again; see [startup and interruption](architecture.md#startup-and-interruption).
+A timeout returns the output captured so far. Timeout and cancellation leave completed effects in place. See [startup and interruption](architecture.md#startup-and-interruption) for continuation after a runtime failure or restart.

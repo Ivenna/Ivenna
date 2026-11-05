@@ -51,11 +51,6 @@ pub const Background = union(enum) {
     handover: Handover,
 };
 
-pub const ReportOutcome = union(enum) {
-    completed: []const u8,
-    failed: []const u8,
-};
-
 pub const Response = union(enum) {
     reply: struct { audience: []const []const u8 },
     report: struct { session_id: u64 },
@@ -90,7 +85,7 @@ pub const Observation = union(enum) {
     assignment: Assignment,
     report: struct {
         from_session: u64,
-        outcome: ReportOutcome,
+        text: []const u8,
     },
     handover: Handover,
     background: struct {
