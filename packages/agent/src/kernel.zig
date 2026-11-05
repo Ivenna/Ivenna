@@ -82,19 +82,18 @@ pub const Kernel = struct {
                 try waiting.append(a, .{
                     .input = received.input,
                     .reply = received.reply,
-                    .source_control = .{
+                    .source_state = .{
                         .receipt = candidate.receipt,
                         .input_key = received.input_key,
                         .route = received.route,
                         .state_key = try std.fmt.allocPrint(a, "conversation/{s}", .{received.route}),
                     },
-                    .priority = candidate.priority,
                 });
             }
             try self.sessions.reconcile(waiting.items);
             for (waiting.items) |incoming| self.receive(a, incoming) catch |err| {
                 if (err == error.Canceled) return err;
-                std.log.warn("could not receive source {s}: {s}", .{ incoming.source_control.?.input_key, @errorName(err) });
+                std.log.warn("could not receive source {s}: {s}", .{ incoming.source_state.?.input_key, @errorName(err) });
             };
             try self.sources.sweep(try self.sessions.receiptsInUse(a));
             try self.dispatch();
@@ -130,19 +129,19 @@ pub const Kernel = struct {
 
     fn receive(self: *Kernel, a: Allocator, incoming: WorkInput.Incoming) !void {
         var prepared = incoming;
-        if (incoming.source_control) |control| {
-            if (try self.sessions.handled(control.input_key)) {
-                try self.state.complete(a, control.receipt, false);
+        if (incoming.source_state) |source| {
+            if (try self.sessions.handled(source.input_key)) {
+                try self.state.complete(a, source.receipt);
                 return;
             }
             if (try self.sessions.acceptExisting(incoming)) return;
             var context: std.ArrayList(Input.Background) = .empty;
             try context.appendSlice(a, incoming.input.context);
-            if (control.state_key) |key| {
+            if (source.state_key) |key| {
                 if (try self.state.loadHandover(a, key, self.limits.handover_bytes)) |handover|
                     try context.append(a, .{ .handover = handover });
             }
-            for (try self.email.history(a, control.receipt)) |material|
+            for (try self.email.history(a, source.receipt)) |material|
                 try context.append(a, .{ .evidence = material });
             prepared.input.context = context.items;
         }
@@ -204,7 +203,6 @@ pub const Kernel = struct {
 
     fn respond(self: *Kernel, work: Work) !void {
         const session = work.session;
-        const control = work.delivery.source_control;
         if (work.delivery.completion == .ready) return self.finishResult(work);
         if (!work.delivery.supplied) {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -222,11 +220,6 @@ pub const Kernel = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            if (control) |owned| if (try self.state.withdrawn(a, owned.receipt)) {
-                try self.sessions.appendInput(session, try Input.serialize(a, session.session_id, .{ .work_update = .{ .state = .withdrawn } }));
-                const saved = try self.saveForRelease(work);
-                return self.sessions.finish(work, null, saved);
-            };
             var view = try self.requestContext(a, session, work.delivery);
             defer view.deinit();
             var runtime: RuntimeRound = .{ .kernel = self, .work = work };
@@ -246,21 +239,14 @@ pub const Kernel = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const result = &work.delivery.completion.ready;
-        if (work.delivery.source_control) |control| {
-            if (!result.submitted and try self.state.withdrawn(a, control.receipt)) {
-                try self.sessions.appendInput(work.session, try Input.serialize(a, work.session.session_id, .{ .work_update = .{ .state = .withdrawn } }));
-                const saved = try self.saveForRelease(work);
-                return self.sessions.finish(work, null, saved);
-            }
-        }
         if (!result.submitted) {
             if (work.delivery.reply) |target| if (result.text) |text| {
                 try self.email.reply(a, target.receipt, text);
                 result.submitted = true;
             };
         }
-        if (work.delivery.source_control) |control|
-            try self.state.complete(a, control.receipt, result.submitted);
+        if (work.delivery.source_state) |source|
+            try self.state.complete(a, source.receipt);
         const saved = try self.saveForRelease(work);
         return self.sessions.finish(work, result.text, saved);
     }
@@ -283,8 +269,8 @@ pub const Kernel = struct {
         if (try provider.requestBytes(a, request.history()) > self.limits.request_bytes) return error.ContextBudgetExhausted;
         const key: ?[]const u8 = if (session.role == .core)
             "core"
-        else if (delivery.source_control) |control|
-            control.state_key
+        else if (delivery.source_state) |source|
+            source.state_key
         else
             null;
         if (key) |state_key| try self.state.saveHandover(a, state_key, summary);
@@ -297,8 +283,8 @@ pub const Kernel = struct {
     /// reply destination does not determine its state-storage policy.
     fn saveForRelease(self: *Kernel, work: Work) !bool {
         if (work.session.role == .core) return true;
-        const control = work.delivery.source_control orelse return true;
-        const key = control.state_key orelse return true;
+        const source = work.delivery.source_state orelse return true;
+        const key = source.state_key orelse return true;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();

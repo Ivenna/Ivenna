@@ -87,8 +87,8 @@ pub const Registry = struct {
     pub fn acceptExisting(self: *Registry, incoming: WorkInput.Incoming) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const control = incoming.source_control orelse return false;
-        const route = control.route orelse return false;
+        const source = incoming.source_state orelse return false;
+        const route = source.route orelse return false;
         const owner = self.routes.get(route) orelse return false;
         _ = try self.acceptLocked(self.sessions.get(owner).?, incoming);
         return true;
@@ -100,21 +100,21 @@ pub const Registry = struct {
     pub fn accept(self: *Registry, incoming: WorkInput.Incoming) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const route = if (incoming.source_control) |control| control.route else null;
+        const route = if (incoming.source_state) |source| source.route else null;
         const session = if (route) |key| if (self.routes.get(key)) |owner| self.sessions.get(owner).? else self.core else self.core;
         return self.acceptLocked(session, incoming);
     }
 
     fn acceptLocked(self: *Registry, session: *Session, incoming: WorkInput.Incoming) !bool {
-        if (incoming.source_control) |control| if (self.noticed.contains(control.input_key)) return false;
+        if (incoming.source_state) |source| if (self.noticed.contains(source.input_key)) return false;
         if (session.pending.items.len + @as(usize, @intFromBool(session.active != null)) >= self.max_contexts and session.state != .paused) return false;
         const delivery = try Delivery.fromIncoming(self.allocator, incoming);
         errdefer delivery.destroy(self.allocator);
         try session.pending.ensureUnusedCapacity(self.allocator, 1 + @as(usize, @intFromBool(session.active != null)));
-        const notice_key = if (incoming.source_control) |control| try self.allocator.dupe(u8, control.input_key) else null;
+        const notice_key = if (incoming.source_state) |source| try self.allocator.dupe(u8, source.input_key) else null;
         errdefer if (notice_key) |key| self.allocator.free(key);
         var added_route: ?[]const u8 = null;
-        if (incoming.source_control) |control| if (control.route) |route| {
+        if (incoming.source_state) |source| if (source.route) |route| {
             if (!self.routes.contains(route)) {
                 const key = try self.allocator.dupe(u8, route);
                 self.routes.put(self.allocator, key, session.session_id) catch |err| {
@@ -126,7 +126,7 @@ pub const Registry = struct {
         };
         errdefer if (added_route) |route| self.removeRoute(route, session.session_id);
         if (notice_key) |key| try self.noticed.put(self.allocator, key, .scheduled);
-        if (incoming.priority or session.state == .paused) session.pending.insertAssumeCapacity(0, delivery) else session.pending.appendAssumeCapacity(delivery);
+        if (session.state == .paused) session.pending.insertAssumeCapacity(0, delivery) else session.pending.appendAssumeCapacity(delivery);
         if (session.state == .paused) session.state = .ready;
         return true;
     }
@@ -139,14 +139,13 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         if (ready(self.core)) return take(self.core);
         if (self.runningWorkers() >= max_parallel) return null;
-        var chosen: ?*Session = null;
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
             const session = entry.*;
             if (session == self.core or !ready(session)) continue;
-            if (chosen == null or (session.pending.items[0].priority and !chosen.?.pending.items[0].priority)) chosen = session;
+            return take(session);
         }
-        return if (chosen) |session| take(session) else null;
+        return null;
     }
 
     pub fn prepareFork(self: *Registry, work: Work, request: ForkRequest) !ForkPlan {
@@ -166,7 +165,7 @@ pub const Registry = struct {
             .task = request.task,
             .from_session = work.session.session_id,
             .source_refs = source_refs,
-        } }, if (request.mode == .handoff) work.delivery.reply else null, if (request.mode == .handoff) work.delivery.source_control else null, work.delivery.priority);
+        } }, if (request.mode == .handoff) work.delivery.reply else null, if (request.mode == .handoff) work.delivery.source_state else null);
         errdefer delivery.destroy(self.allocator);
         child.* = .{
             .session_id = self.next_session_id,
@@ -225,12 +224,12 @@ pub const Registry = struct {
                 .handoff => {
                     child.report_to = parent.report_to;
                     parent.report_to = null;
-                    if (work.delivery.source_control) |control| if (control.route) |route| {
+                    if (work.delivery.source_state) |source| if (source.route) |route| {
                         self.routes.getPtr(route).?.* = child.session_id;
                         var index: usize = 0;
                         while (index < parent.pending.items.len) {
-                            const queued = parent.pending.items[index].source_control;
-                            const queued_route = if (queued) |source_control| source_control.route else null;
+                            const queued = parent.pending.items[index].source_state;
+                            const queued_route = if (queued) |source_state| source_state.route else null;
                             if (queued_route != null and std.mem.eql(u8, queued_route.?, route)) {
                                 child.pending.appendAssumeCapacity(parent.pending.orderedRemove(index));
                             } else index += 1;
@@ -321,9 +320,9 @@ pub const Registry = struct {
         try validateWork(work);
         const session = work.session;
         try self.notifyParent(session, .{ .completed = text orelse "" });
-        if (work.delivery.source_control) |control| {
-            self.markHandled(control.input_key);
-            if (control.route) |route| if (session == self.core and !hasPendingRoute(session, route))
+        if (work.delivery.source_state) |source| {
+            self.markHandled(source.input_key);
+            if (source.route) |route| if (session == self.core and !hasPendingRoute(session, route))
                 self.removeRoute(route, session.session_id);
         }
         session.active = null;
@@ -337,7 +336,7 @@ pub const Registry = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         validateWork(work) catch return;
-        if (work.delivery.source_control == null and work.delivery.reply == null) {
+        if (work.delivery.source_state == null and work.delivery.reply == null) {
             try self.notifyParent(work.session, .{ .failed = failure });
             work.session.active = null;
             work.session.state = .ready;
@@ -392,15 +391,15 @@ pub const Registry = struct {
         while (notices.next()) |entry| {
             if (entry.value_ptr.* != .handled) continue;
             const present = for (waiting) |incoming| {
-                const control = incoming.source_control orelse continue;
-                if (std.mem.eql(u8, entry.key_ptr.*, control.input_key)) break true;
+                const source = incoming.source_state orelse continue;
+                if (std.mem.eql(u8, entry.key_ptr.*, source.input_key)) break true;
             } else false;
             if (!present) try absent.append(self.allocator, entry.key_ptr.*);
         }
         for (absent.items) |key| if (self.noticed.fetchRemove(key)) |entry| self.allocator.free(entry.key);
     }
 
-    /// Reply targets and source controls independently keep adapter-owned
+    /// Reply targets and source-state bindings independently keep adapter-owned
     /// receipts live. Both can be absent from native input or internal work.
     pub fn receiptsInUse(self: *Registry, a: Allocator) ![]const []const u8 {
         try self.mutex.lock(self.io);
@@ -481,8 +480,8 @@ fn take(session: *Session) Work {
 
 fn hasPendingRoute(session: *const Session, route: []const u8) bool {
     for (session.pending.items) |delivery| {
-        const control = delivery.source_control orelse continue;
-        const queued_route = control.route orelse continue;
+        const source = delivery.source_state orelse continue;
+        const queued_route = source.route orelse continue;
         if (std.mem.eql(u8, queued_route, route)) return true;
     }
     return false;
@@ -496,7 +495,7 @@ fn responseFor(session: *const Session, delivery: *const Delivery) Input.Respons
 
 fn retainDeliveryReceipts(a: Allocator, receipts: *std.ArrayList([]const u8), delivery: *const Delivery) !void {
     if (delivery.reply) |reply| try retainReceipt(a, receipts, reply.receipt);
-    if (delivery.source_control) |control| try retainReceipt(a, receipts, control.receipt);
+    if (delivery.source_state) |source| try retainReceipt(a, receipts, source.receipt);
 }
 
 fn retainReceipt(a: Allocator, receipts: *std.ArrayList([]const u8), value: []const u8) !void {

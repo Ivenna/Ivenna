@@ -7,7 +7,7 @@ Frame = {session_id: u64, observation: Observation}
 Observation = input Input | assignment Assignment
   | report {from_session: u64, outcome: completed(Text) | failed(Text)}
   | handover Handover | background {items: Background[]}
-  | runtime State | work_update {state: enum{withdrawn}}
+  | runtime State
   | context_compaction {instructions: Text, state: State}
 Input = {content: Content, source: Source | null, context: Background[]}
 Content = text(Text) | excerpt {text: Text, full: Resource}
@@ -23,7 +23,7 @@ Response = reply {audience: Text[]} | report {session_id: u64}
 Resource = {file: Text, byte_length: usize}
 ```
 
-`session_id` identifies the receiving session. Inputs carry content with optional provenance and context; excerpts reference full material. Assignments supply work; reports, evidence, and handovers support understanding. Withdrawal ends the current activation while completed effects remain.
+`session_id` identifies the receiving session. Inputs carry content with optional provenance and context; excerpts reference full material. Assignments supply work; reports, evidence, and handovers support understanding.
 
 `Session` records role, parentage, and children; `Runtime` records execution counts. The core coordinates ongoing work; branches continue assigned work.
 

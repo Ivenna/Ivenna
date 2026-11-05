@@ -25,10 +25,9 @@ A fork inherits earlier frames with their original session identifiers. The late
 | `handover` | `Handover` | Working understanding for continuation |
 | `background` | `items: Background[]` | Evidence and handovers supplied as context |
 | `runtime` | `State` | Current execution state and response destination |
-| `work_update` | `state: withdrawn` | Withdrawal of further work on the current activation |
 | `context_compaction` | `instructions: Text`, `state: State` | Summary task with current state |
 
-A work update concerns the active delivery. It leaves completed effects in place and does not cancel descendant sessions. `ReportOutcome` contains `completed: Text` or `failed: Text`; its text may be empty. These outcomes describe the child's activation, while the broader task can remain open.
+`ReportOutcome` contains `completed: Text` or `failed: Text`; its text may be empty. These outcomes describe the child's activation, while the broader task can remain open.
 
 ## Content, source, and context
 

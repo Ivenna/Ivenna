@@ -97,9 +97,6 @@ pub const Observation = union(enum) {
         items: []const Background,
     },
     runtime: State,
-    work_update: struct {
-        state: enum { withdrawn },
-    },
     context_compaction: struct {
         instructions: []const u8,
         state: State,

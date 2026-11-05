@@ -48,44 +48,20 @@ Use Tuesday and Saturday, and keep each session to 20 minutes.
 
 Related input queues with the session handling that thread while its current work continues. Independent threads can run concurrently. Reusing a subject alone does not reliably establish a reply relationship.
 
-Reply in the same thread even after a clarification question or a gap in the work. Ivenna can continue from the thread's handover and recent correspondence after releasing its old working context. Older letters can remain in Inbox or be archived.
-
-## Managing work through mail
-
-Use normal folders, flags, and replies in Ivenna's account to manage attention:
-
-| Action or state | Effect |
-| --- | --- |
-| Unread letter in Inbox | Input eligible for work |
-| Reply in the existing thread | Another input turn for that conversation |
-| Flagged input (`$flagged`) | Priority when the runtime accepts and schedules it |
-| Read input (`$seen`) | Excluded from intake; Ivenna sets this after handling a letter |
-| Answered input (`$answered`) | Ivenna submitted a reply for delivery |
-| Active input removed from Inbox | Withdraw further work at the next complete model/tool boundary |
-| Archive finished correspondence | Keep it for reference; later replies can still continue the thread |
-
-Use the operator account for ordinary correspondence. A client marking letters read in Ivenna's account changes which input is eligible; it is separate from reading the replies in the operator account.
-
-Ordinary self-addressed input follows the same intake and withdrawal rules. Ivenna's saved handover records are excluded from task intake.
-
-To withdraw ongoing work, move its input letter out of Ivenna's Inbox. The current model response and its tool batch finish before withdrawal takes effect. This stops further work on that letter; internal helper work that has already started can continue. Completed commands, memory changes, and submitted replies retain their effects. A related follow-up can describe the known outcome and provide the next direction.
-
-Archive and later delete correspondence to manage mailbox capacity. This is separate from releasing working context. Automatic retention policy is not implemented; source files and host logs also need their own retention and cleanup.
+Reply in the same thread even after a clarification question or a gap in the work. Describe changes of intent and relevant new information in the message. Ivenna interprets them in the context of the correspondence and its ongoing work.
 
 ## Work sessions and handovers
 
-Ivenna decides when to hand work to another session or ask an internal helper for findings. The session responsible for your thread replies directly; it does not need another core turn to deliver its answer. The [architecture guide](architecture.md#forks-and-work-ownership) explains how these sessions share context and coordinate work.
+Ivenna decides when to hand work to another session or ask an internal helper for findings. The session responsible for your thread replies directly. The [architecture guide](architecture.md#forks-and-work-ownership) explains how these sessions share context and coordinate work.
 
-After a work session finishes processing a thread's input, Ivenna saves a handover summarizing its understanding. It can release the working context once no queued input or child session remains. Processed source letters are marked read and stay in their existing folders.
+Work sessions can release detailed working context between inputs. Ivenna saves a handover summarizing its understanding and uses it with recent correspondence to continue later. It also summarizes growing contexts. Processing leaves source letters in their existing folders.
 
-Handovers are readable self-addressed state records saved directly in Archive. Ivenna associates them with work independently of the external reply chain; reply to the ordinary correspondence to continue it. Saving a note does not archive source letters. Ivenna also records handovers when shortening a model context.
-
-If a handover cannot be saved after a reply was submitted, Ivenna logs the failure and keeps the working context. Retain handovers, source correspondence, and referenced files when preserving continuity. See [bounded model context](architecture.md#bounded-model-context) for the summary and reconstruction limits.
+Later continuation depends on retained handovers, correspondence, and referenced files. See [local data](running.md#local-data) for storage and cleanup, and [bounded model context](architecture.md#bounded-model-context) for summary and reconstruction limits. Provide new information by replying to the ordinary correspondence.
 
 ## After interruption
 
-Restart with the same mailbox, artifacts, and memory workspace. Ivenna rebuilds its understanding from handovers and recent correspondence, takes up unread Inbox input, and can continue existing threads. Interrupted model requests and tool calls do not resume from their previous execution point.
+Restart with the same mailbox, artifacts, and memory workspace. Ivenna rebuilds its understanding from handovers and recent correspondence, polls for [pending correspondence](running.md#mail-intake), and can continue existing threads. Interrupted model requests and tool calls do not resume from their previous execution point.
 
-An interrupted operation may already have changed files, memory, or mail. Inspect those effects before repeating uncertain work. A follow-up letter can explain what is known and ask Ivenna to continue. Execution failure pauses that conversation and retains its input while suppressing repeated automatic attempts in the current process; new related input can supply direction.
+Execution failure retains the affected delivery in the current process without repeated automatic attempts. An interrupted operation may already have changed files, memory, or mail; a lost reply-submission response can leave delivery uncertain. Inspect those effects before repeating uncertain work. A follow-up letter can explain what is known and ask Ivenna to continue.
 
 See [startup and interruption](architecture.md#startup-and-interruption) for the runtime contract.

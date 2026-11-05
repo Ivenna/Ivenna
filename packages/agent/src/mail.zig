@@ -20,9 +20,6 @@ pub const Letter = struct {
     body: []const u8,
     state_key: ?[]const u8 = null,
     state_record: bool = false,
-    flagged: bool = false,
-    in_inbox: bool = true,
-    in_archive: bool = false,
 };
 
 pub const Outgoing = struct {
@@ -48,10 +45,11 @@ const mail_capability = "urn:ietf:params:jmap:mail";
 const submission_capability = "urn:ietf:params:jmap:submission";
 const state_key_property = "header:X-Ivenna-State-Key:asText";
 const state_record_keyword = "ivenna-state";
+const handled_keyword = "ivenna-handled";
+const outbound_keyword = "ivenna-outbound";
 const metadata_properties: []const []const u8 = &.{
-    "id",               "threadId",   "mailboxIds", "keywords", "messageId",
-    "inReplyTo",        "references", "from",       "to",       "subject",
-    state_key_property,
+    "id",         "threadId", "keywords", "messageId", "inReplyTo",
+    "references", "from",     "to",       "subject",   state_key_property,
 };
 const body_properties = metadata_properties ++ &[_][]const u8{
     "textBody", "htmlBody", "bodyValues",
@@ -68,13 +66,11 @@ pub const Mailbox = struct {
     api_url: []const u8 = "",
     account_id: []const u8 = "",
     identity_id: []const u8 = "",
-    inbox_id: []const u8 = "",
     sent_id: []const u8 = "",
     drafts_id: []const u8 = "",
     archive_id: []const u8 = "",
     excluded_ids: []const []const u8 = &.{},
     max_get: usize = 32,
-    max_set: usize = 32,
 
     pub fn discover(self: *Mailbox, a: Allocator) !void {
         const session = try self.http(a, .GET, self.session_url, null);
@@ -86,7 +82,6 @@ pub const Mailbox = struct {
             return error.MailCapabilityUnavailable;
         if (capabilities.object.get(core_capability)) |core| {
             self.max_get = try objectLimit(core, "maxObjectsInGet");
-            self.max_set = try objectLimit(core, "maxObjectsInSet");
         }
         const identities = try self.call(a, "Identity/get", .{ .accountId = self.account_id });
         for (try arrayField(identities, "list")) |identity| {
@@ -105,15 +100,14 @@ pub const Mailbox = struct {
         for (try arrayField(folders, "list")) |folder| {
             const role = optionalText(folder, "role") orelse continue;
             const id = try textField(folder, "id");
-            if (std.mem.eql(u8, role, "inbox")) self.inbox_id = id;
             if (std.mem.eql(u8, role, "sent")) self.sent_id = id;
             if (std.mem.eql(u8, role, "drafts")) self.drafts_id = id;
             if (std.mem.eql(u8, role, "archive")) self.archive_id = id;
-            if (std.mem.eql(u8, role, "trash") or std.mem.eql(u8, role, "junk"))
+            if (std.mem.eql(u8, role, "drafts") or std.mem.eql(u8, role, "trash") or std.mem.eql(u8, role, "junk"))
                 try excluded.append(a, id);
         }
         self.excluded_ids = try excluded.toOwnedSlice(a);
-        if (self.inbox_id.len == 0 or self.sent_id.len == 0 or self.drafts_id.len == 0)
+        if (self.sent_id.len == 0 or self.drafts_id.len == 0)
             return error.MailFoldersNotFound;
         if (self.archive_id.len == 0) {
             const created = try self.call(a, "Mailbox/set", .{
@@ -124,10 +118,16 @@ pub const Mailbox = struct {
         }
     }
 
-    pub fn unread(self: Mailbox, a: Allocator, limit: usize) ![]const Letter {
+    /// Intake uses private progress and origin markers, independently of the
+    /// client's read status, stars, or ordinary folder organization.
+    pub fn pending(self: Mailbox, a: Allocator, limit: usize) ![]const Letter {
         return self.queryLetters(a, try value(a, .{
-            .inMailbox = self.inbox_id,
-            .notKeyword = "$seen",
+            .operator = "AND",
+            .conditions = .{
+                try self.recentFilter(a),
+                try value(a, .{ .notKeyword = handled_keyword }),
+                try value(a, .{ .notKeyword = outbound_keyword }),
+            },
         }), true, limit);
     }
 
@@ -137,18 +137,9 @@ pub const Mailbox = struct {
         return self.decode(a, records[0], true);
     }
 
-    pub fn markRead(self: Mailbox, a: Allocator, id: []const u8) !void {
-        try self.mark(a, id, false);
-    }
-
-    pub fn markAnswered(self: Mailbox, a: Allocator, id: []const u8) !void {
-        try self.mark(a, id, true);
-    }
-
-    fn mark(self: Mailbox, a: Allocator, id: []const u8, answered: bool) !void {
+    pub fn markHandled(self: Mailbox, a: Allocator, id: []const u8) !void {
         var patch: std.json.ObjectMap = .empty;
-        try patch.put(a, "keywords/$seen", .{ .bool = true });
-        if (answered) try patch.put(a, "keywords/$answered", .{ .bool = true });
+        try patch.put(a, "keywords/" ++ handled_keyword, .{ .bool = true });
         var updates: std.json.ObjectMap = .empty;
         try updates.put(a, id, .{ .object = patch });
         const result = try self.call(a, "Email/set", .{
@@ -192,7 +183,10 @@ pub const Mailbox = struct {
         var folders: std.json.ObjectMap = .empty;
         try folders.put(a, folder, .{ .bool = true });
         var keywords: std.json.ObjectMap = .empty;
-        if (draft) try keywords.put(a, "$draft", .{ .bool = true });
+        if (draft) {
+            try keywords.put(a, "$draft", .{ .bool = true });
+            try keywords.put(a, outbound_keyword, .{ .bool = true });
+        }
         if (draft or std.mem.eql(u8, folder, self.archive_id))
             try keywords.put(a, "$seen", .{ .bool = true });
         if (state_key != null)
@@ -217,43 +211,6 @@ pub const Mailbox = struct {
             .create = .{ .letter = message },
         });
         return createdId(result, "letter");
-    }
-
-    /// Move only the caller's processed letters that still belong to Inbox.
-    /// Other folder membership, including Sent, is preserved.
-    pub fn archive(self: Mailbox, a: Allocator, ids: []const []const u8) !void {
-        var offset: usize = 0;
-        const batch_size = @min(self.max_get, self.max_set);
-        while (offset < ids.len) {
-            const end = offset + @min(batch_size, ids.len - offset);
-            var updates: std.json.ObjectMap = .empty;
-            for (try self.getRecords(a, ids[offset..end], false)) |record| {
-                const folders = try field(record, "mailboxIds");
-                if (folders != .object) return error.InvalidMailReply;
-                if (!folders.object.contains(self.inbox_id)) continue;
-                var patch: std.json.ObjectMap = .empty;
-                try patch.put(a, try std.fmt.allocPrint(a, "mailboxIds/{s}", .{self.inbox_id}), .null);
-                try patch.put(a, try std.fmt.allocPrint(a, "mailboxIds/{s}", .{self.archive_id}), .{ .bool = true });
-                try updates.put(a, try textField(record, "id"), .{ .object = patch });
-            }
-            if (updates.count() != 0) {
-                const result = try self.call(a, "Email/set", .{
-                    .accountId = self.account_id,
-                    .update = Value{ .object = updates },
-                });
-                for (updates.keys()) |id| {
-                    if (!hasKey(result, "updated", id)) return error.InvalidMailReply;
-                }
-            }
-            offset = end;
-        }
-    }
-
-    /// Deletion policy and destructive lifecycle are deliberately unimplemented.
-    pub fn deleteArchived(self: Mailbox, thread_id: []const u8) !void {
-        _ = self;
-        _ = thread_id;
-        return error.ArchiveDeletionUnavailable;
     }
 
     /// Thread.emailIds is oldest first by receivedAt (RFC 8621, section 3).
@@ -323,11 +280,11 @@ pub const Mailbox = struct {
         return self.queryLetters(a, try self.recentFilter(a), false, limit);
     }
 
-    fn queryLetters(self: Mailbox, a: Allocator, filter: Value, unread_only: bool, limit: usize) ![]const Letter {
+    fn queryLetters(self: Mailbox, a: Allocator, filter: Value, oldest_first: bool, limit: usize) ![]const Letter {
         var letters: std.ArrayList(Letter) = .empty;
         var position: usize = 0;
         while (letters.items.len < limit) {
-            const ids = try self.queryIds(a, filter, unread_only, position, limit - letters.items.len);
+            const ids = try self.queryIds(a, filter, oldest_first, position, limit - letters.items.len);
             if (ids.len == 0) break;
             var available: std.ArrayList(Letter) = .empty;
             try self.appendAvailable(a, &available, ids);
@@ -341,11 +298,8 @@ pub const Mailbox = struct {
         return letters.toOwnedSlice(a);
     }
 
-    fn queryIds(self: Mailbox, a: Allocator, filter: Value, unread_only: bool, position: usize, limit: usize) ![]const []const u8 {
-        const sort = if (unread_only) try value(a, .{
-            .{ .property = "hasKeyword", .keyword = "$flagged", .isAscending = false },
-            .{ .property = "receivedAt", .isAscending = true },
-        }) else try value(a, .{.{ .property = "receivedAt", .isAscending = false }});
+    fn queryIds(self: Mailbox, a: Allocator, filter: Value, oldest_first: bool, position: usize, limit: usize) ![]const []const u8 {
+        const sort = try value(a, .{.{ .property = "receivedAt", .isAscending = oldest_first }});
         const query = try self.call(a, "Email/query", .{
             .accountId = self.account_id,
             .filter = filter,
@@ -404,10 +358,9 @@ pub const Mailbox = struct {
         return ordered.toOwnedSlice(a);
     }
 
-    fn decode(self: Mailbox, a: Allocator, record: Value, body: bool) !Letter {
-        const folders = try field(record, "mailboxIds");
+    fn decode(_: Mailbox, a: Allocator, record: Value, body: bool) !Letter {
         const keywords = try field(record, "keywords");
-        if (folders != .object or keywords != .object) return error.InvalidMailReply;
+        if (keywords != .object) return error.InvalidMailReply;
         return .{
             .id = try textField(record, "id"),
             .thread_id = try textField(record, "threadId"),
@@ -420,9 +373,6 @@ pub const Mailbox = struct {
             .body = if (body) try bodyText(a, record) else "",
             .state_key = optionalText(record, state_key_property),
             .state_record = boolean(keywords, state_record_keyword),
-            .flagged = keywords.object.contains("$flagged"),
-            .in_inbox = folders.object.contains(self.inbox_id),
-            .in_archive = folders.object.contains(self.archive_id),
         };
     }
 

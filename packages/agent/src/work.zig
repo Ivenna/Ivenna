@@ -7,9 +7,9 @@ pub const ReplyTarget = struct {
     audience: []const []const u8,
 };
 
-/// The input producer controls source acknowledgement, withdrawal, and optional
-/// routing or continuity independently of the destination of a model result.
-pub const SourceControl = struct {
+/// Program-owned consumption and continuity bindings, independent of provenance
+/// in model input and the destination of a model result.
+pub const SourceState = struct {
     receipt: []const u8,
     input_key: []const u8,
     route: ?[]const u8 = null,
@@ -19,8 +19,7 @@ pub const SourceControl = struct {
 pub const Incoming = struct {
     input: Input.Input,
     reply: ?ReplyTarget = null,
-    source_control: ?SourceControl = null,
-    priority: bool = false,
+    source_state: ?SourceState = null,
 };
 
 pub const Delivery = struct {
@@ -32,39 +31,37 @@ pub const Delivery = struct {
     arena: std.heap.ArenaAllocator,
     input: Payload,
     reply: ?ReplyTarget,
-    source_control: ?SourceControl,
-    priority: bool,
+    source_state: ?SourceState,
     supplied: bool = false,
     completion: union(enum) {
         pending,
         ready: struct { text: ?[]const u8, submitted: bool = false },
     } = .pending,
 
-    /// Payload, result destination, and source control are independently copied
+    /// Payload, result destination, and source state are independently copied
     /// into the delivery arena and do not borrow producer-owned storage.
-    pub fn create(allocator: Allocator, input: Payload, reply: ?ReplyTarget, source_control: ?SourceControl, priority: bool) !*Delivery {
+    pub fn create(allocator: Allocator, input: Payload, reply: ?ReplyTarget, source_state: ?SourceState) !*Delivery {
         const self = try allocator.create(Delivery);
         errdefer allocator.destroy(self);
         self.* = .{
             .arena = .init(allocator),
             .input = undefined,
             .reply = null,
-            .source_control = null,
-            .priority = priority,
+            .source_state = null,
         };
         errdefer self.arena.deinit();
         const a = self.arena.allocator();
-        const Data = struct { input: Payload, reply: ?ReplyTarget, source_control: ?SourceControl };
-        const bytes = try std.json.Stringify.valueAlloc(a, Data{ .input = input, .reply = reply, .source_control = source_control }, .{});
+        const Data = struct { input: Payload, reply: ?ReplyTarget, source_state: ?SourceState };
+        const bytes = try std.json.Stringify.valueAlloc(a, Data{ .input = input, .reply = reply, .source_state = source_state }, .{});
         const data = try std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always });
         self.input = data.input;
         self.reply = data.reply;
-        self.source_control = data.source_control;
+        self.source_state = data.source_state;
         return self;
     }
 
     pub fn fromIncoming(allocator: Allocator, incoming: Incoming) !*Delivery {
-        return create(allocator, .{ .input = incoming.input }, incoming.reply, incoming.source_control, incoming.priority);
+        return create(allocator, .{ .input = incoming.input }, incoming.reply, incoming.source_state);
     }
 
     pub fn destroy(self: *Delivery, allocator: Allocator) void {

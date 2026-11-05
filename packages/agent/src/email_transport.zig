@@ -5,8 +5,8 @@ const Input = @import("input.zig");
 const Work = @import("work.zig");
 const Allocator = std.mem.Allocator;
 
-/// Exchange communication with the outside world. Work control and continuity
-/// records are owned independently by MailState, using the same mail service.
+/// Exchange communication with the outside world. MailState independently owns
+/// ingestion progress and continuity records, using the same mail service.
 pub const EmailTransport = struct {
     io: std.Io,
     mailbox: *Mail.Mailbox,

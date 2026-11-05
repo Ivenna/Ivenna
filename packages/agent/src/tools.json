@@ -352,7 +352,7 @@
   {
     "type": "function",
     "name": "fork_session",
-    "description": "Continue work in another focus of Ivenna with the current context. A handoff transfers the active input and its responsibilities; a subtask keeps them with the parent. Both share the host and memory.",
+    "description": "Continue work in another focus of Ivenna with the current context. A handoff transfers the current work and its responsibilities; a subtask keeps them with the parent. Both share the host and memory.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -363,7 +363,7 @@
         },
         "mode": {
           "type": "object",
-          "description": "Transfer the current input, or create an internal subtask.",
+          "description": "Transfer the current work, or create an internal subtask.",
           "default": {
             "handoff": {}
           },
@@ -391,7 +391,7 @@
                     "report_to_parent": {
                       "type": "boolean",
                       "default": false,
-                      "description": "When true, wait for the subtask's findings before resuming this input."
+                      "description": "When true, wait for the subtask's findings before resuming this work."
                     }
                   },
                   "additionalProperties": false

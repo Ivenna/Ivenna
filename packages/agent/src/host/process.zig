@@ -1,7 +1,6 @@
 const std = @import("std");
 
-// Subprocess execution and cleanup for shell commands.
-// Conversation-level process control belongs to Shell.
+// Subprocess execution and process-group cleanup for shell commands.
 pub const Outcome = union(enum) {
     completed: std.process.Child.Term,
     timed_out,

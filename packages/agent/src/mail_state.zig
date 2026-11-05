@@ -4,44 +4,33 @@ const MailSources = @import("mail_sources.zig").MailSources;
 const Input = @import("input.zig");
 const Allocator = std.mem.Allocator;
 
-/// Mailbox work control and independently keyed continuity records. The current
-/// deployment controls the same physical letters used for boundary delivery.
+/// Program-owned ingestion progress and independently keyed continuity records.
+/// Read status, stars, and archiving do not control work.
 pub const MailState = struct {
-    io: std.Io,
     mailbox: *Mail.Mailbox,
     sources: *MailSources,
 
     pub const Pending = struct {
         receipt: []const u8,
-        priority: bool,
     };
 
-    pub fn init(io: std.Io, mailbox: *Mail.Mailbox, sources: *MailSources) MailState {
-        return .{ .io = io, .mailbox = mailbox, .sources = sources };
+    pub fn init(mailbox: *Mail.Mailbox, sources: *MailSources) MailState {
+        return .{ .mailbox = mailbox, .sources = sources };
     }
 
     pub fn pending(self: *MailState, a: Allocator, limit: usize) ![]const Pending {
         var result: std.ArrayList(Pending) = .empty;
-        for (try self.mailbox.unread(a, limit)) |letter| {
+        for (try self.mailbox.pending(a, limit)) |letter| {
             const receipt = try self.sources.receiptId(a, letter.id);
             try self.sources.retain(receipt, letter);
-            try result.append(a, .{ .receipt = receipt, .priority = letter.flagged });
+            try result.append(a, .{ .receipt = receipt });
         }
         return result.toOwnedSlice(a);
     }
 
-    pub fn withdrawn(self: *MailState, a: Allocator, receipt: []const u8) !bool {
+    pub fn complete(self: *MailState, a: Allocator, receipt: []const u8) !void {
         const origin = try self.sources.lookup(a, receipt);
-        const current = self.mailbox.read(a, origin.id) catch |err| switch (err) {
-            error.MailNotFound => return true,
-            else => return err,
-        };
-        return !current.in_inbox;
-    }
-
-    pub fn complete(self: *MailState, a: Allocator, receipt: []const u8, answered: bool) !void {
-        const origin = try self.sources.lookup(a, receipt);
-        if (answered) try self.mailbox.markAnswered(a, origin.id) else try self.mailbox.markRead(a, origin.id);
+        try self.mailbox.markHandled(a, origin.id);
     }
 
     pub fn loadHandover(self: *MailState, a: Allocator, key: []const u8, limit: usize) !?Input.Handover {

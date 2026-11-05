@@ -28,7 +28,7 @@ pub const Provider = struct {
     };
 
     /// Encode content parts, replacing only images that exceed the image-count
-    /// or request-body limit. Sibling observations stay intact. Image decoding
+    /// or request-body limit. Other content parts stay intact. Image decoding
     /// belongs to the model service.
     /// JSON storage and encoded local images use arena; call_id, text, and
     /// remote URL strings borrow their inputs.
@@ -209,7 +209,7 @@ pub const Provider = struct {
 
 fn coordinationTool(arena: Allocator, tool: Value) !Value {
     var scoped = tool;
-    try scoped.object.put(arena, "description", .{ .string = "Continue the current input in another focus of Ivenna, freeing the core for coordination." });
+    try scoped.object.put(arena, "description", .{ .string = "Continue the current work in another focus of Ivenna, freeing the core for coordination." });
     const parameters = scoped.object.getPtr("parameters").?;
     const properties = parameters.object.getPtr("properties").?;
     const mode = properties.object.getPtr("mode").?;
@@ -223,7 +223,7 @@ fn coordinationTool(arena: Allocator, tool: Value) !Value {
     var default_mode: std.json.ObjectMap = .empty;
     try default_mode.put(arena, "handoff", .{ .object = .empty });
     try mode.object.put(arena, "default", .{ .object = default_mode });
-    try mode.object.put(arena, "description", .{ .string = "Transfer the current input and responsibilities to the new session." });
+    try mode.object.put(arena, "description", .{ .string = "Transfer the current work and responsibilities to the new session." });
     return scoped;
 }
 

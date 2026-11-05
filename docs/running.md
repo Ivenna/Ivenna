@@ -37,7 +37,7 @@ Edit its account credentials and put the matching kernel and operator credential
 
 | Address | Role | Example password |
 | --- | --- | --- |
-| `ivenna@ivenna.test` | Kernel mailbox | `ivenna-local-password` |
+| `ivenna@ivenna.test` | Dedicated kernel mailbox | `ivenna-local-password` |
 | `operator@ivenna.test` | Send requests and read replies | `operator-local-password` |
 | `admin@ivenna.test` | Stalwart administration | `admin-local-password` |
 
@@ -62,6 +62,12 @@ The default local endpoints are:
 | Stalwart administration | `http://127.0.0.1:8088/admin` |
 
 Published ports bind to loopback. The plan requires authenticated submission with a matching sender; its listener, spam, and rate policies are defined in the plan. Stalwart stores mail, accounts, and configuration in the external volume, which remains after the Compose containers are removed.
+
+## Mail intake
+
+Reserve the kernel account and its sending identity for Ivenna. Use the operator account, or another correspondent account, to send messages and read replies. The kernel polls stored correspondence across ordinary folders, including Archive. Drafts and messages in Junk or Trash are excluded, along with the runtime's own outgoing and internal state records.
+
+Ivenna tracks processing with its own completion marker, independently of read or starred state. Existing eligible mail without that marker is pending even if it is old, read, or archived. Review an account's existing mail before connecting it.
 
 ## Starting the kernel
 
@@ -127,7 +133,7 @@ The kernel reads the settings below at startup. Stop it, edit `.env`, load the v
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. Numeric kernel settings must be positive. `CONTEXT_COMPACTION_BYTES` must be at least `CONTEXT_REQUEST_BYTES`. The work execution limit and retained-context limit are independent.
 
-The context limit includes parents waiting for children; these contexts do not occupy work execution slots. A limit of one leaves room only for the core, so no fork can be admitted. Mail that cannot be admitted remains in Inbox. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
+The context limit includes parents waiting for children; these contexts do not occupy work execution slots. A limit of one leaves room only for the core, so no fork can be admitted. Mail that cannot be admitted remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
 
 Request byte limits cover the whole serialized body, including instructions, tool definitions, history, and encoded images. They do not estimate model tokens. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
 
@@ -172,15 +178,15 @@ Changing `DATA_DIR` changes where the kernel writes artifacts; it does not move 
 
 Source files let a work session retrieve the complete material behind an excerpt and inspect mail details when needed. Correspondence text includes the subject and body supplied as input; JSON snapshots contain decoded fields rather than original MIME or live mailbox state. These files remain after the work finishes. See [source materials](architecture.md#email-boundary-and-source-materials) for their naming and publication contract.
 
-Handovers are self-addressed state records saved locally in Archive. Saving them or releasing working context leaves source letters in their existing folders. Automatic mail retention and coordinated artifact cleanup are not implemented; see [mail retention](architecture.md#mail-retention).
+Handovers are self-addressed state records saved locally in Archive. Saving them or releasing working context leaves source letters in their existing folders. Manage mailbox capacity through retention and deletion. Automatic mail retention and coordinated artifact cleanup are not implemented; see [mail retention](architecture.md#mail-retention).
 
 ## Using an existing mail service
 
-Use a dedicated account with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Inbox, Sent, and Drafts folders and permission to create and update mail. Ivenna uses the Archive folder when present and creates it when missing, so that operation also needs permission.
+Use a dedicated account with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create messages and update private keywords. Ivenna uses the Archive folder when present and creates it when missing, so that operation also needs permission.
 
-Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in `.env`, then skip local mail provisioning and startup. Use another account to send requests and read replies. Marking letters read in Ivenna's account affects intake.
+Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in `.env`, then skip local mail provisioning and startup. Use an operator or other correspondent account to send messages and read replies; reserve the Ivenna identity for the runtime's submissions.
 
-This deployment uses the same mailbox for correspondence and internal state records, with Inbox membership and source-letter flags controlling work. Configure service retention to preserve correspondence and handovers needed for later continuation.
+Correspondence and internal state records share this mailbox. The [intake rules](#mail-intake) also apply to its existing mail. Configure service retention to preserve correspondence and handovers needed for later continuation.
 
 ## Using remote memory
 

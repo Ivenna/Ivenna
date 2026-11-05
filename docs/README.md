@@ -6,7 +6,7 @@ Choose a guide for your task:
 | --- | --- |
 | Understand the project's goals and interface principles | [Design intent](design.md) |
 | Set up middleware, choose storage, and start Ivenna | [Running guide](running.md) |
-| Send requests, control attention, and continue correspondence | [Usage guide](usage.md) |
+| Send messages and continue correspondence | [Usage guide](usage.md) |
 | Read model observations and response destinations | [Input contract](input.md) |
 | Use memory rooms and understand their shared capacity | [Memory rooms](memory.md) |
 | Run host commands and interpret their results | [Host shell](host.md) |

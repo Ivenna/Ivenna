@@ -1,8 +1,8 @@
 # Architecture
 
-Ivenna coordinates model sessions, tools, and typed work. Execution histories live in memory. External correspondence and work state use separate mail components: EmailTransport receives and submits correspondence, while MailState interprets work controls and stores keyed handovers. Both use the shared mail client and source records.
+Ivenna coordinates model sessions, tools, and typed work. The kernel retains execution histories in process memory. External correspondence and work state use separate mail components: EmailTransport receives and submits correspondence, while MailState tracks input consumption and stores keyed handovers. Both use the shared mail client and source records.
 
-The [design intent](design.md) explains these choices, the [input contract](input.md) defines model observations, and the [usage guide](usage.md) explains correspondence and available controls.
+The [design intent](design.md) explains these choices, the [input contract](input.md) defines model observations, and the [usage guide](usage.md) explains correspondence and continuity.
 
 ## Sessions, work, and communication
 
@@ -12,11 +12,11 @@ The [design intent](design.md) explains these choices, the [input contract](inpu
 | Core session | Permanent coordinating context with its own queue and execution lane |
 | Work session | A fork with an independent history, queue, parent, and any children |
 | Input | Content with optional source information and context |
-| Delivery | An owned input or assignment being queued or executed, with any reply target and source control |
+| Delivery | An owned input or assignment being queued or executed, with any reply target and source state |
 | Activation | One session handling a delivery, including any wait for requested findings |
 | Model round | One model response followed by all tools it invoked |
 
-Inputs carry content, optional provenance, and supporting context. Sessions own execution histories and queues; a producer can supply an opaque route for continuing work. New work enters the core unless that route identifies an existing owner. Follow-ups queue while an activation continues; explicit steering remains unimplemented.
+Inputs carry content, optional provenance, and supporting context. Sessions own execution histories and queues; a producer can supply an opaque route for continuing work. New work enters the core unless that route identifies an existing owner. Follow-ups queue while an activation continues. Ivenna interprets their content when processing them.
 
 The core can answer directly or hand work to another session through `fork_session`. Its tool interface exposes handoff; work sessions have the full tool interface and can fork further sessions. A response without tool calls ends the current activation. Its response destination determines whether text is a reply, requested findings, or an internal result; the broader task can remain open.
 
@@ -24,7 +24,7 @@ The core can answer directly or hand work to another session through `fork_sessi
 flowchart LR
     Kernel[Kernel] <--> Sessions[Sessions and work]
     Kernel <--> Email[EmailTransport: external correspondence]
-    Kernel <--> State[MailState: controls and handovers]
+    Kernel <--> State[MailState: consumption and handovers]
     Email --> Shared[Shared mail client and source records]
     State --> Shared
     Kernel --> Engine[Model round and tools]
@@ -49,13 +49,13 @@ Work gives each delivery two independent optional bindings:
 | Binding | Responsibility |
 | --- | --- |
 | `ReplyTarget` | Bind the result to a private delivery receipt and a model-visible audience |
-| `SourceControl` | Keep the private receipt, input deduplication key, optional route, and optional persistent state key |
+| `SourceState` | Keep the private receipt, input bookkeeping key, optional route, and optional persistent state key |
 
-Either binding can be present on its own. A plain native input can have neither. Model response state projects the audience or reporting destination; receipt and control values stay in Work.
+Either binding can be present on its own. A plain native input can have neither. Model response state projects the audience or reporting destination; receipt and source-state values stay in Work. Input provenance remains separate from both bindings.
 
 A handoff transfers the active delivery's responsibilities, including queued follow-ups for its route when present. The child can answer directly; the parent returns to its queue without another inference to conclude the transfer. An internal handoff preserves its internal destination.
 
-A subtask does not acquire the parent's reply target or source control. By default, its parent continues without receiving findings. Enabling `report_to_parent` suspends the parent's activation until all requested findings arrive, then resumes its retained work. Results go to that parent without passing through the core. Core subtasks remain unavailable; the core exposes only handoff mode.
+A subtask does not acquire the parent's reply target or source state. By default, its parent continues without receiving findings. Enabling `report_to_parent` suspends the parent's activation until all requested findings arrive, then resumes its retained work. Results go to that parent without passing through the core. Core subtasks remain unavailable; the core exposes only handoff mode.
 
 Sessions reserves child identity and capacity during tool invocation. It publishes a fork only after committing model output and one result for every tool call, so inherited history contains a complete exchange. A handoff is the only fork allowed in its model round; a work session can request several subtasks in one round.
 
@@ -64,11 +64,11 @@ Sessions reserves child identity and capacity during tool invocation. It publish
 | Component | Responsibility |
 | --- | --- |
 | [Application](../apps/ivenna) | Load configuration, assemble shared and domain components, and own startup and shutdown |
-| [Work](../packages/agent/src/work.zig) | Own inputs, assignments, deliveries, reply targets, source controls, and completion phases |
+| [Work](../packages/agent/src/work.zig) | Own inputs, assignments, deliveries, reply targets, source state, and completion phases |
 | [Sessions](../packages/agent/src/sessions.zig) | Own contexts, queues, opaque routes, fork publication, and synchronized scheduling |
 | [Kernel](../packages/agent/src/kernel.zig) | Coordinate execution, email, internal state, and worker scopes |
 | [Email transport](../packages/agent/src/email_transport.zig) | Project external correspondence into input material and submit replies |
-| [Mail state](../packages/agent/src/mail_state.zig) | Interpret Inbox and flags as work controls and store handovers by state key |
+| [Mail state](../packages/agent/src/mail_state.zig) | Track physical input consumption and store handovers by state key |
 | [Mail sources](../packages/agent/src/mail_sources.zig) | Own shared source records, opaque receipts, caching, and immutable source artifacts |
 | [Mail client](../packages/agent/src/mail.zig) | Decode the required JMAP operations into typed results |
 | [Input](../packages/agent/src/input.zig) | Own native observation types and render them as YAML |
@@ -79,7 +79,7 @@ Sessions reserves child identity and capacity during tool invocation. It publish
 | [Memory](../packages/agent/src/memory.zig) | Exchange operations with the shared file workspace over SSH |
 | [Host](../packages/agent/src/host.zig) | Route shell operations and select returned content |
 
-Sessions compares opaque control and route values. The kernel connects an incoming letter's projected content and reply target to the work controls supplied by MailState. Work, Sessions, and Input depend on those typed values; native mail decoding belongs to the mail client and its adapters.
+The kernel combines projected content and its reply target with the source state supplied by the mail integration. Work owns the resulting delivery; Sessions uses its opaque input and route keys. Input defines model observations independently of these execution bindings. Native mail decoding belongs to the mail client and its adapters.
 
 Sessions serializes queue and history changes. Workers infer from owned snapshots and commit complete rounds before their arenas end. A worker's borrow keeps its session alive through completion or handoff. Shutdown cancels and joins the kernel's worker group before shared dependencies are released.
 
@@ -89,7 +89,7 @@ EmailTransport renders a nonempty subject, a blank line, and the body as input t
 
 Material within the excerpt budget is supplied inline. Longer material includes an excerpt and a reference to the complete projection. The boundary captures source artifacts for both representations.
 
-EmailTransport derives source references from an available Message-ID, trimming surrounding whitespace and angle brackets before hashing; its fallback includes the service, account, and native letter identifier. Routes group correspondence by service, account, and native thread. MailSources derives physical receipts from the service endpoint, account, and native letter. Copies sharing a Message-ID can therefore share provenance while retaining separate receipts for flag and delivery effects.
+EmailTransport derives source references from an available Message-ID, trimming surrounding whitespace and angle brackets before hashing; its fallback includes the service, account, and native letter identifier. Routes group correspondence by service, account, and native thread. MailSources derives physical receipts from the service endpoint, account, and native letter. Copies sharing a Message-ID can therefore share provenance while retaining separate receipts for consumption and delivery effects.
 
 Shared source-cache cleanup checks receipts still retained by work. It does not delete mail or artifacts. Under `<DATA_DIR>/sources/`, projected content uses `receipt-<receipt-hash>-<content-hash>.txt` and decoded details use `receipt-<receipt-hash>.json`. Both hashes use SHA-256; the content hash covers the projected bytes. The text resource contains the same full material represented inline or excerpted in input, and its hash distinguishes different projections of one receipt. Each file is published once through an atomic link, so later reads and polling do not truncate or rewrite it. The details file preserves the first captured snapshot of selected `Mail.Letter` fields, including its body, rather than original MIME or current mailbox state.
 
@@ -97,13 +97,13 @@ The boundary prefers decoded plain text and falls back to UTF-8 HTML source. Uns
 
 ## Internal mail state
 
-MailState interprets Inbox membership and flags as execution controls. Eligible input can be queued, flagged input receives priority, and withdrawal stops the active delivery at a complete model/tool boundary. The kernel records that change as a work update. Completed effects remain, and already-started internal subtasks continue under their own control.
+MailState polls for physical input messages without the private `ivenna-handled` keyword. Intake spans ordinary mail folders and is independent of read and starred state. Runtime-created outgoing messages carry the private `ivenna-outbound` keyword; they are excluded along with drafts, Junk, Trash, and recognized state records. The supported deployment uses a dedicated Ivenna account, with ordinary correspondents sending from other accounts.
 
-The current application uses each incoming letter's mailbox state as its control record. EmailTransport supplies its material and reply target; MailState checks eligibility, withdrawal, and acknowledgment. The kernel assigns the work route and persistent state association.
+Completion sets `ivenna-handled` on the input copy. This records consumption of that physical message; it does not store model or tool progress. Sessions keeps its input-key bookkeeping in memory. The completion operation leaves ordinary read, answered, and folder state unchanged. The kernel associates input with an opaque work route and persistent state key through `SourceState`.
 
 Handovers are internal state records with their own mail identity. MailState creates self-addressed letters in Archive with subject `Ivenna state: <key>`, header `X-Ivenna-State-Key`, and the private `ivenna-state` keyword. The mail client stores them through `Email/set` without submitting them for delivery or adding an external reply chain. State lookup narrows candidates by header and keyword, then checks the exact key and private keyword. The sole From address and at least one To address must match Ivenna, ignoring case. Recognized state records are excluded from ordinary input and email history. Loading one returns the summary and its resource reference as a native handover.
 
-The core uses the fixed key `core`. For communication work, the kernel assigns `conversation/<route-ref>` to `SourceControl.state_key`. This key selects continuity storage independently of input provenance and reply destination.
+The core uses the fixed key `core`. For communication work, the kernel assigns `conversation/<route-ref>` to `SourceState.state_key`. This key selects continuity storage independently of input provenance and reply destination.
 
 Work without a persistent state key can compact in memory, but has no cross-restart handover lookup contract. Durable identities and lifetimes for independent internal work remain undecided; source references do not supply them.
 
@@ -117,19 +117,19 @@ An ordinary request appends a fresh runtime observation to its inference snapsho
 
 Engine returns one result per tool call. Ordinary results feed another round; handoff transfers work, and requested findings suspend its activation. Intermediate assistant text and complete exchanges remain in history.
 
-A final response without tool calls moves `Work.Delivery.completion` from `pending` to `ready`, retaining optional text in the delivery arena. If text and a reply target exist, the kernel submits the reply through EmailTransport and records confirmed acceptance. If source control exists, it then asks MailState to acknowledge that input. A failure during acknowledgment preserves the ready result and submission phase in the paused delivery. When scheduled again, that delivery continues finalization using the retained result. Requested findings return to the waiting parent; other internal completion produces no external reply.
+A final response without tool calls moves `Work.Delivery.completion` from `pending` to `ready`, retaining optional text in the delivery arena. If text and a reply target exist, the kernel submits the reply through EmailTransport and records confirmed acceptance. If source state exists, it then asks MailState to mark that input copy as handled. A failure during acknowledgment preserves the ready result and submission phase in the paused delivery. When scheduled again, that delivery continues finalization using the retained result. Requested findings return to the waiting parent; other internal completion produces no external reply.
 
 `Mail.Submission` separates `mail_id` from a `sent_copy` outcome of `updated` or `unconfirmed`. Submission acceptance and the following implicit `Email/set` result are distinct under [RFC 8621 §7.5](https://www.rfc-editor.org/rfc/rfc8621.html#section-7.5). A failed sent-copy update does not erase confirmed acceptance. EmailTransport records the uncertainty diagnostically, without adding operational prose to the reply. Service acceptance does not establish final recipient delivery.
 
 When a work context with a state key needs a handover, the kernel saves it through MailState. Sessions completes the activation and checks queued input, children, and worker ownership before releasing context. Queued work can continue; children keep an idle parent retained without occupying a work slot. A worker's final borrow prevents release before it returns.
 
-The permanent core remains available between activations and does not request a summary after each one. Internal subtasks keep their own result and control bindings. Input accepted during summary storage keeps its work session available. A failed summary or storage operation retains context; a confirmed reply submission remains recorded in the delivery.
+The permanent core remains available between activations and does not request a summary after each one. Internal subtasks keep their own results and reporting destinations. Input accepted during summary storage keeps its work session available. A failed summary or storage operation retains context; a confirmed reply submission remains recorded in the delivery.
 
 ## Mail retention
 
-External correspondence and internal state records have their own retention lifecycles. Normal completion updates source flags while leaving folder membership unchanged; handover storage creates a separate record in Archive.
+External correspondence and internal state records have their own retention lifecycles. Normal completion records consumption with a private keyword; handover storage creates a separate record in Archive. Source correspondence stays in its existing folders.
 
-Automatic retention and deletion remain unimplemented. The low-level mail client has an archive helper and an explicit deletion placeholder. Operators manage retained records and source artifacts through their services and files; context release and cache cleanup do not delete either.
+Automatic retention and deletion remain unimplemented. Operators manage retained records and source artifacts through their services and files; context release and cache cleanup do not delete either.
 
 ## Bounded model context
 
@@ -147,7 +147,7 @@ MailState supplies the latest handover for the fixed core key. The email boundar
 
 Restart reconstructs understanding from the available keyed handovers and external material. It does not restore transcripts, delivery queues, completion phases, source caches, or the branch tree. In-flight model and tool operations do not resume from their interruption point.
 
-A delivery with source control or a reply target pauses on failure, retaining its context and any ready result; paused work is not automatically retried. A delivery with neither completes as internal failure, returning requested findings as a failed report and releasing context once children and worker ownership allow it.
+A delivery with source state or a reply target pauses on failure, retaining its context and any ready result; paused work is not automatically retried. A delivery with neither completes as internal failure, returning requested findings as a failed report and releasing context once children and worker ownership allow it.
 
 A host command, memory change, or submission may have taken effect before interruption was observed. Losing a submission response can leave acceptance unknown; repeating it can produce a duplicate. Completion phases protect confirmed submissions within retained in-process deliveries, not exactly-once delivery across network failures or restart. Inspect uncertain effects before repeating work.
 

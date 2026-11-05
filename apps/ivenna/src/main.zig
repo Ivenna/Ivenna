@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     var sources = agent.MailSources.init(init.gpa, io, &mailbox, data_directory);
     defer sources.deinit();
     var email = agent.EmailTransport.init(io, &mailbox, &sources);
-    var state = agent.MailState.init(io, &mailbox, &sources);
+    var state = agent.MailState.init(&mailbox, &sources);
     var kernel = try agent.Kernel.init(init.gpa, io, &engine, &email, &state, &sources, config.context_limits, config.mail_poll_interval_ms, config.max_parallel_attention, config.max_attention_contexts);
     defer kernel.deinit();
 
