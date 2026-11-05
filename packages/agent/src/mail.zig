@@ -10,10 +10,7 @@ pub const Address = struct {
 /// All returned text and arrays belong to the operation's allocator.
 pub const Letter = struct {
     id: []const u8,
-    thread_id: []const u8,
     message_id: ?[]const u8,
-    in_reply_to: ?[]const u8,
-    references: []const []const u8,
     from: []const Address,
     to: []const Address,
     reply_to: []const Address = &.{},
@@ -27,18 +24,11 @@ pub const Outgoing = struct {
     to: []const Address,
     subject: []const u8,
     body: []const u8,
-    in_reply_to: ?[]const u8 = null,
-    references: []const []const u8 = &.{},
 };
 
 pub const Submission = struct {
     mail_id: []const u8,
     sent_copy: enum { updated, unconfirmed },
-};
-
-pub const Thread = struct {
-    id: []const u8,
-    letters: []const Letter,
 };
 
 const core_capability = "urn:ietf:params:jmap:core";
@@ -49,8 +39,7 @@ const state_record_keyword = "ivenna-state";
 const handled_keyword = "ivenna-handled";
 const outbound_keyword = "ivenna-outbound";
 const metadata_properties: []const []const u8 = &.{
-    "id",               "threadId", "keywords", "messageId", "inReplyTo",
-    "references",       "from",     "to",       "replyTo",   "subject",
+    "id",               "keywords", "messageId", "from", "to", "replyTo", "subject",
     state_key_property,
 };
 const body_properties = metadata_properties ++ &[_][]const u8{
@@ -201,10 +190,6 @@ pub const Mailbox = struct {
             .textBody = &.{.{ .partId = "text", .type = "text/plain" }},
             .bodyValues = .{ .text = .{ .value = outgoing.body } },
         });
-        if (outgoing.in_reply_to) |id|
-            try message.object.put(a, "inReplyTo", try value(a, &[_][]const u8{id}));
-        if (outgoing.references.len != 0)
-            try message.object.put(a, "references", try value(a, outgoing.references));
         if (state_key) |key|
             try message.object.put(a, state_key_property, .{ .string = key });
         const result = try self.call(a, "Email/set", .{
@@ -212,40 +197,6 @@ pub const Mailbox = struct {
             .create = .{ .letter = message },
         });
         return createdId(result, "letter");
-    }
-
-    /// Thread.emailIds is oldest first by receivedAt (RFC 8621, section 3).
-    /// Exclude internal state records even if the service groups them here.
-    pub fn thread(self: Mailbox, a: Allocator, thread_id: []const u8, limit: usize) !Thread {
-        const result = try self.call(a, "Thread/get", .{
-            .accountId = self.account_id,
-            .ids = &[_][]const u8{thread_id},
-        });
-        const threads = try arrayField(result, "list");
-        if (threads.len == 0) return error.MailNotFound;
-        const ids = try strings(a, try field(threads[0], "emailIds"));
-        var recent_ids: std.ArrayList([]const u8) = .empty;
-        var offset: usize = 0;
-        while (offset < ids.len) {
-            const end = offset + @min(self.max_get, ids.len - offset);
-            for (try self.getRecords(a, ids[offset..end], false)) |record| {
-                const letter = try self.decode(a, record, false);
-                if (self.isState(letter)) continue;
-                if (limit != 0) {
-                    if (recent_ids.items.len == limit) _ = recent_ids.orderedRemove(0);
-                    try recent_ids.append(a, letter.id);
-                }
-            }
-            offset = end;
-        }
-        var letters: std.ArrayList(Letter) = .empty;
-        offset = 0;
-        while (offset < recent_ids.items.len) {
-            const end = offset + @min(self.max_get, recent_ids.items.len - offset);
-            try self.appendAvailable(a, &letters, recent_ids.items[offset..end]);
-            offset = end;
-        }
-        return .{ .id = try a.dupe(u8, thread_id), .letters = try letters.toOwnedSlice(a) };
     }
 
     /// Find the most recent self state record whose key matches exactly.
@@ -361,10 +312,7 @@ pub const Mailbox = struct {
         if (keywords != .object) return error.InvalidMailReply;
         return .{
             .id = try textField(record, "id"),
-            .thread_id = try textField(record, "threadId"),
             .message_id = try firstString(a, record, "messageId"),
-            .in_reply_to = try firstString(a, record, "inReplyTo"),
-            .references = if (optionalField(record, "references")) |refs| try strings(a, refs) else &.{},
             .from = try addresses(a, record, "from"),
             .to = try addresses(a, record, "to"),
             .reply_to = try addresses(a, record, "replyTo"),

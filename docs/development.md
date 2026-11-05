@@ -20,7 +20,7 @@ Follow the component boundaries in the [architecture guide](architecture.md#resp
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
-[Input](../packages/agent/src/input.zig) defines the closed observation union and its payload types. Construct those variants directly and render their declared fields. Native input can have content alone or include provenance and context. Keep reply targets and source bookkeeping in [Work](../packages/agent/src/work.zig), independently of that provenance; derive routing, response destinations, and persistence from the explicit work bindings.
+[Input](../packages/agent/src/input.zig) defines the closed observation union and its payload types. Construct those variants directly and render their declared fields. Native input can have content alone or include contacts, provenance, and context. [Communication](../packages/agent/src/communication.zig) defines recipient references and outgoing messages; the adapter resolves those references to native destinations. [Work](../packages/agent/src/work.zig) owns delivery payloads and optional private consumption receipts. External input enters the core, fork assignments enter new children, and final reports enter their direct parents' queues.
 
 ### Model-facing resources
 
@@ -34,20 +34,22 @@ Treat prompts and tool descriptions as editable interfaces:
 
 Put task facts and observations in user input. Keep model-facing descriptions concise; detailed field references belong in the [input contract](input.md). Update the owning resource, renderer, and documentation together when a contract changes.
 
-Keep external replies, internal findings, handovers, and diagnostics distinct. Submit reply text as the intended answer. Preserve text, media, and source descriptions together when handling [tool content](content.md).
+Keep outgoing messages, internal reports, handovers, and diagnostics distinct. Outgoing communication occurs through `send_message`; final model text completes the activation and supplies an internal result in the core or a report to a work session's parent. Preserve text, media, and source descriptions together when handling [tool content](content.md).
 
 ### Execution and storage
 
-Sessions synchronizes contexts, queues, and routes. The kernel coordinates adapter operations and owns worker task scopes. Infrastructure and execution failures propagate to the kernel's task scope, which cancels and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
+Sessions synchronizes contexts, queues, and work ownership. The kernel coordinates adapter operations and owns worker task scopes. Infrastructure and execution failures propagate to the application's task scope, which closes reception, cancels, and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
 
-Keep context release and stored-record retention independent. Follow the architecture contracts for [source publication](architecture.md#email-boundary-and-source-materials), [internal state](architecture.md#internal-mail-state), and [context lifetime](architecture.md#turn-completion-and-context-release).
+The application serves health and reception status. The mail server's receiving boundary uses that status before accepting external SMTP traffic. Keep this gate separate from model reasoning and in-process work queues; its readiness check does not reserve an activation or establish an atomic delivery transaction.
+
+Keep context release and stored-record retention independent. Follow the architecture contracts for [source publication](architecture.md#email-boundary-and-source-materials), [internal state](architecture.md#internal-mail-state), and [context lifetime](architecture.md#activation-completion-and-context-release).
 
 ## Repository and build
 
 | Location | Responsibility |
 | --- | --- |
-| [apps/ivenna](../apps/ivenna) | Configuration and application startup |
-| [packages/agent](../packages/agent) | Work and session execution, email boundary, internal mail state, native observations, model provider, host and memory tools |
+| [apps/ivenna](../apps/ivenna) | Configuration, service status, application startup and shutdown |
+| [packages/agent](../packages/agent) | Work and session execution, communication contract and email adapter, internal mail state, native observations, model provider, host and memory tools |
 | [dev/mail](../dev/mail) | Stalwart Compose deployment and native provisioning plan |
 | [dev/memory](../dev/memory) | Memory container, SSH entry point, and local startup |
 
@@ -85,10 +87,12 @@ Build the application and exercise the affected behavior through communication a
 
 | Area changed | Checks |
 | --- | --- |
-| Execution | Tool-result continuation, handoff, requested findings, follow-up routing, reopening, and context release |
+| Execution | Tool-result continuation, single-fork handoff, queued direct-parent reports, independent arrivals, report-slot capacity, and context release |
 | Failure handling | Required-capability failures stop the runtime and join concurrent work; ordinary tool outcomes allow continuation |
-| Email | Reply recipients and threading, material projection, and intake independent of read, starred, or archived state |
-| Internal state | Private consumption and outbound markers, keyed handovers, receipt cleanup, and affected retention behavior |
+| Communication | Explicit zero, one, or multiple sends; recipient reference lifetime; final text without implicit sending |
+| Email | Standalone submissions, material projection, and independent intake regardless of thread, read, starred, or archived state |
+| Service | Health and reception status during startup, operation, and shutdown; SMTP rejection when reception is closed |
+| Internal state | Private consumption and outbound markers, core handovers, receipt cleanup, and affected retention behavior |
 | Model-facing interfaces | Complete serialized requests, YAML observations, response variants, tool selection, and budget accounting |
 
 Report the checks performed. Distinguish reconstruction of understanding from execution recovery.

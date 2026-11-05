@@ -2,34 +2,27 @@ const std = @import("std");
 const Mail = @import("mail.zig");
 const MailSources = @import("mail_sources.zig").MailSources;
 const Input = @import("input.zig");
-const Work = @import("work.zig");
+const Communication = @import("communication.zig");
 const Allocator = std.mem.Allocator;
 
-/// Exchange communication with the outside world. MailState independently owns
-/// ingestion progress and continuity records, using the same mail service.
+/// Exchange messages with the outside world. MailState owns input consumption
+/// and handovers in the same mail service.
 pub const EmailTransport = struct {
     io: std.Io,
     mailbox: *Mail.Mailbox,
     sources: *MailSources,
 
-    pub const Received = struct {
-        input: Input.Input,
-        route: []const u8,
-        reply: ?Work.ReplyTarget,
-    };
-
     pub fn init(io: std.Io, mailbox: *Mail.Mailbox, sources: *MailSources) EmailTransport {
         return .{ .io = io, .mailbox = mailbox, .sources = sources };
     }
 
-    pub fn receive(self: *EmailTransport, a: Allocator, receipt: []const u8, limit: usize) !Received {
+    pub fn receive(self: *EmailTransport, a: Allocator, receipt: []const u8, limit: usize) !Input.Input {
         const letter = try self.sources.lookup(a, receipt);
         const material = try self.project(a, letter, limit);
-        const audience = try describe(a, replyAddresses(letter));
         return .{
-            .input = .{ .content = material.content, .source = material.source },
-            .route = try reference(a, "route", &.{ self.mailbox.session_url, self.mailbox.account_id, letter.thread_id }),
-            .reply = if (self.isSelf(letter) or audience.len == 0) null else .{ .receipt = receipt, .audience = audience },
+            .content = material.content,
+            .source = material.source,
+            .contacts = material.contacts,
         };
     }
 
@@ -40,28 +33,24 @@ pub const EmailTransport = struct {
         return result.toOwnedSlice(a);
     }
 
-    pub fn history(self: *EmailTransport, a: Allocator, receipt: []const u8) ![]const Input.Evidence {
-        const origin = try self.sources.lookup(a, receipt);
-        const thread = try self.mailbox.thread(a, origin.thread_id, 32);
-        var result: std.ArrayList(Input.Evidence) = .empty;
-        for (thread.letters) |letter| {
-            if (std.mem.eql(u8, letter.id, origin.id)) continue;
-            try result.append(a, try self.project(a, letter, 512));
+    pub fn send(self: *EmailTransport, a: Allocator, message: Communication.Message) !Communication.Submission {
+        const recipients = try a.alloc(Mail.Address, message.recipients.len);
+        for (message.recipients, recipients) |id, *recipient| {
+            const path = try self.contactPath(a, id);
+            const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, a, .unlimited) catch |err| switch (err) {
+                error.FileNotFound => return error.InvalidContactReference,
+                else => return err,
+            };
+            recipient.* = try std.json.parseFromSliceLeaky(Mail.Address, a, bytes, .{});
         }
-        return result.toOwnedSlice(a);
-    }
-
-    pub fn reply(self: *EmailTransport, a: Allocator, receipt: []const u8, text: []const u8) !void {
-        const origin = try self.sources.lookup(a, receipt);
         const submission = try self.mailbox.send(a, .{
-            .to = replyAddresses(origin),
-            .subject = try replySubject(a, origin.subject),
-            .body = text,
-            .in_reply_to = origin.message_id,
-            .references = try replyReferences(a, origin),
+            .to = recipients,
+            .subject = "Ivenna",
+            .body = message.text,
         });
         if (submission.sent_copy == .unconfirmed)
             std.log.warn("mail {s} accepted for submission; sent-copy update unconfirmed", .{submission.mail_id});
+        return .{ .reference = try reference(a, "submission", &.{ self.mailbox.session_url, self.mailbox.account_id, submission.mail_id }) };
     }
 
     fn project(self: *EmailTransport, a: Allocator, letter: Mail.Letter, limit: usize) !Input.Evidence {
@@ -71,7 +60,11 @@ pub const EmailTransport = struct {
             try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ letter.subject, letter.body });
         const files = try self.sources.capture(a, letter, text);
         const authors = try describe(a, letter.from);
+        const addresses = replyAddresses(letter);
+        const contacts = try a.alloc(Communication.Contact, addresses.len);
+        for (addresses, contacts) |address, *contact| contact.* = try self.rememberContact(a, address);
         return .{
+            .contacts = contacts,
             .content = if (text.len <= limit)
                 .{ .text = text }
             else
@@ -91,8 +84,25 @@ pub const EmailTransport = struct {
         return reference(a, "source", &.{ "native", self.mailbox.session_url, self.mailbox.account_id, letter.id });
     }
 
-    fn isSelf(self: *EmailTransport, letter: Mail.Letter) bool {
-        return letter.from.len == 1 and std.ascii.eqlIgnoreCase(letter.from[0].email, self.mailbox.address);
+    fn rememberContact(self: *EmailTransport, a: Allocator, address: Mail.Address) !Communication.Contact {
+        const id = try reference(a, "contact", &.{address.email});
+        const path = try self.contactPath(a, id);
+        _ = try std.Io.Dir.cwd().createDirPathStatus(self.io, std.fs.path.dirname(path).?, .fromMode(0o700));
+        var file = try std.Io.Dir.cwd().createFileAtomic(self.io, path, .{ .permissions = .fromMode(0o600) });
+        defer file.deinit(self.io);
+        try file.file.writeStreamingAll(self.io, try std.json.Stringify.valueAlloc(a, address, .{}));
+        file.link(self.io) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        return .{ .reference = id, .description = contactDescription(address) };
+    }
+
+    fn contactPath(self: *EmailTransport, a: Allocator, id: []const u8) ![]const u8 {
+        const prefix = "contact-";
+        if (id.len != prefix.len + 64 or !std.mem.startsWith(u8, id, prefix)) return error.InvalidContactReference;
+        for (id[prefix.len..]) |byte| if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return error.InvalidContactReference;
+        return std.fs.path.join(a, &.{ self.sources.data_directory, "contacts", try std.fmt.allocPrint(a, "{s}.json", .{id}) });
     }
 };
 
@@ -103,11 +113,14 @@ fn replyAddresses(letter: Mail.Letter) []const Mail.Address {
 fn describe(a: Allocator, addresses: []const Mail.Address) ![]const []const u8 {
     const descriptions = try a.alloc([]const u8, addresses.len);
     for (addresses, descriptions) |address, *description|
-        description.* = if (address.name) |name|
-            try std.fmt.allocPrint(a, "{s} <{s}>", .{ name, address.email })
-        else
-            address.email;
+        description.* = contactDescription(address);
     return descriptions;
+}
+
+fn contactDescription(address: Mail.Address) []const u8 {
+    if (address.name) |name|
+        if (name.len != 0) return name;
+    return "Correspondent";
 }
 
 fn reference(a: Allocator, domain: []const u8, components: []const []const u8) ![]const u8 {
@@ -125,17 +138,4 @@ fn excerpt(bytes: []const u8, limit: usize) []const u8 {
     var end = @min(limit, bytes.len);
     while (end > 0 and end < bytes.len and (bytes[end] & 0xc0) == 0x80) end -= 1;
     return bytes[0..end];
-}
-
-fn replySubject(a: Allocator, subject: []const u8) ![]const u8 {
-    if (subject.len >= 3 and std.ascii.eqlIgnoreCase(subject[0..3], "re:")) return subject;
-    return std.fmt.allocPrint(a, "Re: {s}", .{subject});
-}
-
-fn replyReferences(a: Allocator, letter: Mail.Letter) ![]const []const u8 {
-    const retained = @min(letter.references.len, 31);
-    const refs = try a.alloc([]const u8, retained + @as(usize, @intFromBool(letter.message_id != null)));
-    @memcpy(refs[0..retained], letter.references[letter.references.len - retained ..]);
-    if (letter.message_id) |id| refs[retained] = id;
-    return refs;
 }

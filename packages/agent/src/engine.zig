@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
 /// One model request and its complete tool batch. Kernel owns attention,
-/// context lifetime, correspondence routing, and when another round starts.
+/// context lifetime, communication, and when another round starts.
 pub const Engine = struct {
     io: std.Io,
     provider: Provider,

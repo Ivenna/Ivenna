@@ -53,7 +53,7 @@ The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`
 
 ## Results and interruption
 
-A command returns a text part containing a JSON `result` with its outcome and both stream descriptions. Nonzero exits and timeouts are command outcomes. Image stdout adds a native image part alongside the description. If an invocation fails to return a command result, it returns an `error` with code `host_unavailable` and a message. The [architecture guide](architecture.md#host-execution) describes the current failure boundary.
+A command result is supplied as a text part containing JSON `result` with its outcome and both stream descriptions. Nonzero exits and timeouts are command outcomes. Image stdout adds a native image part alongside the description. An `error` with code `host_unavailable` means the invocation could not supply a complete command result. The [architecture guide](architecture.md#host-execution) describes the current failure boundary.
 
 For session `2` with the default data directory, the `pwd` command above returns a text summary such as:
 

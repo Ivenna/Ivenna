@@ -6,6 +6,7 @@ const Content = @import("content.zig").Content;
 const Input = @import("input.zig");
 const Sessions = @import("sessions.zig");
 const WorkInput = @import("work.zig");
+const Communication = @import("communication.zig");
 const EmailTransport = @import("email_transport.zig").EmailTransport;
 const MailState = @import("mail_state.zig").MailState;
 const MailSources = @import("mail_sources.zig").MailSources;
@@ -26,6 +27,7 @@ pub const Kernel = struct {
     poll_interval_ms: u32,
     max_parallel: usize,
     sessions: Sessions.Registry,
+    reception: std.atomic.Value(enum(u8) { starting, open, closed }) = .init(.starting),
 
     pub const Limits = struct {
         request_bytes: u64 = 65536,
@@ -56,10 +58,21 @@ pub const Kernel = struct {
     const TaskResult = union(enum) { intake: anyerror!void, work: anyerror!void };
     const Tasks = std.Io.Select(TaskResult);
 
+    pub fn isReceiving(self: *const Kernel) bool {
+        return self.reception.load(.acquire) == .open;
+    }
+
+    pub fn closeReception(self: *Kernel) void {
+        self.reception.store(.closed, .release);
+    }
+
     pub fn run(self: *Kernel) !void {
         var results: [1]TaskResult = undefined;
         var tasks = Tasks.init(self.io, &results);
-        defer tasks.cancelDiscard();
+        defer {
+            self.closeReception();
+            tasks.cancelDiscard();
+        }
         try tasks.concurrent(.intake, receiveLoop, .{ self, &tasks });
         while (true) switch (try tasks.await()) {
             .intake => |result| return result,
@@ -72,6 +85,7 @@ pub const Kernel = struct {
 
     fn receiveLoop(self: *Kernel, tasks: *Tasks) !void {
         try self.recollect();
+        if (self.reception.cmpxchgStrong(.starting, .open, .release, .monotonic) != null) return;
         while (true) {
             try self.io.checkCancel();
             var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -82,18 +96,12 @@ pub const Kernel = struct {
             for (pending) |candidate| {
                 const received = try self.email.receive(a, candidate.receipt, @intCast(@min(4096, self.limits.request_bytes / 8)));
                 try waiting.append(a, .{
-                    .input = received.input,
-                    .reply = received.reply,
-                    .source_state = .{
-                        .receipt = candidate.receipt,
-                        .input_key = candidate.input_key,
-                        .route = received.route,
-                        .state_key = try std.fmt.allocPrint(a, "conversation/{s}", .{received.route}),
-                    },
+                    .input = received,
+                    .receipt = candidate.receipt,
                 });
             }
             try self.sessions.reconcile(waiting.items);
-            for (waiting.items) |incoming| try self.receive(a, incoming);
+            for (waiting.items) |incoming| _ = try self.sessions.accept(incoming);
             try self.sources.sweep(try self.sessions.receiptsInUse(a));
             try self.dispatch(tasks);
             try self.io.sleep(.fromMilliseconds(self.poll_interval_ms), .awake);
@@ -126,24 +134,6 @@ pub const Kernel = struct {
         if (selected) |rendered| try self.sessions.appendCoreInput(rendered);
     }
 
-    fn receive(self: *Kernel, a: Allocator, incoming: WorkInput.Incoming) !void {
-        var prepared = incoming;
-        if (incoming.source_state) |source| {
-            if (try self.sessions.handled(source.input_key)) return;
-            if (try self.sessions.acceptExisting(incoming)) return;
-            var context: std.ArrayList(Input.Background) = .empty;
-            try context.appendSlice(a, incoming.input.context);
-            if (source.state_key) |key| {
-                if (try self.state.loadHandover(a, key, self.limits.handover_bytes)) |handover|
-                    try context.append(a, .{ .handover = handover });
-            }
-            for (try self.email.history(a, source.receipt)) |material|
-                try context.append(a, .{ .evidence = material });
-            prepared.input.context = context.items;
-        }
-        _ = try self.sessions.accept(prepared);
-    }
-
     fn dispatch(self: *Kernel, tasks: *Tasks) !void {
         while (try self.sessions.nextReady(self.max_parallel)) |work| {
             tasks.concurrent(.work, execute, .{ self, work }) catch |err| {
@@ -166,32 +156,34 @@ pub const Kernel = struct {
     const RuntimeRound = struct {
         kernel: *Kernel,
         work: Work,
-        plans: std.ArrayList(Sessions.ForkPlan) = .empty,
+        plan: ?Sessions.ForkPlan = null,
         committed: bool = false,
 
         fn deinit(self: *RuntimeRound) void {
-            if (!self.committed) self.kernel.sessions.abandonForks(self.plans.items);
-            self.plans.deinit(self.kernel.allocator);
+            if (!self.committed) if (self.plan) |plan| self.kernel.sessions.abandonFork(plan);
         }
 
         fn invoke(context: *anyopaque, a: Allocator, name: []const u8, arguments: []const u8) anyerror!?Content {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
+            if (std.mem.eql(u8, name, "send_message")) {
+                const message = try parseArguments(Communication.Message, a, arguments);
+                if (message.recipients.len == 0 or message.text.len == 0) return error.InvalidToolArguments;
+                const submission = self.kernel.email.send(a, message) catch |err| switch (err) {
+                    error.InvalidContactReference => return try runtimeError(a, "unknown_recipient", "The recipient reference is not available."),
+                    else => return err,
+                };
+                return try runtimeResult(a, submission);
+            }
             if (!std.mem.eql(u8, name, "fork_session")) return null;
-            const request = std.json.parseFromSliceLeaky(Sessions.ForkRequest, a, arguments, .{}) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => return error.InvalidToolArguments,
-            };
-            if (self.plans.items.len != 0 and (request.mode == .handoff or self.plans.items[0].request.mode == .handoff))
-                return try runtimeError(a, "invalid_fork_batch", "A handoff must be the only fork in its round.");
-            try self.plans.ensureUnusedCapacity(self.kernel.allocator, 1);
+            const request = try parseArguments(Sessions.ForkRequest, a, arguments);
+            if (self.plan != null)
+                return try runtimeError(a, "invalid_fork_batch", "Only one fork is allowed in a model round.");
             const plan = self.kernel.sessions.prepareFork(self.work, request) catch |err| switch (err) {
-                error.InvalidForkArguments, error.CoreRequiresHandoff, error.AttentionCapacityUnavailable => return try runtimeError(a, "fork_unavailable", @errorName(err)),
+                error.InvalidForkArguments, error.AttentionCapacityUnavailable => return try runtimeError(a, "fork_unavailable", @errorName(err)),
                 else => return err,
             };
-            self.plans.appendAssumeCapacity(plan);
-            return try Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
-                .result = .{ .session_id = plan.child.session_id },
-            }, .{}));
+            self.plan = plan;
+            return try runtimeResult(a, .{ .session_id = plan.child.session_id });
         }
     };
 
@@ -204,6 +196,7 @@ pub const Kernel = struct {
             const observation: Input.Observation = switch (work.delivery.input) {
                 .input => |input| .{ .input = input },
                 .assignment => |assignment| .{ .assignment = assignment },
+                .report => |report| .{ .report = report },
             };
             try self.sessions.appendInput(session, try Input.serialize(a, session.session_id, observation));
             work.delivery.supplied = true;
@@ -213,12 +206,12 @@ pub const Kernel = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var view = try self.requestContext(a, session, work.delivery);
+            var view = try self.requestContext(a, session);
             defer view.deinit();
             var runtime: RuntimeRound = .{ .kernel = self, .work = work };
             defer runtime.deinit();
             const round = try self.engine.turn(a, session.session_id, view.history(), .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role == .core);
-            const committed = try self.sessions.commitRound(work, round.output, round.replies, runtime.plans.items);
+            const committed = try self.sessions.commitRound(work, round.output, round.replies, runtime.plan);
             runtime.committed = true;
             if (committed != .continuing) return;
             if (round.replies.len != 0) continue;
@@ -230,15 +223,12 @@ pub const Kernel = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        if (work.delivery.reply) |target| if (text) |answer|
-            try self.email.reply(a, target.receipt, answer);
-        if (work.delivery.source_state) |source|
-            try self.state.complete(a, source.receipt);
-        try self.saveForRelease(work);
+        if (work.delivery.receipt) |receipt|
+            try self.state.complete(a, receipt);
         return self.sessions.finish(work, text);
     }
 
-    fn requestContext(self: *Kernel, a: Allocator, session: *Session, delivery: *WorkInput.Delivery) !Context {
+    fn requestContext(self: *Kernel, a: Allocator, session: *Session) !Context {
         var provider = self.engine.provider;
         provider.tool_scope = if (session.role == .core) .coordination else .all;
         var view = try self.sessions.snapshot(session);
@@ -254,33 +244,23 @@ pub const Kernel = struct {
         errdefer request.deinit();
         try request.appendInput(current);
         if (try provider.requestBytes(a, request.history()) > self.limits.request_bytes) return error.ContextBudgetExhausted;
-        const key: ?[]const u8 = if (session.role == .core)
-            "core"
-        else if (delivery.source_state) |source|
-            source.state_key
-        else
-            null;
-        if (key) |state_key| try self.state.saveHandover(a, state_key, summary);
+        if (session.role == .core) try self.state.saveHandover(a, "core", summary);
         try self.sessions.replaceContext(session, candidate);
         view.deinit();
         return request;
     }
-
-    /// Persist continuity only when work has an assigned state key. A result's
-    /// reply destination does not determine its state-storage policy.
-    fn saveForRelease(self: *Kernel, work: Work) !void {
-        if (work.session.role == .core) return;
-        const source = work.delivery.source_state orelse return;
-        const key = source.state_key orelse return;
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var view = try self.sessions.snapshot(work.session);
-        defer view.deinit();
-        const summary = try Compaction.summarize(self.engine.provider, a, view.history(), try self.sessions.runtimeSnapshot(work.session), self.limits.compaction_bytes, self.limits.handover_bytes);
-        try self.state.saveHandover(a, key, summary);
-    }
 };
+
+fn parseArguments(comptime T: type, a: Allocator, arguments: []const u8) !T {
+    return std.json.parseFromSliceLeaky(T, a, arguments, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidToolArguments,
+    };
+}
+
+fn runtimeResult(a: Allocator, value: anytype) !Content {
+    return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = value }, .{}));
+}
 
 fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
     return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .code = code, .message = message } }, .{}));

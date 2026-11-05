@@ -351,8 +351,37 @@
   },
   {
     "type": "function",
+    "name": "send_message",
+    "description": "Send text to one or more contacts using their references. Each call submits one message and returns its reference.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "recipients": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Contact references supplied with input or evidence."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Message text."
+        }
+      },
+      "required": [
+        "recipients",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
     "name": "fork_session",
-    "description": "Continue work in another focus of Ivenna with the complete current context. Sessions share the host and memory.",
+    "description": "Transfer current work to a child that inherits the complete working context. The caller's activation ends; the child processes its assignment in a new activation. The child's final text enters its direct parent's queue. At most one fork per round.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -360,51 +389,6 @@
           "type": "string",
           "minLength": 1,
           "description": "Work for the new session to continue."
-        },
-        "mode": {
-          "type": "object",
-          "description": "Choose how to assign the work; defaults to handoff. A handoff must be the only fork in its round.",
-          "default": {
-            "handoff": {}
-          },
-          "anyOf": [
-            {
-              "type": "object",
-              "properties": {
-                "handoff": {
-                  "type": "object",
-                  "properties": {},
-                  "additionalProperties": false,
-                  "description": "Transfer the current work and responsibility for its result to the new session."
-                }
-              },
-              "required": [
-                "handoff"
-              ],
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "properties": {
-                "subtask": {
-                  "type": "object",
-                  "properties": {
-                    "report_to_parent": {
-                      "type": "boolean",
-                      "default": false,
-                      "description": "When true, suspend this activation until the subtask returns its findings."
-                    }
-                  },
-                  "additionalProperties": false,
-                  "description": "Assign internal work while retaining the current work and its responsibilities."
-                }
-              },
-              "required": [
-                "subtask"
-              ],
-              "additionalProperties": false
-            }
-          ]
         }
       },
       "required": [

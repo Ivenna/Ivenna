@@ -2,15 +2,15 @@
 
 Ivenna is an agent runtime, designed as [a body for an LLM soul](docs/design.md). Through ongoing communication and autonomous activity, the project explores how interaction and memory can sustain a sense of self over time.
 
-People and programs communicate with Ivenna through email. A permanent core interprets correspondence and coordinates ongoing activity, forking its current understanding into work sessions when needed. Work sessions use tools, answer their intended audience, and can fork further work.
+People and programs communicate with Ivenna through email. It interprets each message alongside ongoing activity and coordinates work through a permanent core and other focuses of attention. Ivenna chooses when to communicate and whom to address through an [explicit sending tool](docs/communication.md); one incoming message can lead to zero, one, or several outgoing messages.
 
-The kernel runs locally, combining email, [host commands](docs/host.md), and shared [memory rooms](docs/memory.md) accessed over SSH. Communication and memory must be available for it to run. Tools can return [text and images](docs/content.md).
+The kernel runs as a local service, combining email, [host commands](docs/host.md), and shared [memory rooms](docs/memory.md) accessed over SSH. Communication and memory must be available for it to run. It exposes [health and reception readiness](docs/running.md#service-status-and-reception), and tools can return [text and images](docs/content.md).
 
-The deployment user owns the mailbox, state records, artifacts, and autonomous memory. Handovers and source material provide context for continuing work after a working context is released or the kernel restarts.
+The deployment user owns the mailbox, autonomous memory, and [local data](docs/running.md#local-data). Retained material supports continued understanding when working contexts are released or the kernel restarts.
 
 ## Getting started
 
-Start with the [running guide](docs/running.md): prepare `.env`, initialize local mail, and start the middleware and kernel. Existing mail and memory services can be configured there too. Then follow [Corresponding with Ivenna](docs/usage.md) to send a message and continue the correspondence.
+Start with the [running guide](docs/running.md) to configure model access, mail, and memory, then start Ivenna and check reception readiness. It covers both the supplied local services and connections to existing services. Follow [Corresponding with Ivenna](docs/usage.md) to send a message and continue the correspondence.
 
 ## Development
 

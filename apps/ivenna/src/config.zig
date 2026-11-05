@@ -2,6 +2,7 @@ const std = @import("std");
 const agent = @import("agent");
 
 pub const Config = struct {
+    service_address: std.Io.net.IpAddress,
     data_dir: []const u8,
     memory_ssh_target: []const u8,
     memory_ssh_config: ?[]const u8,
@@ -24,6 +25,7 @@ pub const Config = struct {
     pub fn load(env: *const std.process.Environ.Map) !Config {
         const mail_auth = env.get("MAIL_AUTHORIZATION");
         const config: Config = .{
+            .service_address = try serviceAddress(env),
             .data_dir = try nonempty(env, "DATA_DIR", ".ivenna"),
             .memory_ssh_target = try nonempty(env, "MEMORY_SSH_TARGET", "ivenna-memory"),
             .memory_ssh_config = env.get("MEMORY_SSH_CONFIG"),
@@ -63,6 +65,7 @@ pub const Config = struct {
             .credentials => |value| value,
         };
         const credentials = try std.fmt.allocPrint(a, "{s}:{s}", .{ account.username, account.password });
+        defer a.free(credentials);
         const encoder = std.base64.standard.Encoder;
         const value = try a.alloc(u8, "Basic ".len + encoder.calcSize(credentials.len));
         @memcpy(value[0.."Basic ".len], "Basic ");
@@ -70,6 +73,13 @@ pub const Config = struct {
         return value;
     }
 };
+
+fn serviceAddress(env: *const std.process.Environ.Map) !std.Io.net.IpAddress {
+    const value = try nonempty(env, "SERVICE_ADDRESS", "0.0.0.0:8090");
+    const address = std.Io.net.IpAddress.parseLiteral(value) catch return error.InvalidServiceAddress;
+    if (address.getPort() == 0) return error.InvalidServiceAddress;
+    return address;
+}
 
 fn nonempty(env: *const std.process.Environ.Map, key: []const u8, default: []const u8) ![]const u8 {
     const value = env.get(key) orelse default;

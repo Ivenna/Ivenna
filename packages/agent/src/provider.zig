@@ -106,8 +106,10 @@ pub const Provider = struct {
             var selected = std.array_list.Managed(Value).init(arena);
             for (declarations.array.items) |tool| {
                 const name = tool.object.get("name") orelse continue;
-                if (name == .string and std.mem.eql(u8, name.string, "fork_session"))
-                    try selected.append(try coordinationTool(arena, tool));
+                if (name != .string) continue;
+                if (std.mem.eql(u8, name.string, "fork_session") or std.mem.eql(u8, name.string, "send_message")) {
+                    try selected.append(tool);
+                }
             }
             declarations = .{ .array = selected };
         }
@@ -229,24 +231,6 @@ pub const Provider = struct {
         };
     }
 };
-
-fn coordinationTool(arena: Allocator, tool: Value) !Value {
-    var scoped = tool;
-    const parameters = scoped.object.getPtr("parameters").?;
-    const properties = parameters.object.getPtr("properties").?;
-    const mode = properties.object.getPtr("mode").?;
-    const alternatives = mode.object.getPtr("anyOf").?;
-    var handoff = std.array_list.Managed(Value).init(arena);
-    for (alternatives.array.items) |variant| {
-        if (variant.object.get("properties").?.object.contains("handoff"))
-            try handoff.append(variant);
-    }
-    alternatives.* = .{ .array = handoff };
-    var default_mode: std.json.ObjectMap = .empty;
-    try default_mode.put(arena, "handoff", .{ .object = .empty });
-    try mode.object.put(arena, "default", .{ .object = default_mode });
-    return scoped;
-}
 
 fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
     var encoded: std.json.ObjectMap = .empty;

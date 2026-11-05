@@ -1,5 +1,6 @@
 const std = @import("std");
 const yaml = @import("yaml");
+const Communication = @import("communication.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Role = enum { core, branch };
@@ -26,11 +27,13 @@ pub const Source = struct {
 
 pub const Evidence = struct {
     content: Content,
+    contacts: []const Communication.Contact = &.{},
     source: ?Source = null,
 };
 
 pub const Input = struct {
     content: Content,
+    contacts: []const Communication.Contact = &.{},
     source: ?Source = null,
     context: []const Background = &.{},
 };
@@ -46,13 +49,17 @@ pub const Assignment = struct {
     source_refs: []const []const u8 = &.{},
 };
 
+pub const Report = struct {
+    from_session: u64,
+    text: []const u8,
+};
+
 pub const Background = union(enum) {
     evidence: Evidence,
     handover: Handover,
 };
 
 pub const Response = union(enum) {
-    reply: struct { audience: []const []const u8 },
     report: struct { session_id: u64 },
     internal: struct {},
     summary: struct {},
@@ -73,8 +80,7 @@ pub const State = struct {
     response: Response = .{ .internal = .{} },
 };
 
-/// Current state for one model request. Reply audience descriptions borrow the
-/// active delivery and must be rendered while it remains live.
+/// Current state for one model request.
 pub const Snapshot = struct {
     session_id: u64,
     state: State,
@@ -83,10 +89,7 @@ pub const Snapshot = struct {
 pub const Observation = union(enum) {
     input: Input,
     assignment: Assignment,
-    report: struct {
-        from_session: u64,
-        text: []const u8,
-    },
+    report: Report,
     handover: Handover,
     background: struct {
         items: []const Background,

@@ -8,8 +8,9 @@ Choose a guide for your task:
 | Trace execution and component ownership | [Architecture guide](architecture.md) |
 | Build from source, edit interfaces, and update middleware | [Development guide](development.md) |
 | Set up middleware, choose storage, and start Ivenna | [Running guide](running.md) |
-| Send messages and continue correspondence | [Usage guide](usage.md) |
+| Send messages and understand reception and responses | [Usage guide](usage.md) |
 | Read model observations and response destinations | [Input contract](input.md) |
+| Use contact references and explicitly send messages | [Communication](communication.md) |
 | Use memory rooms and understand their shared capacity | [Memory rooms](memory.md) |
 | Run host commands and interpret their results | [Host shell](host.md) |
 | Understand automatic content classification and image URL references | [Tool content](content.md) |

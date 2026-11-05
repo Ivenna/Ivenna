@@ -4,7 +4,7 @@ const MailSources = @import("mail_sources.zig").MailSources;
 const Input = @import("input.zig");
 const Allocator = std.mem.Allocator;
 
-/// Program-owned ingestion progress and independently keyed continuity records.
+/// Track mail intake and store continuity handovers.
 /// Read status, stars, and archiving do not control work.
 pub const MailState = struct {
     mailbox: *Mail.Mailbox,
@@ -12,7 +12,6 @@ pub const MailState = struct {
 
     pub const Pending = struct {
         receipt: []const u8,
-        input_key: []const u8,
     };
 
     pub fn init(mailbox: *Mail.Mailbox, sources: *MailSources) MailState {
@@ -24,7 +23,7 @@ pub const MailState = struct {
         for (try self.mailbox.pending(a, limit)) |letter| {
             const receipt = try self.sources.receiptId(a, letter.id);
             try self.sources.retain(receipt, letter);
-            try result.append(a, .{ .receipt = receipt, .input_key = receipt });
+            try result.append(a, .{ .receipt = receipt });
         }
         return result.toOwnedSlice(a);
     }

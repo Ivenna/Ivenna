@@ -139,14 +139,9 @@ pub const MailSources = struct {
 };
 
 fn copyLetter(a: Allocator, letter: Mail.Letter) !Mail.Letter {
-    const references = try a.alloc([]const u8, letter.references.len);
-    for (letter.references, references) |reference, *copy| copy.* = try a.dupe(u8, reference);
     return .{
         .id = try a.dupe(u8, letter.id),
-        .thread_id = try a.dupe(u8, letter.thread_id),
         .message_id = try copyOptional(a, letter.message_id),
-        .in_reply_to = try copyOptional(a, letter.in_reply_to),
-        .references = references,
         .from = try copyAddresses(a, letter.from),
         .to = try copyAddresses(a, letter.to),
         .reply_to = try copyAddresses(a, letter.reply_to),

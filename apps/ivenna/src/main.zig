@@ -1,6 +1,7 @@
 const std = @import("std");
 const agent = @import("agent");
 const Config = @import("config.zig").Config;
+const Service = @import("service.zig").Service;
 
 var stopping: std.atomic.Value(bool) = .init(false);
 
@@ -44,6 +45,8 @@ pub fn main(init: std.process.Init) !void {
     var state = agent.MailState.init(&mailbox, &sources);
     var kernel = try agent.Kernel.init(init.gpa, io, &engine, &email, &state, &sources, config.context_limits, config.mail_poll_interval_ms, config.max_parallel_attention, config.max_attention_contexts);
     defer kernel.deinit();
+    var service = try Service.listen(io, config.service_address, &kernel);
+    defer service.deinit();
 
     const action: std.posix.Sigaction = .{
         .handler = .{ .handler = requestStop },
@@ -57,14 +60,19 @@ pub fn main(init: std.process.Init) !void {
     std.posix.sigaction(.TERM, &action, &previous_term);
     defer std.posix.sigaction(.TERM, &previous_term, null);
 
-    const Result = union(enum) { kernel: anyerror!void, shutdown: std.Io.Cancelable!void };
-    var result_buffer: [2]Result = undefined;
+    const Result = union(enum) { service: anyerror!void, kernel: anyerror!void, shutdown: std.Io.Cancelable!void };
+    var result_buffer: [3]Result = undefined;
     var select = std.Io.Select(Result).init(io, &result_buffer);
-    defer select.cancelDiscard();
+    defer {
+        kernel.closeReception();
+        select.cancelDiscard();
+    }
+    try select.concurrent(.service, Service.run, .{&service});
     try select.concurrent(.kernel, agent.Kernel.run, .{&kernel});
     try select.concurrent(.shutdown, waitForStop, .{io});
-    std.log.info("Ivenna receiving mail as {s} (model: {s})", .{ config.mail_address, config.llm_model });
+    std.log.info("Ivenna listening on {f} as {s} (model: {s})", .{ service.listener.socket.address, config.mail_address, config.llm_model });
     switch (try select.await()) {
+        .service => |result| try result,
         .kernel => |result| try result,
         .shutdown => |result| {
             try result;

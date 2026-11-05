@@ -1,6 +1,6 @@
 # Corresponding with Ivenna
 
-Send requests to `MAIL_ADDRESS` after [starting the kernel](running.md#starting-the-kernel). Ivenna replies in the same mail thread, and later replies in that thread can continue the work.
+Send messages to `MAIL_ADDRESS` while [reception is open](running.md#service-status-and-reception). Each arrival enters Ivenna's core independently. Include enough context for Ivenna to understand the message and relate it to ongoing work.
 
 ## Sending a request
 
@@ -26,40 +26,36 @@ Please remember that I am learning French and propose a practice plan.
 EOF
 ```
 
-Read replies through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. The [configuration reference](running.md#changing-configuration) lists that endpoint and its default. For another service, use its submission and client settings.
+With the supplied readiness policy installed, this SMTP command receives a `550` rejection when reception is closed or unreachable. A normal mail client may submit to its own server first, so its Send result need not show Ivenna's rejection immediately. See [reception readiness](running.md#service-status-and-reception) for delivery behavior and the policy's scope.
 
-SMTP acceptance means the service accepted the request for delivery. Allow time for Ivenna to process it, including any tool work. A reply can provide a result, ask for clarification, or describe unfinished work.
+SMTP acceptance means the mail service accepted the message for delivery. Ivenna chooses when to communicate: it may send no message, one response, or several updates. Finishing internal work does not itself send mail.
+
+Read Ivenna's messages through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Outgoing messages currently use the subject `Ivenna`. For another service, use its submission and client settings.
 
 Ivenna receives the subject and body as text. Plain-text bodies are preferred; HTML-only letters supply their HTML source. Longer content includes an excerpt and a reference to the full material, which Ivenna can retrieve when needed. The deployment retains these [source files](running.md#local-data). Mail attachment intake is not implemented.
 
-## Continuing a conversation
+## Continuing correspondence
 
-Reply to Ivenna's letter in your mail client. A programmatic reply should keep the thread's subject, put the `Message-ID` of the Ivenna letter being answered in `In-Reply-To`, and append that identifier to its existing `References` chain. Replace the illustrative identifiers below with those from the correspondence:
+Describe what you are referring to, what changed, and what you want to happen next. For example:
 
 ```text
 To: ivenna@ivenna.test
-Subject: Re: French practice
-Message-ID: <french-practice-2@example.local>
-In-Reply-To: <ivenna-reply-being-answered@example.local>
-References: <french-practice-1@example.local> <ivenna-reply-being-answered@example.local>
+Subject: French practice schedule
 
-Use Tuesday and Saturday, and keep each session to 20 minutes.
+About the French practice plan: use Tuesday and Saturday, and keep each
+session to 20 minutes. Please retain the vocabulary goals we agreed on.
 ```
 
-Follow-up messages queue while work in the same thread continues. Independent threads can run concurrently. Reusing a subject alone does not reliably establish a reply relationship.
+You can use your client's reply action or compose a new message. Every arrival goes to the core; email thread headers do not select an internal work session. Ivenna interprets the relationship using its retained core understanding and memory. Passing new instructions into an already running work focus remains unimplemented.
 
-Reply in the same thread even after a clarification question or a gap in the work. Describe changes of intent and relevant new information in the message. Ivenna interprets them in the context of the correspondence and its ongoing work.
+## Ongoing work and memory
 
-## Work sessions and handovers
+Ivenna can continue sustained work while receiving other messages. Forked work shares the host and memory and returns its final result to the focus that created it. See [work ownership](architecture.md#forks-and-work-ownership) for their lifecycle.
 
-Ivenna's core receives correspondence and handles brief requests directly. It can hand sustained work to a work session, which uses tools and replies directly to your thread. Work sessions can delegate subtasks and request findings. See the [architecture guide](architecture.md#forks-and-work-ownership) for how these sessions coordinate.
-
-Work sessions can release detailed working context between inputs. Ivenna saves a handover summarizing its understanding and uses it with recent correspondence to continue later. It also summarizes growing contexts. Processing leaves source letters in their existing folders.
-
-Later continuation depends on retained handovers, correspondence, and referenced files. See [local data](running.md#local-data) for storage and cleanup, and [bounded model context](architecture.md#bounded-model-context) for summary and reconstruction limits.
+Detailed work contexts can be released. Autonomous memory, retained correspondence, source files, and core handovers provide material for continued understanding. Processing leaves source letters in their existing folders. See [local data](running.md#local-data) for storage and cleanup.
 
 ## After interruption
 
-After a [restart](running.md#stopping-and-restarting) with the same mailbox, artifacts, and memory workspace, Ivenna rebuilds its understanding from handovers and recent correspondence. It reads [pending mail](running.md#mail-intake) and can continue existing threads. Reply in the thread to explain what is known and what should happen next.
+After a [restart](running.md#stopping-and-restarting) with the same deployment data, Ivenna rebuilds its understanding from the available core handover and recent correspondence. It continues reading [ordinary unprocessed mail](running.md#mail-intake); it does not restore individual work histories or interrupted execution.
 
-An interrupted operation may already have changed files, memory, or mail; a lost reply-submission response can leave delivery uncertain. Inspect uncertain effects before asking Ivenna to repeat work. Restarting does not resume model requests or tool calls from their interruption point. Detailed execution recovery remains undefined; see [startup and interruption](architecture.md#startup-and-interruption).
+An interrupted operation may already have changed files, memory, or mail. Inspect uncertain effects before asking Ivenna to repeat work, and include what is known in a new message. Automatic execution recovery remains undefined; see [startup and interruption](architecture.md#startup-and-interruption).

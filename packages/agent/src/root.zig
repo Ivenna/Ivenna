@@ -2,6 +2,7 @@ pub const Kernel = @import("kernel.zig").Kernel;
 pub const Engine = @import("engine.zig").Engine;
 pub const Context = @import("context.zig").Context;
 pub const Input = @import("input.zig");
+pub const Communication = @import("communication.zig");
 pub const Sessions = @import("sessions.zig");
 pub const Work = @import("work.zig");
 pub const EmailTransport = @import("email_transport.zig").EmailTransport;

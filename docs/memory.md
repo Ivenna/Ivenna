@@ -162,7 +162,7 @@ The result describes the space at the time of the query. Another session can cha
 
 ## Results and errors
 
-Tools return a text part containing JSON with either `result` or an operation `error`. For example, `remember` returns the entry's address:
+A memory tool reply includes a text part containing JSON with either `result` or an operation `error`. For example, `remember` returns the entry's address:
 
 ```json
 {"result":{"address":"languages/progress.md"}}
