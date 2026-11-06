@@ -68,7 +68,7 @@ After a restart, Ivenna rebuilds its working understanding from the latest core 
 
 Automatic retry, reconnection, and execution resumption after runtime failure remain undefined.
 
-## Local data and ownership
+## Data ownership
 
 The deployment user owns Ivenna's mailbox, artifacts, and autonomous memory, and chooses where they live. External correspondence and internal state records both use mail storage, with their ownership and retention kept distinct. Artifacts and autonomous memory remain files. Keep these forms open to inspection, retention, and management within the user's deployment.
 

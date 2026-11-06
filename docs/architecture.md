@@ -68,7 +68,7 @@ The application owns service, kernel, and shutdown tasks. The [kernel](../packag
 
 The application discovers the mail account and checks memory, then binds `SERVICE_ADDRESS` before starting kernel tasks. While the listener is running, `GET /healthz` reports that the HTTP service is responding. `GET /readyz` returns success with `X-Ivenna-Ready: true` only while the kernel's reception state is open; otherwise it returns `503`. Readiness opens after the core's startup recollection. Closing is terminal for that kernel instance. The status endpoint reads this lifecycle state; it does not perform fresh dependency checks or reserve processing capacity.
 
-The example Stalwart deployment checks readiness at SMTP recipient acceptance and rejects mail to Ivenna when the header is absent or the service cannot be reached. This is a receiving precheck, not a reservation: shutdown can follow a successful check, and an already accepted message can remain in ordinary mail storage. Direct mail API writes and same-service JMAP delivery do not pass through this gate. The [running guide](running.md#service-status-and-reception) defines the supported external path and deployment settings.
+The receiving boundary checks reception status before accepting external messages. This is a precheck: shutdown can follow a successful check, and an already accepted message can remain in ordinary mail storage. The receiving policy is configured in the deployment's mail infrastructure. The [running guide](running.md#service-status-and-reception) describes the reception contract and HTTP status interface; the [local mail setup](../dev/README.md#configuring-mail) provides an SMTP example.
 
 Reception status belongs to the service boundary. Model reasoning and tools do not manage transport availability, offline queues, or sender retries.
 
@@ -204,7 +204,7 @@ One kernel owns an Ivenna account's execution state. External submission, intern
 
 ## Autonomous memory
 
-Memory is a file workspace shared by all sessions. The Memory component resolves local write sources and exchanges typed JSON operations over SSH with the fixed [memory.nu](../apps/memory/src/memory.nu) handler. The handler owns file operations and capacity enforcement. See [memory rooms](memory.md) for tool behavior and [remote memory setup](running.md#using-remote-memory) for deployment.
+Memory is a file workspace shared by all sessions. The Memory component resolves host write sources and exchanges typed JSON operations over SSH with the fixed [memory.nu](../apps/memory/src/memory.nu) handler. The handler owns file operations and capacity enforcement. See [memory rooms](memory.md) for tool behavior and [memory service requirements](running.md#memory-service) for deployment.
 
 The handler returns explicitly defined operation errors, such as a missing entry or exhausted capacity, to the model as tool results. SSH failures, invalid protocol replies, and unclassified handler or backend failures propagate to the kernel. Finer error distinctions remain undefined.
 

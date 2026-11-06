@@ -10,7 +10,7 @@ Leave behavior that needs further design as an unavailable or explicitly limited
 
 Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 
-During development, do not write tests in advance or introduce test frameworks. Run the application locally; containerize only middleware.
+During development, do not write tests in advance or introduce test frameworks. Use the [local development environment](../dev/README.md) to run the kernel on the host and middleware in containers.
 
 ## Implementation boundaries
 
@@ -77,39 +77,17 @@ Keep context release and stored-record retention independent. Follow the archite
 | [apps/ivenna](../apps/ivenna) | Configuration, adapter assembly, HTTP status, application startup and shutdown |
 | [apps/memory](../apps/memory) | Remote memory handler, image, and SSH entry point |
 | [packages](../packages) | Runtime libraries and their resources; see the [architecture map](architecture.md#responsibilities) for each package's interface and responsibility |
-| [dev/compose.yaml](../dev/compose.yaml) | Local mail and memory service builds, containers, and volumes |
-| [dev/mail](../dev/mail) | Stalwart configuration and native provisioning plan |
-| [dev/memory](../dev/memory) | Local SSH key and connection preparation |
+| [dev](../dev/README.md) | Local service orchestration, mail provisioning, and memory SSH preparation |
 
-Each Zig library declares its module and dependencies in `build.zig` and `build.zig.zon`, with public exports in `src/root.zig`. When adding or moving a unit, update its consuming build declarations, the [root package's exported source paths](../build.zig.zon), and the architecture map. `apps/ivenna` links the libraries into one executable. The memory app is a separately deployed Nushell program built from its Containerfile.
+Each Zig library declares its module and dependencies in `build.zig` and `build.zig.zon`, with public exports in `src/root.zig`. When adding or moving a unit, update its consuming build declarations, the [root package's exported source paths](../build.zig.zon), and the architecture map. `apps/ivenna` links the libraries into one executable. The memory app is a separate Nushell program; its Containerfile packages it for container use.
 
-Build the application from the repository root:
+Install the Zig version in [`.zig-version`](../.zig-version), then build the application from the repository root:
 
 ```sh
 zig build
 ```
 
-The executable is installed at `zig-out/bin/ivenna`. After loading configuration and preparing middleware, run from the repository root:
-
-```sh
-zig build run
-```
-
-## Updating the kernel and middleware
-
-The executable embeds the [model-facing resources](#model-facing-resources) from their owning packages. Stop the kernel and run `zig build run` after editing code or these resources. Restart follows the [continuity contract](architecture.md#startup-and-interruption).
-
-The memory [Containerfile](../apps/memory/Containerfile) installs [memory.nu](../apps/memory/src/memory.nu). After changing the handler, container contents, or SSH entry point, stop the kernel, rebuild the image, and recreate the memory service. These commands use the example engine from the [running guide](running.md#prerequisites-and-configuration):
-
-```sh
-podman compose -f dev/compose.yaml build --pull --no-cache memory
-podman compose -f dev/compose.yaml up -d --wait memory
-zig build run
-```
-
-This retains the external memory volume and SSH keys. The build context includes only the memory image sources selected by [`.dockerignore`](../.dockerignore). For another workspace, update its handler and entry point as described in [remote memory setup](running.md#using-remote-memory).
-
-Stalwart's account and policy configuration lives in its data store; [config.json](../dev/mail/config.json) selects that store. Apply provisioning-plan changes through [local mail setup](running.md#configuring-local-mail), then return to normal operation. Container recreation retains the stored configuration and mail.
+The executable is installed at `zig-out/bin/ivenna` and embeds the [model-facing resources](#model-facing-resources). Rebuild it after editing code or those resources. The [local development guide](../dev/README.md) covers service preparation, running from source, and updating middleware; the [running guide](running.md#starting-the-kernel) covers starting the built executable.
 
 ## Validation
 

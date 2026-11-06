@@ -2,7 +2,7 @@
 
 Ivenna stores persistent memory in rooms shared across sessions. Work sessions use tools to browse, find, recall, record, and revise memories. Ivenna chooses its own room hierarchy, entry names, formats, and cross-references.
 
-Memory is a required runtime capability. The [running guide](running.md) covers local setup and [remote workspaces](running.md#using-remote-memory); the [architecture guide](architecture.md#autonomous-memory) explains its implementation responsibilities.
+Memory is a required runtime capability. The [running guide](running.md#memory-service) covers its service requirements and SSH connection; the [architecture guide](architecture.md#autonomous-memory) explains its implementation responsibilities.
 
 ## Addresses and organization
 
@@ -154,7 +154,7 @@ All rooms and sessions share one capacity. Call `inspect_memory_space` with `{}`
 
 `used_bytes` counts regular-file lengths across all rooms, including hidden files. Each hard-linked name counts separately; directories, symlinks, and special files do not contribute. `capacity_bytes` is the shared limit for that total.
 
-`remaining_bytes` is capacity minus used space, with a minimum of zero. `used_ratio` is used space divided by capacity; multiply by 100 for a percentage. The deployment user [configures the capacity](running.md#local-middleware-settings). Lowering it below the size of existing memories leaves them intact and can produce a ratio above 1.
+`remaining_bytes` is capacity minus used space, with a minimum of zero. `used_ratio` is used space divided by capacity; multiply by 100 for a percentage. The deployment user [configures the capacity at the memory service](running.md#memory-service). Lowering it below the size of existing memories leaves them intact and can produce a ratio above 1.
 
 Before `remember` or a content-changing `revise_memory`, Ivenna checks how much space the memories would occupy. Growth beyond the shared capacity returns `memory_capacity_exceeded` without changing the entry. A change can exactly fill the remaining space. Changes that shrink or preserve occupied space remain possible when already over capacity, as do reading, moving, and forgetting memories.
 

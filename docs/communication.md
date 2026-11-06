@@ -13,7 +13,7 @@ Incoming material and supporting [evidence](input.md#material-and-provenance) ca
 
 A contact reference identifies a recipient independently of the material's source and the current session. Retain references needed for ongoing work in handovers or autonomous memory.
 
-The email adapter supplies contacts from Reply-To, falling back to From, and keeps their address mappings in [deployment data](running.md#local-data). Preserving those mappings lets references remain usable after the originating material and working context have been released.
+The email adapter supplies contacts from Reply-To, falling back to From, and keeps their address mappings in [deployment data](running.md#data-and-retention). Preserving those mappings lets references remain usable after the originating material and working context have been released.
 
 ## Sending a message
 

@@ -1,45 +1,32 @@
 # Corresponding with Ivenna
 
-Send messages to `MAIL_ADDRESS` while [reception is open](running.md#service-status-and-reception). Each arrival enters Ivenna's core independently. Include enough context for Ivenna to understand the message and relate it to ongoing work.
+Send messages to Ivenna's configured email address (`MAIL_ADDRESS`) while [reception is open](running.md#service-status-and-reception). Each arrival enters Ivenna's core independently. Include enough context for Ivenna to understand the message and relate it to ongoing work.
 
 ## Sending a request
 
-Use the operator account configured during [mail setup](running.md#configuring-local-mail), or another account that can reach Ivenna. Give the request a useful subject and put the task and relevant context in its body.
+Use a correspondent account that can reach Ivenna. Send through your mail client, give the request a useful subject, and put the task and relevant context in its body. For example:
 
-The following example requires `curl` and submits through the supplied local service's authenticated SMTP endpoint. Run it from a second terminal at the repository root:
-
-```sh
-set -a
-. ./.env
-set +a
-curl --url "smtp://127.0.0.1:${MAIL_SMTP_PORT:-2525}" --crlf \
-  --user "$OPERATOR_MAIL_ADDRESS:$OPERATOR_MAIL_PASSWORD" \
-  --mail-from "$OPERATOR_MAIL_ADDRESS" \
-  --mail-rcpt "$MAIL_ADDRESS" \
-  --upload-file - <<EOF
-From: $OPERATOR_MAIL_ADDRESS
-To: $MAIL_ADDRESS
+```text
+To: <Ivenna's address>
 Subject: French practice
-Message-ID: <french-practice-$(date +%s)@ivenna.test>
 
 Please remember that I am learning French and propose a practice plan.
-EOF
 ```
 
-With the supplied readiness policy installed, this SMTP command receives a `550` rejection when reception is closed or unreachable. A normal mail client may submit to its own server first, so its Send result need not show Ivenna's rejection immediately. See [reception readiness](running.md#service-status-and-reception) for delivery behavior and the policy's scope.
+Your mail client may confirm submission to its own server before delivery to Ivenna. A rejection while reception is closed can arrive later as a delivery result; see [reception readiness](running.md#service-status-and-reception).
 
-SMTP acceptance means the mail service accepted the message for delivery. Ivenna chooses when to communicate: it may send no message, one response, or several updates. Finishing internal work does not itself send mail.
+Ivenna chooses when to communicate: it may send no message, one response, or several updates. Finishing internal work does not itself send mail. Read messages sent to you through your mail client; outgoing messages currently use the subject `Ivenna`.
 
-Read Ivenna's messages through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Outgoing messages currently use the subject `Ivenna`. For another service, use its submission and client settings.
+Ivenna receives the subject and body as text. Plain-text bodies are preferred; HTML-only letters supply their HTML source. Longer content includes an excerpt and a reference to the full material, which Ivenna can retrieve when needed. The deployment retains these [source files](running.md#data-and-retention). Mail attachment intake is not implemented.
 
-Ivenna receives the subject and body as text. Plain-text bodies are preferred; HTML-only letters supply their HTML source. Longer content includes an excerpt and a reference to the full material, which Ivenna can retrieve when needed. The deployment retains these [source files](running.md#local-data). Mail attachment intake is not implemented.
+For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 
 ## Continuing correspondence
 
 Describe what you are referring to, what changed, and what you want to happen next. For example:
 
 ```text
-To: ivenna@ivenna.test
+To: <Ivenna's address>
 Subject: French practice schedule
 
 About the French practice plan: use Tuesday and Saturday, and keep each
@@ -52,7 +39,7 @@ You can use your client's reply action or compose a new message. Ivenna relates 
 
 Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. Its focuses share the host and memory; each work focus returns its result to the focus that created it. See [work ownership](architecture.md#forks-and-work-ownership) for details.
 
-Detailed work contexts can be released. Autonomous memory, retained correspondence, source files, and core handovers provide material for continued understanding. Processing leaves source letters in their existing folders. See [local data](running.md#local-data) for storage and cleanup.
+Detailed work contexts can be released. Autonomous memory, retained correspondence, source files, and core handovers provide material for continued understanding. Processing leaves source letters in their existing folders. See [data and retention](running.md#data-and-retention) for storage and cleanup.
 
 ## After interruption
 

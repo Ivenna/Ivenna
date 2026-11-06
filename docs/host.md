@@ -93,6 +93,6 @@ In the result description, both `stdout` and `stderr` contain an absolute `path`
 
 Stderr's `content` contains either a `text` preview or an `unavailable` diagnostic. See [tool content](content.md) for classification, image descriptions, preview bounds, and model-input limits. Content diagnostics leave the command outcome and stream descriptions available.
 
-Each invocation creates distinct log files under `<DATA_DIR>/host/<session_id>/`. They contain the full streams, including output omitted from the reply, and outlive the working session. Later shell calls can read or remove them. See [local data](running.md#local-data) for `DATA_DIR` configuration.
+Each invocation creates distinct log files under `<DATA_DIR>/host/<session_id>/`. They contain the full streams, including output omitted from the reply, and outlive the working session. Later shell calls can read or remove them. See [data and retention](running.md#data-and-retention) for `DATA_DIR` configuration.
 
 A timeout returns the captured output. Runtime cancellation stops the invocation without returning an ordinary tool result. Effects already produced remain in place in either case. See [startup and interruption](architecture.md#startup-and-interruption) for continuation after a runtime failure or restart.

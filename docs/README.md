@@ -6,8 +6,9 @@ Choose a guide for your task:
 | --- | --- |
 | Understand the project's goals and interface principles | [Design intent](design.md) |
 | Trace execution, package dependencies, and component ownership | [Architecture guide](architecture.md) |
-| Build from source, edit interfaces, and update middleware | [Development guide](development.md) |
-| Set up middleware, choose storage, and start Ivenna | [Running guide](running.md) |
+| Follow development conventions, build from source, and validate changes | [Development guide](development.md) |
+| Prepare, run, and update the supplied local development environment | [Local development](../dev/README.md) |
+| Configure runtime services, choose storage, and start Ivenna | [Running guide](running.md) |
 | Send messages and understand reception and responses | [Usage guide](usage.md) |
 | Read retained records, temporary requests, and response destinations | [Input contract](input.md) |
 | Use contact references and explicitly send messages | [Communication](communication.md) |

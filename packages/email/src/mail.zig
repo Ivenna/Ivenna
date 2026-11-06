@@ -47,7 +47,8 @@ const body_properties = metadata_properties ++ &[_][]const u8{
 };
 
 /// Typed JMAP operations shared by the email boundary and internal mail state.
-/// Stalwart decodes MIME and headers; this component decodes protocol results.
+/// The mail service decodes MIME and headers; this component decodes protocol
+/// results.
 /// Discover once using an allocator that outlives every operation and worker.
 pub const Mailbox = struct {
     client: *std.http.Client,
