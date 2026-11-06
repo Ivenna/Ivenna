@@ -11,12 +11,8 @@ pub const Address = struct {
 pub const Letter = struct {
     id: []const u8,
     from: []const Address,
-    to: []const Address,
     subject: []const u8,
     body: []const u8,
-    state_key: ?[]const u8 = null,
-    state_record: bool = false,
-    outbound: bool = false,
 };
 
 pub const Outgoing = struct {
@@ -30,22 +26,34 @@ pub const Submission = struct {
     sent_copy: enum { updated, unconfirmed },
 };
 
+pub const StateRecord = struct {
+    id: []const u8,
+    revision: u64,
+};
+
 const core_capability = "urn:ietf:params:jmap:core";
 const mail_capability = "urn:ietf:params:jmap:mail";
 const submission_capability = "urn:ietf:params:jmap:submission";
-const state_key_property = "header:X-Ivenna-State-Key:asText";
-const state_record_keyword = "ivenna-state";
 const handled_keyword = "ivenna-handled";
 const outbound_keyword = "ivenna-outbound";
-const metadata_properties: []const []const u8 = &.{
-    "id",               "keywords", "from", "to", "subject",
-    state_key_property,
+const state_keyword = "ivenna-state";
+const current_keyword = "ivenna-current";
+const state_key_property = "header:X-Ivenna-State-Key:asText";
+const revision_property = "header:X-Ivenna-History-Revision:asText";
+const state_properties: []const []const u8 = &.{
+    "id", "keywords", "from", "to", state_key_property, revision_property,
 };
-const body_properties = metadata_properties ++ &[_][]const u8{
-    "textBody", "htmlBody", "bodyValues",
+const message_properties: []const []const u8 = &.{
+    "id", "from", "subject", "textBody", "htmlBody", "bodyValues",
 };
 
-/// JMAP access for correspondence and internal state records.
+fn stateKeyKeyword(a: Allocator, key: []const u8) ![]const u8 {
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(key, &hash, .{});
+    return std.fmt.allocPrint(a, "ivenna-key-{s}", .{std.fmt.bytesToHex(hash, .lower)});
+}
+
+/// JMAP access for correspondence, submissions, and internal history storage.
 /// Discover once using an allocator that outlives every operation and worker.
 pub const Mailbox = struct {
     client: *std.http.Client,
@@ -111,20 +119,26 @@ pub const Mailbox = struct {
     /// Intake uses private progress and origin markers, independently of the
     /// client's read status, stars, or ordinary folder organization.
     pub fn pending(self: Mailbox, a: Allocator, limit: usize) ![]const Letter {
-        return self.queryLetters(a, try value(a, .{
-            .operator = "AND",
-            .conditions = .{
-                try self.recentFilter(a),
-                try value(a, .{ .notKeyword = handled_keyword }),
-                try value(a, .{ .notKeyword = outbound_keyword }),
-            },
-        }), true, limit);
-    }
-
-    pub fn read(self: Mailbox, a: Allocator, id: []const u8) !Letter {
-        const records = try self.getRecords(a, &.{id}, true);
-        if (records.len == 0) return error.MailNotFound;
-        return self.decode(a, records[0], true);
+        const filter = try self.pendingFilter(a);
+        var letters: std.ArrayList(Letter) = .empty;
+        var position: usize = 0;
+        while (letters.items.len < limit) {
+            const ids = try self.queryIds(a, filter, true, position, limit - letters.items.len);
+            if (ids.len == 0) break;
+            for (try self.getRecords(a, ids)) |record| {
+                const letter = decode(a, record) catch |err| switch (err) {
+                    error.MailBodyUnavailable => {
+                        std.log.warn("mail {s} has no complete supported body", .{try textField(record, "id")});
+                        continue;
+                    },
+                    else => return err,
+                };
+                if (!self.isCorrespondence(letter)) continue;
+                try letters.append(a, letter);
+            }
+            position += ids.len;
+        }
+        return letters.toOwnedSlice(a);
     }
 
     pub fn markHandled(self: Mailbox, a: Allocator, id: []const u8) !void {
@@ -139,9 +153,113 @@ pub const Mailbox = struct {
         if (!hasKey(result, "updated", id)) return error.InvalidMailReply;
     }
 
+    /// Private keywords index keys without relying on arbitrary-header search.
+    /// Exact headers and self addresses still identify the selected records.
+    pub fn stateRecords(self: Mailbox, a: Allocator, key: []const u8, current: bool) ![]const StateRecord {
+        var conditions: std.ArrayList(Value) = .empty;
+        try conditions.append(a, try value(a, .{ .hasKeyword = state_keyword }));
+        try conditions.append(a, try value(a, .{ .hasKeyword = try stateKeyKeyword(a, key) }));
+        if (current) try conditions.append(a, try value(a, .{ .hasKeyword = current_keyword }));
+        const filter = try value(a, .{ .operator = "AND", .conditions = conditions.items });
+        var records: std.ArrayList(StateRecord) = .empty;
+        var position: usize = 0;
+        while (true) {
+            const ids = try self.queryIds(a, filter, false, position, self.max_get);
+            if (ids.len == 0) break;
+            const response = try self.call(a, "Email/get", .{
+                .accountId = self.account_id,
+                .ids = ids,
+                .properties = state_properties,
+            });
+            const fetched = try arrayField(response, "list");
+            for (ids) |id| {
+                const record = for (fetched) |candidate| {
+                    if (std.mem.eql(u8, try textField(candidate, "id"), id)) break candidate;
+                } else return error.InvalidHistory;
+                const keywords = try field(record, "keywords");
+                if (keywords != .object) return error.InvalidMailReply;
+                if (!boolean(keywords, state_keyword) or (current and !boolean(keywords, current_keyword))) continue;
+                if (!std.mem.eql(u8, optionalText(record, state_key_property) orelse continue, key)) continue;
+                const from = try addresses(a, record, "from");
+                if (from.len != 1 or !std.ascii.eqlIgnoreCase(from[0].email, self.address)) continue;
+                const to = try addresses(a, record, "to");
+                const addressed_to_self = for (to) |recipient| {
+                    if (std.ascii.eqlIgnoreCase(recipient.email, self.address)) break true;
+                } else false;
+                if (!addressed_to_self) continue;
+                const revision = if (current) blk: {
+                    const text = optionalText(record, revision_property) orelse return error.InvalidHistory;
+                    const parsed = std.fmt.parseInt(u64, text, 10) catch return error.InvalidHistory;
+                    if (parsed == 0) return error.InvalidHistory;
+                    break :blk parsed;
+                } else 0;
+                try records.append(a, .{ .id = try textField(record, "id"), .revision = revision });
+            }
+            position += ids.len;
+        }
+        return records.toOwnedSlice(a);
+    }
+
+    /// History data is one complete plain-text part, without subject or
+    /// display transformations. Incomplete or malformed source is an error.
+    pub fn stateData(self: Mailbox, a: Allocator, id: []const u8) ![]const u8 {
+        const response = try self.call(a, "Email/get", .{
+            .accountId = self.account_id,
+            .ids = &[_][]const u8{id},
+            .properties = &[_][]const u8{ "id", "textBody", "bodyValues" },
+            .bodyProperties = &[_][]const u8{ "partId", "type" },
+            .fetchTextBodyValues = true,
+            .maxBodyValueBytes = 0,
+        });
+        const records = try arrayField(response, "list");
+        if (records.len != 1 or !std.mem.eql(u8, try textField(records[0], "id"), id)) return error.InvalidHistory;
+        const parts = try arrayField(records[0], "textBody");
+        if (parts.len != 1 or !std.ascii.eqlIgnoreCase(try textField(parts[0], "type"), "text/plain")) return error.InvalidHistory;
+        const part = try field(try field(records[0], "bodyValues"), try textField(parts[0], "partId"));
+        if (boolean(part, "isEncodingProblem") or boolean(part, "isTruncated")) return error.InvalidHistory;
+        return textField(part, "value");
+    }
+
+    /// Confirmation publishes a complete immutable record locally, without
+    /// submitting correspondence. Only manifests have a current revision.
+    pub fn createState(self: Mailbox, a: Allocator, key: []const u8, data: []const u8, revision: ?u64) ![]const u8 {
+        var folders: std.json.ObjectMap = .empty;
+        try folders.put(a, self.archive_id, .{ .bool = true });
+        var keywords: std.json.ObjectMap = .empty;
+        try keywords.put(a, "$seen", .{ .bool = true });
+        try keywords.put(a, state_keyword, .{ .bool = true });
+        try keywords.put(a, try stateKeyKeyword(a, key), .{ .bool = true });
+        if (revision != null) try keywords.put(a, current_keyword, .{ .bool = true });
+        var message = try value(a, .{
+            .mailboxIds = Value{ .object = folders },
+            .keywords = Value{ .object = keywords },
+            .from = &[_]Address{.{ .email = self.address }},
+            .to = &[_]Address{.{ .email = self.address }},
+            .subject = try std.fmt.allocPrint(a, "Ivenna state: {s}", .{key}),
+            .textBody = &.{.{ .partId = "text", .type = "text/plain" }},
+            .bodyValues = .{ .text = .{ .value = data } },
+        });
+        try message.object.put(a, state_key_property, .{ .string = key });
+        if (revision) |number| try message.object.put(a, revision_property, .{ .string = try std.fmt.allocPrint(a, "{d}", .{number}) });
+        const response = try self.call(a, "Email/set", .{
+            .accountId = self.account_id,
+            .create = .{ .letter = message },
+        });
+        return createdId(response, "letter");
+    }
+
+    pub fn clearHistoryHead(self: Mailbox, a: Allocator, id: []const u8) !void {
+        var patch: std.json.ObjectMap = .empty;
+        try patch.put(a, "keywords/" ++ current_keyword, .null);
+        var updates: std.json.ObjectMap = .empty;
+        try updates.put(a, id, .{ .object = patch });
+        const response = try self.call(a, "Email/set", .{ .accountId = self.account_id, .update = Value{ .object = updates } });
+        if (!hasKey(response, "updated", id)) return error.InvalidMailReply;
+    }
+
     /// Submission acceptance does not establish final recipient delivery.
     pub fn send(self: Mailbox, a: Allocator, outgoing: Outgoing) !Submission {
-        const id = try self.create(a, outgoing, self.drafts_id, true, null);
+        const id = try self.create(a, outgoing);
         var patch: std.json.ObjectMap = .empty;
         try patch.put(a, "keywords/$draft", .null);
         try patch.put(a, try std.fmt.allocPrint(a, "mailboxIds/{s}", .{self.drafts_id}), .null);
@@ -156,29 +274,14 @@ pub const Mailbox = struct {
         return .{ .mail_id = id, .sent_copy = if (updated) .updated else .unconfirmed };
     }
 
-    /// Create a self-addressed state record in the mailbox.
-    pub fn saveState(self: Mailbox, a: Allocator, key: []const u8, summary: []const u8) !void {
-        try validStateKey(key);
-        _ = try self.create(a, .{
-            .to = &.{.{ .email = self.address }},
-            .subject = try std.fmt.allocPrint(a, "Ivenna state: {s}", .{key}),
-            .body = summary,
-        }, self.archive_id, false, key);
-    }
-
-    fn create(self: Mailbox, a: Allocator, outgoing: Outgoing, folder: []const u8, draft: bool, state_key: ?[]const u8) ![]const u8 {
+    fn create(self: Mailbox, a: Allocator, outgoing: Outgoing) ![]const u8 {
         var folders: std.json.ObjectMap = .empty;
-        try folders.put(a, folder, .{ .bool = true });
+        try folders.put(a, self.drafts_id, .{ .bool = true });
         var keywords: std.json.ObjectMap = .empty;
-        if (draft) {
-            try keywords.put(a, "$draft", .{ .bool = true });
-            try keywords.put(a, outbound_keyword, .{ .bool = true });
-        }
-        if (draft or std.mem.eql(u8, folder, self.archive_id))
-            try keywords.put(a, "$seen", .{ .bool = true });
-        if (state_key != null)
-            try keywords.put(a, state_record_keyword, .{ .bool = true });
-        var message = try value(a, .{
+        try keywords.put(a, "$draft", .{ .bool = true });
+        try keywords.put(a, outbound_keyword, .{ .bool = true });
+        try keywords.put(a, "$seen", .{ .bool = true });
+        const message = try value(a, .{
             .mailboxIds = Value{ .object = folders },
             .keywords = Value{ .object = keywords },
             .from = &[_]Address{.{ .email = self.address }},
@@ -187,61 +290,11 @@ pub const Mailbox = struct {
             .textBody = &.{.{ .partId = "text", .type = "text/plain" }},
             .bodyValues = .{ .text = .{ .value = outgoing.body } },
         });
-        if (state_key) |key|
-            try message.object.put(a, state_key_property, .{ .string = key });
         const result = try self.call(a, "Email/set", .{
             .accountId = self.account_id,
             .create = .{ .letter = message },
         });
         return createdId(result, "letter");
-    }
-
-    /// Find the most recent self state record whose key matches exactly.
-    /// Query by marker and header, then check the exact key and self identities
-    /// before fetching the complete body.
-    pub fn latestState(self: Mailbox, a: Allocator, key: []const u8) !?Letter {
-        try validStateKey(key);
-        var position: usize = 0;
-        const filter = try value(a, .{
-            .operator = "AND",
-            .conditions = .{
-                try self.recentFilter(a),
-                try value(a, .{ .hasKeyword = state_record_keyword }),
-                try value(a, .{ .header = &[_][]const u8{ "X-Ivenna-State-Key", key } }),
-            },
-        });
-        while (true) {
-            const ids = try self.queryIds(a, filter, false, position, self.max_get);
-            if (ids.len == 0) return null;
-            for (try self.getRecords(a, ids, false)) |record| {
-                const letter = try self.decode(a, record, false);
-                if (!self.isState(letter) or !std.mem.eql(u8, letter.state_key.?, key)) continue;
-                return try self.read(a, letter.id);
-            }
-            position += ids.len;
-        }
-    }
-
-    pub fn recent(self: Mailbox, a: Allocator, limit: usize) ![]const Letter {
-        return self.queryLetters(a, try self.recentFilter(a), false, limit);
-    }
-
-    fn queryLetters(self: Mailbox, a: Allocator, filter: Value, oldest_first: bool, limit: usize) ![]const Letter {
-        var letters: std.ArrayList(Letter) = .empty;
-        var position: usize = 0;
-        while (letters.items.len < limit) {
-            const ids = try self.queryIds(a, filter, oldest_first, position, limit - letters.items.len);
-            if (ids.len == 0) break;
-            var available: std.ArrayList(Letter) = .empty;
-            try self.appendAvailable(a, &available, ids);
-            for (available.items) |letter| {
-                if (self.isState(letter) or !self.isCorrespondence(letter)) continue;
-                try letters.append(a, letter);
-                if (letters.items.len == limit) break;
-            }
-            position += ids.len;
-        }
-        return letters.toOwnedSlice(a);
     }
 
     fn queryIds(self: Mailbox, a: Allocator, filter: Value, oldest_first: bool, position: usize, limit: usize) ![]const []const u8 {
@@ -257,9 +310,12 @@ pub const Mailbox = struct {
         return strings(a, try field(query, "ids"));
     }
 
-    fn recentFilter(self: Mailbox, a: Allocator) !Value {
+    fn pendingFilter(self: Mailbox, a: Allocator) !Value {
         var conditions: std.ArrayList(Value) = .empty;
         try conditions.append(a, try value(a, .{ .notKeyword = "$draft" }));
+        try conditions.append(a, try value(a, .{ .notKeyword = handled_keyword }));
+        try conditions.append(a, try value(a, .{ .notKeyword = outbound_keyword }));
+        try conditions.append(a, try value(a, .{ .notKeyword = state_keyword }));
         for (self.excluded_ids) |id| {
             try conditions.append(a, try value(a, .{
                 .operator = "NOT",
@@ -269,27 +325,14 @@ pub const Mailbox = struct {
         return value(a, .{ .operator = "AND", .conditions = conditions.items });
     }
 
-    fn appendAvailable(self: Mailbox, a: Allocator, letters: *std.ArrayList(Letter), ids: []const []const u8) !void {
-        for (try self.getRecords(a, ids, true)) |record| {
-            const letter = self.decode(a, record, true) catch |err| switch (err) {
-                error.MailBodyUnavailable => {
-                    std.log.warn("mail {s} has no complete supported body", .{try textField(record, "id")});
-                    continue;
-                },
-                else => return err,
-            };
-            try letters.append(a, letter);
-        }
-    }
-
     /// Preserve the requested order: Email/get need not return query order.
-    fn getRecords(self: Mailbox, a: Allocator, ids: []const []const u8, body: bool) ![]const Value {
+    fn getRecords(self: Mailbox, a: Allocator, ids: []const []const u8) ![]const Value {
         const result = try self.call(a, "Email/get", .{
             .accountId = self.account_id,
             .ids = ids,
-            .properties = if (body) body_properties else metadata_properties,
-            .fetchTextBodyValues = body,
-            .fetchHTMLBodyValues = body,
+            .properties = message_properties,
+            .fetchTextBodyValues = true,
+            .fetchHTMLBodyValues = true,
         });
         const records = try arrayField(result, "list");
         var ordered: std.ArrayList(Value) = .empty;
@@ -304,38 +347,19 @@ pub const Mailbox = struct {
         return ordered.toOwnedSlice(a);
     }
 
-    fn decode(_: Mailbox, a: Allocator, record: Value, body: bool) !Letter {
-        const keywords = try field(record, "keywords");
-        if (keywords != .object) return error.InvalidMailReply;
+    fn decode(a: Allocator, record: Value) !Letter {
         return .{
             .id = try textField(record, "id"),
             .from = try addresses(a, record, "from"),
-            .to = try addresses(a, record, "to"),
             .subject = optionalText(record, "subject") orelse "",
-            .body = if (body) try bodyText(a, record) else "",
-            .state_key = optionalText(record, state_key_property),
-            .state_record = boolean(keywords, state_record_keyword),
-            .outbound = boolean(keywords, outbound_keyword),
+            .body = try bodyText(a, record),
         };
-    }
-
-    fn isState(self: Mailbox, letter: Letter) bool {
-        const key = letter.state_key orelse return false;
-        if (!letter.state_record or key.len == 0 or letter.from.len != 1 or !std.ascii.eqlIgnoreCase(letter.from[0].email, self.address)) return false;
-        for (letter.to) |recipient|
-            if (std.ascii.eqlIgnoreCase(recipient.email, self.address)) return true;
-        return false;
     }
 
     fn isCorrespondence(self: Mailbox, letter: Letter) bool {
         if (letter.from.len == 0) return false;
         for (letter.from) |address|
             if (self.addressing.id(address.email) == null) return false;
-        if (letter.outbound) {
-            if (letter.from.len != 1 or !std.ascii.eqlIgnoreCase(letter.from[0].email, self.address) or letter.to.len == 0) return false;
-            for (letter.to) |recipient|
-                if (self.addressing.id(recipient.email) == null) return false;
-        }
         return true;
     }
 
@@ -417,14 +441,6 @@ fn objectLimit(record: Value, name: []const u8) !usize {
     const item = optionalField(record, name) orelse return 32;
     if (item != .integer or item.integer <= 0) return error.InvalidMailReply;
     return @intCast(@min(item.integer, 32));
-}
-
-fn validStateKey(key: []const u8) !void {
-    if (key.len == 0) return error.InvalidStateKey;
-    for (key) |byte| switch (byte) {
-        0, '\r', '\n' => return error.InvalidStateKey,
-        else => {},
-    };
 }
 
 fn bodyText(a: Allocator, record: Value) ![]const u8 {

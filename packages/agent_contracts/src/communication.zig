@@ -8,19 +8,6 @@ pub const IncomingMessage = struct {
     observed_at_unix_ms: i64,
 };
 
-/// A record of a message Ivenna previously sent.
-pub const SentMessage = struct {
-    recipients: []const []const u8,
-    text: []const u8,
-    /// Time this sent message was observed, in Unix milliseconds.
-    observed_at_unix_ms: i64,
-};
-
-pub const HistoryItem = union(enum) {
-    received: IncomingMessage,
-    sent: SentMessage,
-};
-
 pub const Message = struct {
     recipients: []const []const u8,
     text: []const u8,

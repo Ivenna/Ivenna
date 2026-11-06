@@ -41,10 +41,10 @@ You can use your client's reply action or compose a new message. Ivenna relates 
 
 Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. Its focuses share the host and memory; each work focus returns its result to the focus that created it. See [work ownership](architecture.md#forks-and-work-ownership) for details.
 
-Detailed work contexts can be released. Autonomous memory, retained correspondence, and core handovers provide material for continued understanding. Processing leaves correspondence in its existing folders. See [data and retention](running.md#data-and-retention) for storage and cleanup.
+The core and still-retained work contexts survive restart. Long histories can be condensed into handovers, and detailed work contexts can be released after the work no longer needs them. Autonomous memory, correspondence, and the remaining histories provide material for continued understanding. Processing leaves correspondence in its existing folders. See [data and retention](running.md#data-and-retention) for storage and cleanup.
 
 ## After interruption
 
-After a [restart](running.md#stopping-and-restarting) with the same deployment data, Ivenna rebuilds its understanding from the available core handover and recent correspondence. It continues reading [ordinary unprocessed mail](running.md#mail-intake); it does not restore individual work histories or interrupted execution.
+After a [restart](running.md#stopping-and-restarting), Ivenna loads its saved core and retained work histories. Each session receives a fresh startup observation with the current time and can choose what to inspect or continue without waiting for new correspondence. Unread internal assignments and reports remain available for processing.
 
-An interrupted operation may already have changed files, memory, or mail. Inspect uncertain effects before asking Ivenna to repeat work, and include what is known in a new message. Automatic execution recovery remains undefined; see [startup and interruption](architecture.md#startup-and-interruption).
+Earlier activations and host processes are not restored, and old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail before its result was saved. [Ordinary unprocessed mail](running.md#mail-intake) can appear again even if an earlier observation was retained. Include what is known about external changes when corresponding about interrupted work. See [startup and interruption](architecture.md#startup-and-interruption) for how retained history relates to the new runtime.

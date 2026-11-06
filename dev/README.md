@@ -148,7 +148,7 @@ Read Ivenna's outgoing messages through a JMAP-capable client or mail API using 
 
 ## Stopping and restarting
 
-Press `Ctrl+C` to stop the kernel and wait for its workers. Before restarting after an interruption, inspect uncertain effects as described in the [restart guidance](../docs/running.md#stopping-and-restarting). With the services running and configuration loaded, start the kernel again with `zig build run`.
+Press `Ctrl+C` to stop the kernel and wait for its workers. With the services running and configuration loaded, start the kernel again with `zig build run`. The configured mailbox retains the working contexts independently of `DATA_DIR`; the [restart guidance](../docs/running.md#stopping-and-restarting) explains fresh startup activations and interrupted effects.
 
 To remove the local middleware containers while retaining mail, memory, and SSH keys:
 
@@ -207,10 +207,11 @@ Source changes inside the memory image require a [rebuild](#updating-the-kernel-
 
 | Location | Contents |
 | --- | --- |
-| Stalwart volume, `ivenna-mail` by default | Mail, handovers, accounts, and Stalwart configuration |
+| Stalwart volume, `ivenna-mail` by default | Correspondence, canonical history records, manifests, accounts, and Stalwart configuration |
 | Memory volume, `ivenna-memory` by default | Shared memory rooms and entries |
 | `.env` | Kernel and local service settings and credentials |
 | `dev/mail/provision.ndjson` | Private mail configuration plan |
 | `.ivenna/dev-memory/` | Local memory SSH configuration and keys |
+| `<DATA_DIR>/host/` | Full host command output |
 
 The preparation script and Compose use `.ivenna/dev-memory/` under the repository root independently of `DATA_DIR`. Changing `DATA_DIR` leaves these files and the middleware volumes in place. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.

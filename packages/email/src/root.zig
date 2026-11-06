@@ -3,6 +3,7 @@ const contracts = @import("agent_contracts");
 const Mailbox = @import("mail.zig").Mailbox;
 const Addressing = @import("addressing.zig").Addressing;
 const EmailTransport = @import("email_transport.zig").EmailTransport;
+const History = @import("history.zig").History;
 const Allocator = std.mem.Allocator;
 
 pub const Config = struct {
@@ -11,12 +12,13 @@ pub const Config = struct {
     address: []const u8,
 };
 
-/// Own the mail integration behind the runtime's observation, submission, and
-/// handover contracts. Native mail records remain private to the integration.
+/// Own correspondence and persistent history behind the runtime's contracts.
+/// Native mail records remain private to the integration.
 pub const Integration = struct {
     discovery: std.heap.ArenaAllocator,
     mailbox: Mailbox,
     transport: EmailTransport,
+    history_adapter: History,
 
     /// Initialize in the final storage location: components borrow each other.
     /// The client and configuration strings must outlive self.
@@ -32,9 +34,11 @@ pub const Integration = struct {
         };
         try self.mailbox.discover(self.discovery.allocator());
         self.transport = EmailTransport.init(&self.mailbox);
+        self.history_adapter = History.init(allocator, &self.mailbox);
     }
 
     pub fn deinit(self: *Integration) void {
+        self.history_adapter.deinit();
         self.discovery.deinit();
         self.* = undefined;
     }
@@ -47,19 +51,13 @@ pub const Integration = struct {
         return .{ .context = self, .submit = submit };
     }
 
-    pub fn handovers(self: *Integration) contracts.HandoverStore {
-        return .{ .context = self, .vtable = &handover_vtable };
+    pub fn history(self: *Integration) contracts.HistoryStore {
+        return self.history_adapter.port();
     }
 
     const inbox_vtable: contracts.Inbox.VTable = .{
         .poll = poll,
-        .recent = recent,
         .complete = complete,
-    };
-
-    const handover_vtable: contracts.HandoverStore.VTable = .{
-        .load = loadHandover,
-        .save = saveHandover,
     };
 
     fn fromContext(context: *anyopaque) *Integration {
@@ -77,24 +75,11 @@ pub const Integration = struct {
         return incoming;
     }
 
-    fn recent(context: *anyopaque, a: Allocator, limit: usize) ![]const contracts.Communication.HistoryItem {
-        return fromContext(context).transport.recent(a, limit);
-    }
-
     fn complete(context: *anyopaque, a: Allocator, receipt: []const u8) !void {
         return fromContext(context).mailbox.markHandled(a, receipt);
     }
 
     fn submit(context: *anyopaque, a: Allocator, message: contracts.Communication.Message) !contracts.Communication.Submission {
         return fromContext(context).transport.send(a, message);
-    }
-
-    fn loadHandover(context: *anyopaque, a: Allocator, key: []const u8) !?contracts.Handover {
-        const letter = try fromContext(context).mailbox.latestState(a, key) orelse return null;
-        return .{ .summary = letter.body };
-    }
-
-    fn saveHandover(context: *anyopaque, a: Allocator, key: []const u8, summary: []const u8) !void {
-        return fromContext(context).mailbox.saveState(a, key, summary);
     }
 };

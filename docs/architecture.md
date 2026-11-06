@@ -1,8 +1,8 @@
 # Architecture
 
-Ivenna coordinates incoming messages, model sessions, and explicit tool effects within one body. The application exposes health and reception status. The kernel retains execution histories in process memory and coordinates communication and autonomous memory as required capabilities.
+This guide describes Ivenna's current implementation: package responsibilities, execution, and service and storage protocols. The kernel retains working histories across restarts and constructs fresh execution state on startup. The application assembles the runtime and exposes health and reception status.
 
-The [design intent](design.md) explains these choices. The [input contract](input.md) defines retained records and current requests, [communication](communication.md) defines outgoing messages, and the [usage guide](usage.md) explains correspondence with Ivenna.
+The [design intent](design.md) explains these choices. The [input contract](input.md) defines model-facing records and current requests, [communication](communication.md) defines outgoing messages, and the [usage guide](usage.md) explains correspondence with Ivenna.
 
 ## Responsibilities
 
@@ -11,8 +11,8 @@ The [design intent](design.md) explains these choices. The [input contract](inpu
 | [apps/ivenna](../apps/ivenna) | Configure and assemble the runtime, serve HTTP status, and own process startup and shutdown |
 | [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
 | [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activations, forks, and retained history; own model-input rendering, execution policy, and model-facing resources |
-| [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, handover, and capability contracts shared by execution and concrete implementations |
-| [packages/email](../packages/email/src/root.zig) | Implement communication within the internal domain and continuity through mail, owning native records, correspondent addressing, message projection, and state storage |
+| [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
+| [packages/email](../packages/email/src/root.zig) | Implement communication and working-history storage within the mailbox, owning native records, correspondent addressing, message projection, manifest publication, and processing markers |
 | [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, validate Responses output, and apply model content limits |
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own shell execution, process cleanup, logs, and returned output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
@@ -44,21 +44,21 @@ flowchart TD
     Agent --> YAML[YAML]
 ```
 
-At runtime, the application supplies concrete capability implementations to the core through these contracts. Kernel calls the input, sending, and handover operations; Engine calls the model and registered tools. These calls dispatch to the supplied implementations, whose code runs in the same process.
+At runtime, the application supplies concrete capability implementations to the core through these contracts. Kernel calls the input, sending, and history storage operations; Engine calls the model and registered tools. These calls dispatch to the supplied implementations, whose code runs in the same process.
 
 The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer. Session scheduling, owned deliveries, activations, and retained context remain core implementation details. `Kernel.Config` and `Kernel.Limits` describe execution policy. Connection settings and protocol parameters belong to their capability packages; the application loads environment values and owns HTTP listener settings.
 
-Shared [communication types](../packages/agent_contracts/src/communication.zig) describe who each received observation came from, whom each sent message addressed, and recent history that distinguishes the two. Each message record carries correspondent ID strings, text, and observation time; [handovers](../packages/agent_contracts/src/handover.zig) carry continued understanding. The shared capability contracts define calls and data exchanged within the process. The core owns the YAML supplied to the model, and each adapter owns its service protocol encoding:
+Shared [communication types](../packages/agent_contracts/src/communication.zig) describe incoming observations and explicit outgoing messages. The shared capability contracts define calls and data exchanged within the process. The agent owns model-input rendering, handovers, source-record encoding, and the active-session manifest; each adapter owns its service protocol encoding:
 
 | Contract | Operations | Implementation |
 | --- | --- | --- |
-| [Inbox](../packages/agent_contracts/src/inbox.zig) | Poll `Inbox.Incoming` messages with opaque receipts, supply recent `Communication.HistoryItem` values, and record consumption | Email integration |
+| [Inbox](../packages/agent_contracts/src/inbox.zig) | Poll `Inbox.Incoming` messages with opaque receipts and record consumption | Email integration |
 | [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Submit explicit outgoing messages using correspondent IDs | Email integration |
-| [HandoverStore](../packages/agent_contracts/src/handover.zig) | Load and save handovers by state key | Email integration |
+| [HistoryStore](../packages/agent_contracts/src/history.zig) | Load and save the current manifest; read and put immutable source records | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure the encoded request, and apply model content limits | Responses adapter |
 | [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host and Memory |
 
-The email integration implements three contracts over one shared mail client. Correspondence and handovers keep their own semantics and retention within the mail service. The kernel uses these operations without inspecting mail headers, folders, or native delivery identifiers.
+The email integration implements reception, sending, and history storage over one shared mail client. Private markers distinguish history state and runtime-created outgoing messages from ordinary correspondence and track input consumption. The kernel uses these operations without inspecting mail headers, folders, or native delivery identifiers.
 
 The email adapter supplies `Inbox.Incoming` with a complete `Communication.IncomingMessage` and an opaque consumption receipt. The receipt identifies the native letter within the configured account and stays outside model input. Inside the core, [Work](../packages/agent/src/work.zig) owns the accepted delivery's event and receipts; Sessions tracks receipts to prevent duplicate intake while messages remain visible to polling. A fork's assignment can hold the receipts of several original inputs. The kernel records their consumption through `Inbox` when processing completes. Model-facing input and communication use the shared contracts independently of mail records or thread identifiers.
 
@@ -66,7 +66,9 @@ The application owns service, kernel, and shutdown tasks. The [kernel](../packag
 
 ## Service and reception
 
-The application discovers the mail account and checks memory, then binds `SERVICE_ADDRESS` before starting kernel tasks. While the listener is running, `GET /healthz` reports that the HTTP service is responding. `GET /readyz` returns success with `X-Ivenna-Ready: true` only while the kernel's reception state is open; otherwise it returns `503`. Readiness opens after the core's startup recollection. Closing is terminal for that kernel instance. The status endpoint reads this lifecycle state; it does not perform fresh dependency checks or reserve processing capacity.
+The application discovers the mail account, checks memory, and initializes the kernel, including history loading and startup activation setup. It then binds `SERVICE_ADDRESS` and starts kernel tasks. The kernel opens reception before dispatching the startup activations; readiness does not wait for their model work to finish.
+
+While the listener is running, `GET /healthz` reports that the HTTP service is responding. `GET /readyz` returns success with `X-Ivenna-Ready: true` only while reception is open; otherwise it returns `503`. Closing is terminal for that kernel instance. The status endpoint reads this lifecycle state; it does not perform fresh dependency checks or reserve processing capacity.
 
 The receiving boundary checks reception status before accepting correspondence. This is a precheck: shutdown can follow a successful check, and an already accepted message can remain in ordinary mail storage. The receiving policy is configured in the deployment's mail infrastructure. The [running guide](running.md#service-status-and-reception) describes the reception contract and HTTP status interface; the [local mail setup](../dev/README.md#configuring-mail) provides an SMTP example.
 
@@ -77,7 +79,7 @@ Reception status belongs to the service boundary. Model reasoning and tools do n
 | Concept | Role and lifetime |
 | --- | --- |
 | Task | Work to be accomplished; it may continue across activations |
-| Core session | Coordinating context retained for the kernel's lifetime, with its own queue and execution lane |
+| Core session | Permanent coordinating session with saved history and a runtime queue and execution lane |
 | Work session | A fork with an independent history, queue, parent, and any children |
 | Input | Message observation with `from` IDs, text, and observation time |
 | Delivery | An owned event being queued or executed, with zero or more consumption receipts |
@@ -88,9 +90,9 @@ Every incoming message enters the core independently, including messages a mail 
 
 The core exposes `send_message` and `fork_session`. Work sessions have the full tool interface and can fork further sessions. `send_message` is available independently of the activation's incoming messages or result destination. For ordinary work, a response without tool calls ends the current activation: its final text is an internal result in the core or a report to a work session's direct parent. The broader task can remain open.
 
-`MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core. It also bounds each session's active and queued deliveries plus reserved child reports. Every active delivery counts; a child assignment carrying several receipts is still one delivery. Input that cannot be admitted stays with its producer; the mail integration leaves it available for later polling. Idle parents retain context while their children work without consuming a work slot. The core still processes its requests serially, so responsiveness also depends on short coordination turns and service latency.
+`MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core. It also bounds each session's active and queued ordinary deliveries plus reserved child reports. Startup adds one control observation per session outside that ordinary delivery budget. A child assignment carrying several receipts is still one delivery. Input that cannot be admitted stays with its producer; the mail integration leaves it available for later polling. Idle parents retain context while their children work without consuming a work slot. The core still processes its requests serially, so responsiveness also depends on short coordination turns and service latency.
 
-Publishing a fork replaces the caller's active delivery group with one reserved report slot in that caller's admission budget. Queue storage preserves room for outstanding report slots. When the child returns, its report consumes the slot and joins the queue, so later input cannot take its place. Runtime `queued_inputs` counts actual queued deliveries, excluding these reservations.
+A work activation reserves space for its report in its direct parent's admission budget. The initial reservation is made when preparing a fork; a later activation reserves a new slot before it starts and waits if the parent has no capacity. A completed report consumes that slot and joins the parent's queue, so later input cannot take its place. Runtime `queued_inputs` counts actual queued deliveries, excluding these reservations.
 
 ## Activation admission
 
@@ -102,23 +104,15 @@ When old working history prevents even the first event from fitting, the kernel 
 
 `fork_session` accepts a `task` and passes the whole activation's work to one new work session. A model round can create at most one fork. The [tool definitions](../packages/agent/src/tools.json) own its parameters.
 
-Sessions reserves child identity and context capacity during tool invocation. It publishes the fork only after committing model output and one result for every tool call, so inherited history contains a complete exchange.
+Sessions reserves child identity, context capacity, and parent report space during tool invocation. It publishes the fork only after committing model output and one result for every tool call, so inherited history contains a complete exchange.
 
 A fork copies the caller's complete retained context, including any compaction handover. It receives an assignment, and its model request supplies its current state. Histories then grow independently while the host, memory, and world effects remain shared. The [input contract](input.md#assignments-and-reports) defines assignment and report fields.
 
 Publishing a fork ends the caller's activation and transfers all of its deliveries' consumption receipts to one child assignment. The child handles the assignment in a new activation. Queued deliveries remain with the caller, which returns to its own queue without another inference to conclude the transfer. Later messages still arrive at the core.
 
-A work session's final text returns one combined result to the session that created it. The report enters the tail of that parent's FIFO queue and can join other events in a later activation. It does not modify history during an ongoing model round. Nested forks return through their direct parents; a child does not inherit an ancestor's reporting destination. Report deliveries have no consumption receipts.
+A work session's final text returns one combined result for that activation to the session that created it. The report enters the tail of that parent's FIFO queue and can join other events in a later activation. It does not modify history during an ongoing model round. Nested forks return through their direct parents; a child does not inherit an ancestor's reporting destination. Report deliveries have no consumption receipts.
 
-Session identifiers, queues, and report reservations last for one kernel process.
-
-## Records, context, and current requests
-
-[Input](../packages/agent/src/input.zig) defines and renders retained `Record` messages and temporary `Request` messages. Records incorporate shared received-message, sent-message, and handover types from `agent_contracts`; requests supply current state and instructions. New observations use `Event.input`; recollection uses distinct `ContextItem.received` and `ContextItem.sent` branches. Event grouping, assignments, reports, and execution state belong to the core. The [input contract](input.md) owns their serialized payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
-
-Sessions fixes the selected delivery group, returns the unselected suffix, and installs the selected history under the registry lock. [Context](../packages/agent/src/context.zig) owns retained `Model.Item` values: native system and user messages, opaque adapter continuation bytes, and typed tool results. Continuations retain complete model output, including reasoning, in the producing adapter's format. Context copies those bytes without interpreting them; they remain meaningful to that adapter for the retained context's lifetime. Startup recollection records the core handover and recent correspondence as supporting context. Forks copy retained history with its original session identifiers.
-
-For each inference, the kernel takes an owned history snapshot and obtains current state from Sessions. `Context.request` assembles a view of that history followed by one temporary request, without changing the snapshot. The kernel keeps the snapshot alive until the model/tool round returns. Request state and summary instructions stay outside retained history; later rounds use that history or its replacement handover.
+Session identifiers and parent relationships persist with retained contexts. The [startup contract](#startup-and-interruption) describes how those relationships and unread internal work are restored.
 
 ## Activation completion and context release
 
@@ -130,6 +124,14 @@ Sessions checks active and queued deliveries, children, and worker ownership bef
 
 The permanent core stays available between activations. Its context is summarized when it needs compaction.
 
+## Records, context, and current requests
+
+[Input](../packages/agent/src/input.zig) defines and renders retained `Record` messages and temporary `Request` messages. Records contain admitted events or a compaction handover; requests supply current state and instructions. Communication observations use `Event.input`, and startup uses `Event.startup`. Event grouping, assignments, reports, and execution state belong to the core. The [input contract](input.md) owns their serialized payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+
+Sessions fixes the selected delivery group, returns the unselected suffix, and installs the selected history under the registry lock. [Context](../packages/agent/src/context.zig) owns typed admitted event groups, complete model/tool exchanges, and handovers. Model exchanges retain native `Model.Item` values, including opaque adapter continuation bytes and typed tool results. Continuations preserve complete model output, including reasoning, in the producing adapter's format. The agent copies and persists those bytes without interpreting them; they remain specific to the producing adapter. Forks inherit the same earlier source records with their original receiving session identifiers.
+
+Context derives and caches native model messages from the current system prompt, rendered event groups and handovers, and stored model/tool exchanges when restoring or changing its source entries. For each inference, the kernel takes an owned history snapshot and obtains current state from Sessions. `Context.request` appends one temporary request to that cached model-message view without changing the snapshot. The kernel keeps the snapshot alive until the model/tool round returns. Request state and summary instructions stay outside retained history; later rounds use that history or its replacement handover.
+
 ## Bounded model context
 
 `CONTEXT_REQUEST_BYTES` bounds the complete ordinary request, including system instructions, retained records and exchanges, current state, tools, and encoded images. The kernel requests measurements through `Model.Port`; the Responses adapter uses the same encoder for sizing and transmission, including protocol fields and encoded content. `LLM_MAX_OUTPUT_TOKENS` separately bounds generated output.
@@ -138,9 +140,41 @@ After admission, each tool continuation checks the complete request budget again
 
 Compaction uses the same request assembly with response `summary` and instructions from [compaction.md](../packages/agent/src/compaction.md). It assembles retained history followed by one temporary summary request. The agent supplies no tools for that request; the Responses adapter encodes this as `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
 
-The kernel builds the replacement's ordinary request with a fresh state snapshot and checks its complete budget before installing the handover record. Core compaction also saves the summary under the fixed internal state key `core`; work-session compaction remains in memory. The handover replaces the entire earlier working view; no raw transcript tail is retained. Summary instructions preserve relevant session and correspondent IDs, relationships, ongoing work, commitments, and completed effects.
+The kernel builds the replacement's ordinary request with a fresh state snapshot and checks its complete budget before installing the handover record. Compaction updates the session's persisted history path. The handover replaces the entire earlier working view, including its raw transcript tail; immutable source records remain stored separately. Summary instructions preserve relevant session and correspondent IDs, relationships, ongoing work, commitments, and completed effects.
 
 Byte counts are local measurements, not model-token estimates. If a request or summary cannot meet its bound, execution fails explicitly rather than cutting an unfinished exchange.
+
+## Persistent working history
+
+The agent's [history codec](../packages/agent/src/history.zig) stores immutable canonical records as compact UTF-8 ZON bodies. Each record is keyed by the SHA-256 hex digest of that body:
+
+| Source kind | Payload |
+| --- | --- |
+| `event` | One typed `Input.Event` |
+| `exchange` | One complete model-output and tool-result batch as `Model.Item[]` |
+| `handover` | A free-form summary |
+
+Exchange records preserve opaque model output, including reasoning, and typed tool replies with text and media. Local image bytes remain in those records; remote images retain their URLs. Context derives model-facing history from these sources; current requests are generated from live state.
+
+A manifest identifies the active history paths. It contains the next session identifier and each retained session's identity, parent relationship, context generation, ordered history path, and unread internal event references. An event-group path entry records the receiving session identifier and event references; other entries reference exchange or handover records. Forks share earlier source references. Compaction replaces an active path with a handover reference; releasing a work context removes it from the next manifest. Source records remain stored independently of those active paths.
+
+The runtime saves after activation admission, accepted complete model/tool batches, compaction, fork publication, and context release. It confirms all newly referenced source records before publishing a complete new manifest. The [email integration](#history-storage) owns their native mailbox storage and current-manifest selection.
+
+Unread internal assignments and reports have no external inbox from which to read them again, so the manifest retains their event references separately from admitted history. External input deliveries, active groups, consumption receipts, worker ownership, and host process handles are outside the manifest. The [startup contract](#startup-and-interruption) describes reconstruction and interruption semantics. Storage and decoding failures end startup or execution rather than silently starting with empty history.
+
+## Startup and interruption
+
+Startup discovers the mail account and checks memory through a read-only `inspect_memory_space` exchange. Both must succeed before the kernel starts. Memory is required throughout operation.
+
+The kernel loads the current manifest and its referenced sources through `HistoryStore`. If no history exists, it creates the core. It rebuilds session identities, parent relationships, and working contexts with the current system prompt. Each session receives a fresh activation containing `startup` with the current observation time. Unread internal assignments and reports are queued after that observation for normal FIFO request-budget admission. Startup activations can run without incoming mail; a newly forked session receives an assignment instead.
+
+Startup creates fresh execution state without restoring prior activations, external input deliveries, receipts, or processes. Restored parent relationships route future reports to the direct parent. Current request state is authoritative about the new runtime; retained records describe earlier observations. Ivenna chooses how to continue from that evidence. Ordinary unhandled mail remains eligible for intake and can appear again even when an earlier observation survives in history. Correspondent IDs retain their destinations within the configured domain.
+
+A host command, memory change, or submission may have taken effect before its complete model/tool batch was saved. Losing a submission response can leave acceptance unknown; repeating it can produce a duplicate. The runtime does not replay historical calls or guarantee exactly-once effects. Uncertain effects may need inspection before further action. Automatic retry and reconnection remain undefined.
+
+The runtime assumes one kernel per Ivenna account. Message submission, mail processing markers, host effects, memory writes, and history storage do not share a transaction.
+
+Communication, memory infrastructure, model execution, compaction, and history storage errors propagate through the kernel's intake and execution tasks. An error returned by either task ends the kernel and its task scope. Defined tool outcomes, including invalid arguments, command failures, and memory-handler domain errors, remain results for the model to interpret.
 
 ## Content and provider boundary
 
@@ -158,8 +192,6 @@ Tool declarations live with their owning implementations: [communication and ses
 
 [EmailTransport](../packages/email/src/email_transport.zig) projects received From addresses into the correspondent ID strings in `IncomingMessage.from`. It renders a nonempty subject, a blank line, and the body as complete received text; with an empty subject it uses the body alone. The observation also records the runtime's observation time. Received mail must have at least one From address, and every address must map to a supported same-domain ID.
 
-Recent history uses `HistoryItem.received` for these observations and `HistoryItem.sent` for Ivenna's own communication. A sent record requires the private `ivenna-outbound` marker, exactly one From address matching Ivenna, and nonempty To addresses with supported IDs in the configured domain. The adapter projects those To addresses into `SentMessage.recipients` and keeps the body as the sent text, without the fixed transport subject. Its observation timestamp records recollection of the stored message, rather than sending or delivery time. Native To addresses also support internal state recognition.
-
 Filtering leaves completion markers unchanged. The mail client continues through native query pages after filtering so excluded records do not hide later eligible messages or consume the requested result limit.
 
 Each send resolves recipient IDs in the configured domain and submits a standalone email with subject `Ivenna` and the supplied text as its body. Unsupported IDs return the ordinary `invalid_recipient` tool result. IDs retain their destinations across context release and restart with the same domain configuration. Native addresses, delivery records, headers, folders, and processing markers remain within the email integration.
@@ -168,37 +200,25 @@ Each send resolves recipient IDs in the configured domain and submits a standalo
 
 The boundary prefers decoded plain text and falls back to UTF-8 HTML source. Unsupported or incomplete bodies remain unavailable for intake, with a diagnostic. Supported text enters the message in full and is subject to [whole-request admission](#activation-admission). Intake uses polling; mail attachment intake is unimplemented.
 
-## Internal mail state
+### History storage
 
-The [email integration](../packages/email/src/root.zig) polls through the [mail client](../packages/email/src/mail.zig) for physical input messages without the private `ivenna-handled` keyword. Intake spans ordinary mail folders and is independent of read and starred state. Runtime-created outgoing messages carry the private `ivenna-outbound` keyword; they are excluded from ordinary intake along with drafts, Junk, Trash, and recognized state records. The supported deployment uses a dedicated Ivenna account, with ordinary correspondents sending from other accounts.
+The email integration stores source records and manifests as self-addressed plain-text ZON messages in Archive through `Email/set`, without SMTP submission. It creates Archive if the account has no mailbox with that role. Message bodies carry the agent's source-record or manifest encoding; the email envelope supplies native identity and lookup metadata.
+
+State messages carry the private `ivenna-state` keyword and `X-Ivenna-State-Key`. Source record keys are `record:<sha256>`; manifest keys are `history`. Native lookup uses a private `ivenna-key-<digest>` keyword derived from SHA-256 of that native key, then validates the exact key header and self-addressed identity. Immutable puts reuse matching stored bodies and reject conflicting content.
+
+Current manifest candidates also carry `ivenna-current` and a numeric `X-Ivenna-History-Revision`. Loading validates current candidates and selects the highest revision, independently of mail observation timestamps. Distinct candidates at the same highest revision are an error. Saving confirms creation of the complete new manifest before removing current markers from previous heads. An interruption between those steps can leave several heads; the numeric revision identifies the current complete manifest.
+
+### Mail processing markers
+
+The [email integration](../packages/email/src/root.zig) polls through the [mail client](../packages/email/src/mail.zig) for physical input messages without the private `ivenna-handled` keyword. Intake spans ordinary mail folders and is independent of read and starred state. Messages carrying `ivenna-outbound` or `ivenna-state` are excluded, along with drafts and messages in Junk or Trash. The runtime marks its outgoing messages with `ivenna-outbound`. The supported deployment uses a dedicated Ivenna account, with ordinary correspondents sending from other accounts.
 
 Completion sets `ivenna-handled` on the input copy. This records consumption of that physical message; it does not store model or tool progress. Sessions keeps receipt bookkeeping in memory. The completion operation leaves ordinary read, answered, and folder state unchanged.
 
-Handovers are self-addressed internal state records stored in Archive with subject `Ivenna state: <key>`, header `X-Ivenna-State-Key`, and the private `ivenna-state` keyword. The mail client creates them through `Email/set`; creation confirmation completes storage. These records remain local to the mailbox, separate from correspondence.
+### Mail retention
 
-State lookup narrows candidates by header and keyword, then checks the exact key and private keyword. The sole From address and at least one To address must match Ivenna, ignoring case. Recognized state records are excluded from ordinary input and recent communication history. Loading the latest matching record returns its complete summary as a native handover. The kernel checks it against `HANDOVER_MAX_BYTES` before installing it; an oversized handover or read failure ends startup.
+Correspondence, immutable history records, and manifests have their own retention lifecycles. Normal completion leaves correspondence in its existing folders. History saves retain superseded manifests and source records after removing old current markers.
 
-The only runtime state key is `core`. Work sessions can compact in memory, but have no cross-restart handover lookup contract. Durable identities and lifetimes for independent internal work remain undecided.
-
-## Mail retention
-
-Correspondence and internal state records have their own retention lifecycles. Normal completion records consumption with a private keyword; handover storage creates a separate record in Archive. Correspondence stays in its existing folders.
-
-Automatic mail retention and deletion remain unimplemented. Operators manage correspondence and state records through the mail service. Context release leaves retained mail and host output files in place.
-
-## Startup and interruption
-
-Startup discovers the mail account and checks memory through a read-only `inspect_memory_space` exchange. Both must succeed before the kernel starts. Memory is required throughout operation.
-
-The email integration supplies the complete latest handover for the fixed core key. The kernel checks its size and the base coordination request before adding recent communication. The email boundary supplies received observations and sent messages from the internal domain in full; recollection admits the newest-first prefix that fits after reserving headroom in the complete-request budget. A later fork inherits that reconstructed context rather than a restored execution checkpoint.
-
-Communication, memory infrastructure, model execution, and handover generation or storage errors propagate through the kernel's intake and execution tasks. An error returned by either task ends the kernel and its task scope. Defined tool outcomes, including invalid arguments, command failures, and memory-handler domain errors, remain results for the model to interpret.
-
-Restart reconstructs understanding from the core handover and recent correspondence. Ordinary unhandled mail remains eligible for intake. Transcripts, delivery queues, receipt bookkeeping, and the branch tree have process lifetimes. Correspondent IDs retain their destinations within the configured domain independently of these runtime structures. Automatic retry, reconnection, and execution resumption remain undefined.
-
-A host command, memory change, or submission may have taken effect before interruption was observed. Losing a submission response can leave acceptance unknown; repeating it can produce a duplicate. Inspect uncertain effects before restarting or repeating work.
-
-The runtime assumes one kernel per Ivenna account. Message submission, internal state changes, host effects, memory writes, and working context do not share a transaction.
+Automatic mail retention and deletion remain unimplemented. Operators manage correspondence, history records, and superseded manifests through the mail service. Startup restoration needs the current manifest and every source record it references, including their identifying headers and private keywords. Compaction and context release update active paths while leaving earlier source records and manifests stored. See [data and retention](running.md#data-and-retention) for operational guidance and host-artifact lifetimes.
 
 ## Autonomous memory
 

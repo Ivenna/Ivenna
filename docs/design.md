@@ -28,7 +28,7 @@ Tool results can combine text, media, and information about an operation's outco
 
 People and programs communicate with Ivenna through messages. Each arrival enters the core as an observation of who said what. An observation does not imply that the words were addressed specifically to Ivenna or require a response. Ivenna relates it to its ongoing understanding and work.
 
-The communication interface supplies received text, the IDs of participants it came from, and observation time. Recent history also records Ivenna's sent text with recipient IDs and observation time. Correspondent IDs link observations with explicit communication actions. Understanding correspondents and their relationships to Ivenna can inform coordination. Policies based on correspondent IDs, including any participant whitelist or scheduling distinctions, remain undecided.
+The communication interface supplies received text, the IDs of participants it came from, and observation time. Retained model and tool exchanges preserve Ivenna's outgoing communication with its chosen recipient IDs. Correspondent IDs link observations with explicit communication actions. Understanding correspondents and their relationships to Ivenna can inform coordination. Policies based on correspondent IDs, including any participant whitelist or scheduling distinctions, remain undecided.
 
 Ivenna explicitly chooses whether to send a message, to whom, and what it says through `send_message`. An activation can send zero, one, or several messages. Final model text supplies an internal result in the core or a report to a work session's parent; outgoing communication requires an explicit send. The [communication guide](communication.md) describes the interface and its current implementation.
 
@@ -36,9 +36,9 @@ Ivenna explicitly chooses whether to send a message, to whom, and what it says t
 
 Work is defined by a task and the understanding needed to continue it. A session owns a working context and a queue. An activation handles a bounded group of already queued inputs, assignments, or reports together through model and tool rounds. It ends with a final response or a fork that passes the group's work to a child. Events arriving during an activation remain queued for later processing.
 
-Execution state coordinates ongoing work in process memory. Durable internal state records which correspondence has been processed and retains handovers for continuation. Correspondence and internal state have their own responsibilities and lifecycles.
+Execution state coordinates ongoing work in process memory. Retained working contexts persist independently of execution, while communication records which correspondence has been processed. These forms have their own responsibilities and lifecycles.
 
-Activation completion, task completion, context release, and stored-record retention have separate lifecycles. A broader task can remain open after an activation ends.
+Activation completion, task completion, context release, and data retention have separate lifecycles. A broader task can remain open after an activation ends.
 
 ## Core and concurrent attention
 
@@ -46,7 +46,7 @@ One core session coordinates Ivenna throughout the kernel's lifetime. It handles
 
 Forking is an explicit model decision available to core and work sessions alike. It passes the whole activation's work to another focus of Ivenna's attention with the complete retained working context, including any earlier handover. The caller's activation ends and it returns to its queue; the child starts an activation for its assignment.
 
-A work session's final text returns one combined result to the session that forked it. The report remains queued until that parent can process it, potentially alongside other queued events, in a later activation. Nested work returns through each creating parent, preserving the relationship between the work and its result.
+A work session's final text returns one combined result for that activation to the session that forked it. The report remains queued until that parent can process it, potentially alongside other queued events, in a later activation. Nested work returns through each creating parent, preserving the relationship between the work and its result.
 
 After a fork, the histories grow independently. The core retains its reception and coordination history; execution detail accumulates in the session carrying out the work. This keeps the core's context useful for further coordination and forks.
 
@@ -56,21 +56,23 @@ These contexts share a body: files, memory, communication, and host processes. S
 
 A work session keeps its context while its work or descendants still need it. The context can be released after completion while the broader task awaits further input. The [architecture guide](architecture.md#activation-completion-and-context-release) describes these lifetimes and how child results are retained until processing.
 
-Peer assignments, steering retained work, and parallel subtasks within one activation remain undecided. Work-session identities and queues last for one process.
+Peer assignments, steering retained work, and parallel subtasks within one activation remain undecided. Session identities and parent relationships survive with their retained contexts. Unread internal assignments and reports are retained until admission; activation ownership lasts for one process.
 
 ## Context and continuity
 
-Runtime transcripts hold the detail needed for model and tool execution. They have bounded lifetimes and sizes. Limits cover the complete model request, including instructions, tool definitions, observations, and tool results, as well as the generated response. Each limit states what it measures; byte counts and model tokens are separate units.
+Working contexts retain observations, complete model output, and tool results. The core and every still-retained work context preserve that understanding across runtime interruption. Working history has a lifetime independent of host execution artifacts.
 
-When context needs to be shortened, the kernel asks the model for a handover. The replacement context should preserve commitments, relevant uncertainty, completed effects, and correspondent IDs and context needed for continued work. Core handovers are retained in internal state for later recall. Work contexts compact in process memory; durable recovery for independent internal work remains undecided.
+Limits cover the complete model request, including instructions, tool definitions, observations, and tool results, as well as the generated response. Each limit states what it measures; byte counts and model tokens are separate units.
 
-After a restart, Ivenna rebuilds its working understanding from the latest core handover and recent communication. Further messages inform that understanding as independent observations. This sustains continuity without restoring every intermediate model or tool state. An interrupted action may already have affected the world, so uncertain outcomes need inspection before repetition.
+When context needs to be shortened, the kernel asks the model for a handover. The replacement context should preserve commitments, relevant uncertainty, completed effects, and correspondent IDs and relationships needed for continued understanding. The handover remains free-form text.
 
-Automatic retry, reconnection, and execution resumption after runtime failure remain undefined.
+Startup restores saved working histories and session relationships, then gives each retained session a fresh activation with a startup observation. Current execution state describes the new runtime; earlier observations describe what was known then. This preserves understanding while acknowledging the interruption. Ivenna decides how to relate that history to the present and what to do next. The [startup contract](architecture.md#startup-and-interruption) defines what survives and what is rebuilt.
+
+An interrupted action may already have affected the world before its result was retained. Persistence supplies historical evidence; it does not establish that effects occurred exactly once or that external state is unchanged. The runtime does not replay past tool calls. Automatic retry and reconnection after runtime failure remain undefined.
 
 ## Data ownership
 
-The deployment user owns Ivenna's correspondence, internal state, artifacts, and autonomous memory, and chooses where they live. Keep these forms open to inspection, retention, and management within the user's deployment. Storage implementations preserve their distinct ownership and retention needs.
+The deployment user owns Ivenna's correspondence, retained working histories, artifacts, and autonomous memory, and chooses where they live. Keep these forms open to inspection, retention, and management within the user's deployment. Storage implementations preserve their distinct ownership and retention needs.
 
 Diagnostics support troubleshooting and analysis. Keep them separate from the source material and handovers used for continuity.
 

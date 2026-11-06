@@ -18,7 +18,7 @@ During development, do not write tests in advance or introduce test frameworks. 
 
 Organize packages around cohesive capabilities, keeping their types, rules, resources, and implementation together. Public interfaces should let callers use a capability without coordinating its internal components. Keep supporting mechanisms with their owning capability. Applications select implementations, load deployment settings, and own program startup and shutdown.
 
-Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities). Shared communication and handover types and the `Inbox`, `Communication.Sender`, `HandoverStore`, `Model.Port`, and `Tools` contracts belong to `packages/agent_contracts`. The execution core and capability implementations depend on that package; `apps/ivenna` selects and assembles the implementations. Update producers and consumers together when changing a shared type or operation.
+Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities). Shared communication and model types and the `Inbox`, `Communication.Sender`, `HistoryStore`, `Model.Port`, and `Tools` contracts belong to `packages/agent_contracts`. The execution core and capability implementations depend on that package; `apps/ivenna` selects and assembles the implementations. Update producers and consumers together when changing a shared type or operation.
 
 Keep execution policy, model-input rendering, prompts, and runtime tool declarations in `packages/agent`. The agent exposes `Kernel`, `Engine`, and its own `Input` schemas and renderer.
 
@@ -30,9 +30,9 @@ Decode external protocols in their owning components and give execution code typ
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
-[Communication](../packages/agent_contracts/src/communication.zig) defines incoming observations with `from` IDs, sent records with recipient IDs, and outgoing messages addressed by ID. Its history variants distinguish received observations from Ivenna's own sent messages. [Inbox](../packages/agent_contracts/src/inbox.zig) owns the incoming-message and receipt envelope and supplies recent communication history. Construct these typed values at their producing boundary. The email adapter owns the internal domain and conversion between IDs and native addresses.
+[Communication](../packages/agent_contracts/src/communication.zig) defines incoming observations with `from` IDs and outgoing messages addressed by recipient ID. [Inbox](../packages/agent_contracts/src/inbox.zig) owns the incoming-message and receipt envelope and records consumption. Construct these typed values at their producing boundary. The email adapter owns the internal domain and conversion between IDs and native addresses.
 
-[Input](../packages/agent/src/input.zig) owns event groups, assignments, reports, execution state, and YAML rendering. Its records incorporate shared received-message, sent-message, and handover values; temporary requests add current state and instructions. [Work](../packages/agent/src/work.zig) owns delivery and activation lifetimes inside the core. The [input contract](input.md) documents the serialized fields.
+[Input](../packages/agent/src/input.zig) owns event groups, startup observations, assignments, reports, handovers, execution state, and YAML rendering. Its records incorporate shared incoming messages; temporary requests add current state and instructions. [Work](../packages/agent/src/work.zig) owns delivery and activation lifetimes inside the core. The [input contract](input.md) documents the serialized fields.
 
 [Content](../packages/content/src/root.zig) owns tool-result text and image types, byte-source classification, and explicit image reference interpretation. Observations carry complete text strings; tool results use Content's parts. Content is the sole package dependency of `agent_contracts`.
 
@@ -62,13 +62,17 @@ Keep outgoing messages, internal reports, handovers, and diagnostics distinct. O
 
 ### Execution and storage
 
-The session registry synchronizes contexts, queues, and activation ownership. The kernel coordinates adapter operations and worker task scopes. Context retains records and complete model/tool exchanges, assembling temporary requests without changing that history. Keep current state and summary instructions in the request.
+The session registry synchronizes contexts, queues, and activation ownership. The kernel coordinates adapter operations and worker task scopes. Context retains typed event groups, complete model/tool exchanges, and handovers, deriving and caching their native model-message view as source entries change. Append a fresh temporary request for each inference. Keep current state and summary instructions in that request.
+
+Persist the core and every still-retained work context, preserving complete model/tool exchanges and unread internal assignments and reports. Restore saved understanding and session relationships with fresh startup activations and the current system prompt. Execution ownership, external deliveries, receipts, and process handles belong to the running process. Loading history must not execute historical tool calls. Storage failures end the runtime through the normal execution failure path.
+
+Keep history encoding and storage protocols with their owning components. Preserve complete saved histories across interrupted writes. The current implementation uses source records and a manifest; [persistent working history](architecture.md#persistent-working-history) describes that representation and its save boundaries, and [email history storage](architecture.md#history-storage) explains native publication and revision selection. Working history has a separate lifetime from host command artifacts.
 
 Infrastructure and execution failures propagate to the application's task scope, which closes reception, cancels, and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
 
 The application serves health and reception status. The mail server's receiving boundary uses that status before accepting incoming SMTP correspondence. Keep this gate separate from model reasoning and in-process work queues; its readiness check does not reserve an activation or establish an atomic delivery transaction.
 
-Keep context release and stored-record retention independent. Follow the architecture contracts for [message projection and addressing](architecture.md#email-boundary), [internal state](architecture.md#internal-mail-state), and [context lifetime](architecture.md#activation-completion-and-context-release).
+Keep context retention independent of correspondence and host artifacts. Follow the architecture contracts for [message projection and addressing](architecture.md#email-boundary), [mail processing markers](architecture.md#mail-processing-markers), [persistent working history](architecture.md#persistent-working-history), and [context lifetime](architecture.md#activation-completion-and-context-release).
 
 ## Repository and build
 
@@ -97,10 +101,11 @@ Build the application and exercise the affected behavior through communication a
 | --- | --- |
 | Execution | Joint processing of queued events, budget-limited FIFO admission, tool-result continuation, whole-group handoff and receipt consumption, direct-parent reports, and context release |
 | Failure handling | Required-capability failures stop the runtime and join concurrent work; ordinary tool outcomes allow continuation |
-| Communication | Explicit zero, one, or multiple sends; correspondent ID lifetime; received `from` IDs and sent recipients retained in their own history variants; final text without implicit sending |
-| Email | Same-domain address conversion, From-address filtering across query pages, marked outbound history with its recipients, standalone submissions, and independent intake regardless of thread, read, starred, or archived state |
+| Communication | Explicit zero, one, or multiple sends; correspondent ID lifetime; incoming `from` IDs and outgoing tool arguments retained in history; final text without implicit sending |
+| Email | Same-domain address conversion, From-address filtering across query pages, marked outbound messages, standalone submissions, and independent intake regardless of thread, read, starred, or archived state |
 | Service | Health and reception status during startup, operation, and shutdown; SMTP rejection when reception is closed |
-| Internal state | Private consumption and outbound markers, core handovers, receipt ownership, and affected retention behavior |
+| History and restart | Canonical events, model/tool exchanges, and unread internal observations survive restart; model output and media round-trip; forks share source references; compaction updates active paths; source records are confirmed before manifest publication; numeric revision selects the current manifest after interruption; startup uses current state; old activations, external deliveries, receipts, and tool calls are not replayed |
+| Mail processing | Private consumption and outbound markers, receipt ownership, and affected retention behavior |
 | Model-facing interfaces | Record and request serialization, response variants, tool selection, and complete-payload budget accounting |
 
 Report the checks performed. Distinguish reconstruction of understanding from execution recovery.

@@ -3,8 +3,6 @@ const yaml = @import("yaml");
 const contracts = @import("agent_contracts");
 const Allocator = std.mem.Allocator;
 const IncomingMessage = contracts.Communication.IncomingMessage;
-const SentMessage = contracts.Communication.SentMessage;
-const Handover = contracts.Handover;
 
 pub const Role = enum { core, branch };
 
@@ -18,10 +16,12 @@ pub const Report = struct {
     text: []const u8,
 };
 
-pub const ContextItem = union(enum) {
-    received: IncomingMessage,
-    sent: SentMessage,
-    handover: Handover,
+pub const Handover = struct {
+    summary: []const u8,
+};
+
+pub const Startup = struct {
+    observed_at_unix_ms: i64,
 };
 
 pub const Response = union(enum) {
@@ -52,16 +52,17 @@ pub const Snapshot = struct {
 };
 
 pub const Event = union(enum) {
+    startup: Startup,
     input: IncomingMessage,
     assignment: Assignment,
     report: Report,
 };
 
-/// A retained event group and supporting context in a session's history.
+/// An event group or compacted understanding retained in session history.
 pub const Record = struct {
     session_id: u64,
     events: []const Event = &.{},
-    context: []const ContextItem = &.{},
+    handover: ?Handover = null,
 };
 
 /// Temporary current-state message appended for one inference.
@@ -73,15 +74,15 @@ pub const Request = struct {
 
 /// Render declared fields as YAML values. Returned bytes belong to arena.
 pub fn renderRecord(arena: Allocator, record: Record) ![]const u8 {
-    return render(arena, record);
+    return render(arena, record, .{ .emit_null_optional_fields = false });
 }
 
 pub fn renderRequest(arena: Allocator, request: Request) ![]const u8 {
-    return render(arena, request);
+    return render(arena, request, .{});
 }
 
-fn render(arena: Allocator, value: anytype) ![]const u8 {
-    const bytes = try std.json.Stringify.valueAlloc(arena, value, .{});
+fn render(arena: Allocator, value: anytype, options: std.json.Stringify.Options) ![]const u8 {
+    const bytes = try std.json.Stringify.valueAlloc(arena, value, options);
     const document = try yaml.parse(arena, bytes, .{});
     var output = std.Io.Writer.Allocating.init(arena);
     defer output.deinit();

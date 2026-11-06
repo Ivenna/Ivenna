@@ -35,6 +35,7 @@ pub const Delivery = struct {
 
 pub const Activation = struct {
     deliveries: std.ArrayList(*Delivery),
+    admitted: bool = false,
 
     /// Success takes ownership of the deliveries, copying only their pointers.
     pub fn create(allocator: Allocator, deliveries: []const *Delivery) !*Activation {

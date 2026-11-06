@@ -8,7 +8,7 @@ Each [incoming message](input.md#incoming-messages) records the correspondent ID
 
 IDs identify people and programs Ivenna can choose to contact through `send_message`. For example, `alice` can ask Ivenna in the message text to send an update to `support`. The model decides whether to send it and explicitly supplies the recipient IDs.
 
-[Recent history](input.md#received-and-sent-history) distinguishes received observations from messages Ivenna previously sent. Each sent record retains its `recipients`, text, and observation time. Handovers can preserve correspondent IDs along with the understanding needed for continued interaction.
+Retained working history preserves incoming observations and the model/tool exchanges that send messages. Outgoing tool arguments include the chosen `recipients` and text; tool results record submission outcomes. Handovers can preserve correspondent IDs along with the understanding needed for continued interaction.
 
 ## Sending a message
 
@@ -48,6 +48,6 @@ IDs use ASCII dot-atom local parts: letters, digits, and the punctuation below, 
 ! # $ % & ' * + - / = ? ^ _ ` { | } ~
 ```
 
-Incoming mail must have at least one From address, and every address must map to a supported ID in this domain. Missing, unsupported, or cross-domain From addresses exclude the message from intake and recent received history.
+Incoming mail must have at least one From address, and every address must map to a supported ID in this domain. Missing, unsupported, or cross-domain From addresses exclude the message from intake.
 
 Outgoing submissions create standalone messages with the supplied text as the body. See the [email boundary](architecture.md#email-boundary) for implementation details.

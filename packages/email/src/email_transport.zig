@@ -3,7 +3,7 @@ const Mail = @import("mail.zig");
 const Communication = @import("agent_contracts").Communication;
 const Allocator = std.mem.Allocator;
 
-/// Project received and sent communication, and submit explicit messages.
+/// Project incoming observations and submit explicit messages.
 pub const EmailTransport = struct {
     mailbox: *Mail.Mailbox,
 
@@ -17,22 +17,6 @@ pub const EmailTransport = struct {
             .text = if (letter.subject.len == 0) letter.body else try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ letter.subject, letter.body }),
             .observed_at_unix_ms = std.Io.Clock.real.now(self.mailbox.client.io).toMilliseconds(),
         };
-    }
-
-    pub fn recent(self: *EmailTransport, a: Allocator, limit: usize) ![]const Communication.HistoryItem {
-        var result: std.ArrayList(Communication.HistoryItem) = .empty;
-        for (try self.mailbox.recent(a, limit)) |letter| {
-            const item: Communication.HistoryItem = if (letter.outbound)
-                .{ .sent = .{
-                    .recipients = try self.participantIds(a, letter.to),
-                    .text = letter.body,
-                    .observed_at_unix_ms = std.Io.Clock.real.now(self.mailbox.client.io).toMilliseconds(),
-                } }
-            else
-                .{ .received = try self.receive(a, letter) };
-            try result.append(a, item);
-        }
-        return result.toOwnedSlice(a);
     }
 
     pub fn send(self: *EmailTransport, a: Allocator, message: Communication.Message) !Communication.Submission {

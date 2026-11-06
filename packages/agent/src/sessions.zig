@@ -1,5 +1,7 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
+const History = @import("history.zig").History;
+const Persistence = @import("history.zig").Persistence;
 const Input = @import("input.zig");
 const WorkInput = @import("work.zig");
 const Delivery = WorkInput.Delivery;
@@ -25,6 +27,8 @@ pub const Session = struct {
     children: usize = 0,
     /// Queue positions reserved for results of forked work.
     return_slots: usize = 0,
+    /// This session's next report has a reserved position in its parent.
+    return_reserved: bool = false,
 };
 
 pub const Work = struct { session: *Session, activation: *Activation };
@@ -44,6 +48,7 @@ pub const Registry = struct {
     allocator: Allocator,
     io: std.Io,
     max_contexts: usize,
+    history: Persistence,
     mutex: std.Io.Mutex = .init,
     core: *Session,
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
@@ -51,14 +56,67 @@ pub const Registry = struct {
     reserved: usize = 0,
     next_session_id: u64 = 2,
 
-    pub fn init(allocator: Allocator, io: std.Io, max_contexts: usize) !Registry {
-        const core = try allocator.create(Session);
-        errdefer allocator.destroy(core);
-        var context = try Context.init(allocator, @embedFile("system.md"));
-        errdefer context.deinit();
-        core.* = .{ .session_id = 1, .role = .core, .context = context };
-        var self: Registry = .{ .allocator = allocator, .io = io, .max_contexts = max_contexts, .core = core };
-        try self.sessions.put(allocator, 1, core);
+    pub fn init(allocator: Allocator, io: std.Io, max_contexts: usize, history: contracts.HistoryStore) !Registry {
+        var self: Registry = .{ .allocator = allocator, .io = io, .max_contexts = max_contexts, .history = .init(allocator, history), .core = undefined };
+        errdefer self.deinit();
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const saved = try self.history.load(arena.allocator(), max_contexts);
+        if (saved) |retained| {
+            self.next_session_id = retained.next_session_id;
+            for (retained.sessions) |record| {
+                const session = try allocator.create(Session);
+                errdefer allocator.destroy(session);
+                var context = try Context.restore(allocator, record.entries, @embedFile("system.md"));
+                errdefer context.deinit();
+                session.* = .{
+                    .session_id = record.session_id,
+                    .role = if (record.parent_session_id == null) .core else .branch,
+                    .parent_session_id = record.parent_session_id,
+                    .parent_generation = record.parent_generation,
+                    .generation = record.generation,
+                    .context = context,
+                };
+                try self.sessions.put(allocator, session.session_id, session);
+            }
+            self.core = self.sessions.get(1).?;
+        } else {
+            const core = try allocator.create(Session);
+            errdefer allocator.destroy(core);
+            var context = try Context.init(allocator, @embedFile("system.md"));
+            errdefer context.deinit();
+            core.* = .{ .session_id = 1, .role = .core, .context = context };
+            try self.sessions.put(allocator, 1, core);
+            self.core = core;
+        }
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |entry| {
+            const session = entry.*;
+            if (session.parent_session_id) |parent_id| {
+                const parent = self.sessions.get(parent_id).?;
+                parent.children += 1;
+                parent.return_slots += 1;
+                session.return_reserved = true;
+            }
+            const delivery = try Delivery.create(allocator, .{ .startup = .{
+                .observed_at_unix_ms = std.Io.Clock.real.now(io).toMilliseconds(),
+            } }, &.{});
+            errdefer delivery.destroy(allocator);
+            try session.pending.append(allocator, delivery);
+        }
+        if (saved) |retained| for (retained.sessions) |record| {
+            const session = self.sessions.get(record.session_id).?;
+            for (record.observations) |event| {
+                const delivery = try Delivery.create(allocator, event, &.{});
+                errdefer delivery.destroy(allocator);
+                try session.pending.append(allocator, delivery);
+            }
+        };
+        sessions = self.sessions.valueIterator();
+        while (sessions.next()) |entry| {
+            try entry.*.pending.ensureUnusedCapacity(allocator, entry.*.return_slots);
+        }
+        try self.save();
         return self;
     }
 
@@ -69,6 +127,7 @@ pub const Registry = struct {
         var notice_keys = self.noticed.keyIterator();
         while (notice_keys.next()) |key| self.allocator.free(key.*);
         self.noticed.deinit(self.allocator);
+        self.history.deinit();
         self.* = undefined;
     }
 
@@ -86,8 +145,8 @@ pub const Registry = struct {
         const session = self.core;
         const receipt = incoming.receipt;
         if (receipt) |key| if (self.noticed.contains(key)) return false;
-        const active_count = if (session.active) |activation| activation.deliveries.items.len else 0;
-        if (session.pending.items.len + active_count + session.return_slots >= self.max_contexts) return false;
+        const active_count = if (session.active) |activation| deliveryCount(activation.deliveries.items) else 0;
+        if (deliveryCount(session.pending.items) + active_count + session.return_slots >= self.max_contexts) return false;
         const delivery = try Delivery.create(self.allocator, .{ .input = incoming.input }, if (receipt) |key| &.{key} else &.{});
         errdefer delivery.destroy(self.allocator);
         try session.pending.ensureUnusedCapacity(self.allocator, 1 + session.return_slots);
@@ -104,13 +163,13 @@ pub const Registry = struct {
     pub fn nextReady(self: *Registry, max_parallel: usize) !?Work {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        if (try takeReady(self.allocator, self.core)) |work| return work;
+        if (try self.takeReady(self.core)) |work| return work;
         if (self.runningWorkers() >= max_parallel) return null;
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
             const session = entry.*;
             if (session == self.core) continue;
-            if (try takeReady(self.allocator, session)) |work| return work;
+            if (try self.takeReady(session)) |work| return work;
         }
         return null;
     }
@@ -132,6 +191,7 @@ pub const Registry = struct {
         session.context.deinit();
         session.context = context;
         session.generation += 1;
+        work.activation.admitted = true;
     }
 
     pub fn prepareFork(self: *Registry, work: Work, request: ForkRequest) !ForkPlan {
@@ -140,6 +200,9 @@ pub const Registry = struct {
         assertWork(work);
         if (request.task.len == 0) return error.InvalidForkArguments;
         if (self.sessions.count() + self.reserved >= self.max_contexts) return error.AttentionCapacityUnavailable;
+        if (deliveryCount(work.session.pending.items) + work.session.return_slots >= self.max_contexts)
+            return error.AttentionCapacityUnavailable;
+        try work.session.pending.ensureUnusedCapacity(self.allocator, work.session.return_slots + 1);
         const child = try self.allocator.create(Session);
         errdefer self.allocator.destroy(child);
         var receipts: std.ArrayList([]const u8) = .empty;
@@ -157,10 +220,12 @@ pub const Registry = struct {
             .role = .branch,
             .context = undefined,
             .parent_session_id = work.session.session_id,
+            .return_reserved = true,
         };
         try child.pending.append(self.allocator, delivery);
         self.next_session_id += 1;
         self.reserved += 1;
+        work.session.return_slots += 1;
         return .{ .child = child };
     }
 
@@ -168,6 +233,7 @@ pub const Registry = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.reserved -= 1;
+        self.sessions.get(plan.child.parent_session_id.?).?.return_slots -= 1;
         for (plan.child.pending.items) |delivery| delivery.destroy(self.allocator);
         plan.child.pending.deinit(self.allocator);
         self.allocator.destroy(plan.child);
@@ -186,7 +252,6 @@ pub const Registry = struct {
         try completed.appendBatch(output, replies);
         if (plan) |fork| {
             try self.sessions.ensureUnusedCapacity(self.allocator, 1);
-            try parent.pending.ensureUnusedCapacity(self.allocator, parent.return_slots + 1);
             fork.child.context = try completed.fork(self.allocator);
         }
         parent.context.deinit();
@@ -198,7 +263,6 @@ pub const Registry = struct {
             self.sessions.putAssumeCapacity(child.session_id, child);
             self.reserved -= 1;
             parent.children += 1;
-            parent.return_slots += 1;
             parent.active = null;
             work.activation.destroy(self.allocator);
             return .forked;
@@ -212,15 +276,60 @@ pub const Registry = struct {
         return session.context.fork(self.allocator);
     }
 
-    pub fn snapshotCore(self: *Registry) !Context {
-        return self.snapshot(self.core);
-    }
-
-    pub fn appendCoreContext(self: *Registry, context: []const Input.ContextItem) !void {
+    /// Serialize under the same lock as history changes so concurrent workers
+    /// cannot replace a newer persisted view with an older snapshot.
+    pub fn save(self: *Registry) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try self.core.context.appendRecord(.{ .session_id = self.core.session_id, .context = context });
-        self.core.generation += 1;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var needed: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        try needed.put(a, self.core.session_id, {});
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |entry| {
+            const session = entry.*;
+            if (session.active == null and session.pending.items.len == 0) continue;
+            var ancestor = session;
+            while (!needed.contains(ancestor.session_id)) {
+                try needed.put(a, ancestor.session_id, {});
+                ancestor = self.sessions.get(ancestor.parent_session_id orelse break).?;
+            }
+        }
+        var retained: std.ArrayList(History.Session) = .empty;
+        sessions = self.sessions.valueIterator();
+        while (sessions.next()) |entry| {
+            const session = entry.*;
+            if (!needed.contains(session.session_id)) continue;
+            // Internal observations have no external inbox to read again.
+            // Preserve them separately until ordinary budget admission adds
+            // them to history. Runtime deliveries and receipts do not survive.
+            var observations: std.ArrayList(Input.Event) = .empty;
+            if (session.active) |activation| if (!activation.admitted) {
+                for (activation.deliveries.items) |delivery| switch (delivery.event) {
+                    .assignment, .report => try observations.append(a, delivery.event),
+                    else => {},
+                };
+            };
+            for (session.pending.items) |delivery| switch (delivery.event) {
+                .assignment, .report => try observations.append(a, delivery.event),
+                else => {},
+            };
+            try retained.append(a, .{
+                .session_id = session.session_id,
+                .parent_session_id = session.parent_session_id,
+                .parent_generation = session.parent_generation,
+                .generation = session.generation,
+                .entries = session.context.records(),
+                .observations = observations.items,
+            });
+        }
+        std.mem.sort(History.Session, retained.items, {}, struct {
+            fn lessThan(_: void, lhs: History.Session, rhs: History.Session) bool {
+                return lhs.session_id < rhs.session_id;
+            }
+        }.lessThan);
+        try self.history.save(a, .{ .next_session_id = self.next_session_id, .sessions = retained.items });
     }
 
     pub fn replaceContext(self: *Registry, session: *Session, replacement: Context) !void {
@@ -294,7 +403,8 @@ pub const Registry = struct {
         const target = session.parent_session_id orelse return;
         const parent = self.sessions.get(target).?;
         const report = try Delivery.create(self.allocator, .{ .report = .{ .from_session = session.session_id, .text = text } }, &.{});
-        std.debug.assert(parent.return_slots > 0);
+        std.debug.assert(session.return_reserved and parent.return_slots > 0);
+        session.return_reserved = false;
         parent.return_slots -= 1;
         parent.pending.appendAssumeCapacity(report);
     }
@@ -343,16 +453,38 @@ pub const Registry = struct {
         session.context.deinit();
         self.allocator.destroy(session);
     }
+
+    fn takeReady(self: *Registry, session: *Session) !?Work {
+        if (session.active != null or session.pending.items.len == 0) return null;
+        const parent = if (!session.return_reserved)
+            if (session.parent_session_id) |id| self.sessions.get(id).? else null
+        else
+            null;
+        if (parent) |target| {
+            const active_count = if (target.active) |activation| deliveryCount(activation.deliveries.items) else 0;
+            if (deliveryCount(target.pending.items) + active_count + target.return_slots >= self.max_contexts) return null;
+            try target.pending.ensureUnusedCapacity(self.allocator, target.return_slots + 1);
+        }
+        const activation = try Activation.create(self.allocator, session.pending.items);
+        if (parent) |target| {
+            target.return_slots += 1;
+            session.return_reserved = true;
+        }
+        session.pending.clearRetainingCapacity();
+        session.active = activation;
+        session.borrowed_workers += 1;
+        return .{ .session = session, .activation = activation };
+    }
 };
 
-fn takeReady(allocator: Allocator, session: *Session) !?Work {
-    if (session.active != null) return null;
-    if (session.pending.items.len == 0) return null;
-    const activation = try Activation.create(allocator, session.pending.items);
-    session.pending.clearRetainingCapacity();
-    session.active = activation;
-    session.borrowed_workers += 1;
-    return .{ .session = session, .activation = activation };
+/// Startup is one additional control observation, independent of the bounded
+/// ordinary queue retained before this runtime began.
+fn deliveryCount(deliveries: []const *Delivery) usize {
+    var count: usize = 0;
+    for (deliveries) |delivery| if (delivery.event != .startup) {
+        count += 1;
+    };
+    return count;
 }
 
 fn assertWork(work: Work) void {

@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
         .engine = &engine,
         .inbox = mail.inbox(),
         .sender = mail.sender(),
-        .handovers = mail.handovers(),
+        .history = mail.history(),
     }, .{
         .limits = config.context_limits,
         .poll_interval_ms = config.mail_poll_interval_ms,
