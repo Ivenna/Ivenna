@@ -67,7 +67,7 @@ pub const Registry = struct {
             for (retained.sessions) |record| {
                 const session = try allocator.create(Session);
                 errdefer allocator.destroy(session);
-                var context = try Context.restore(allocator, record.entries, @embedFile("system.md"));
+                var context = try Context.restore(allocator, .{ .session_id = record.session_id, .epoch = record.epoch }, record.entries, @embedFile("system.md"));
                 errdefer context.deinit();
                 session.* = .{
                     .session_id = record.session_id,
@@ -83,7 +83,7 @@ pub const Registry = struct {
         } else {
             const core = try allocator.create(Session);
             errdefer allocator.destroy(core);
-            var context = try Context.init(allocator, @embedFile("system.md"));
+            var context = try Context.init(allocator, .{ .session_id = 1, .epoch = 0 }, @embedFile("system.md"));
             errdefer context.deinit();
             core.* = .{ .session_id = 1, .role = .core, .context = context };
             try self.sessions.put(allocator, 1, core);
@@ -187,7 +187,7 @@ pub const Registry = struct {
     }
 
     /// Install the selected FIFO prefix and return its suffix ahead of any
-    /// arrivals admitted since claim. Success consumes context; failure leaves
+    /// arrivals queued since claim. Success consumes context; failure leaves
     /// queue membership and the caller's context ownership unchanged.
     pub fn beginActivation(self: *Registry, work: Work, count: usize, context: Context) !void {
         try self.mutex.lock(self.io);
@@ -265,6 +265,7 @@ pub const Registry = struct {
         if (plan) |fork| {
             try self.sessions.ensureUnusedCapacity(self.allocator, 1);
             fork.child.context = try completed.fork(self.allocator);
+            fork.child.context.scope = .{ .session_id = fork.child.session_id, .epoch = 0 };
         }
         parent.context.deinit();
         parent.context = completed;
@@ -332,6 +333,7 @@ pub const Registry = struct {
                 .parent_session_id = session.parent_session_id,
                 .parent_generation = session.parent_generation,
                 .generation = session.generation,
+                .epoch = session.context.scope.epoch,
                 .entries = session.context.records(),
                 .observations = observations.items,
             });

@@ -60,7 +60,7 @@ Peer assignments, steering retained work, and parallel subtasks within one activ
 
 ## Context and continuity
 
-Working contexts retain observations, complete model output, and tool results. The core and every still-retained work context preserve that understanding across runtime interruption. Working history has a lifetime independent of host execution artifacts.
+Working contexts retain observations, complete model output, and tool results. The core and every still-retained work context preserve that understanding across runtime interruption. Working history persists independently of host execution artifacts. Retention of earlier records has a separate lifecycle from the history selected for continuation.
 
 Limits cover the complete model request, including instructions, tool definitions, observations, and tool results, as well as the generated response. Each limit states what it measures; byte counts and model tokens are separate units.
 

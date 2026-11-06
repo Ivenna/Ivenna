@@ -1,6 +1,7 @@
 const std = @import("std");
 const Input = @import("input.zig");
 const Entry = @import("history.zig").Entry;
+const Scope = @import("history.zig").Scope;
 const Model = @import("agent_contracts").Model;
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
@@ -10,15 +11,17 @@ const Allocator = std.mem.Allocator;
 pub const Context = struct {
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
+    /// Destination for new entries; inherited entries keep their own scopes.
+    scope: Scope,
     entries: std.ArrayList(Entry) = .empty,
     messages: std.ArrayList(Model.Item) = .empty,
 
-    pub fn init(allocator: Allocator, system_text: []const u8) !Context {
-        return restore(allocator, &.{}, system_text);
+    pub fn init(allocator: Allocator, scope: Scope, system_text: []const u8) !Context {
+        return restore(allocator, scope, &.{}, system_text);
     }
 
-    pub fn restore(allocator: Allocator, entries: []const Entry, system_text: []const u8) !Context {
-        var self: Context = .{ .allocator = allocator, .arena = .init(allocator) };
+    pub fn restore(allocator: Allocator, scope: Scope, entries: []const Entry, system_text: []const u8) !Context {
+        var self: Context = .{ .allocator = allocator, .arena = .init(allocator), .scope = scope };
         errdefer self.deinit();
         const a = self.arena.allocator();
         try self.entries.ensureTotalCapacity(allocator, entries.len);
@@ -42,13 +45,14 @@ pub const Context = struct {
         return self.entries.items;
     }
 
-    /// Source values and the derived view become independently owned.
+    /// Copy entries and their scopes into an independently owned context,
+    /// preserving the current write scope.
     pub fn fork(self: *const Context, allocator: Allocator) !Context {
-        return restore(allocator, self.entries.items, self.messages.items[0].message.text);
+        return restore(allocator, self.scope, self.entries.items, self.messages.items[0].message.text);
     }
 
     pub fn appendRecord(self: *Context, record: Input.Record) !void {
-        try self.append(.{ .record = record });
+        try self.append(.{ .scope = self.scope, .value = .{ .record = record } });
     }
 
     /// Retain one complete exchange, preserving the adapter's opaque output.
@@ -58,15 +62,17 @@ pub const Context = struct {
         defer self.allocator.free(batch);
         @memcpy(batch[0..output.len], output);
         @memcpy(batch[output.len..], replies);
-        try self.append(.{ .exchange = batch });
+        try self.append(.{ .scope = self.scope, .value = .{ .exchange = batch } });
     }
 
-    /// The temporary request and returned slice belong to a.
+    /// The slice and rendered request belong to a; retained message payloads
+    /// borrow self.
     pub fn request(self: *const Context, a: Allocator, current: Input.Request) ![]const Model.Item {
         return self.buildRequest(a, null, current);
     }
 
-    /// Measure an admission candidate without cloning or retaining its history.
+    /// Assemble an admission candidate without changing retained history.
+    /// As with request, retained message payloads borrow self.
     pub fn requestWithRecord(self: *const Context, a: Allocator, record: Input.Record, current: Input.Request) ![]const Model.Item {
         return self.buildRequest(a, record, current);
     }
@@ -81,13 +87,14 @@ pub const Context = struct {
     }
 
     pub fn withHandover(self: *const Context, allocator: Allocator, session_id: u64, handover: Input.Handover) !Context {
-        return restore(allocator, &.{.{ .record = .{ .session_id = session_id, .handover = handover } }}, self.messages.items[0].message.text);
+        const scope: Scope = .{ .session_id = session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
+        return restore(allocator, scope, &.{.{ .scope = scope, .value = .{ .record = .{ .session_id = session_id, .handover = handover } } }}, self.messages.items[0].message.text);
     }
 
     fn append(self: *Context, entry: Entry) !void {
         const a = self.arena.allocator();
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        switch (entry) {
+        switch (entry.value) {
             .record => |record| {
                 try self.messages.ensureUnusedCapacity(self.allocator, 1);
                 const copy: Input.Record = .{
@@ -96,14 +103,14 @@ pub const Context = struct {
                     .handover = if (record.handover) |handover| .{ .summary = try a.dupe(u8, handover.summary) } else null,
                 };
                 const text = try Input.renderRecord(a, copy);
-                self.entries.appendAssumeCapacity(.{ .record = copy });
+                self.entries.appendAssumeCapacity(.{ .scope = entry.scope, .value = .{ .record = copy } });
                 self.messages.appendAssumeCapacity(.{ .message = .{ .role = .user, .text = text } });
             },
             .exchange => |items| {
                 try self.messages.ensureUnusedCapacity(self.allocator, items.len);
                 const batch = try a.alloc(Model.Item, items.len);
                 for (items, batch) |item, *copy| copy.* = try cloneItem(a, item);
-                self.entries.appendAssumeCapacity(.{ .exchange = batch });
+                self.entries.appendAssumeCapacity(.{ .scope = entry.scope, .value = .{ .exchange = batch } });
                 self.messages.appendSliceAssumeCapacity(batch);
             },
         }

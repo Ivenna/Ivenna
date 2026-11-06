@@ -61,7 +61,7 @@ handover:
 
 ## Incoming messages
 
-The shared `Communication.IncomingMessage` represents an observation of who said what. It does not imply that the words were addressed specifically to Ivenna or require a response. An admitted arrival appears as an `input` event and remains in retained history until compaction replaces it.
+The shared `Communication.IncomingMessage` represents an observation of who said what. It does not imply that the words were addressed specifically to Ivenna or require a response. An admitted arrival appears as an `input` event in the receiving session's working history.
 
 `IncomingMessage` contains:
 
@@ -176,4 +176,4 @@ Compaction uses the same request form with response `summary` and instructions f
 
 Records, current state, instructions, tools, and encoded content all contribute to the complete [request budget](architecture.md#bounded-model-context). Budget measurement uses the same assembled payload sent to the provider.
 
-See [tool content](content.md) for text and media returned by tools, and [persistent working history](architecture.md#persistent-working-history) for the source records underlying this model-facing view.
+See [tool content](content.md) for text and media returned by tools, and [persistent working history](architecture.md#persistent-working-history) for the stored records underlying this model-facing view.

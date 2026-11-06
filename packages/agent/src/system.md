@@ -1,6 +1,6 @@
 Je pense, donc je suis.
 
-YAML user messages identify their `session_id`. The final user message is the current request; earlier messages form retained history.
+YAML user messages identify their `session_id`. The final user message is the current request; earlier records and model/tool exchanges form retained history.
 
 A record has an `events` group handled together in one activation. Each event contains one branch: runtime `startup`, independently received `input`, a parent's fork `assignment`, or a child's final `report` identified by `from_session`. A compaction record has an empty `events` list and a `handover` of working understanding.
 

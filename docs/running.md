@@ -46,7 +46,7 @@ Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's star
 
 ## Mail service
 
-Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create messages and update private keywords. Ivenna stores history records and manifests in the top-level `Ivenna History` folder, which has no special mail role. It creates that folder when missing, so the account also needs permission to create it. The JMAP session must advertise positive integer `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits; the adapter uses these to bound native requests.
+Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create messages and update private keywords. Ivenna stores history records and checkpoints in the top-level `Ivenna History` folder, which has no special mail role. It creates that folder when missing, so the account also needs permission to create it. The JMAP session must advertise positive integer `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits; the adapter uses these to bound native requests.
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
@@ -54,7 +54,7 @@ Addresses must use the [supported ASCII dot-atom local parts](communication.md#c
 
 Install the [reception-readiness policy](#service-status-and-reception) on the service's receiving paths before using them for correspondence.
 
-The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working-history records and manifests use their own folder while sharing the account's storage capacity. See [data and retention](#data-and-retention) for the records and metadata needed to restore working contexts.
+The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working-history records and checkpoints use their own folder while sharing the account's storage capacity. See [data and retention](#data-and-retention) for the records and metadata needed to restore working contexts.
 
 ### Mail intake
 
@@ -136,7 +136,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 
 | Location | Contents |
 | --- | --- |
-| Configured JMAP account | Correspondence, canonical history records, retained-session manifests, and private processing markers |
+| Configured JMAP account | Correspondence, working-history records and checkpoints, and private processing markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
 
@@ -144,15 +144,22 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 
 Host output files remain available after the command and work session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
 
-Working history uses immutable source records for events, complete model/tool exchanges, and handovers. The current manifest has a unique source table containing content hashes and native object locators; indexed paths describe the core and each still-retained work context, including unread internal assignments and reports. Compaction starts a replacement active history from a handover with the same session identity and parent relationships. Context release removes a session from the active graph. Earlier source records and manifests remain in the history folder. History search and model tools for retrieving earlier records are unimplemented.
+The latest checkpoint selects the saved histories and unread internal observations needed to restore the core and still-retained work sessions. Compaction replaces a session's active history with a handover, and context release removes the session from the checkpoint. Both leave earlier stored records in place. History search and model tools for retrieving earlier records are unimplemented.
 
-History records and manifests are JMAP Email objects with plain-text ZON bodies and the private `ivenna-state` keyword in the top-level `Ivenna History` folder, which has no mail role. Their `X-Ivenna-History-Kind` header identifies `source` or `manifest`. Current manifest candidates also carry `ivenna-current`; the runtime selects the highest numeric `X-Ivenna-History-Revision` if an interrupted save leaves several candidates. Preserve the folder's name and location, the current manifest and all of its referenced source objects in that folder, their native `Email.id` values, their From and To addresses, and their private keywords and identifying headers. The adapter checks those addresses against `MAIL_ADDRESS`, so keep that setting aligned with the saved records.
+History records and checkpoints are JMAP Email objects in the top-level `Ivenna History` folder, which has no mail role. For a backup or transfer used for restoration, preserve the current checkpoint and all records it selects, including:
 
-The manifest's locators identify native objects within the configured account. Copying or importing history messages can assign new IDs and make those locators invalid. A backup or transfer used for restoration must preserve the native identities and folder membership as well as bodies and metadata. The prototype provides no storage-format compatibility or migration path.
+| Applies to | Preserve |
+| --- | --- |
+| Bodies | Exact plain-text ZON content |
+| All history objects | Membership in the top-level `Ivenna History` folder, From and To addresses matching `MAIL_ADDRESS`, `ivenna-state`, and `X-Ivenna-History-Kind` (`record` or `checkpoint`) |
+| Records | `ivenna-history-<token>`, `X-Ivenna-History-Key`, and `X-Ivenna-History-Previous` when present |
+| Current checkpoint candidates | `ivenna-current` and `X-Ivenna-History-Revision` |
 
-Source sharing covers the current active graph. Unconfirmed writes may leave unreferenced source copies, and reintroducing a body absent from the active graph may create another copy. Physical archive-wide deduplication and exactly-once creation are not guaranteed.
+If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration discovers records through logical groups and keys. An import that preserves bodies alone is insufficient. The prototype provides no storage-format compatibility or migration path.
 
-Folder separation lets operators select correspondence and history independently for retention while both use the account's storage capacity. Automatic cleanup and quota management are not implemented. See [persistent working history](architecture.md#persistent-working-history) for source formats, [email history storage](architecture.md#history-storage) for publication and lookup metadata, and [mail retention](architecture.md#mail-retention) for their lifetimes.
+An interrupted or unconfirmed create can leave extra physical copies or uncommitted suffixes. Group membership does not make those records part of the current history: the checkpoint's committed heads and predecessor keys select it. Exactly-once creation and archive-wide deduplication are not guaranteed.
+
+The history folder lets operators manage correspondence and working history separately while both use the account's storage capacity. Automatic cleanup and quota management are not implemented. See [persistent working history](architecture.md#persistent-working-history) for encoding and restoration, and [mail retention](architecture.md#mail-retention) for storage lifetimes.
 
 ## Optional host tools
 

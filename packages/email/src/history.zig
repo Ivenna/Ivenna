@@ -4,8 +4,8 @@ const Mailbox = @import("mail.zig").Mailbox;
 const StateRecord = @import("mail.zig").StateRecord;
 const Allocator = std.mem.Allocator;
 
-/// Store immutable source records and publish the manifest of retained sessions.
-/// The agent owns their encodings and content identity; native IDs are opaque.
+/// Store grouped immutable records and publish the retained-session checkpoint.
+/// The agent owns record encodings and identity; native locators stay in memory.
 pub const History = struct {
     allocator: Allocator,
     mailbox: *Mailbox,
@@ -24,7 +24,7 @@ pub const History = struct {
     }
 
     pub fn port(self: *History) contracts.HistoryStore {
-        return .{ .context = self, .vtable = &.{ .load = load, .read = read, .create = create, .save = save } };
+        return .{ .context = self, .vtable = &.{ .load = load, .allocateGroup = allocateGroup, .query = query, .read = read, .create = create, .save = save } };
     }
 
     fn load(context: *anyopaque, a: Allocator) !?[]const u8 {
@@ -41,7 +41,7 @@ pub const History = struct {
             if (record.revision == selected.revision and !std.mem.eql(u8, record.id, selected.id))
                 return error.AmbiguousHistoryRevision;
         };
-        const data = if (latest) |record| (try self.mailbox.historyData(a, &.{record.id}, .manifest))[0] else null;
+        const data = if (latest) |record| try self.mailbox.historyCheckpoint(a, record.id) else null;
         var heads: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (heads.items) |id| self.allocator.free(id);
@@ -60,17 +60,27 @@ pub const History = struct {
         return data;
     }
 
-    fn read(context: *anyopaque, a: Allocator, locators: []const []const u8) ![]const []const u8 {
+    fn allocateGroup(context: *anyopaque, a: Allocator) ![]const u8 {
         const self: *History = @ptrCast(@alignCast(context));
-        return self.mailbox.historyData(a, locators, .source);
+        return self.mailbox.allocateHistoryGroup(a);
     }
 
-    fn create(context: *anyopaque, a: Allocator, records: []const []const u8) ![]const []const u8 {
+    fn query(context: *anyopaque, a: Allocator, groups: []const []const u8) ![]const contracts.HistoryStore.Reference {
         const self: *History = @ptrCast(@alignCast(context));
-        return self.mailbox.createSources(a, records);
+        return self.mailbox.queryHistory(a, groups);
     }
 
-    fn save(context: *anyopaque, manifest: []const u8) !void {
+    fn read(context: *anyopaque, a: Allocator, references: []const contracts.HistoryStore.Reference) ![]const []const u8 {
+        const self: *History = @ptrCast(@alignCast(context));
+        return self.mailbox.readHistory(a, references);
+    }
+
+    fn create(context: *anyopaque, a: Allocator, records: []const contracts.HistoryStore.Record) !void {
+        const self: *History = @ptrCast(@alignCast(context));
+        return self.mailbox.createHistoryRecords(a, records);
+    }
+
+    fn save(context: *anyopaque, checkpoint: []const u8) !void {
         const self: *History = @ptrCast(@alignCast(context));
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
@@ -81,7 +91,7 @@ pub const History = struct {
         // An unconfirmed create may already exist. A retry must refresh heads
         // before allocating another revision instead of trusting this cache.
         self.loaded = false;
-        const created = try self.mailbox.createManifest(a, manifest, revision);
+        const created = try self.mailbox.createCheckpoint(a, checkpoint, revision);
         self.revision = revision;
         const id = try self.allocator.dupe(u8, created);
         self.heads.appendAssumeCapacity(id);

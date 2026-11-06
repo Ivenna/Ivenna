@@ -2,22 +2,25 @@ const std = @import("std");
 const contracts = @import("agent_contracts");
 const Input = @import("input.zig");
 const Allocator = std.mem.Allocator;
-const Locations = std.StringHashMapUnmanaged([]const u8);
+const Store = contracts.HistoryStore;
+const Key = Store.Key;
 const source_batch_count = 32;
 const source_batch_bytes = 1024 * 1024;
 
-/// Retained context entries from which Context builds its model-message sequence.
-pub const Entry = union(enum) {
+/// One session's append-only history segment. Compaction advances its epoch.
+pub const Scope = struct { session_id: u64, epoch: u64 };
+
+pub const Payload = union(enum) {
     record: Input.Record,
     exchange: []const contracts.Model.Item,
 };
 
-/// Immutable payloads. Event grouping and session membership live in the
-/// manifest, so a queued event keeps its identity when admitted or inherited.
+/// Forks preserve the original scopes of inherited entries.
+pub const Entry = struct { scope: Scope, value: Payload };
+
 const Source = union(enum) {
-    event: Input.Event,
-    exchange: []const contracts.Model.Item,
-    handover: Input.Handover,
+    entry: struct { previous: ?Key, value: Entry },
+    observations: []const Input.Event,
 };
 
 pub const History = struct {
@@ -29,19 +32,21 @@ pub const History = struct {
         parent_session_id: ?u64,
         parent_generation: ?u64,
         generation: u64,
+        epoch: u64,
         entries: []const Entry,
         observations: []const Input.Event,
     };
 
     fn validate(self: History, a: Allocator) !void {
         if (self.sessions.len == 0) return error.InvalidHistory;
-        var generations: std.AutoHashMapUnmanaged(u64, u64) = .empty;
-        defer generations.deinit(a);
+        const State = struct { generation: u64, epoch: u64 };
+        var states: std.AutoHashMapUnmanaged(u64, State) = .empty;
+        defer states.deinit(a);
         for (self.sessions) |session| {
             if (session.session_id == 0 or session.session_id >= self.next_session_id) return error.InvalidHistory;
-            const result = try generations.getOrPut(a, session.session_id);
+            const result = try states.getOrPut(a, session.session_id);
             if (result.found_existing) return error.InvalidHistory;
-            result.value_ptr.* = session.generation;
+            result.value_ptr.* = .{ .generation = session.generation, .epoch = session.epoch };
         }
         var cores: usize = 0;
         for (self.sessions) |session| {
@@ -49,10 +54,14 @@ pub const History = struct {
                 .assignment, .report => {},
                 else => return error.InvalidHistory,
             };
+            for (session.entries) |entry| {
+                const owner = states.get(entry.scope.session_id) orelse return error.InvalidHistory;
+                if (entry.scope.epoch > owner.epoch) return error.InvalidHistory;
+            }
             if (session.parent_session_id) |parent_id| {
                 if (parent_id >= session.session_id or session.parent_generation == null) return error.InvalidHistory;
-                const generation = generations.get(parent_id) orelse return error.InvalidHistory;
-                if (session.parent_generation.? > generation) return error.InvalidHistory;
+                const parent = states.get(parent_id) orelse return error.InvalidHistory;
+                if (session.parent_generation.? > parent.generation) return error.InvalidHistory;
             } else {
                 if (session.session_id != 1 or session.parent_generation != null) return error.InvalidHistory;
                 cores += 1;
@@ -62,24 +71,12 @@ pub const History = struct {
     }
 };
 
-const Reference = union(enum) {
-    record: struct {
-        session_id: u64,
-        events: []const usize,
-        handover: ?usize,
-    },
-    exchange: usize,
-};
+const Span = struct { scope: Scope, group: []const u8, head: Key, count: usize };
 
-const SourceReference = struct {
-    key: []const u8,
-    locator: []const u8,
-};
-
-/// References for retained histories, unread internal events, and session relationships.
-const Manifest = struct {
+/// Each span selects a scope's committed prefix and names its storage group,
+/// so all required groups are known before record discovery.
+const Checkpoint = struct {
     next_session_id: u64,
-    sources: []const SourceReference,
     sessions: []const Session,
 
     const Session = struct {
@@ -87,246 +84,427 @@ const Manifest = struct {
         parent_session_id: ?u64,
         parent_generation: ?u64,
         generation: u64,
-        history: []const Reference,
-        observations: []const usize,
+        epoch: u64,
+        group: []const u8,
+        history: []const Span,
+        observations: ?Key,
     };
+};
+
+const CachedScope = struct {
+    group: []const u8,
+    keys: std.ArrayList(Key) = .empty,
+};
+const CachedObservation = struct { scope: Scope, key: Key };
+
+/// Groups and keys from the last successfully loaded or saved active graph.
+/// The arena owns the complete cache.
+const Cache = struct {
+    arena: std.heap.ArenaAllocator,
+    scopes: std.AutoHashMapUnmanaged(Scope, CachedScope) = .empty,
+    observations: std.AutoHashMapUnmanaged(u64, CachedObservation) = .empty,
+
+    fn init(a: Allocator) Cache {
+        return .{ .arena = .init(a) };
+    }
+
+    fn deinit(self: *Cache) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
 };
 
 pub const Persistence = struct {
     allocator: Allocator,
-    store: contracts.HistoryStore,
-    /// Only sources in the last published active manifest; no all-time RAM index.
-    known: Locations = .empty,
+    store: Store,
+    cache: Cache,
+    published_checkpoint_digest: ?Key = null,
 
-    pub fn init(allocator: Allocator, store: contracts.HistoryStore) Persistence {
-        return .{ .allocator = allocator, .store = store };
+    pub fn init(allocator: Allocator, store: Store) Persistence {
+        return .{ .allocator = allocator, .store = store, .cache = .init(allocator) };
     }
 
     pub fn deinit(self: *Persistence) void {
-        self.freeLocations(&self.known);
+        self.cache.deinit();
         self.* = undefined;
     }
 
     pub fn load(self: *Persistence, a: Allocator, max_contexts: usize) !?History {
-        const data = try self.store.load(a) orelse {
-            self.freeLocations(&self.known);
-            self.known = .empty;
+        const document = try self.store.load(a) orelse {
+            self.cache.deinit();
+            self.cache = .init(self.allocator);
+            self.published_checkpoint_digest = null;
             return null;
         };
-        const manifest = try decode(Manifest, a, data);
-        if (manifest.sessions.len > max_contexts) return error.AttentionCapacityUnavailable;
-        var unique: std.StringHashMapUnmanaged(void) = .empty;
-        defer unique.deinit(a);
-        for (manifest.sources) |reference| {
-            if (reference.key.len != 64 or reference.locator.len == 0) return error.InvalidHistory;
-            for (reference.key) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidHistory;
-            const result = try unique.getOrPut(a, reference.key);
-            if (result.found_existing) return error.InvalidHistory;
+        const checkpoint = try decode(Checkpoint, a, document);
+        if (checkpoint.sessions.len > max_contexts) return error.AttentionCapacityUnavailable;
+        var candidate: Cache = .init(self.allocator);
+        defer candidate.deinit();
+        var owners: std.StringHashMapUnmanaged(Scope) = .empty;
+        defer owners.deinit(a);
+        for (checkpoint.sessions) |session| {
+            try registerScope(&candidate, &owners, a, .{ .session_id = session.session_id, .epoch = session.epoch }, session.group);
+            var seen: std.AutoHashMapUnmanaged(Scope, void) = .empty;
+            defer seen.deinit(a);
+            for (session.history) |span| {
+                if (span.count == 0 or !validKey(span.head)) return error.InvalidHistory;
+                if ((try seen.getOrPut(a, span.scope)).found_existing) return error.InvalidHistory;
+                try registerScope(&candidate, &owners, a, span.scope, span.group);
+            }
+            if (session.observations) |key| {
+                if (!validKey(key)) return error.InvalidHistory;
+                try candidate.observations.put(candidate.arena.allocator(), session.session_id, .{
+                    .scope = .{ .session_id = session.session_id, .epoch = session.epoch },
+                    .key = key,
+                });
+            }
         }
-        const sources = try a.alloc(Source, manifest.sources.len);
+        var selections: Selections = .{ .allocator = a };
+        defer selections.deinit();
+        const groups = try a.alloc([]const u8, owners.count());
+        var group_iterator = owners.keyIterator();
+        for (groups) |*group| group.* = group_iterator.next().?.*;
         var scratch: std.heap.ArenaAllocator = .init(self.allocator);
         defer scratch.deinit();
         var offset: usize = 0;
-        while (offset < manifest.sources.len) {
-            const count = @min(source_batch_count, manifest.sources.len - offset);
-            const references = manifest.sources[offset..][0..count];
-            var locators: [source_batch_count][]const u8 = undefined;
-            for (references, locators[0..count]) |reference, *locator| locator.* = reference.locator;
-            const bodies = try self.store.read(scratch.allocator(), locators[0..count]);
-            if (bodies.len != count) return error.InvalidHistory;
-            for (references, bodies) |reference, body| {
-                const actual = digest(body);
-                if (!std.mem.eql(u8, reference.key, &actual)) return error.InvalidHistory;
+        while (offset < groups.len) {
+            const count = @min(source_batch_count, groups.len - offset);
+            const batch = groups[offset..][0..count];
+            const temporary = scratch.allocator();
+            const references = try self.store.query(temporary, batch);
+            const Metadata = std.AutoHashMapUnmanaged(Key, Store.Reference);
+            var metadata: std.AutoHashMapUnmanaged(Scope, Metadata) = .empty;
+            for (batch) |group| try metadata.put(temporary, owners.get(group).?, .empty);
+            for (references) |reference| {
+                const scope = owners.get(reference.group) orelse return error.InvalidHistory;
+                const records = metadata.getPtr(scope) orelse return error.InvalidHistory;
+                if (!validKey(reference.key) or reference.locator.len == 0) return error.InvalidHistory;
+                if (reference.previous) |previous| if (!validKey(previous)) return error.InvalidHistory;
+                const result = try records.getOrPut(temporary, reference.key);
+                if (result.found_existing) {
+                    if (!equalPrevious(result.value_ptr.previous, reference.previous)) return error.InvalidHistory;
+                } else result.value_ptr.* = reference;
             }
-            for (bodies, sources[offset..][0..count]) |body, *source| source.* = try decode(Source, a, body);
+            for (checkpoint.sessions) |session| {
+                for (session.history) |span| {
+                    const records = metadata.getPtr(span.scope) orelse continue;
+                    if (span.count > records.count()) return error.InvalidHistory;
+                    const keys = try temporary.alloc(Key, span.count);
+                    var next: ?Key = span.head;
+                    var index = span.count;
+                    while (index > 0) {
+                        index -= 1;
+                        const key = next orelse return error.InvalidHistory;
+                        const reference = records.get(key) orelse return error.InvalidHistory;
+                        keys[index] = key;
+                        next = reference.previous;
+                        try selections.add(span.scope, reference, .entry);
+                    }
+                    if (next != null) return error.InvalidHistory;
+                    const cached = candidate.scopes.getPtr(span.scope).?;
+                    const common = @min(cached.keys.items.len, keys.len);
+                    for (cached.keys.items[0..common], keys[0..common]) |left, right| {
+                        if (!equalKey(left, right)) return error.InvalidHistory;
+                    }
+                    if (keys.len > cached.keys.items.len)
+                        try cached.keys.appendSlice(candidate.arena.allocator(), keys[cached.keys.items.len..]);
+                }
+                if (session.observations) |key| {
+                    const scope: Scope = .{ .session_id = session.session_id, .epoch = session.epoch };
+                    const records = metadata.getPtr(scope) orelse continue;
+                    const reference = records.get(key) orelse return error.InvalidHistory;
+                    if (reference.previous != null) return error.InvalidHistory;
+                    try selections.add(scope, reference, .observations);
+                }
+            }
             _ = scratch.reset(.retain_capacity);
             offset += count;
         }
-        const sessions = try a.alloc(History.Session, manifest.sessions.len);
-        for (manifest.sessions, sessions) |session, *restored| {
-            const entries = try a.alloc(Entry, session.history.len);
-            for (session.history, entries) |reference, *entry| entry.* = switch (reference) {
-                .record => |record| blk: {
-                    const events = try a.alloc(Input.Event, record.events.len);
-                    for (record.events, events) |index, *event| {
-                        const source = try sourceAt(sources, index);
-                        if (source != .event) return error.InvalidHistory;
-                        event.* = source.event;
-                    }
-                    const handover: ?Input.Handover = if (record.handover) |index| handover: {
-                        const source = try sourceAt(sources, index);
-                        if (source != .handover) return error.InvalidHistory;
-                        break :handover source.handover;
-                    } else null;
-                    break :blk .{ .record = .{ .session_id = record.session_id, .events = events, .handover = handover } };
-                },
-                .exchange => |index| blk: {
-                    const source = try sourceAt(sources, index);
-                    if (source != .exchange) return error.InvalidHistory;
-                    break :blk .{ .exchange = source.exchange };
-                },
-            };
-            const observations = try a.alloc(Input.Event, session.observations.len);
-            for (session.observations, observations) |index, *event| {
-                const source = try sourceAt(sources, index);
-                if (source != .event) return error.InvalidHistory;
-                event.* = source.event;
+        offset = 0;
+        while (offset < selections.items.items.len) {
+            const count = @min(source_batch_count, selections.items.items.len - offset);
+            const batch = selections.items.items[offset..][0..count];
+            var references: [source_batch_count]Store.Reference = undefined;
+            for (batch, references[0..count]) |selected, *reference| reference.* = selected.reference;
+            const bodies = try self.store.read(scratch.allocator(), references[0..count]);
+            if (bodies.len != count) return error.InvalidHistory;
+            for (batch, bodies) |*selected, body| {
+                if (!equalKey(digest(body), selected.reference.key)) return error.InvalidHistory;
+                const source = try decode(Source, a, body);
+                switch (source) {
+                    .entry => |entry| {
+                        if (selected.kind != .entry or !equalScope(entry.value.scope, selected.scope) or
+                            !equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
+                    },
+                    .observations => |events| {
+                        if (selected.kind != .observations or selected.reference.previous != null or events.len == 0)
+                            return error.InvalidHistory;
+                    },
+                }
+                selected.source = source;
             }
+            _ = scratch.reset(.retain_capacity);
+            offset += count;
+        }
+        const sessions = try a.alloc(History.Session, checkpoint.sessions.len);
+        for (checkpoint.sessions, sessions) |session, *restored| {
+            var entry_count: usize = 0;
+            for (session.history) |span| entry_count = std.math.add(usize, entry_count, span.count) catch return error.InvalidHistory;
+            const entries = try a.alloc(Entry, entry_count);
+            var position: usize = 0;
+            for (session.history) |span| {
+                const cached = candidate.scopes.get(span.scope).?;
+                for (cached.keys.items[0..span.count]) |key| {
+                    entries[position] = selections.source(span.scope, key).entry.value;
+                    position += 1;
+                }
+            }
+            const scope: Scope = .{ .session_id = session.session_id, .epoch = session.epoch };
             restored.* = .{
                 .session_id = session.session_id,
                 .parent_session_id = session.parent_session_id,
                 .parent_generation = session.parent_generation,
                 .generation = session.generation,
+                .epoch = session.epoch,
                 .entries = entries,
-                .observations = observations,
+                .observations = if (session.observations) |key| selections.source(scope, key).observations else &.{},
             };
         }
-        const history: History = .{ .next_session_id = manifest.next_session_id, .sessions = sessions };
+        const history: History = .{ .next_session_id = checkpoint.next_session_id, .sessions = sessions };
         try history.validate(a);
-        var current = try self.copyLocations(manifest.sources);
-        errdefer self.freeLocations(&current);
-        self.freeLocations(&self.known);
-        self.known = current;
+        std.mem.swap(Cache, &self.cache, &candidate);
+        self.published_checkpoint_digest = digest(document);
         return history;
     }
 
     pub fn save(self: *Persistence, a: Allocator, history: History) !void {
-        var builder: SourceBuilder = .init(self, a);
+        var candidate: Cache = .init(self.allocator);
+        defer candidate.deinit();
+        var builder: Builder = .init(self, &candidate, a);
         defer builder.deinit();
-        const sessions = try a.alloc(Manifest.Session, history.sessions.len);
-        for (history.sessions, sessions) |session, *saved| {
-            const references = try a.alloc(Reference, session.entries.len);
-            for (session.entries, references) |entry, *reference| reference.* = switch (entry) {
-                .record => |record| blk: {
-                    const events = try a.alloc(usize, record.events.len);
-                    for (record.events, events) |event, *index| index.* = try builder.add(.{ .event = event });
-                    break :blk .{ .record = .{
-                        .session_id = record.session_id,
-                        .events = events,
-                        .handover = if (record.handover) |handover| try builder.add(.{ .handover = handover }) else null,
-                    } };
-                },
-                .exchange => |items| .{ .exchange = try builder.add(.{ .exchange = items }) },
-            };
-            const observations = try a.alloc(usize, session.observations.len);
-            for (session.observations, observations) |event, *index| index.* = try builder.add(.{ .event = event });
+        const ordered = try a.dupe(History.Session, history.sessions);
+        std.mem.sort(History.Session, ordered, {}, struct {
+            fn lessThan(_: void, lhs: History.Session, rhs: History.Session) bool {
+                return lhs.session_id < rhs.session_id;
+            }
+        }.lessThan);
+        const sessions = try a.alloc(Checkpoint.Session, ordered.len);
+        for (ordered, sessions) |session, *saved| {
+            const current: Scope = .{ .session_id = session.session_id, .epoch = session.epoch };
+            const group = try builder.group(current);
+            var spans: std.ArrayList(Span) = .empty;
+            var seen: std.AutoHashMapUnmanaged(Scope, void) = .empty;
+            defer seen.deinit(a);
+            var offset: usize = 0;
+            while (offset < session.entries.len) {
+                const scope = session.entries[offset].scope;
+                if ((try seen.getOrPut(a, scope)).found_existing) return error.InvalidHistory;
+                const source_group = try builder.group(scope);
+                var count: usize = 0;
+                var head: Key = undefined;
+                while (offset < session.entries.len and equalScope(session.entries[offset].scope, scope)) {
+                    head = try builder.entry(session.entries[offset], count);
+                    count += 1;
+                    offset += 1;
+                }
+                try spans.append(a, .{ .scope = scope, .group = source_group, .head = head, .count = count });
+            }
+            const observations = if (session.observations.len == 0) null else try builder.observations(current, session.observations);
             saved.* = .{
                 .session_id = session.session_id,
                 .parent_session_id = session.parent_session_id,
                 .parent_generation = session.parent_generation,
                 .generation = session.generation,
-                .history = references,
+                .epoch = session.epoch,
+                .group = group,
+                .history = spans.items,
                 .observations = observations,
             };
         }
         try builder.flush();
-        var current = try self.copyLocations(builder.sources.items);
-        errdefer self.freeLocations(&current);
-        // Every referenced source has been confirmed before this publication.
-        try self.store.save(try encode(a, Manifest{ .next_session_id = history.next_session_id, .sources = builder.sources.items, .sessions = sessions }));
-        self.freeLocations(&self.known);
-        self.known = current;
-    }
-
-    fn copyLocations(self: *Persistence, sources: []const SourceReference) !Locations {
-        var locations: Locations = .empty;
-        errdefer self.freeLocations(&locations);
-        for (sources) |source| {
-            const key = try self.allocator.dupe(u8, source.key);
-            errdefer self.allocator.free(key);
-            const locator = try self.allocator.dupe(u8, source.locator);
-            errdefer self.allocator.free(locator);
-            try locations.put(self.allocator, key, locator);
+        const document = try encode(a, Checkpoint{ .next_session_id = history.next_session_id, .sessions = sessions });
+        const candidate_digest = digest(document);
+        if (self.published_checkpoint_digest) |published| {
+            if (equalKey(published, candidate_digest)) return;
         }
-        return locations;
-    }
-
-    fn freeLocations(self: *Persistence, locations: *Locations) void {
-        var iterator = locations.iterator();
-        while (iterator.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
-        }
-        locations.deinit(self.allocator);
+        // A failed publication may still have changed the stored checkpoint.
+        self.published_checkpoint_digest = null;
+        try self.store.save(document);
+        std.mem.swap(Cache, &self.cache, &candidate);
+        self.published_checkpoint_digest = candidate_digest;
     }
 };
 
-/// Builds one manifest source table while retaining only a bounded batch of new
-/// bodies. Encoding known or repeated sources uses separate per-source scratch.
-const SourceBuilder = struct {
-    persistence: *Persistence,
+fn registerScope(cache: *Cache, owners: *std.StringHashMapUnmanaged(Scope), a: Allocator, scope: Scope, group: []const u8) !void {
+    if (scope.session_id == 0 or group.len == 0) return error.InvalidHistory;
+    if (cache.scopes.get(scope)) |known| {
+        if (!std.mem.eql(u8, known.group, group)) return error.InvalidHistory;
+        return;
+    }
+    if (owners.contains(group)) return error.InvalidHistory;
+    const owned = try cache.arena.allocator().dupe(u8, group);
+    try cache.scopes.put(cache.arena.allocator(), scope, .{ .group = owned });
+    try owners.put(a, owned, scope);
+}
+
+const SelectionId = struct { scope: Scope, key: Key };
+const SelectionKind = enum { entry, observations };
+const Selection = struct {
+    scope: Scope,
+    reference: Store.Reference,
+    kind: SelectionKind,
+    source: ?Source = null,
+};
+const Selections = struct {
     allocator: Allocator,
-    indices: std.StringHashMapUnmanaged(usize) = .empty,
-    sources: std.ArrayList(SourceReference) = .empty,
+    indexes: std.AutoHashMapUnmanaged(SelectionId, usize) = .empty,
+    items: std.ArrayList(Selection) = .empty,
+
+    fn deinit(self: *Selections) void {
+        self.indexes.deinit(self.allocator);
+        self.items.deinit(self.allocator);
+    }
+
+    fn add(self: *Selections, scope: Scope, reference: Store.Reference, kind: SelectionKind) !void {
+        const result = try self.indexes.getOrPut(self.allocator, .{ .scope = scope, .key = reference.key });
+        if (result.found_existing) {
+            const previous = self.items.items[result.value_ptr.*];
+            if (previous.kind != kind or !equalPrevious(previous.reference.previous, reference.previous)) return error.InvalidHistory;
+            return;
+        }
+        result.value_ptr.* = self.items.items.len;
+        try self.items.append(self.allocator, .{
+            .scope = scope,
+            .reference = .{
+                .group = try self.allocator.dupe(u8, reference.group),
+                .key = reference.key,
+                .previous = reference.previous,
+                .locator = try self.allocator.dupe(u8, reference.locator),
+            },
+            .kind = kind,
+        });
+    }
+
+    fn source(self: *const Selections, scope: Scope, key: Key) Source {
+        return self.items.items[self.indexes.get(.{ .scope = scope, .key = key }).?].source.?;
+    }
+};
+
+/// Encode every occurrence to compare exact prefixes; retain only a bounded
+/// batch of new bodies. Confirmed prefixes need no new stored records.
+const Builder = struct {
+    persistence: *Persistence,
+    cache: *Cache,
+    allocator: Allocator,
+    owners: std.StringHashMapUnmanaged(Scope) = .empty,
     encoding: std.heap.ArenaAllocator,
     batch: std.heap.ArenaAllocator,
-    bodies: [source_batch_count][]const u8 = undefined,
-    pending_indices: [source_batch_count]usize = undefined,
+    records: [source_batch_count]Store.Record = undefined,
     count: usize = 0,
     bytes: usize = 0,
 
-    fn init(persistence: *Persistence, a: Allocator) SourceBuilder {
+    fn init(persistence: *Persistence, cache: *Cache, a: Allocator) Builder {
         return .{
             .persistence = persistence,
+            .cache = cache,
             .allocator = a,
             .encoding = .init(persistence.allocator),
             .batch = .init(persistence.allocator),
         };
     }
 
-    fn deinit(self: *SourceBuilder) void {
-        self.indices.deinit(self.allocator);
-        self.sources.deinit(self.allocator);
+    fn deinit(self: *Builder) void {
+        self.owners.deinit(self.allocator);
         self.encoding.deinit();
         self.batch.deinit();
     }
 
-    fn add(self: *SourceBuilder, source: Source) !usize {
-        defer _ = self.encoding.reset(.retain_capacity);
-        const data = try encode(self.encoding.allocator(), source);
-        const key = digest(data);
-        if (self.indices.get(&key)) |index| return index;
-        const known = self.persistence.known.get(&key);
-        if (known == null and self.count > 0 and
-            (self.count == source_batch_count or data.len > source_batch_bytes - self.bytes))
-            try self.flush();
-        const index = self.sources.items.len;
-        const owned_key = try self.allocator.dupe(u8, &key);
-        const locator = if (known) |stored| try self.allocator.dupe(u8, stored) else "";
-        try self.sources.append(self.allocator, .{ .key = owned_key, .locator = locator });
-        try self.indices.put(self.allocator, owned_key, index);
-        if (known == null) {
-            self.bodies[self.count] = try self.batch.allocator().dupe(u8, data);
-            self.pending_indices[self.count] = index;
-            self.count += 1;
-            self.bytes += data.len;
-            // A single source can exceed the target batch size. Storage owns
-            // whether its native protocol can represent that complete source.
-            if (self.bytes >= source_batch_bytes) try self.flush();
-        }
-        return index;
+    fn group(self: *Builder, scope: Scope) ![]const u8 {
+        if (self.cache.scopes.get(scope)) |cached| return cached.group;
+        const stored = if (self.persistence.cache.scopes.get(scope)) |cached|
+            cached.group
+        else
+            try self.persistence.store.allocateGroup(self.allocator);
+        try registerScope(self.cache, &self.owners, self.allocator, scope, stored);
+        return self.cache.scopes.get(scope).?.group;
     }
 
-    fn flush(self: *SourceBuilder) !void {
-        if (self.count == 0) return;
-        const locators = try self.persistence.store.create(self.batch.allocator(), self.bodies[0..self.count]);
-        if (locators.len != self.count) return error.InvalidHistory;
-        for (self.pending_indices[0..self.count], locators) |index, locator| {
-            if (locator.len == 0) return error.InvalidHistory;
-            self.sources.items[index].locator = try self.allocator.dupe(u8, locator);
+    fn entry(self: *Builder, value: Entry, index: usize) !Key {
+        defer _ = self.encoding.reset(.retain_capacity);
+        const cached = self.cache.scopes.getPtr(value.scope).?;
+        const previous = if (index == 0) null else cached.keys.items[index - 1];
+        const body = try encode(self.encoding.allocator(), Source{ .entry = .{ .previous = previous, .value = value } });
+        const key = digest(body);
+        if (index < cached.keys.items.len) {
+            if (!equalKey(cached.keys.items[index], key)) return error.InvalidHistory;
+            return key;
         }
+        var known = false;
+        if (self.persistence.cache.scopes.get(value.scope)) |stored| {
+            if (index < stored.keys.items.len) {
+                if (!equalKey(stored.keys.items[index], key)) return error.InvalidHistory;
+                known = true;
+            }
+        }
+        try cached.keys.append(self.cache.arena.allocator(), key);
+        if (!known) try self.add(cached.group, key, previous, body);
+        return key;
+    }
+
+    fn observations(self: *Builder, scope: Scope, events: []const Input.Event) !Key {
+        defer _ = self.encoding.reset(.retain_capacity);
+        const body = try encode(self.encoding.allocator(), Source{ .observations = events });
+        const key = digest(body);
+        try self.cache.observations.put(self.cache.arena.allocator(), scope.session_id, .{ .scope = scope, .key = key });
+        if (self.persistence.cache.observations.get(scope.session_id)) |stored| {
+            if (equalScope(stored.scope, scope) and equalKey(stored.key, key)) return key;
+        }
+        try self.add(self.cache.scopes.get(scope).?.group, key, null, body);
+        return key;
+    }
+
+    fn add(self: *Builder, group_id: []const u8, key: Key, previous: ?Key, body: []const u8) !void {
+        if (self.count > 0 and (self.count == source_batch_count or body.len > source_batch_bytes - self.bytes))
+            try self.flush();
+        self.records[self.count] = .{
+            .group = group_id,
+            .key = key,
+            .previous = previous,
+            .body = try self.batch.allocator().dupe(u8, body),
+        };
+        self.count += 1;
+        self.bytes += body.len;
+        if (self.bytes >= source_batch_bytes) try self.flush();
+    }
+
+    fn flush(self: *Builder) !void {
+        if (self.count == 0) return;
+        try self.persistence.store.create(self.batch.allocator(), self.records[0..self.count]);
         self.count = 0;
         self.bytes = 0;
         _ = self.batch.reset(.retain_capacity);
     }
 };
 
-fn sourceAt(sources: []const Source, index: usize) !Source {
-    if (index >= sources.len) return error.InvalidHistory;
-    return sources[index];
+fn validKey(key: Key) bool {
+    for (key) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
 }
 
-fn digest(data: []const u8) [64]u8 {
+fn equalKey(left: Key, right: Key) bool {
+    return std.mem.eql(u8, &left, &right);
+}
+
+fn equalPrevious(left: ?Key, right: ?Key) bool {
+    if (left) |key| return if (right) |other| equalKey(key, other) else false;
+    return right == null;
+}
+
+fn equalScope(left: Scope, right: Scope) bool {
+    return left.session_id == right.session_id and left.epoch == right.epoch;
+}
+
+fn digest(data: []const u8) Key {
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});
     return std.fmt.bytesToHex(hash, .lower);
