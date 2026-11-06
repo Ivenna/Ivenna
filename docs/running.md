@@ -46,7 +46,7 @@ Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's star
 
 ## Mail service
 
-Use a dedicated account with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create messages and update private keywords. Ivenna stores history records and manifests in Archive and creates that folder when missing, so the account also needs permission to create it.
+Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create messages and update private keywords. Ivenna stores history records and manifests in the top-level `Ivenna History` folder, which has no special mail role. It creates that folder when missing, so the account also needs permission to create it. The JMAP session must advertise positive integer `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits; the adapter uses these to bound native requests.
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
@@ -54,17 +54,15 @@ Addresses must use the [supported ASCII dot-atom local parts](communication.md#c
 
 Install the [reception-readiness policy](#service-status-and-reception) on the service's receiving paths before using them for correspondence.
 
-The [intake rules](#mail-intake) also apply to the account's existing mail. Working-history records and manifests share the mailbox with correspondence. See [data and retention](#data-and-retention) for the records and metadata needed to restore working contexts.
+The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working-history records and manifests use their own folder while sharing the account's storage capacity. See [data and retention](#data-and-retention) for the records and metadata needed to restore working contexts.
 
 ### Mail intake
 
-The kernel reads ordinary unprocessed correspondence across mail folders, including Archive. Drafts and messages in Junk or Trash are excluded, along with messages carrying the runtime's private outgoing or history-state markers.
+The kernel reads unprocessed correspondence across the account's mail folders, including Archive. The `Ivenna History`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying the runtime's private outgoing or history-state markers. The history-state marker keeps moved history records out of intake as well.
 
 Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. Missing, cross-domain, or unsupported From addresses exclude the whole message from intake, leaving its completion marker unchanged. The adapter presents the corresponding IDs and text as an observation.
 
-Integrations that bring outside material to Ivenna can submit it through an internal account with suitable context; the current adapter supports only same-domain correspondence.
-
-Ivenna tracks processing with a private completion marker. Eligible mail without that marker is pending, including existing mail that has been read or archived. Review the mailbox before connecting it; reading, starring, or moving ordinary correspondence does not mark it as processed.
+Ivenna tracks processing with a private completion marker. Eligible correspondence without that marker is pending, including existing messages that have been read or archived. Review the account's communication records before connecting it; reading, starring, or moving correspondence does not mark it as processed.
 
 ## Memory service
 
@@ -120,7 +118,7 @@ curl --include http://127.0.0.1:8090/readyz
 
 Configure the mail receiving boundary to check the readiness header at an address it can reach and reject incoming traffic when the header is absent, including when the endpoint cannot be reached. Apply the policy to every receiving address and delivery path used for correspondence. The [local Stalwart setup](../dev/README.md#configuring-mail) demonstrates an SMTP recipient check.
 
-Readiness describes the kernel's reception state when queried. It reserves no processing capacity, and the runtime can stop after a successful check or accepted delivery. The kernel continues to read [ordinary unprocessed mail](#mail-intake) already present in its mailbox.
+Readiness describes the kernel's reception state when queried. It reserves no processing capacity, and the runtime can stop after a successful check or accepted delivery. The kernel continues to read [unprocessed correspondence](#mail-intake) already present in its account.
 
 With SMTP, a recipient rejection reaches the sending server during that delivery attempt. A normal mail client may already have submitted to its own server, which handles the delivery result. Connection failures can also lead that server to queue and retry mail. See SMTP's [delivery responsibilities](https://www.rfc-editor.org/rfc/rfc5321.html#section-4.2.5) and [retry behavior](https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.4.1).
 
@@ -130,15 +128,15 @@ Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception
 
 When an incoming message fails admission with `ContextBudgetExhausted`, it remains unprocessed. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
 
-Start the executable again with the same mailbox to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work. Each retained session receives a fresh startup activation with the current observation time. Ivenna chooses how to continue from its history and current state; old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail, so include any known external changes when corresponding about the interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means.
+Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work. Each retained session receives a fresh startup activation with the current observation time. Ivenna chooses how to continue from its history and current state; old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail, so include any known external changes when corresponding about the interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means.
 
 ## Data and retention
 
-The deployment chooses mailbox storage, the memory workspace, and the kernel's local data directory independently:
+The deployment chooses storage for the mail account, the memory workspace, and the kernel's local data directory independently:
 
 | Location | Contents |
 | --- | --- |
-| Configured JMAP mailbox | Correspondence, canonical history records, retained-session manifests, and private processing markers |
+| Configured JMAP account | Correspondence, canonical history records, retained-session manifests, and private processing markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
 
@@ -146,9 +144,15 @@ The deployment chooses mailbox storage, the memory workspace, and the kernel's l
 
 Host output files remain available after the command and work session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
 
-Working history uses immutable source records for events, complete model/tool exchanges, and handovers. The current manifest references the records needed by the core and each still-retained work context, including unread internal assignments and reports. Compaction and context release change those references; earlier source records and manifests remain in the mailbox. Automatic history cleanup is not implemented.
+Working history uses immutable source records for events, complete model/tool exchanges, and handovers. The current manifest has a unique source table containing content hashes and native object locators; indexed paths describe the core and each still-retained work context, including unread internal assignments and reports. Compaction starts a replacement active history from a handover with the same session identity and parent relationships. Context release removes a session from the active graph. Earlier source records and manifests remain in the history folder. History search and model tools for retrieving earlier records are unimplemented.
 
-History records and manifests are plain-text ZON messages created in Archive with the private `ivenna-state` keyword. Current manifest candidates also carry `ivenna-current`; the runtime selects the highest numeric `X-Ivenna-History-Revision` if an interrupted save leaves several candidates. Manage mailbox capacity while preserving the current manifest, all of its referenced source records, and their private keywords and identifying headers. See [persistent working history](architecture.md#persistent-working-history) for source formats, [email history storage](architecture.md#history-storage) for publication and lookup metadata, and [mail retention](architecture.md#mail-retention) for their lifetimes.
+History records and manifests are JMAP Email objects with plain-text ZON bodies and the private `ivenna-state` keyword in the top-level `Ivenna History` folder, which has no mail role. Their `X-Ivenna-History-Kind` header identifies `source` or `manifest`. Current manifest candidates also carry `ivenna-current`; the runtime selects the highest numeric `X-Ivenna-History-Revision` if an interrupted save leaves several candidates. Preserve the folder's name and location, the current manifest and all of its referenced source objects in that folder, their native `Email.id` values, their From and To addresses, and their private keywords and identifying headers. The adapter checks those addresses against `MAIL_ADDRESS`, so keep that setting aligned with the saved records.
+
+The manifest's locators identify native objects within the configured account. Copying or importing history messages can assign new IDs and make those locators invalid. A backup or transfer used for restoration must preserve the native identities and folder membership as well as bodies and metadata. The prototype provides no storage-format compatibility or migration path.
+
+Source sharing covers the current active graph. Unconfirmed writes may leave unreferenced source copies, and reintroducing a body absent from the active graph may create another copy. Physical archive-wide deduplication and exactly-once creation are not guaranteed.
+
+Folder separation lets operators select correspondence and history independently for retention while both use the account's storage capacity. Automatic cleanup and quota management are not implemented. See [persistent working history](architecture.md#persistent-working-history) for source formats, [email history storage](architecture.md#history-storage) for publication and lookup metadata, and [mail retention](architecture.md#mail-retention) for their lifetimes.
 
 ## Optional host tools
 

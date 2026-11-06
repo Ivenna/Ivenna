@@ -172,7 +172,7 @@ In ordinary execution, a response without tool calls completes the whole selecte
 
 ### Compaction and budgets
 
-Compaction uses the same request form with response `summary` and instructions from the dedicated [summary resource](../packages/agent/src/compaction.md), with tools disabled. The resulting handover replaces history in a record with an empty `events` list; the summary instructions and state remain temporary, and ordinary work continues in the replacement context. The [architecture guide](architecture.md#bounded-model-context) explains when compaction occurs and how its request is bounded.
+Compaction uses the same request form with response `summary` and instructions from the dedicated [summary resource](../packages/agent/src/compaction.md), with tools disabled. The resulting handover starts a replacement working history in a record with an empty `events` list. The session identity remains the same; summary instructions and state stay temporary, and ordinary work continues in the replacement context. The [architecture guide](architecture.md#bounded-model-context) explains when compaction occurs and how its request is bounded.
 
 Records, current state, instructions, tools, and encoded content all contribute to the complete [request budget](architecture.md#bounded-model-context). Budget measurement uses the same assembled payload sent to the provider.
 

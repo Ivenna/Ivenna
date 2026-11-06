@@ -4,7 +4,7 @@ The [design intent](design.md) guides product and interface decisions; the [arch
 
 ## Development conventions
 
-The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design. Start from Ivenna's overall behavior, establish responsibilities and interfaces, then implement in useful increments. Explain choices through the behavior they establish and the reasons for choosing them.
+The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design. Start from Ivenna's overall behavior, establish responsibilities and interfaces, then complete the change across its producers, consumers, and documentation. Explain choices through the behavior they establish and the reasons for choosing them.
 
 Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided. When a design changes, remove superseded behavior and state; do not retain compatibility paths or introduce migration frameworks.
 
@@ -66,7 +66,7 @@ The session registry synchronizes contexts, queues, and activation ownership. Th
 
 Persist the core and every still-retained work context, preserving complete model/tool exchanges and unread internal assignments and reports. Restore saved understanding and session relationships with fresh startup activations and the current system prompt. Execution ownership, external deliveries, receipts, and process handles belong to the running process. Loading history must not execute historical tool calls. Storage failures end the runtime through the normal execution failure path.
 
-Keep history encoding and storage protocols with their owning components. Preserve complete saved histories across interrupted writes. The current implementation uses source records and a manifest; [persistent working history](architecture.md#persistent-working-history) describes that representation and its save boundaries, and [email history storage](architecture.md#history-storage) explains native publication and revision selection. Working history has a separate lifetime from host command artifacts.
+Keep history encoding with the agent and native storage protocols with their implementations. `HistoryStore` exposes ordered batches of source reads by opaque locator and source creation returning locators, alongside manifest load and save. Adapters own native identifiers, request limits, and result correlation. Confirm sources before manifest publication; an unconfirmed create may leave unreferenced stored records. [Persistent working history](architecture.md#persistent-working-history) describes the current representation, sharing, and save boundaries; [email history storage](architecture.md#history-storage) explains native publication and revision selection. Working history has a separate lifetime from host command artifacts.
 
 Infrastructure and execution failures propagate to the application's task scope, which closes reception, cancels, and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
 
@@ -104,7 +104,7 @@ Build the application and exercise the affected behavior through communication a
 | Communication | Explicit zero, one, or multiple sends; correspondent ID lifetime; incoming `from` IDs and outgoing tool arguments retained in history; final text without implicit sending |
 | Email | Same-domain address conversion, From-address filtering across query pages, marked outbound messages, standalone submissions, and independent intake regardless of thread, read, starred, or archived state |
 | Service | Health and reception status during startup, operation, and shutdown; SMTP rejection when reception is closed |
-| History and restart | Canonical events, model/tool exchanges, and unread internal observations survive restart; model output and media round-trip; forks share source references; compaction updates active paths; source records are confirmed before manifest publication; numeric revision selects the current manifest after interruption; startup uses current state; old activations, external deliveries, receipts, and tool calls are not replayed |
+| History and restart | Canonical events, model/tool exchanges, and unread internal observations survive restart; model output and media round-trip; forks share source-table entries; compaction starts a replacement active history with session relationships preserved; batched reads and creates preserve order; source reads validate saved locators, bodies, and content hashes; newly created sources are confirmed before manifest publication; failed creates prevent publication; numeric revision selects the current manifest after interruption; startup uses current state; old activations, external deliveries, receipts, and tool calls are not replayed |
 | Mail processing | Private consumption and outbound markers, receipt ownership, and affected retention behavior |
 | Model-facing interfaces | Record and request serialization, response variants, tool selection, and complete-payload budget accounting |
 

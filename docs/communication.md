@@ -40,7 +40,7 @@ The result confirms submission through the adapter. It does not establish final 
 
 ## Current email addressing
 
-The current email adapter uses the domain of `MAIL_ADDRESS` as one internal communication namespace. For `MAIL_ADDRESS=ivenna@ivenna.test`, `operator@ivenna.test` becomes `operator`, and sending to `operator` resolves to that address. ID case is preserved; domain matching ignores case. IDs remain usable across context release and restart with the same configured domain. The model-facing fields carry ID strings, while the adapter handles full addresses.
+The current email adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. For `MAIL_ADDRESS=ivenna@ivenna.test`, `operator@ivenna.test` becomes `operator`, and sending to `operator` resolves to that address. ID case is preserved; domain matching ignores case. IDs remain usable across context release and restart with the same configured domain. The model-facing fields carry ID strings, while the adapter handles full addresses.
 
 IDs use ASCII dot-atom local parts: letters, digits, and the punctuation below, with dots separating nonempty atoms. Leading, trailing, or consecutive dots, quoted or escaped local parts, and non-ASCII local parts are unsupported.
 

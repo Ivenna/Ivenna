@@ -110,11 +110,14 @@ pub const Kernel = struct {
     }
 
     fn dispatch(self: *Kernel, tasks: *Tasks) !void {
-        while (try self.sessions.nextReady(self.max_parallel)) |work| {
-            tasks.concurrent(.work, execute, .{ self, work }) catch |err| {
-                self.sessions.endWorker(work.session.session_id);
-                return err;
-            };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const ready = try self.sessions.takeReadyBatch(arena.allocator(), self.max_parallel);
+        var started: usize = 0;
+        defer for (ready[started..]) |work| self.sessions.endWorker(work.session.session_id);
+        for (ready) |work| {
+            try tasks.concurrent(.work, execute, .{ self, work });
+            started += 1;
         }
     }
 
@@ -203,31 +206,26 @@ pub const Kernel = struct {
     /// history is installed.
     fn selectActivation(self: *Kernel, a: Allocator, work: Work, history: *const Context, request: Input.Request) !?Selection {
         const scope: Engine.Scope = if (work.session.role == .core) .coordination else .all;
-        var selected = try history.fork(self.allocator);
-        errdefer selected.deinit();
         var count: usize = 0;
         const deliveries = work.activation.deliveries.items;
         const events = try a.alloc(Input.Event, deliveries.len);
         for (deliveries, events) |delivery, *event| event.* = delivery.event;
+        var trial_arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer trial_arena.deinit();
         for (1..events.len + 1) |end| {
-            var candidate = try history.fork(self.allocator);
-            errdefer candidate.deinit();
-            try candidate.appendRecord(.{ .session_id = work.session.session_id, .events = events[0..end] });
+            const trial = trial_arena.allocator();
             var current = request;
             current.state.runtime.queued_inputs += events.len - end;
-            const input = try candidate.request(a, current);
-            if (try self.engine.requestBytes(a, input, scope) > self.limits.request_bytes) {
-                candidate.deinit();
-                break;
-            }
-            selected.deinit();
-            selected = candidate;
+            const input = try history.requestWithRecord(trial, .{ .session_id = work.session.session_id, .events = events[0..end] }, current);
+            const bytes = try self.engine.requestBytes(trial, input, scope);
+            _ = trial_arena.reset(.retain_capacity);
+            if (bytes > self.limits.request_bytes) break;
             count = end;
         }
-        if (count == 0) {
-            selected.deinit();
-            return null;
-        }
+        if (count == 0) return null;
+        var selected = try history.fork(self.allocator);
+        errdefer selected.deinit();
+        try selected.appendRecord(.{ .session_id = work.session.session_id, .events = events[0..count] });
         return .{ .count = count, .context = selected };
     }
 

@@ -199,7 +199,7 @@ These settings configure the supplied local services in [dev/compose.yaml](compo
 
 If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Account and server policy changes belong in the private provisioning plan; apply them through [local mail setup](#configuring-mail).
 
-After changing service settings, reload `.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed.
+After changing service settings, reload `.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed. Mail history restoration requires [preserving native object identities and metadata](../docs/running.md#data-and-retention); importing messages alone is insufficient.
 
 Source changes inside the memory image require a [rebuild](#updating-the-kernel-and-middleware). For another memory deployment, configure capacity at its [service entry point](../docs/running.md#memory-service).
 

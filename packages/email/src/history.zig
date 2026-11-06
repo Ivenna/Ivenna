@@ -5,7 +5,7 @@ const StateRecord = @import("mail.zig").StateRecord;
 const Allocator = std.mem.Allocator;
 
 /// Store immutable source records and publish the manifest of retained sessions.
-/// The agent owns their encodings and record keys.
+/// The agent owns their encodings and content identity; native IDs are opaque.
 pub const History = struct {
     allocator: Allocator,
     mailbox: *Mailbox,
@@ -24,13 +24,13 @@ pub const History = struct {
     }
 
     pub fn port(self: *History) contracts.HistoryStore {
-        return .{ .context = self, .vtable = &.{ .load = load, .read = read, .put = put, .save = save } };
+        return .{ .context = self, .vtable = &.{ .load = load, .read = read, .create = create, .save = save } };
     }
 
     fn load(context: *anyopaque, a: Allocator) !?[]const u8 {
         const self: *History = @ptrCast(@alignCast(context));
         self.loaded = false;
-        const records = try self.mailbox.stateRecords(a, "history", true);
+        const records = try self.mailbox.historyHeads(a);
         var latest: ?StateRecord = null;
         for (records) |record| {
             if (latest == null or record.revision > latest.?.revision) {
@@ -41,7 +41,7 @@ pub const History = struct {
             if (record.revision == selected.revision and !std.mem.eql(u8, record.id, selected.id))
                 return error.AmbiguousHistoryRevision;
         };
-        const data = if (latest) |record| try self.mailbox.stateData(a, record.id) else null;
+        const data = if (latest) |record| (try self.mailbox.historyData(a, &.{record.id}, .manifest))[0] else null;
         var heads: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (heads.items) |id| self.allocator.free(id);
@@ -60,35 +60,14 @@ pub const History = struct {
         return data;
     }
 
-    fn read(context: *anyopaque, a: Allocator, key: []const u8) ![]const u8 {
+    fn read(context: *anyopaque, a: Allocator, locators: []const []const u8) ![]const []const u8 {
         const self: *History = @ptrCast(@alignCast(context));
-        const native_key = try std.fmt.allocPrint(a, "record:{s}", .{key});
-        const records = try self.mailbox.stateRecords(a, native_key, false);
-        if (records.len == 0) return error.HistoryRecordNotFound;
-        var data: ?[]const u8 = null;
-        for (records) |record| {
-            const candidate = try self.mailbox.stateData(a, record.id);
-            if (data) |existing| {
-                if (!std.mem.eql(u8, existing, candidate)) return error.InvalidHistory;
-            } else data = candidate;
-        }
-        return data.?;
+        return self.mailbox.historyData(a, locators, .source);
     }
 
-    fn put(context: *anyopaque, key: []const u8, data: []const u8) !void {
+    fn create(context: *anyopaque, a: Allocator, records: []const []const u8) ![]const []const u8 {
         const self: *History = @ptrCast(@alignCast(context));
-        var arena: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const existing = read(context, a, key) catch |err| switch (err) {
-            error.HistoryRecordNotFound => null,
-            else => return err,
-        };
-        if (existing) |stored| {
-            if (!std.mem.eql(u8, stored, data)) return error.InvalidHistory;
-            return;
-        }
-        _ = try self.mailbox.createState(a, try std.fmt.allocPrint(a, "record:{s}", .{key}), data, null);
+        return self.mailbox.createSources(a, records);
     }
 
     fn save(context: *anyopaque, manifest: []const u8) !void {
@@ -102,7 +81,7 @@ pub const History = struct {
         // An unconfirmed create may already exist. A retry must refresh heads
         // before allocating another revision instead of trusting this cache.
         self.loaded = false;
-        const created = try self.mailbox.createState(a, "history", manifest, revision);
+        const created = try self.mailbox.createManifest(a, manifest, revision);
         self.revision = revision;
         const id = try self.allocator.dupe(u8, created);
         self.heads.appendAssumeCapacity(id);
@@ -110,14 +89,19 @@ pub const History = struct {
         // Publication is confirmed before older heads are demoted. If cleanup
         // fails, retain the confirmed revision and refresh native head state
         // before a retry; its response may not describe what took effect.
-        while (self.heads.items.len > 1) {
-            const previous = self.heads.items[0];
+        var cleared: usize = 0;
+        defer {
+            for (self.heads.items[0..cleared]) |previous| self.allocator.free(previous);
+            const remaining = self.heads.items[cleared..];
+            std.mem.copyForwards([]const u8, self.heads.items[0..remaining.len], remaining);
+            self.heads.items.len = remaining.len;
+        }
+        while (cleared + 1 < self.heads.items.len) : (cleared += 1) {
+            const previous = self.heads.items[cleared];
             self.mailbox.clearHistoryHead(a, previous) catch |err| {
                 self.loaded = false;
                 return err;
             };
-            self.allocator.free(previous);
-            _ = self.heads.orderedRemove(0);
         }
     }
 };

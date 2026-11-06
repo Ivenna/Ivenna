@@ -1,6 +1,6 @@
 # Corresponding with Ivenna
 
-Send messages from an account in Ivenna's configured internal mail domain to its address (`MAIL_ADDRESS`) while [reception is open](running.md#service-status-and-reception). Each arrival enters Ivenna's core independently. Include enough context for Ivenna to understand the message and relate it to ongoing work.
+Send messages to Ivenna while [reception is open](running.md#service-status-and-reception). Each arrival enters Ivenna's core independently. Include enough context for Ivenna to understand the message and relate it to ongoing work.
 
 ## Sending a request
 
@@ -47,4 +47,4 @@ The core and still-retained work contexts survive restart. Long histories can be
 
 After a [restart](running.md#stopping-and-restarting), Ivenna loads its saved core and retained work histories. Each session receives a fresh startup observation with the current time and can choose what to inspect or continue without waiting for new correspondence. Unread internal assignments and reports remain available for processing.
 
-Earlier activations and host processes are not restored, and old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail before its result was saved. [Ordinary unprocessed mail](running.md#mail-intake) can appear again even if an earlier observation was retained. Include what is known about external changes when corresponding about interrupted work. See [startup and interruption](architecture.md#startup-and-interruption) for how retained history relates to the new runtime.
+Earlier activations and host processes are not restored, and old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail before its result was saved. [Unprocessed correspondence](running.md#mail-intake) can appear again even if an earlier observation was retained. Include what is known about external changes when corresponding about interrupted work. See [startup and interruption](architecture.md#startup-and-interruption) for how retained history relates to the new runtime.

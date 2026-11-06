@@ -38,22 +38,22 @@ const handled_keyword = "ivenna-handled";
 const outbound_keyword = "ivenna-outbound";
 const state_keyword = "ivenna-state";
 const current_keyword = "ivenna-current";
-const state_key_property = "header:X-Ivenna-State-Key:asText";
+const history_mailbox_name = "Ivenna History";
+const kind_property = "header:X-Ivenna-History-Kind:asText";
 const revision_property = "header:X-Ivenna-History-Revision:asText";
 const state_properties: []const []const u8 = &.{
-    "id", "keywords", "from", "to", state_key_property, revision_property,
+    "id", "mailboxIds", "keywords", "from", "to", kind_property, revision_property,
+};
+const state_data_properties: []const []const u8 = &.{
+    "id", "mailboxIds", "keywords", "from", "to", kind_property, revision_property, "textBody", "bodyValues",
 };
 const message_properties: []const []const u8 = &.{
     "id", "from", "subject", "textBody", "htmlBody", "bodyValues",
 };
 
-fn stateKeyKeyword(a: Allocator, key: []const u8) ![]const u8 {
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(key, &hash, .{});
-    return std.fmt.allocPrint(a, "ivenna-key-{s}", .{std.fmt.bytesToHex(hash, .lower)});
-}
+const HistoryKind = enum { source, manifest };
 
-/// JMAP access for correspondence, submissions, and internal history storage.
+/// JMAP access for communication records, submissions, and working history.
 /// Discover once using an allocator that outlives every operation and worker.
 pub const Mailbox = struct {
     client: *std.http.Client,
@@ -66,9 +66,11 @@ pub const Mailbox = struct {
     identity_id: []const u8 = "",
     sent_id: []const u8 = "",
     drafts_id: []const u8 = "",
-    archive_id: []const u8 = "",
+    history_id: []const u8 = "",
     excluded_ids: []const []const u8 = &.{},
     max_get: usize = 32,
+    max_set: usize = 32,
+    max_request: usize = 0,
 
     pub fn discover(self: *Mailbox, a: Allocator) !void {
         const session = try self.http(a, .GET, self.session_url, null);
@@ -78,9 +80,10 @@ pub const Mailbox = struct {
         if (capabilities != .object or !capabilities.object.contains(mail_capability) or
             !capabilities.object.contains(submission_capability))
             return error.MailCapabilityUnavailable;
-        if (capabilities.object.get(core_capability)) |core| {
-            self.max_get = try objectLimit(core, "maxObjectsInGet");
-        }
+        const core = try field(capabilities, core_capability);
+        self.max_get = @min(try objectLimit(core, "maxObjectsInGet"), 32);
+        self.max_set = @min(try objectLimit(core, "maxObjectsInSet"), 32);
+        self.max_request = try objectLimit(core, "maxSizeRequest");
         const identities = try self.call(a, "Identity/get", .{ .accountId = self.account_id });
         for (try arrayField(identities, "list")) |identity| {
             if (std.ascii.eqlIgnoreCase(try textField(identity, "email"), self.address)) {
@@ -93,31 +96,36 @@ pub const Mailbox = struct {
         var excluded: std.ArrayList([]const u8) = .empty;
         const folders = try self.call(a, "Mailbox/get", .{
             .accountId = self.account_id,
-            .properties = &[_][]const u8{ "id", "role" },
+            .properties = &[_][]const u8{ "id", "name", "parentId", "role" },
         });
         for (try arrayField(folders, "list")) |folder| {
-            const role = optionalText(folder, "role") orelse continue;
             const id = try textField(folder, "id");
+            const role = optionalText(folder, "role") orelse {
+                if (optionalText(folder, "parentId") == null and
+                    std.mem.eql(u8, try textField(folder, "name"), history_mailbox_name))
+                    self.history_id = id;
+                continue;
+            };
             if (std.mem.eql(u8, role, "sent")) self.sent_id = id;
             if (std.mem.eql(u8, role, "drafts")) self.drafts_id = id;
-            if (std.mem.eql(u8, role, "archive")) self.archive_id = id;
             if (std.mem.eql(u8, role, "drafts") or std.mem.eql(u8, role, "trash") or std.mem.eql(u8, role, "junk"))
                 try excluded.append(a, id);
         }
-        self.excluded_ids = try excluded.toOwnedSlice(a);
         if (self.sent_id.len == 0 or self.drafts_id.len == 0)
             return error.MailFoldersNotFound;
-        if (self.archive_id.len == 0) {
+        if (self.history_id.len == 0) {
             const created = try self.call(a, "Mailbox/set", .{
                 .accountId = self.account_id,
-                .create = .{ .archive = .{ .name = "Archive", .role = "archive" } },
+                .create = .{ .history = .{ .name = history_mailbox_name, .parentId = null, .role = null } },
             });
-            self.archive_id = try createdId(created, "archive");
+            self.history_id = try createdId(created, "history");
         }
+        try excluded.append(a, self.history_id);
+        self.excluded_ids = try excluded.toOwnedSlice(a);
     }
 
-    /// Intake uses private progress and origin markers, independently of the
-    /// client's read status, stars, or ordinary folder organization.
+    /// Intake excludes history storage and uses private processing markers,
+    /// independently of read status, stars, or archiving.
     pub fn pending(self: Mailbox, a: Allocator, limit: usize) ![]const Letter {
         const filter = try self.pendingFilter(a);
         var letters: std.ArrayList(Letter) = .empty;
@@ -153,99 +161,206 @@ pub const Mailbox = struct {
         if (!hasKey(result, "updated", id)) return error.InvalidMailReply;
     }
 
-    /// Private keywords index keys without relying on arbitrary-header search.
-    /// Exact headers and self addresses still identify the selected records.
-    pub fn stateRecords(self: Mailbox, a: Allocator, key: []const u8, current: bool) ![]const StateRecord {
-        var conditions: std.ArrayList(Value) = .empty;
-        try conditions.append(a, try value(a, .{ .hasKeyword = state_keyword }));
-        try conditions.append(a, try value(a, .{ .hasKeyword = try stateKeyKeyword(a, key) }));
-        if (current) try conditions.append(a, try value(a, .{ .hasKeyword = current_keyword }));
-        const filter = try value(a, .{ .operator = "AND", .conditions = conditions.items });
+    /// Only current manifests are discovered. Sources are read by native ID.
+    pub fn historyHeads(self: Mailbox, a: Allocator) ![]const StateRecord {
+        const filter = try value(a, .{
+            .operator = "AND",
+            .conditions = .{
+                .{ .inMailbox = self.history_id },
+                .{ .hasKeyword = state_keyword },
+                .{ .hasKeyword = current_keyword },
+            },
+        });
         var records: std.ArrayList(StateRecord) = .empty;
         var position: usize = 0;
         while (true) {
-            const ids = try self.queryIds(a, filter, false, position, self.max_get);
+            var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+            defer scratch.deinit();
+            const temporary = scratch.allocator();
+            const ids = try self.queryIds(temporary, filter, false, position, self.max_get);
             if (ids.len == 0) break;
-            const response = try self.call(a, "Email/get", .{
-                .accountId = self.account_id,
-                .ids = ids,
-                .properties = state_properties,
-            });
-            const fetched = try arrayField(response, "list");
-            for (ids) |id| {
-                const record = for (fetched) |candidate| {
-                    if (std.mem.eql(u8, try textField(candidate, "id"), id)) break candidate;
-                } else return error.InvalidHistory;
-                const keywords = try field(record, "keywords");
-                if (keywords != .object) return error.InvalidMailReply;
-                if (!boolean(keywords, state_keyword) or (current and !boolean(keywords, current_keyword))) continue;
-                if (!std.mem.eql(u8, optionalText(record, state_key_property) orelse continue, key)) continue;
-                const from = try addresses(a, record, "from");
-                if (from.len != 1 or !std.ascii.eqlIgnoreCase(from[0].email, self.address)) continue;
-                const to = try addresses(a, record, "to");
-                const addressed_to_self = for (to) |recipient| {
-                    if (std.ascii.eqlIgnoreCase(recipient.email, self.address)) break true;
-                } else false;
-                if (!addressed_to_self) continue;
-                const revision = if (current) blk: {
-                    const text = optionalText(record, revision_property) orelse return error.InvalidHistory;
-                    const parsed = std.fmt.parseInt(u64, text, 10) catch return error.InvalidHistory;
-                    if (parsed == 0) return error.InvalidHistory;
-                    break :blk parsed;
-                } else 0;
-                try records.append(a, .{ .id = try textField(record, "id"), .revision = revision });
+            var offset: usize = 0;
+            while (offset < ids.len) {
+                const count = try self.historyGetCount(ids[offset..], false);
+                for (try self.getHistoryRecords(temporary, ids[offset..][0..count], false)) |record| {
+                    if (!try self.validateHistoryRecord(temporary, record, .manifest)) continue;
+                    try records.append(a, .{
+                        .id = try a.dupe(u8, try textField(record, "id")),
+                        .revision = try historyRevision(record),
+                    });
+                }
+                offset += count;
             }
             position += ids.len;
         }
         return records.toOwnedSlice(a);
     }
 
-    /// History data is one complete plain-text part, without subject or
-    /// display transformations. Incomplete or malformed source is an error.
-    pub fn stateData(self: Mailbox, a: Allocator, id: []const u8) ![]const u8 {
-        const response = try self.call(a, "Email/get", .{
-            .accountId = self.account_id,
-            .ids = &[_][]const u8{id},
-            .properties = &[_][]const u8{ "id", "textBody", "bodyValues" },
-            .bodyProperties = &[_][]const u8{ "partId", "type" },
-            .fetchTextBodyValues = true,
-            .maxBodyValueBytes = 0,
-        });
-        const records = try arrayField(response, "list");
-        if (records.len != 1 or !std.mem.eql(u8, try textField(records[0], "id"), id)) return error.InvalidHistory;
-        const parts = try arrayField(records[0], "textBody");
-        if (parts.len != 1 or !std.ascii.eqlIgnoreCase(try textField(parts[0], "type"), "text/plain")) return error.InvalidHistory;
-        const part = try field(try field(records[0], "bodyValues"), try textField(parts[0], "partId"));
-        if (boolean(part, "isEncodingProblem") or boolean(part, "isTruncated")) return error.InvalidHistory;
-        return textField(part, "value");
+    /// Fetch each complete body with the metadata that establishes its origin.
+    /// Results follow the requested IDs and belong to a; response JSON is
+    /// released after each native batch.
+    pub fn historyData(self: Mailbox, a: Allocator, ids: []const []const u8, kind: HistoryKind) ![]const []const u8 {
+        var unique: std.StringHashMapUnmanaged(void) = .empty;
+        defer unique.deinit(self.client.allocator);
+        for (ids) |id| {
+            if (id.len == 0) return error.InvalidHistory;
+            if ((try unique.getOrPut(self.client.allocator, id)).found_existing) return error.InvalidHistory;
+        }
+        const data = try a.alloc([]const u8, ids.len);
+        var offset: usize = 0;
+        while (offset < ids.len) {
+            var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+            defer scratch.deinit();
+            const temporary = scratch.allocator();
+            const count = try self.historyGetCount(ids[offset..], true);
+            const fetched = try self.getHistoryRecords(temporary, ids[offset..][0..count], true);
+            for (fetched, data[offset..][0..count]) |record, *body| {
+                if (!try self.validateHistoryRecord(temporary, record, kind)) return error.InvalidHistory;
+                if (kind == .manifest) _ = try historyRevision(record);
+                body.* = try a.dupe(u8, try historyBody(record));
+            }
+            offset += count;
+        }
+        return data;
     }
 
-    /// Confirmation publishes a complete immutable record locally, without
-    /// submitting correspondence. Only manifests have a current revision.
-    pub fn createState(self: Mailbox, a: Allocator, key: []const u8, data: []const u8, revision: ?u64) ![]const u8 {
+    pub fn createSources(self: Mailbox, a: Allocator, data: []const []const u8) ![]const []const u8 {
+        return self.createHistory(a, data, null);
+    }
+
+    pub fn createManifest(self: Mailbox, a: Allocator, data: []const u8, revision: u64) ![]const u8 {
+        return (try self.createHistory(a, &.{data}, revision))[0];
+    }
+
+    /// Native creation IDs correlate every result. A failed batch may leave
+    /// sources stored, but its caller cannot publish a manifest using them.
+    fn createHistory(self: Mailbox, a: Allocator, data: []const []const u8, revision: ?u64) ![]const []const u8 {
+        const ids = try a.alloc([]const u8, data.len);
+        var unique: std.StringHashMapUnmanaged(void) = .empty;
+        defer unique.deinit(self.client.allocator);
+        var offset: usize = 0;
+        while (offset < data.len) {
+            var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+            defer scratch.deinit();
+            const temporary = scratch.allocator();
+            var creates: std.json.ObjectMap = .empty;
+            var count: usize = 0;
+            while (count < @min(self.max_set, data.len - offset)) {
+                const creation_id = try std.fmt.allocPrint(temporary, "record-{d}", .{count});
+                try creates.put(temporary, creation_id, try self.historyMessage(temporary, data[offset + count], revision));
+                const size = try requestSize("Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } });
+                if (size > self.max_request) {
+                    _ = creates.swapRemove(creation_id);
+                    if (count == 0) return error.HistoryRecordTooLarge;
+                    break;
+                }
+                count += 1;
+            }
+            const response = try self.call(temporary, "Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } });
+            const created = try field(response, "created");
+            if (created != .object or created.object.count() != count) return error.InvalidMailReply;
+            for (creates.keys(), ids[offset..][0..count]) |creation_id, *id| {
+                const native = try createdId(response, creation_id);
+                if (native.len == 0) return error.InvalidMailReply;
+                const owned = try a.dupe(u8, native);
+                if ((try unique.getOrPut(self.client.allocator, owned)).found_existing) return error.InvalidMailReply;
+                id.* = owned;
+            }
+            offset += count;
+        }
+        return ids;
+    }
+
+    /// Only manifests carry a revision and the current-manifest marker.
+    fn historyMessage(self: Mailbox, a: Allocator, data: []const u8, revision: ?u64) !Value {
         var folders: std.json.ObjectMap = .empty;
-        try folders.put(a, self.archive_id, .{ .bool = true });
+        try folders.put(a, self.history_id, .{ .bool = true });
         var keywords: std.json.ObjectMap = .empty;
         try keywords.put(a, "$seen", .{ .bool = true });
         try keywords.put(a, state_keyword, .{ .bool = true });
-        try keywords.put(a, try stateKeyKeyword(a, key), .{ .bool = true });
         if (revision != null) try keywords.put(a, current_keyword, .{ .bool = true });
         var message = try value(a, .{
             .mailboxIds = Value{ .object = folders },
             .keywords = Value{ .object = keywords },
             .from = &[_]Address{.{ .email = self.address }},
             .to = &[_]Address{.{ .email = self.address }},
-            .subject = try std.fmt.allocPrint(a, "Ivenna state: {s}", .{key}),
+            .subject = if (revision != null) "Ivenna history manifest" else "Ivenna history source",
             .textBody = &.{.{ .partId = "text", .type = "text/plain" }},
             .bodyValues = .{ .text = .{ .value = data } },
         });
-        try message.object.put(a, state_key_property, .{ .string = key });
+        try message.object.put(a, kind_property, .{ .string = if (revision != null) "manifest" else "source" });
         if (revision) |number| try message.object.put(a, revision_property, .{ .string = try std.fmt.allocPrint(a, "{d}", .{number}) });
-        const response = try self.call(a, "Email/set", .{
+        return message;
+    }
+
+    const HistoryGet = struct {
+        accountId: []const u8,
+        ids: []const []const u8,
+        properties: []const []const u8,
+        bodyProperties: []const []const u8 = &.{ "partId", "type" },
+        fetchTextBodyValues: bool,
+        maxBodyValueBytes: usize = 0,
+    };
+
+    fn historyGet(self: Mailbox, ids: []const []const u8, body: bool) HistoryGet {
+        return .{
             .accountId = self.account_id,
-            .create = .{ .letter = message },
-        });
-        return createdId(response, "letter");
+            .ids = ids,
+            .properties = if (body) state_data_properties else state_properties,
+            .fetchTextBodyValues = body,
+        };
+    }
+
+    fn historyGetCount(self: Mailbox, ids: []const []const u8, body: bool) !usize {
+        var count: usize = 0;
+        while (count < @min(ids.len, self.max_get)) {
+            if (try requestSize("Email/get", self.historyGet(ids[0 .. count + 1], body)) > self.max_request) break;
+            count += 1;
+        }
+        if (count == 0) return error.MailRequestTooLarge;
+        return count;
+    }
+
+    /// History cannot silently lose, repeat, or substitute a requested record.
+    fn getHistoryRecords(self: Mailbox, a: Allocator, ids: []const []const u8, body: bool) ![]const Value {
+        const response = try self.call(a, "Email/get", self.historyGet(ids, body));
+        if ((try arrayField(response, "notFound")).len != 0) return error.InvalidHistory;
+        const records = try arrayField(response, "list");
+        if (records.len != ids.len) return error.InvalidHistory;
+        var expected: std.StringHashMapUnmanaged(usize) = .empty;
+        defer expected.deinit(a);
+        for (ids, 0..) |id, index| {
+            const entry = try expected.getOrPut(a, id);
+            if (entry.found_existing) return error.InvalidHistory;
+            entry.value_ptr.* = index;
+        }
+        const ordered = try a.alloc(Value, ids.len);
+        for (records) |record| {
+            const entry = expected.getPtr(try textField(record, "id")) orelse return error.InvalidHistory;
+            if (entry.* == ids.len) return error.InvalidHistory;
+            ordered[entry.*] = record;
+            entry.* = ids.len;
+        }
+        return ordered;
+    }
+
+    /// Ignore records outside our ownership or current selection, but require
+    /// owned candidates to carry the expected native history discriminator.
+    fn validateHistoryRecord(self: Mailbox, a: Allocator, record: Value, kind: HistoryKind) !bool {
+        const folders = try field(record, "mailboxIds");
+        const keywords = try field(record, "keywords");
+        if (folders != .object or keywords != .object) return error.InvalidMailReply;
+        if (!boolean(folders, self.history_id) or !boolean(keywords, state_keyword)) return false;
+        if (kind == .manifest and !boolean(keywords, current_keyword)) return false;
+        const from = try addresses(a, record, "from");
+        if (from.len != 1 or !std.ascii.eqlIgnoreCase(from[0].email, self.address)) return false;
+        const addressed_to_self = for (try addresses(a, record, "to")) |recipient| {
+            if (std.ascii.eqlIgnoreCase(recipient.email, self.address)) break true;
+        } else false;
+        if (!addressed_to_self) return false;
+        const kind_name = optionalText(record, kind_property) orelse return error.InvalidHistory;
+        if (!std.mem.eql(u8, kind_name, @tagName(kind))) return error.InvalidHistory;
+        return true;
     }
 
     pub fn clearHistoryHead(self: Mailbox, a: Allocator, id: []const u8) !void {
@@ -334,15 +449,11 @@ pub const Mailbox = struct {
             .fetchTextBodyValues = true,
             .fetchHTMLBodyValues = true,
         });
-        const records = try arrayField(result, "list");
+        var records = try indexRecords(a, try arrayField(result, "list"));
+        defer records.deinit(a);
         var ordered: std.ArrayList(Value) = .empty;
         for (ids) |id| {
-            for (records) |record| {
-                if (std.mem.eql(u8, id, try textField(record, "id"))) {
-                    try ordered.append(a, record);
-                    break;
-                }
-            }
+            if (records.get(id)) |record| try ordered.append(a, record);
         }
         return ordered.toOwnedSlice(a);
     }
@@ -371,10 +482,11 @@ pub const Mailbox = struct {
     }
 
     fn invoke(self: Mailbox, a: Allocator, method: []const u8, arguments: anytype) !Invocation {
-        const payload = try std.json.Stringify.valueAlloc(a, .{
-            .using = &[_][]const u8{ core_capability, mail_capability, submission_capability },
-            .methodCalls = .{.{ method, arguments, "0" }},
-        }, .{});
+        var output: std.Io.Writer.Allocating = .init(a);
+        defer output.deinit();
+        try writeRequest(method, arguments, &output.writer);
+        const payload = output.written();
+        if (payload.len > self.max_request) return error.MailRequestTooLarge;
         const reply = try self.http(a, .POST, self.api_url, payload);
         var matched: ?Value = null;
         var email_update: ?Value = null;
@@ -437,10 +549,53 @@ pub const Mailbox = struct {
     }
 };
 
+fn indexRecords(a: Allocator, records: []const Value) !std.StringHashMapUnmanaged(Value) {
+    var index: std.StringHashMapUnmanaged(Value) = .empty;
+    errdefer index.deinit(a);
+    for (records) |record| {
+        const entry = try index.getOrPut(a, try textField(record, "id"));
+        if (!entry.found_existing) entry.value_ptr.* = record;
+    }
+    return index;
+}
+
 fn objectLimit(record: Value, name: []const u8) !usize {
-    const item = optionalField(record, name) orelse return 32;
+    const item = try field(record, name);
     if (item != .integer or item.integer <= 0) return error.InvalidMailReply;
-    return @intCast(@min(item.integer, 32));
+    return std.math.cast(usize, item.integer) orelse error.InvalidMailReply;
+}
+
+fn writeRequest(method: []const u8, arguments: anytype, writer: *std.Io.Writer) !void {
+    try std.json.Stringify.value(.{
+        .using = &[_][]const u8{ core_capability, mail_capability, submission_capability },
+        .methodCalls = .{.{ method, arguments, "0" }},
+    }, .{}, writer);
+}
+
+fn requestSize(method: []const u8, arguments: anytype) !u64 {
+    var buffer: [256]u8 = undefined;
+    var output: std.Io.Writer.Discarding = .init(&buffer);
+    try writeRequest(method, arguments, &output.writer);
+    return output.fullCount();
+}
+
+fn historyRevision(record: Value) !u64 {
+    const text = optionalText(record, revision_property) orelse return error.InvalidHistory;
+    const revision = std.fmt.parseInt(u64, text, 10) catch return error.InvalidHistory;
+    if (revision == 0) return error.InvalidHistory;
+    return revision;
+}
+
+fn historyBody(record: Value) ![]const u8 {
+    const parts = try arrayField(record, "textBody");
+    if (parts.len != 1 or !std.ascii.eqlIgnoreCase(try textField(parts[0], "type"), "text/plain")) return error.InvalidHistory;
+    const part = try field(try field(record, "bodyValues"), try textField(parts[0], "partId"));
+    for ([_][]const u8{ "isEncodingProblem", "isTruncated" }) |name| {
+        if (part != .object) return error.InvalidHistory;
+        const flag = part.object.get(name) orelse continue;
+        if (flag != .bool or flag.bool) return error.InvalidHistory;
+    }
+    return textField(part, "value");
 }
 
 fn bodyText(a: Allocator, record: Value) ![]const u8 {

@@ -7,7 +7,7 @@ pub const Delivery = struct {
     event: Input.Event,
     receipts: []const []const u8,
 
-    /// Event and consumption state belong to the delivery arena.
+    /// Copy the event and receipt IDs into the delivery arena.
     pub fn create(allocator: Allocator, event: Input.Event, receipts: []const []const u8) !*Delivery {
         const self = try allocator.create(Delivery);
         errdefer allocator.destroy(self);

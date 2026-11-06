@@ -160,18 +160,30 @@ pub const Registry = struct {
     /// The coordinator has its own serialized execution lane. max_parallel
     /// bounds work sessions independently, so a long work tool cannot take the
     /// coordinator's execution slot.
-    pub fn nextReady(self: *Registry, max_parallel: usize) !?Work {
+    pub fn takeReadyBatch(self: *Registry, a: Allocator, max_parallel: usize) ![]const Work {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        if (try self.takeReady(self.core)) |work| return work;
-        if (self.runningWorkers() >= max_parallel) return null;
+        var ready: std.ArrayList(Work) = .empty;
+        defer ready.deinit(a);
+        // A failed claim ends execution. Sessions keep the activations until
+        // shutdown, but work that was never started must not borrow a worker.
+        errdefer for (ready.items) |work| {
+            work.session.borrowed_workers -= 1;
+        };
+        var available = max_parallel -| self.runningWorkers();
+        try ready.ensureTotalCapacity(a, 1 + @min(available, self.sessions.count() - 1));
+        if (try self.takeReady(self.core)) |work| ready.appendAssumeCapacity(work);
         var sessions = self.sessions.valueIterator();
-        while (sessions.next()) |entry| {
+        while (available > 0) {
+            const entry = sessions.next() orelse break;
             const session = entry.*;
             if (session == self.core) continue;
-            if (try self.takeReady(session)) |work| return work;
+            if (try self.takeReady(session)) |work| {
+                ready.appendAssumeCapacity(work);
+                available -= 1;
+            }
         }
-        return null;
+        return ready.toOwnedSlice(a);
     }
 
     /// Install the selected FIFO prefix and return its suffix ahead of any
@@ -324,11 +336,6 @@ pub const Registry = struct {
                 .observations = observations.items,
             });
         }
-        std.mem.sort(History.Session, retained.items, {}, struct {
-            fn lessThan(_: void, lhs: History.Session, rhs: History.Session) bool {
-                return lhs.session_id < rhs.session_id;
-            }
-        }.lessThan);
         try self.history.save(a, .{ .next_session_id = self.next_session_id, .sessions = retained.items });
     }
 
@@ -412,16 +419,17 @@ pub const Registry = struct {
     pub fn reconcile(self: *Registry, waiting: []const Incoming) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        var present: std.StringHashMapUnmanaged(void) = .empty;
+        defer present.deinit(self.allocator);
+        for (waiting) |incoming| if (incoming.receipt) |receipt| {
+            try present.put(self.allocator, receipt, {});
+        };
         var absent: std.ArrayList([]const u8) = .empty;
         defer absent.deinit(self.allocator);
         var notices = self.noticed.iterator();
         while (notices.next()) |entry| {
             if (entry.value_ptr.* != .handled) continue;
-            const present = for (waiting) |incoming| {
-                const receipt = incoming.receipt orelse continue;
-                if (std.mem.eql(u8, entry.key_ptr.*, receipt)) break true;
-            } else false;
-            if (!present) try absent.append(self.allocator, entry.key_ptr.*);
+            if (!present.contains(entry.key_ptr.*)) try absent.append(self.allocator, entry.key_ptr.*);
         }
         for (absent.items) |key| if (self.noticed.fetchRemove(key)) |entry| self.allocator.free(entry.key);
     }
@@ -478,13 +486,10 @@ pub const Registry = struct {
 };
 
 /// Startup is one additional control observation, independent of the bounded
-/// ordinary queue retained before this runtime began.
+/// ordinary queue retained before this runtime began. Initialization puts it
+/// first; FIFO admission and every later producer preserve that position.
 fn deliveryCount(deliveries: []const *Delivery) usize {
-    var count: usize = 0;
-    for (deliveries) |delivery| if (delivery.event != .startup) {
-        count += 1;
-    };
-    return count;
+    return deliveries.len - @intFromBool(deliveries.len != 0 and deliveries[0].event == .startup);
 }
 
 fn assertWork(work: Work) void {

@@ -64,7 +64,7 @@ Working contexts retain observations, complete model output, and tool results. T
 
 Limits cover the complete model request, including instructions, tool definitions, observations, and tool results, as well as the generated response. Each limit states what it measures; byte counts and model tokens are separate units.
 
-When context needs to be shortened, the kernel asks the model for a handover. The replacement context should preserve commitments, relevant uncertainty, completed effects, and correspondent IDs and relationships needed for continued understanding. The handover remains free-form text.
+When context needs to be shortened, the kernel asks the model for a handover. The replacement context should preserve commitments, relevant uncertainty, completed effects, and correspondent IDs and relationships needed for continued understanding. The handover remains free-form text. Compaction starts a replacement working history while preserving the session and its relationships.
 
 Startup restores saved working histories and session relationships, then gives each retained session a fresh activation with a startup observation. Current execution state describes the new runtime; earlier observations describe what was known then. This preserves understanding while acknowledging the interruption. Ivenna decides how to relate that history to the present and what to do next. The [startup contract](architecture.md#startup-and-interruption) defines what survives and what is rebuilt.
 
