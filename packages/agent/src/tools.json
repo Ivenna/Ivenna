@@ -1,7 +1,7 @@
 [
   {
     "name": "send_message",
-    "description": "Send text to one or more contacts using their references. Each call submits one message and returns a submission reference; acceptance does not confirm delivery.",
+    "description": "Send text to one or more participants by ID. Each call submits one message and returns a submission reference; acceptance does not confirm delivery.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -12,7 +12,7 @@
             "type": "string",
             "minLength": 1
           },
-          "description": "Contact references available in the working context."
+          "description": "Participant IDs."
         },
         "text": {
           "type": "string",

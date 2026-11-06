@@ -1,19 +1,14 @@
 # Communication
 
-`send_message` submits text to recipients identified by contact references. Both core and work sessions can use it, sending zero, one, or several messages while handling their work. An activation's final text remains internal to the core or returns as a report to a work session's parent. For sending messages to Ivenna, see the [usage guide](usage.md).
+`send_message` submits text to people and programs identified by readable IDs. Both core and work sessions can use it, sending zero, one, or several messages while handling their work. An activation's final text remains internal to the core or returns as a report to a work session's parent. For sending messages to Ivenna, see the [usage guide](usage.md).
 
-## Contacts
+## Correspondents and IDs
 
-Incoming material and supporting [evidence](input.md#material-and-provenance) can supply contacts independently of their source provenance. Each contact contains:
+Each [incoming message](input.md#incoming-messages) records the correspondent IDs it came `from` and its free-form text. If `operator` relays Alice's words, `from` is `[operator]`; the text carries that attribution and context. The model relates the message to its ongoing understanding and decides whether to respond.
 
-| Field | Meaning |
-| --- | --- |
-| `reference` | Opaque recipient reference accepted by `send_message` |
-| `description` | Optional human-readable context about that recipient |
+IDs identify people and programs Ivenna can choose to contact through `send_message`. For example, `alice` can ask Ivenna in the message text to send an update to `support`. The model decides whether to send it and explicitly supplies the recipient IDs.
 
-A contact reference identifies a recipient independently of the material's source and the current session. Retain references needed for ongoing work in handovers or autonomous memory.
-
-The email adapter supplies contacts from Reply-To, falling back to From, and keeps their address mappings in [deployment data](running.md#data-and-retention). Preserving those mappings lets references remain usable after the originating material and working context have been released.
+[Recent history](input.md#received-and-sent-history) distinguishes received observations from messages Ivenna previously sent. Each sent record retains its `recipients`, text, and observation time. Handovers can preserve correspondent IDs along with the understanding needed for continued interaction.
 
 ## Sending a message
 
@@ -21,19 +16,19 @@ The [`send_message` declaration](../packages/agent/src/tools.json) defines two r
 
 | Argument | Meaning |
 | --- | --- |
-| `recipients` | Nonempty array of contact references |
+| `recipients` | Nonempty array of correspondent IDs |
 | `text` | Nonempty message text |
 
-For example, using a reference supplied with incoming material or context:
+For example:
 
 ```json
 {
-  "recipients": ["<contact-reference>"],
+  "recipients": ["operator"],
   "text": "The analysis is complete. The updated files are ready for review."
 }
 ```
 
-Each successful invocation submits one message to the specified recipients. The email adapter creates a standalone message with the supplied text as its body.
+Each successful invocation submits one message to the specified recipients.
 
 Success returns a submission reference:
 
@@ -41,4 +36,18 @@ Success returns a submission reference:
 {"result":{"reference":"<submission-reference>"}}
 ```
 
-The result confirms submission through the adapter. It does not establish final recipient delivery. An unavailable recipient reference returns an `unknown_recipient` tool error; invalid argument structure returns `invalid_arguments`. Communication infrastructure or submission failures end the runtime under the [availability contract](design.md#runtime-availability).
+The result confirms submission through the adapter. It does not establish final recipient delivery. An unsupported recipient ID returns an `invalid_recipient` tool error; invalid argument structure returns `invalid_arguments`. Communication infrastructure or submission failures end the runtime under the [availability contract](design.md#runtime-availability).
+
+## Current email addressing
+
+The current email adapter uses the domain of `MAIL_ADDRESS` as one internal communication namespace. For `MAIL_ADDRESS=ivenna@ivenna.test`, `operator@ivenna.test` becomes `operator`, and sending to `operator` resolves to that address. ID case is preserved; domain matching ignores case. IDs remain usable across context release and restart with the same configured domain. The model-facing fields carry ID strings, while the adapter handles full addresses.
+
+IDs use ASCII dot-atom local parts: letters, digits, and the punctuation below, with dots separating nonempty atoms. Leading, trailing, or consecutive dots, quoted or escaped local parts, and non-ASCII local parts are unsupported.
+
+```text
+! # $ % & ' * + - / = ? ^ _ ` { | } ~
+```
+
+Incoming mail must have at least one From address, and every address must map to a supported ID in this domain. Missing, unsupported, or cross-domain From addresses exclude the message from intake and recent received history.
+
+Outgoing submissions create standalone messages with the supplied text as the body. See the [email boundary](architecture.md#email-boundary) for implementation details.

@@ -1,23 +1,22 @@
 const std = @import("std");
+const Addressing = @import("addressing.zig").Addressing;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
 pub const Address = struct {
-    name: ?[]const u8 = null,
     email: []const u8,
 };
 
 /// All returned text and arrays belong to the operation's allocator.
 pub const Letter = struct {
     id: []const u8,
-    message_id: ?[]const u8,
     from: []const Address,
     to: []const Address,
-    reply_to: []const Address = &.{},
     subject: []const u8,
     body: []const u8,
     state_key: ?[]const u8 = null,
     state_record: bool = false,
+    outbound: bool = false,
 };
 
 pub const Outgoing = struct {
@@ -39,22 +38,21 @@ const state_record_keyword = "ivenna-state";
 const handled_keyword = "ivenna-handled";
 const outbound_keyword = "ivenna-outbound";
 const metadata_properties: []const []const u8 = &.{
-    "id",               "keywords", "messageId", "from", "to", "replyTo", "subject",
+    "id",               "keywords", "from", "to", "subject",
     state_key_property,
 };
 const body_properties = metadata_properties ++ &[_][]const u8{
     "textBody", "htmlBody", "bodyValues",
 };
 
-/// Typed JMAP operations shared by the email boundary and internal mail state.
-/// The mail service decodes MIME and headers; this component decodes protocol
-/// results.
+/// JMAP access for correspondence and internal state records.
 /// Discover once using an allocator that outlives every operation and worker.
 pub const Mailbox = struct {
     client: *std.http.Client,
     session_url: []const u8,
     authorization: []const u8,
     address: []const u8,
+    addressing: Addressing,
     api_url: []const u8 = "",
     account_id: []const u8 = "",
     identity_id: []const u8 = "",
@@ -158,8 +156,7 @@ pub const Mailbox = struct {
         return .{ .mail_id = id, .sent_copy = if (updated) .updated else .unconfirmed };
     }
 
-    /// Persist one independent self state record locally. State keys select
-    /// continuity; neither the subject nor RFC reply headers link external mail.
+    /// Create a self-addressed state record in the mailbox.
     pub fn saveState(self: Mailbox, a: Allocator, key: []const u8, summary: []const u8) !void {
         try validStateKey(key);
         _ = try self.create(a, .{
@@ -170,7 +167,6 @@ pub const Mailbox = struct {
     }
 
     fn create(self: Mailbox, a: Allocator, outgoing: Outgoing, folder: []const u8, draft: bool, state_key: ?[]const u8) ![]const u8 {
-        if (outgoing.to.len == 0) return error.MailRecipientRequired;
         var folders: std.json.ObjectMap = .empty;
         try folders.put(a, folder, .{ .bool = true });
         var keywords: std.json.ObjectMap = .empty;
@@ -239,7 +235,7 @@ pub const Mailbox = struct {
             var available: std.ArrayList(Letter) = .empty;
             try self.appendAvailable(a, &available, ids);
             for (available.items) |letter| {
-                if (self.isState(letter)) continue;
+                if (self.isState(letter) or !self.isCorrespondence(letter)) continue;
                 try letters.append(a, letter);
                 if (letters.items.len == limit) break;
             }
@@ -313,14 +309,13 @@ pub const Mailbox = struct {
         if (keywords != .object) return error.InvalidMailReply;
         return .{
             .id = try textField(record, "id"),
-            .message_id = try firstString(a, record, "messageId"),
             .from = try addresses(a, record, "from"),
             .to = try addresses(a, record, "to"),
-            .reply_to = try addresses(a, record, "replyTo"),
             .subject = optionalText(record, "subject") orelse "",
             .body = if (body) try bodyText(a, record) else "",
             .state_key = optionalText(record, state_key_property),
             .state_record = boolean(keywords, state_record_keyword),
+            .outbound = boolean(keywords, outbound_keyword),
         };
     }
 
@@ -332,9 +327,19 @@ pub const Mailbox = struct {
         return false;
     }
 
-    /// Validate the requested operation independently of the implicit Email/set
-    /// result accompanying submission. That result describes sent-copy upkeep
-    /// and cannot undo acceptance of the submission itself.
+    fn isCorrespondence(self: Mailbox, letter: Letter) bool {
+        if (letter.from.len == 0) return false;
+        for (letter.from) |address|
+            if (self.addressing.id(address.email) == null) return false;
+        if (letter.outbound) {
+            if (letter.from.len != 1 or !std.ascii.eqlIgnoreCase(letter.from[0].email, self.address) or letter.to.len == 0) return false;
+            for (letter.to) |recipient|
+                if (self.addressing.id(recipient.email) == null) return false;
+        }
+        return true;
+    }
+
+    /// Submission acceptance is independent of its implicit sent-copy update.
     const Invocation = struct { result: Value, email_update: ?Value };
 
     fn call(self: Mailbox, a: Allocator, method: []const u8, arguments: anytype) !Value {
@@ -342,7 +347,6 @@ pub const Mailbox = struct {
     }
 
     fn invoke(self: Mailbox, a: Allocator, method: []const u8, arguments: anytype) !Invocation {
-        if (self.api_url.len == 0) return error.MailboxNotDiscovered;
         const payload = try std.json.Stringify.valueAlloc(a, .{
             .using = &[_][]const u8{ core_capability, mail_capability, submission_capability },
             .methodCalls = .{.{ method, arguments, "0" }},
@@ -450,17 +454,10 @@ fn addresses(a: Allocator, record: Value, name: []const u8) ![]const Address {
     const result = try a.alloc(Address, items.array.items.len);
     for (items.array.items, result) |item, *address| {
         address.* = .{
-            .name = optionalText(item, "name"),
             .email = try textField(item, "email"),
         };
     }
     return result;
-}
-
-fn firstString(a: Allocator, record: Value, name: []const u8) !?[]const u8 {
-    const item = optionalField(record, name) orelse return null;
-    const list = try strings(a, item);
-    return if (list.len == 0) null else list[0];
 }
 
 fn strings(a: Allocator, items: Value) ![]const []const u8 {

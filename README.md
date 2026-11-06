@@ -2,11 +2,11 @@
 
 Ivenna is an agent runtime, designed as [a body for an LLM soul](docs/design.md). Through ongoing communication and autonomous activity, the project explores how interaction and memory can sustain a sense of self over time.
 
-People and programs communicate with Ivenna through email. It interprets each message alongside ongoing activity and coordinates work through a core session and other focuses of attention. Ivenna chooses when to communicate and whom to address through an [explicit sending tool](docs/communication.md); one incoming message can lead to zero, one, or several outgoing messages.
+People and programs communicate with Ivenna through messages. The model observes who said what through correspondent IDs and message text, and coordinates work through a core session and other focuses of attention. Ivenna chooses when to communicate and whom to address through an [explicit sending tool](docs/communication.md); one incoming message can lead to zero, one, or several outgoing messages.
 
-Ivenna combines email, [host commands](docs/host.md), and shared [memory rooms](docs/memory.md) accessed over SSH. Communication and memory must be available for it to run. It exposes [health and reception readiness](docs/running.md#service-status-and-reception), and tools can return [text and images](docs/content.md).
+The current implementation carries communication through email, provides [host commands](docs/host.md), and accesses shared [memory rooms](docs/memory.md) over SSH. Communication and memory must be available for it to run. It exposes [health and reception readiness](docs/running.md#service-status-and-reception), and tools can return [text and images](docs/content.md).
 
-The deployment user owns the mailbox, autonomous memory, and [runtime data](docs/running.md#data-and-retention). Retained material supports continued understanding when working contexts are released or the kernel restarts.
+The deployment user owns the mailbox, autonomous memory, and [host artifacts](docs/running.md#data-and-retention). Retained material supports continued understanding when working contexts are released or the kernel restarts.
 
 ## Getting started
 

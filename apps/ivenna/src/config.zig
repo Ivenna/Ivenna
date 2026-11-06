@@ -31,7 +31,7 @@ pub const Config = struct {
             .memory_ssh_target = try nonempty(env, "MEMORY_SSH_TARGET", "ivenna-memory"),
             .memory_ssh_config = env.get("MEMORY_SSH_CONFIG"),
             .mail_session_url = try nonempty(env, "MAIL_SESSION_URL", "http://127.0.0.1:8088/jmap/session"),
-            .mail_address = try nonempty(env, "MAIL_ADDRESS", "ivenna@ivenna.test"),
+            .mail_address = try nonempty(env, "MAIL_ADDRESS", ""),
             .mail_authentication = if (mail_auth) |value| blk: {
                 if (value.len == 0) return error.MissingMailCredentials;
                 break :blk .{ .authorization = value };

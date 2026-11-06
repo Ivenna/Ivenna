@@ -25,11 +25,11 @@ pub fn main(init: std.process.Init) !void {
     var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
     defer client.deinit();
     var mail: email.Integration = undefined;
-    try mail.init(init.gpa, io, &client, .{
+    try mail.init(init.gpa, &client, .{
         .session_url = config.mail_session_url,
         .authorization = try config.authorization(a),
         .address = config.mail_address,
-    }, data_directory);
+    });
     defer mail.deinit();
     var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
     try memory_client.checkAvailable(a);

@@ -1,10 +1,10 @@
 # Corresponding with Ivenna
 
-Send messages to Ivenna's configured email address (`MAIL_ADDRESS`) while [reception is open](running.md#service-status-and-reception). Each arrival enters Ivenna's core independently. Include enough context for Ivenna to understand the message and relate it to ongoing work.
+Send messages from an account in Ivenna's configured internal mail domain to its address (`MAIL_ADDRESS`) while [reception is open](running.md#service-status-and-reception). Each arrival enters Ivenna's core independently. Include enough context for Ivenna to understand the message and relate it to ongoing work.
 
 ## Sending a request
 
-Use a correspondent account that can reach Ivenna. Send through your mail client, give the request a useful subject, and put the task and relevant context in its body. For example:
+Use a correspondent account in the domain of `MAIL_ADDRESS`. For example, `operator@ivenna.test` can correspond with `ivenna@ivenna.test`. Send through your mail client, give the request a useful subject, and put the task and relevant context in its body:
 
 ```text
 To: <Ivenna's address>
@@ -15,9 +15,11 @@ Please remember that I am learning French and propose a practice plan.
 
 Your mail client may confirm submission to its own server before delivery to Ivenna. A rejection while reception is closed can arrive later as a delivery result; see [reception readiness](running.md#service-status-and-reception).
 
+Ivenna sees who said what: your readable correspondent ID (`operator` in this example) and your message text. Every From address must map to a supported ID in the configured domain; otherwise the message is excluded from intake. To ask Ivenna to contact someone else, describe that request and their correspondent ID in the text. See [email addressing](communication.md#current-email-addressing) for supported addresses.
+
 Ivenna chooses when to communicate: it may send no message, one response, or several updates. Finishing internal work does not itself send mail. Read messages sent to you through your mail client; outgoing messages currently use the subject `Ivenna`.
 
-Ivenna receives the subject and body as text. Plain-text bodies are preferred; HTML-only letters supply their HTML source. Longer content includes an excerpt and a reference to the full material, which Ivenna can retrieve when needed. The deployment retains these [source files](running.md#data-and-retention). Mail attachment intake is not implemented.
+Ivenna receives the complete subject and body as text. Plain-text bodies are preferred; HTML-only letters supply their HTML source. Each message must fit the [complete-request budget](running.md#configuration) with the instructions and context needed to process it. Oversized input that cannot fit after context compaction stops the runtime. Mail attachment intake is not implemented.
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 
@@ -39,7 +41,7 @@ You can use your client's reply action or compose a new message. Ivenna relates 
 
 Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. Its focuses share the host and memory; each work focus returns its result to the focus that created it. See [work ownership](architecture.md#forks-and-work-ownership) for details.
 
-Detailed work contexts can be released. Autonomous memory, retained correspondence, source files, and core handovers provide material for continued understanding. Processing leaves source letters in their existing folders. See [data and retention](running.md#data-and-retention) for storage and cleanup.
+Detailed work contexts can be released. Autonomous memory, retained correspondence, and core handovers provide material for continued understanding. Processing leaves correspondence in its existing folders. See [data and retention](running.md#data-and-retention) for storage and cleanup.
 
 ## After interruption
 

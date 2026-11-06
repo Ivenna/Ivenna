@@ -2,7 +2,8 @@ const std = @import("std");
 const yaml = @import("yaml");
 const contracts = @import("agent_contracts");
 const Allocator = std.mem.Allocator;
-const Material = contracts.Material;
+const IncomingMessage = contracts.Communication.IncomingMessage;
+const SentMessage = contracts.Communication.SentMessage;
 const Handover = contracts.Handover;
 
 pub const Role = enum { core, branch };
@@ -10,7 +11,6 @@ pub const Role = enum { core, branch };
 pub const Assignment = struct {
     task: []const u8,
     from_session: u64,
-    source_refs: []const []const u8 = &.{},
 };
 
 pub const Report = struct {
@@ -19,7 +19,8 @@ pub const Report = struct {
 };
 
 pub const ContextItem = union(enum) {
-    evidence: Material,
+    received: IncomingMessage,
+    sent: SentMessage,
     handover: Handover,
 };
 
@@ -51,12 +52,12 @@ pub const Snapshot = struct {
 };
 
 pub const Event = union(enum) {
-    input: Material,
+    input: IncomingMessage,
     assignment: Assignment,
     report: Report,
 };
 
-/// A retained event group and any supporting material in a session's history.
+/// A retained event group and supporting context in a session's history.
 pub const Record = struct {
     session_id: u64,
     events: []const Event = &.{},

@@ -18,7 +18,7 @@ cp -n .env.example .env
 
 Set `LLM_API_KEY` and configure the mail and memory connections. The sample settings match the local services below. To use another [mail service](../docs/running.md#mail-service) or [memory workspace](../docs/running.md#memory-service), configure those connections and prepare only the services you run locally.
 
-The kernel authenticates with `MAIL_*`; the [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account. Keep local account credentials aligned with the private [mail provisioning plan](#configuring-mail).
+The kernel authenticates with `MAIL_*`; the [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`. The adapter uses that domain to resolve correspondent IDs, presenting each address's local part to the model. Keep local account credentials aligned with the private [mail provisioning plan](#configuring-mail).
 
 The kernel, Compose, and memory preparation script use the exported configuration. Load `.env` in each terminal used for these commands, and reload it after editing its values:
 
@@ -41,8 +41,6 @@ podman volume create "${MEMORY_VOLUME_NAME:-ivenna-memory}"
 
 Create only the corresponding volume when using one local service. Existing setups reuse their volumes. The [local data reference](#development-data) lists their contents and the SSH files retained outside them.
 
-When replacing independently managed local middleware with this Compose project, stop the kernel and remove the old containers before the preparation below. Retain the named volumes and `.ivenna/dev-memory/` to reuse their data and SSH keys.
-
 ## Configuring mail
 
 Stalwart stores accounts and receiving policy in its data volume. Prepare a private provisioning plan before first use:
@@ -61,8 +59,6 @@ Set the account credentials in the plan and put the matching kernel and operator
 | `admin@ivenna.test` | Stalwart administration | `admin-local-password` |
 
 The plan also defines the `ivenna-ready` script and its `MtaStageRcpt` rule. Set the script's recipient to Ivenna's address and its readiness URL to an endpoint reachable from the mail container. The example uses `ivenna@ivenna.test` and `http://host.containers.internal:8090/readyz`; Compose maps that host name to the host. Keep the address and URL aligned with `MAIL_ADDRESS` and `SERVICE_ADDRESS`. See [reception readiness](../docs/running.md#service-status-and-reception) for the status interface.
-
-When updating a private plan, preserve the accounts, credentials, and domains in use. Keep the readiness gate for Ivenna's address and the domain's disabled `subAddressing` setting. Restarting a container does not update this stored policy.
 
 To apply the initial plan or later edits, stop the kernel, load the updated `.env`, and run:
 
@@ -87,7 +83,7 @@ Published ports bind to loopback. The plan requires authenticated submission wit
 
 The supplied readiness script rejects Ivenna's recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too.
 
-This gate runs during SMTP `RCPT` handling. JMAP imports and delivery between accounts through the same server's JMAP interface bypass it. Use the gated SMTP path for external messages. Readiness is a precheck; the kernel can stop after a successful check or accepted delivery.
+This gate runs during SMTP `RCPT` handling. JMAP imports and delivery between accounts through the same server's JMAP interface bypass it. Use the gated SMTP path for correspondence. Readiness is a precheck; the kernel can stop after a successful check or accepted delivery.
 
 ## Configuring memory
 
@@ -126,7 +122,7 @@ Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the U
 
 ## Sending a message
 
-The operator account provides a correspondent for the local mailbox. With reception open, load the configuration in a second terminal and submit through the local SMTP endpoint:
+The operator account provides the `operator` correspondent ID for the local mailbox. Its sender address must use the domain of `MAIL_ADDRESS`; see [supported addressing](../docs/communication.md#current-email-addressing). With reception open, load the configuration in a second terminal and submit through the local SMTP endpoint:
 
 ```sh
 set -a

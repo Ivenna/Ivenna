@@ -1,8 +1,8 @@
 # Model input and response scope
 
-Ivenna's YAML user messages contain retained records or a current request. Records preserve events, startup material, and handovers in working history. The request adds current state and, for summarization, instructions. These YAML messages sit alongside retained model output and tool replies; the [architecture guide](architecture.md#records-context-and-current-requests) describes that complete history and its adapter-owned continuation data.
+Ivenna's YAML user messages contain retained records or a current request. Records preserve events, recalled communication, and handovers in working history. The request adds current state and, for summarization, instructions. These YAML messages sit alongside retained model output and tool replies; the [architecture guide](architecture.md#records-context-and-current-requests) describes that complete history and its adapter-owned continuation data.
 
-The core's [Input](../packages/agent/src/input.zig) module defines the record and request structures and renders them as YAML. Shared [material](../packages/agent_contracts/src/material.zig) and [handover](../packages/agent_contracts/src/handover.zig) types supply their native payloads. The [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+The core's [Input](../packages/agent/src/input.zig) module defines the record and request structures and renders them as YAML. Shared [communication](../packages/agent_contracts/src/communication.zig) and [handover](../packages/agent_contracts/src/handover.zig) types supply their message and summary payloads. The [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
 ## Retained records
 
@@ -14,11 +14,11 @@ A `Record` combines an event group with a list of context items:
 | `events` | `Event[]` | Events admitted together, in queue order; defaults to an empty array |
 | `context` | `ContextItem[]` | Supporting material retained with the record; defaults to an empty array |
 
-The events and context fields can coexist. Each activation records its selected group once in `events`; startup recollection and compaction create context-only records with `events: []`. Startup recollection records the latest core handover and evidence from recent correspondence. Compaction replaces earlier history with a handover.
+The events and context fields can coexist. Each activation records its selected group once in `events`; startup recollection and compaction create context-only records with `events: []`. Startup recollection records the latest core handover and recent received and sent messages. Compaction replaces earlier history with a handover.
 
 Session identifiers are scoped to one kernel process. Forked history keeps the original records and their session identifiers. The current request identifies the session performing the inference.
 
-Each activation's record preserves its admitted event group and the order of those events in history. Each input keeps its own material, contacts, and provenance within that group. See [activation admission](architecture.md#activation-admission) for how the runtime selects a group and handles later arrivals.
+Each input keeps its own `from` IDs, text, and observation time within the admitted group. See [activation admission](architecture.md#activation-admission) for how the runtime selects a group and handles later arrivals.
 
 ## Events and context items
 
@@ -26,15 +26,23 @@ Each activation's record preserves its admitted event group and the order of tho
 
 | Branch | Payload | Meaning |
 | --- | --- | --- |
-| `input` | `Material` | Independently received content, contacts, and optional provenance |
+| `input` | `IncomingMessage` | Observation of what correspondents said |
 | `assignment` | `Assignment` | Initial work for a fork |
 | `report` | `Report` | A child activation's final text |
 
-`ContextItem` contains either `evidence: Material` or `handover: Handover`. Startup correspondence is supplied as evidence items; recalled and generated summaries are handover items. Each evidence item keeps its own contacts and provenance.
+`ContextItem` contains one of these branches:
 
-A `Handover` contains `summary: Text` and `source: Resource | null`. The optional source identifies stored material behind the summary. Generated handovers use `source: null`.
+| Branch | Payload | Meaning |
+| --- | --- | --- |
+| `received` | `IncomingMessage` | Previously received observation |
+| `sent` | `SentMessage` | Message Ivenna previously sent, with its recipients |
+| `handover` | `Handover` | Retained understanding for continuation |
 
-`Event`, `ContextItem`, `MaterialContent`, and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` denotes a free-form string.
+Startup recollection supplies received and sent messages as context items. Recalled and generated summaries are handover items.
+
+A `Handover` contains `summary: Text`, the retained understanding needed to continue work.
+
+`Event`, `ContextItem`, and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` denotes a free-form string.
 
 For example, two arrivals can enter the core as one event group:
 
@@ -42,15 +50,13 @@ For example, two arrivals can enter the core as one event group:
 session_id: 1
 events:
   - input:
-      content:
-        text: Keep practice sessions to 20 minutes.
-      contacts: []
-      source: null
+      from: [operator]
+      text: Keep practice sessions to 20 minutes.
+      observed_at_unix_ms: 1793966400000
   - input:
-      content:
-        text: Include ten minutes of listening.
-      contacts: []
-      source: null
+      from: [operator]
+      text: Include ten minutes of listening.
+      observed_at_unix_ms: 1793966401000
 context: []
 ```
 
@@ -62,46 +68,55 @@ events: []
 context:
   - handover:
       summary: Keep each practice session to 20 minutes, including ten minutes of listening.
-      source: null
 ```
 
-## Material and provenance
+## Incoming messages
 
-The shared `Material` type represents both incoming content and supporting evidence. Adapters supply new arrivals in an [Inbox.Incoming](../packages/agent_contracts/src/inbox.zig) envelope, which can also carry an opaque consumption receipt. The runtime keeps receipts for processing bookkeeping; only the material enters the YAML `input` event.
+The shared `Communication.IncomingMessage` represents an observation of who said what. It does not imply that the words were addressed specifically to Ivenna or require a response. A new arrival appears as an `input` event; recalled communication uses the `received` context branch.
 
-`Material` contains:
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `content` | `MaterialContent` | Material for the receiving session |
-| `contacts` | `Contact[]` | Available recipients; defaults to an empty array |
-| `source` | `Source` or null | Optional provenance |
-
-`MaterialContent` has two branches:
-
-| Branch | Payload | Meaning |
-| --- | --- | --- |
-| `text` | `Text` | Complete inline content |
-| `excerpt` | `text: Text`, `full: Resource` | Included text and a reference to the full material |
-
-The [whole-request budget](architecture.md#bounded-model-context) counts the inline text and resource-reference fields.
-
-An optional `Source` contains:
+`IncomingMessage` contains:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `reference` | `Text` | Reference identifying the source material |
-| `description` | `Text` or null | Human-readable provenance |
-| `observed_at_unix_ms` | `i64` or null | Observation time in Unix milliseconds, when known |
-| `details` | `Resource` or null | Additional source material available for inspection |
+| `from` | `Text[]` | IDs of participants this message came from |
+| `text` | `Text` | Complete message text |
+| `observed_at_unix_ms` | `i64` | Runtime observation time in Unix milliseconds |
 
-A `Resource` has `file: Text` and `byte_length: usize`. It identifies a file and its content length. Work sessions can inspect that file through host tools when they need material omitted from the observation.
+`from` contains readable [correspondent IDs](communication.md#correspondents-and-ids) accepted by `send_message`. The timestamp records when the runtime observed the message, including during recollection.
 
-## Contacts and outgoing messages
+The [whole-request budget](architecture.md#bounded-model-context) counts the complete message. The runtime admits whole observations; a single input that cannot fit after compaction fails with `ContextBudgetExhausted`.
 
-[Communication](../packages/agent_contracts/src/communication.zig) defines a `Contact` with `reference: Text` and `description: Text | null` (default null). Its reference identifies a recipient for `send_message`; its description provides human-readable context. Contacts and source provenance are independent. Material can have either, both, or neither.
+## Received and sent history
 
-Outgoing messages use [the communication tool](communication.md#sending-a-message). Sending is an explicit external action; an activation's final text is a core result or a report to its parent.
+`Inbox.recent` returns shared `Communication.HistoryItem` values with a `received: IncomingMessage` or `sent: SentMessage` branch. The kernel incorporates each item into the matching `ContextItem` branch. These records distinguish what Ivenna observed from what it previously said to others.
+
+`SentMessage` contains:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `recipients` | `Text[]` | IDs of people or programs Ivenna sent the message to |
+| `text` | `Text` | Complete sent message text |
+| `observed_at_unix_ms` | `i64` | Runtime observation time in Unix milliseconds |
+
+The timestamp records when the runtime observed the stored message. Observation timestamps in received and sent history do not establish when a message was sent or delivered.
+
+For example, startup recollection can supply both sides of earlier communication:
+
+```yaml
+session_id: 1
+events: []
+context:
+  - received:
+      from: [alice]
+      text: Please revise the practice schedule.
+      observed_at_unix_ms: 1793966400000
+  - sent:
+      recipients: [alice]
+      text: The revised schedule is ready for review.
+      observed_at_unix_ms: 1793966401000
+```
+
+Outgoing messages use [the communication tool](communication.md#sending-a-message) with explicitly chosen recipient IDs. An activation's final text is a core result or a report to its parent.
 
 ## Assignments and reports
 
@@ -111,7 +126,6 @@ An `Assignment` contains:
 | --- | --- |
 | `task` | Work for the receiving session to continue |
 | `from_session` | Direct parent that created the fork |
-| `source_refs` | Source references carried by the transferred inputs and assignments; defaults to an empty array |
 
 An assignment describes the caller activation's whole work, and the child inherits the caller's retained history. See [fork ownership](architecture.md#forks-and-work-ownership) for publication, queueing, and context lifetimes.
 
@@ -123,7 +137,6 @@ events:
   - assignment:
       task: Update the French practice plan.
       from_session: 1
-      source_refs: []
 context: []
 ```
 
@@ -192,4 +205,4 @@ Compaction uses the same request form with response `summary` and instructions f
 
 Records, current state, instructions, tools, and encoded content all contribute to the complete [request budget](architecture.md#bounded-model-context). Budget measurement uses the same assembled payload sent to the provider.
 
-For implementation details, [architecture](architecture.md) explains request assembly and ownership. Its [email boundary](architecture.md#email-boundary-and-source-materials) and [internal mail state](architecture.md#internal-mail-state) sections describe the current correspondence projection and handover storage. See [tool content](content.md) for text and media returned by tools.
+For implementation details, [architecture](architecture.md) explains request assembly and ownership. Its [email boundary](architecture.md#email-boundary) and [internal mail state](architecture.md#internal-mail-state) sections describe address projection, consumption receipts, and handover storage. The [email addressing reference](communication.md#current-email-addressing) defines the current ID mapping and supported syntax. See [tool content](content.md) for text and media returned by tools.

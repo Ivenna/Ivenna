@@ -9,7 +9,7 @@ const contracts = @import("agent_contracts");
 const Model = contracts.Model;
 const Incoming = contracts.Inbox.Incoming;
 
-/// A session owns reasoning history independently of external correspondence.
+/// A session owns reasoning history independently of incoming communication.
 /// The core is permanent; branch sessions may retain an idle context while
 /// their children continue without occupying an execution slot.
 pub const Session = struct {
@@ -78,8 +78,8 @@ pub const Registry = struct {
         return self.noticed.count() + @max(32, self.max_contexts * 2);
     }
 
-    /// Every external input enters the core. Source evidence does not select
-    /// an existing focus or impose a response obligation.
+    /// Queue an observation for the core. Returns false for an already tracked
+    /// receipt or when the core's delivery capacity is full.
     pub fn accept(self: *Registry, incoming: Incoming) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -142,22 +142,14 @@ pub const Registry = struct {
         if (self.sessions.count() + self.reserved >= self.max_contexts) return error.AttentionCapacityUnavailable;
         const child = try self.allocator.create(Session);
         errdefer self.allocator.destroy(child);
-        var source_refs: std.ArrayList([]const u8) = .empty;
-        defer source_refs.deinit(self.allocator);
         var receipts: std.ArrayList([]const u8) = .empty;
         defer receipts.deinit(self.allocator);
         for (work.activation.deliveries.items) |item| {
-            switch (item.event) {
-                .input => |input| if (input.source) |source| try source_refs.append(self.allocator, source.reference),
-                .assignment => |assignment| try source_refs.appendSlice(self.allocator, assignment.source_refs),
-                .report => {},
-            }
             try receipts.appendSlice(self.allocator, item.receipts);
         }
         const delivery = try Delivery.create(self.allocator, .{ .assignment = .{
             .task = request.task,
             .from_session = work.session.session_id,
-            .source_refs = source_refs.items,
         } }, receipts.items);
         errdefer delivery.destroy(self.allocator);
         child.* = .{
@@ -324,24 +316,6 @@ pub const Registry = struct {
         for (absent.items) |key| if (self.noticed.fetchRemove(key)) |entry| self.allocator.free(entry.key);
     }
 
-    /// Consumption bindings keep adapter receipts live until processing ends.
-    pub fn receiptsInUse(self: *Registry, a: Allocator) ![]const []const u8 {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        var receipts: std.ArrayList([]const u8) = .empty;
-        errdefer {
-            for (receipts.items) |receipt| a.free(receipt);
-            receipts.deinit(a);
-        }
-        var sessions = self.sessions.valueIterator();
-        while (sessions.next()) |entry| {
-            if (entry.*.active) |activation|
-                for (activation.deliveries.items) |delivery| try retainDeliveryReceipts(a, &receipts, delivery);
-            for (entry.*.pending.items) |delivery| try retainDeliveryReceipts(a, &receipts, delivery);
-        }
-        return receipts.toOwnedSlice(a);
-    }
-
     fn releaseIdle(self: *Registry, session: *Session) void {
         if (session == self.core or session.active != null or session.pending.items.len != 0 or session.children != 0 or session.borrowed_workers != 0) return;
         const parent_id = session.parent_session_id;
@@ -379,12 +353,6 @@ fn takeReady(allocator: Allocator, session: *Session) !?Work {
     session.active = activation;
     session.borrowed_workers += 1;
     return .{ .session = session, .activation = activation };
-}
-
-fn retainDeliveryReceipts(a: Allocator, receipts: *std.ArrayList([]const u8), delivery: *const Delivery) !void {
-    try receipts.ensureUnusedCapacity(a, delivery.receipts.len);
-    for (delivery.receipts) |receipt|
-        receipts.appendAssumeCapacity(try a.dupe(u8, receipt));
 }
 
 fn assertWork(work: Work) void {

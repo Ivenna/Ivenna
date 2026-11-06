@@ -1,6 +1,6 @@
 # Tool content
 
-Memory reads and host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#material-and-provenance) defines received material and excerpts. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
+Memory reads and host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#incoming-messages) defines incoming observations. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
 
 ## Automatic classification
 
@@ -42,8 +42,6 @@ At the end of each tool batch, the Responses adapter applies these local checks 
 The adapter keeps new images in order up to the count limit, replacing later images with text `content_limit` errors. If the serialized request exceeds the byte limit, newly returned images are then omitted from the end until it fits or no new images remain. Text descriptions, command outcomes, diagnostics, and earlier context remain available.
 
 The separate [whole-request budget](architecture.md#bounded-model-context) may require a handover before the next model round.
-
-The model service handles image decoding, dimensions, URL retrieval, and limits on fetched content. Local checks do not ensure that the complete request meets every service limit.
 
 ## Context and continuity
 

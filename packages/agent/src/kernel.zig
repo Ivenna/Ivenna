@@ -103,10 +103,9 @@ pub const Kernel = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            const waiting = try self.inbox.poll(a, try self.sessions.intakeLimit(), @intCast(@min(4096, self.limits.request_bytes / 8)));
+            const waiting = try self.inbox.poll(a, try self.sessions.intakeLimit());
             try self.sessions.reconcile(waiting);
             for (waiting) |incoming| _ = try self.sessions.accept(incoming);
-            try self.inbox.releaseUnused(try self.sessions.receiptsInUse(a));
             try self.dispatch(tasks);
             try self.io.sleep(.fromMilliseconds(self.poll_interval_ms), .awake);
         }
@@ -116,7 +115,8 @@ pub const Kernel = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        if (try self.handovers.load(a, "core", self.limits.handover_bytes)) |record| {
+        if (try self.handovers.load(a, "core")) |record| {
+            if (record.summary.len > self.limits.handover_bytes) return error.HandoverTooLarge;
             try self.sessions.appendCoreContext(&.{.{ .handover = record }});
         }
         var context: std.ArrayList(Input.ContextItem) = .empty;
@@ -128,8 +128,11 @@ pub const Kernel = struct {
             return error.ContextBudgetExhausted;
         const reserve = @min(4096, self.limits.request_bytes / 4);
         var selected: usize = 0;
-        for (try self.inbox.recent(a, 32)) |material| {
-            try context.append(a, .{ .evidence = material });
+        for (try self.inbox.recent(a, 32)) |item| {
+            try context.append(a, switch (item) {
+                .received => |message| .{ .received = message },
+                .sent => |message| .{ .sent = message },
+            });
             var candidate = try base.fork(self.allocator);
             defer candidate.deinit();
             try candidate.appendRecord(.{ .session_id = snapshot.session_id, .context = context.items });
@@ -174,7 +177,7 @@ pub const Kernel = struct {
                 const message = try parseArguments(Communication.Message, a, arguments);
                 if (message.recipients.len == 0 or message.text.len == 0) return error.InvalidToolArguments;
                 const submission = self.kernel.sender.send(a, message) catch |err| switch (err) {
-                    error.InvalidContactReference => return try runtimeError(a, "unknown_recipient", "The recipient reference is not available."),
+                    error.InvalidRecipientId => return try runtimeError(a, "invalid_recipient", "The recipient ID is invalid."),
                     else => return err,
                 };
                 return try runtimeResult(a, submission);

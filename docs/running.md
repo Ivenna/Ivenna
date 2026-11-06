@@ -22,7 +22,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum generated tokens per response | `8192` |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | JMAP session URL | `http://127.0.0.1:8088/jmap/session` |
-| `MAIL_ADDRESS` | Kernel address and sending identity | `ivenna@ivenna.test` |
+| `MAIL_ADDRESS` | Kernel address and sending identity; its domain resolves correspondent IDs | Required |
 | `MAIL_USERNAME` | Mail login | Required for username/password authentication |
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
@@ -32,7 +32,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
 | `HANDOVER_MAX_BYTES` | Maximum retained handover text | `8192` |
-| `DATA_DIR` | Artifact and contact directory in the kernel filesystem | `.ivenna` |
+| `DATA_DIR` | Base directory for host command output in the kernel filesystem | `.ivenna` |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
@@ -40,7 +40,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 
 `MAX_PARALLEL_ATTENTION` and `MAX_ATTENTION_CONTEXTS` are independent. Parents waiting for children retain contexts without occupying execution slots. With `MAX_ATTENTION_CONTEXTS=1`, only the core fits and forking is unavailable. At capacity, pending mail remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for event limits and scheduling.
 
-Request byte limits cover the whole serialized body, including instructions, tool definitions, history, and encoded images. They do not estimate model tokens. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
+Request byte limits cover the whole serialized body, including instructions, tool definitions, history, complete incoming text, and encoded images. They do not estimate model tokens. If a single input cannot fit after context compaction, admission fails with `ContextBudgetExhausted` and the runtime stops. `HANDOVER_MAX_BYTES` also applies to the complete handover loaded at startup. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
@@ -48,15 +48,21 @@ Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's star
 
 Use a dedicated account with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create messages and update private keywords. Ivenna uses the Archive folder when present and creates it when missing, so that operation also needs permission.
 
-Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. Use separate correspondent accounts to send messages to Ivenna and receive its outgoing mail.
+Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
-Configure the mail service's receiving policy to consult Ivenna's [reception readiness](#service-status-and-reception) and reject incoming traffic while reception is closed. Use that gated path for external messages. JMAP access alone does not enforce the reception contract.
+Addresses must use the [supported ASCII dot-atom local parts](communication.md#current-email-addressing) and an ASCII domain made of letters, digits, and hyphens in dot-separated labels. Labels begin and end with a letter or digit; a single-label domain is also supported. Domain matching ignores case, while correspondent IDs preserve case. Changing `MAIL_ADDRESS` to another domain changes how retained IDs resolve.
+
+Install the [reception-readiness policy](#service-status-and-reception) on the service's receiving paths before using them for correspondence.
 
 Correspondence and core state records share the mailbox. The [intake rules](#mail-intake) also apply to its existing mail. Configure service retention to preserve correspondence and core handovers needed for later continuation.
 
 ### Mail intake
 
 The kernel reads ordinary unprocessed correspondence across mail folders, including Archive. Drafts and messages in Junk or Trash are excluded, along with the runtime's own outgoing and internal state records.
+
+Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. Missing, cross-domain, or unsupported From addresses exclude the whole message from intake and recent received history, leaving its completion marker unchanged. The adapter presents the corresponding IDs and text as an observation.
+
+Recent recollection also includes Ivenna's sent messages as separate records with their recipients. The adapter recognizes these records by its private outbound marker and Ivenna's sender address, and requires nonempty recipients in the configured domain. Integrations that bring outside material to Ivenna can submit it through an internal account with suitable context; the current adapter supports only same-domain correspondence.
 
 Ivenna tracks processing with a private completion marker. Eligible mail without that marker is pending, including existing mail that has been read or archived. Review the mailbox before connecting it; reading, starring, or moving ordinary correspondence does not mark it as processed.
 
@@ -112,7 +118,7 @@ Reception opens after startup checks and core context preparation. It closes whe
 curl --include http://127.0.0.1:8090/readyz
 ```
 
-Configure the mail receiving boundary to check the readiness header at an address it can reach and reject incoming traffic when the header is absent, including when the endpoint cannot be reached. Apply the policy to every receiving address and delivery path used for external messages. The [local Stalwart setup](../dev/README.md#configuring-mail) demonstrates an SMTP recipient check.
+Configure the mail receiving boundary to check the readiness header at an address it can reach and reject incoming traffic when the header is absent, including when the endpoint cannot be reached. Apply the policy to every receiving address and delivery path used for correspondence. The [local Stalwart setup](../dev/README.md#configuring-mail) demonstrates an SMTP recipient check.
 
 Readiness describes the kernel's reception state when queried. It reserves no processing capacity, and the runtime can stop after a successful check or accepted delivery. The kernel continues to read [ordinary unprocessed mail](#mail-intake) already present in its mailbox.
 
@@ -122,27 +128,25 @@ With SMTP, a recipient rejection reaches the sending server during that delivery
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception and wait for the kernel's workers to end. Communication or memory infrastructure failures and errors propagated by execution also stop the whole kernel. Diagnose the failure from its diagnostics and restore any unavailable services before restarting.
 
+When an incoming message fails admission with `ContextBudgetExhausted`, it remains unprocessed. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
+
 An interrupted operation may already have changed files, memory, or mail. Inspect uncertain effects before restarting. Start the executable again with the same deployment configuration and data. Ivenna reconstructs its understanding from retained material; see [after interruption](usage.md#after-interruption) for what continuation means.
 
 ## Data and retention
 
-The deployment chooses the kernel's artifact directory, mailbox storage, and memory workspace independently:
+The deployment chooses mailbox storage, the memory workspace, and the host output directory independently:
 
 | Location | Contents |
 | --- | --- |
 | Configured JMAP mailbox | Correspondence, core handovers, and private processing markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
-| `<DATA_DIR>/sources/` | Captured input text and decoded mail snapshots |
-| `<DATA_DIR>/contacts/` | Persistent mappings from contact references to delivery addresses |
 
-`DATA_DIR` selects the artifact and contact directory in the kernel's filesystem. The kernel creates it with private permissions when missing. Changing it selects where the kernel writes artifacts; it does not move existing files, mailbox storage, memory, or SSH configuration. Provisioning files, credentials, and SSH keys belong to deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by that setup.
+`DATA_DIR` selects the base directory for host output in the kernel's filesystem. The kernel creates it with private permissions when missing. Changing it selects where new output files are written; it does not move existing files, mailbox storage, memory, or SSH configuration. Provisioning files, credentials, and SSH keys belong to deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by that setup.
 
-Contact mappings let retained recipient references remain usable after a working context ends or the source cache is cleared. Preserve these files when moving deployment data; removing a mapping can make a retained reference unavailable for sending.
+Host output files remain available after the command and work session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
 
-Source files let a work session retrieve the complete material behind an excerpt and inspect mail details when needed. Correspondence text includes the subject and body supplied as input; JSON snapshots contain decoded fields rather than original MIME or live mailbox state. These files remain after the work finishes. See [source materials](architecture.md#email-boundary-and-source-materials) for their naming and publication contract.
-
-Core handovers are self-addressed state records stored in the mailbox's Archive folder when the core context is compacted. Work sessions compact in memory. Saving a handover or releasing working context leaves source letters in their existing folders. Manage mailbox capacity through retention and deletion. Automatic mail retention and coordinated artifact cleanup are not implemented; see [mail retention](architecture.md#mail-retention).
+Core handovers are self-addressed state records stored in the mailbox's Archive folder when the core context is compacted. Work sessions compact in memory. Saving a handover or releasing working context leaves correspondence in its existing folders. Manage mailbox capacity through retention and deletion; see [mail retention](architecture.md#mail-retention).
 
 ## Optional host tools
 

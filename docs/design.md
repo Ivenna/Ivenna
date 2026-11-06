@@ -12,7 +12,7 @@ Program choices and general tool use draw on the model's prior knowledge and wha
 
 Communication and autonomous memory are required for Ivenna to operate. The runtime starts with both available; infrastructure failures in either end the runtime and its concurrent work. Errors propagated by model and session execution also end the runtime. Defined tool outcomes, such as a missing memory entry, a capacity limit, or a command's nonzero exit, remain observations for the model to understand.
 
-Ivenna exposes its health and whether reception is open. External senders must expect reception to close when Ivenna is starting, stopping, or unavailable. The receiving boundary checks that state before accepting new messages. Retry and queuing by an external sender belong to that sender; automatic offline reception and recovery are outside the current design.
+Ivenna exposes its health and whether reception is open. Senders must expect reception to close when Ivenna is starting, stopping, or unavailable. The receiving boundary checks that state before accepting new messages. Retry and queuing by a sender belong to that sender; automatic offline reception and recovery are outside the current design.
 
 ## Model-facing descriptions and results
 
@@ -20,29 +20,29 @@ Tool descriptions explain how to choose and invoke an operation and interpret it
 
 Keep these interfaces concise and leave room for the model's knowledge and judgment. Detailed field references and implementation explanations belong in developer documentation unless they affect how the interface is used or interpreted.
 
-Keep task text and source material free-form, with contacts and provenance alongside the material they describe. Working history preserves understanding for continuation; current execution state and summary instructions apply to the inference that uses them. The system prompt explains their meaning and response scope; the [input contract](input.md) defines their structure.
+Keep task text and message text free-form. Working history preserves understanding for continuation; current execution state and summary instructions apply to the inference that uses them. The system prompt explains their meaning and response scope; the [input contract](input.md) defines their structure.
 
 Tool results can combine text, media, and information about an operation's outcome and source. Classifying or interpreting one source preserves the other observations in the result. When a provider or budget cannot carry content, retain its source information and describe the omission.
 
-## External communication
+## Communication with people and programs
 
-People and programs send independent messages to Ivenna. Each arrival enters the core as an observation. Ivenna relates it to its ongoing understanding and work; external conversation identifiers do not select a context or define its continuity.
+People and programs communicate with Ivenna through messages. Each arrival enters the core as an observation of who said what. An observation does not imply that the words were addressed specifically to Ivenna or require a response. Ivenna relates it to its ongoing understanding and work.
 
-The communication interface supplies content, recipient references, and optional source information. Ivenna explicitly chooses whether to send a message, to whom, and what it says through `send_message`. An activation can send zero, one, or several messages. Final model text supplies an internal result in the core or a report to a work session's parent; it does not itself communicate externally.
+The communication interface supplies received text, the IDs of participants it came from, and observation time. Recent history also records Ivenna's sent text with recipient IDs and observation time. Correspondent IDs link observations with explicit communication actions. Understanding correspondents and their relationships to Ivenna can inform coordination. Policies based on correspondent IDs, including any participant whitelist or scheduling distinctions, remain undecided.
 
-Email is the current external channel. Its adapter owns addresses, headers, delivery records, and submission. Subjects, bodies, and correspondent descriptions remain material for understanding the message. Model-facing communication uses the same content and recipient-reference contract independently of that protocol.
+Ivenna explicitly chooses whether to send a message, to whom, and what it says through `send_message`. An activation can send zero, one, or several messages. Final model text supplies an internal result in the core or a report to a work session's parent; outgoing communication requires an explicit send. The [communication guide](communication.md) describes the interface and its current implementation.
 
 ## Internal work and state
 
 Work is defined by a task and the understanding needed to continue it. A session owns a working context and a queue. An activation handles a bounded group of already queued inputs, assignments, or reports together through model and tool rounds. It ends with a final response or a fork that passes the group's work to a child. Events arriving during an activation remain queued for later processing.
 
-Execution state coordinates ongoing work in process memory. Mail storage records which correspondence has been processed and retains handovers for continuation. External correspondence and internal state have their own responsibilities and lifecycles within the shared mail service.
+Execution state coordinates ongoing work in process memory. Durable internal state records which correspondence has been processed and retains handovers for continuation. Correspondence and internal state have their own responsibilities and lifecycles.
 
-Activation completion, task completion, context release, and mail retention have separate lifecycles. A broader task can remain open after an activation ends.
+Activation completion, task completion, context release, and stored-record retention have separate lifecycles. A broader task can remain open after an activation ends.
 
 ## Core and concurrent attention
 
-One core session coordinates Ivenna throughout the kernel's lifetime. It handles a queue of observations and keeps its turns focused on reception and coordination. It can send a brief message directly; sustained work moves to separate sessions so the core can receive further input. Later external arrivals still enter the core.
+One core session coordinates Ivenna throughout the kernel's lifetime. It handles a queue of observations and keeps its turns focused on reception and coordination. It can send a brief message directly; sustained work moves to separate sessions so the core can receive further input. Later messages still enter the core.
 
 Forking is an explicit model decision available to core and work sessions alike. It passes the whole activation's work to another focus of Ivenna's attention with the complete retained working context, including any earlier handover. The caller's activation ends and it returns to its queue; the child starts an activation for its assignment.
 
@@ -62,7 +62,7 @@ Peer assignments, steering retained work, and parallel subtasks within one activ
 
 Runtime transcripts hold the detail needed for model and tool execution. They have bounded lifetimes and sizes. Limits cover the complete model request, including instructions, tool definitions, observations, and tool results, as well as the generated response. Each limit states what it measures; byte counts and model tokens are separate units.
 
-When context needs to be shortened, the kernel asks the model for a handover. The replacement context should preserve commitments, relevant uncertainty, completed effects, and source and contact references needed for continued work. Core handovers are retained in internal state for later recall. Work contexts compact in process memory; durable recovery for independent internal work remains undecided.
+When context needs to be shortened, the kernel asks the model for a handover. The replacement context should preserve commitments, relevant uncertainty, completed effects, and correspondent IDs and context needed for continued work. Core handovers are retained in internal state for later recall. Work contexts compact in process memory; durable recovery for independent internal work remains undecided.
 
 After a restart, Ivenna rebuilds its working understanding from the latest core handover and recent communication. Further messages inform that understanding as independent observations. This sustains continuity without restoring every intermediate model or tool state. An interrupted action may already have affected the world, so uncertain outcomes need inspection before repetition.
 
@@ -70,7 +70,7 @@ Automatic retry, reconnection, and execution resumption after runtime failure re
 
 ## Data ownership
 
-The deployment user owns Ivenna's mailbox, artifacts, and autonomous memory, and chooses where they live. External correspondence and internal state records both use mail storage, with their ownership and retention kept distinct. Artifacts and autonomous memory remain files. Keep these forms open to inspection, retention, and management within the user's deployment.
+The deployment user owns Ivenna's correspondence, internal state, artifacts, and autonomous memory, and chooses where they live. Keep these forms open to inspection, retention, and management within the user's deployment. Storage implementations preserve their distinct ownership and retention needs.
 
 Diagnostics support troubleshooting and analysis. Keep them separate from the source material and handovers used for continuity.
 
