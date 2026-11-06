@@ -3,6 +3,7 @@ const Context = @import("context.zig").Context;
 const Input = @import("input.zig");
 const WorkInput = @import("work.zig");
 const Delivery = WorkInput.Delivery;
+const Activation = WorkInput.Activation;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
@@ -16,8 +17,7 @@ pub const Session = struct {
     parent_session_id: ?u64 = null,
     parent_generation: ?u64 = null,
     generation: u64 = 0,
-    state: enum { ready, running } = .ready,
-    active: ?*Delivery = null,
+    active: ?*Activation = null,
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
     children: usize = 0,
@@ -25,7 +25,7 @@ pub const Session = struct {
     return_slots: usize = 0,
 };
 
-pub const Work = struct { session: *Session, delivery: *Delivery };
+pub const Work = struct { session: *Session, activation: *Activation };
 
 pub const ForkRequest = struct {
     task: []const u8,
@@ -84,8 +84,9 @@ pub const Registry = struct {
         const session = self.core;
         const receipt = incoming.receipt;
         if (receipt) |key| if (self.noticed.contains(key)) return false;
-        if (session.pending.items.len + @as(usize, @intFromBool(session.active != null)) + session.return_slots >= self.max_contexts) return false;
-        const delivery = try Delivery.create(self.allocator, .{ .input = incoming.input }, receipt);
+        const active_count = if (session.active) |activation| activation.deliveries.items.len else 0;
+        if (session.pending.items.len + active_count + session.return_slots >= self.max_contexts) return false;
+        const delivery = try Delivery.create(self.allocator, .{ .input = incoming.input }, if (receipt) |key| &.{key} else &.{});
         errdefer delivery.destroy(self.allocator);
         try session.pending.ensureUnusedCapacity(self.allocator, 1 + session.return_slots);
         const notice_key = if (receipt) |key| try self.allocator.dupe(u8, key) else null;
@@ -101,15 +102,34 @@ pub const Registry = struct {
     pub fn nextReady(self: *Registry, max_parallel: usize) !?Work {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        if (takeReady(self.core)) |work| return work;
+        if (try takeReady(self.allocator, self.core)) |work| return work;
         if (self.runningWorkers() >= max_parallel) return null;
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
             const session = entry.*;
             if (session == self.core) continue;
-            if (takeReady(session)) |work| return work;
+            if (try takeReady(self.allocator, session)) |work| return work;
         }
         return null;
+    }
+
+    /// Install the selected FIFO prefix and return its suffix ahead of any
+    /// arrivals admitted since claim. Success consumes context; failure leaves
+    /// queue membership and the caller's context ownership unchanged.
+    pub fn beginActivation(self: *Registry, work: Work, count: usize, context: Context) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        const session = work.session;
+        const deliveries = &work.activation.deliveries;
+        std.debug.assert(count != 0 and count <= deliveries.items.len);
+        const suffix = deliveries.items[count..];
+        try session.pending.ensureUnusedCapacity(self.allocator, suffix.len + session.return_slots);
+        session.pending.insertSliceAssumeCapacity(0, suffix);
+        deliveries.items.len = count;
+        session.context.deinit();
+        session.context = context;
+        session.generation += 1;
     }
 
     pub fn prepareFork(self: *Registry, work: Work, request: ForkRequest) !ForkPlan {
@@ -120,16 +140,23 @@ pub const Registry = struct {
         if (self.sessions.count() + self.reserved >= self.max_contexts) return error.AttentionCapacityUnavailable;
         const child = try self.allocator.create(Session);
         errdefer self.allocator.destroy(child);
-        const source_refs: []const []const u8 = switch (work.delivery.input) {
-            .input => |input| if (input.source) |source| &.{source.reference} else &.{},
-            .assignment => |assignment| assignment.source_refs,
-            .report => &.{},
-        };
+        var source_refs: std.ArrayList([]const u8) = .empty;
+        defer source_refs.deinit(self.allocator);
+        var receipts: std.ArrayList([]const u8) = .empty;
+        defer receipts.deinit(self.allocator);
+        for (work.activation.deliveries.items) |item| {
+            switch (item.event) {
+                .input => |input| if (input.source) |source| try source_refs.append(self.allocator, source.reference),
+                .assignment => |assignment| try source_refs.appendSlice(self.allocator, assignment.source_refs),
+                .report => {},
+            }
+            try receipts.appendSlice(self.allocator, item.receipts);
+        }
         const delivery = try Delivery.create(self.allocator, .{ .assignment = .{
             .task = request.task,
             .from_session = work.session.session_id,
-            .source_refs = source_refs,
-        } }, work.delivery.receipt);
+            .source_refs = source_refs.items,
+        } }, receipts.items);
         errdefer delivery.destroy(self.allocator);
         child.* = .{
             .session_id = self.next_session_id,
@@ -179,8 +206,7 @@ pub const Registry = struct {
             parent.children += 1;
             parent.return_slots += 1;
             parent.active = null;
-            parent.state = .ready;
-            work.delivery.destroy(self.allocator);
+            work.activation.destroy(self.allocator);
             return .forked;
         }
         return .continuing;
@@ -196,15 +222,11 @@ pub const Registry = struct {
         return self.snapshot(self.core);
     }
 
-    pub fn appendCoreInput(self: *Registry, text: []const u8) !void {
-        try self.appendInput(self.core, text);
-    }
-
-    pub fn appendInput(self: *Registry, session: *Session, text: []const u8) !void {
+    pub fn appendCoreContext(self: *Registry, context: []const Input.ContextItem) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try session.context.appendInput(text);
-        session.generation += 1;
+        try self.core.context.appendRecord(.{ .session_id = self.core.session_id, .context = context });
+        self.core.generation += 1;
     }
 
     pub fn replaceContext(self: *Registry, session: *Session, replacement: Context) !void {
@@ -223,7 +245,7 @@ pub const Registry = struct {
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
             queued += entry.*.pending.items.len;
-            running += @intFromBool(entry.*.state == .running);
+            running += @intFromBool(entry.*.active != null);
         }
         return .{
             .session_id = session.session_id,
@@ -255,10 +277,12 @@ pub const Registry = struct {
         assertWork(work);
         const session = work.session;
         try self.notifyParent(session, text orelse "");
-        if (work.delivery.receipt) |key| self.noticed.getPtr(key).?.* = .handled;
+        for (work.activation.deliveries.items) |delivery|
+            for (delivery.receipts) |key| {
+                self.noticed.getPtr(key).?.* = .handled;
+            };
         session.active = null;
-        session.state = .ready;
-        work.delivery.destroy(self.allocator);
+        work.activation.destroy(self.allocator);
         self.releaseIdle(session);
     }
 
@@ -275,7 +299,7 @@ pub const Registry = struct {
     fn notifyParent(self: *Registry, session: *Session, text: []const u8) !void {
         const target = session.parent_session_id orelse return;
         const parent = self.sessions.get(target).?;
-        const report = try Delivery.create(self.allocator, .{ .report = .{ .from_session = session.session_id, .text = text } }, null);
+        const report = try Delivery.create(self.allocator, .{ .report = .{ .from_session = session.session_id, .text = text } }, &.{});
         std.debug.assert(parent.return_slots > 0);
         parent.return_slots -= 1;
         parent.pending.appendAssumeCapacity(report);
@@ -309,14 +333,15 @@ pub const Registry = struct {
         }
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
-            if (entry.*.active) |delivery| try retainDeliveryReceipt(a, &receipts, delivery);
-            for (entry.*.pending.items) |delivery| try retainDeliveryReceipt(a, &receipts, delivery);
+            if (entry.*.active) |activation|
+                for (activation.deliveries.items) |delivery| try retainDeliveryReceipts(a, &receipts, delivery);
+            for (entry.*.pending.items) |delivery| try retainDeliveryReceipts(a, &receipts, delivery);
         }
         return receipts.toOwnedSlice(a);
     }
 
     fn releaseIdle(self: *Registry, session: *Session) void {
-        if (session == self.core or session.state != .ready or session.active != null or session.pending.items.len != 0 or session.children != 0 or session.borrowed_workers != 0) return;
+        if (session == self.core or session.active != null or session.pending.items.len != 0 or session.children != 0 or session.borrowed_workers != 0) return;
         const parent_id = session.parent_session_id;
         _ = self.sessions.remove(session.session_id);
         self.destroySession(session);
@@ -329,14 +354,14 @@ pub const Registry = struct {
     fn runningWorkers(self: *Registry) usize {
         var running: usize = 0;
         var sessions = self.sessions.valueIterator();
-        while (sessions.next()) |entry| if (entry.* != self.core and entry.*.state == .running) {
+        while (sessions.next()) |entry| if (entry.* != self.core and entry.*.active != null) {
             running += 1;
         };
         return running;
     }
 
     fn destroySession(self: *Registry, session: *Session) void {
-        if (session.active) |delivery| delivery.destroy(self.allocator);
+        if (session.active) |activation| activation.destroy(self.allocator);
         for (session.pending.items) |delivery| delivery.destroy(self.allocator);
         session.pending.deinit(self.allocator);
         session.context.deinit();
@@ -344,22 +369,22 @@ pub const Registry = struct {
     }
 };
 
-fn takeReady(session: *Session) ?Work {
-    if (session.state != .ready) return null;
+fn takeReady(allocator: Allocator, session: *Session) !?Work {
+    if (session.active != null) return null;
     if (session.pending.items.len == 0) return null;
-    const delivery = session.pending.orderedRemove(0);
-    session.active = delivery;
+    const activation = try Activation.create(allocator, session.pending.items);
+    session.pending.clearRetainingCapacity();
+    session.active = activation;
     session.borrowed_workers += 1;
-    session.state = .running;
-    return .{ .session = session, .delivery = delivery };
+    return .{ .session = session, .activation = activation };
 }
 
-fn retainDeliveryReceipt(a: Allocator, receipts: *std.ArrayList([]const u8), delivery: *const Delivery) !void {
-    const receipt = delivery.receipt orelse return;
-    try receipts.ensureUnusedCapacity(a, 1);
-    receipts.appendAssumeCapacity(try a.dupe(u8, receipt));
+fn retainDeliveryReceipts(a: Allocator, receipts: *std.ArrayList([]const u8), delivery: *const Delivery) !void {
+    try receipts.ensureUnusedCapacity(a, delivery.receipts.len);
+    for (delivery.receipts) |receipt|
+        receipts.appendAssumeCapacity(try a.dupe(u8, receipt));
 }
 
 fn assertWork(work: Work) void {
-    std.debug.assert(work.session.state == .running and work.session.active == work.delivery);
+    std.debug.assert(work.session.active == work.activation);
 }

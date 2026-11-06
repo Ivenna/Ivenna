@@ -381,7 +381,7 @@
   {
     "type": "function",
     "name": "fork_session",
-    "description": "Transfer current work to a child that inherits the complete working context. The caller's activation ends; the child processes its assignment in a new activation. The child's final text enters its direct parent's queue. At most one fork per round.",
+    "description": "Transfer the whole current activation's work to one child that inherits the complete retained working context, and return its session_id. The caller's activation ends. The child's final text returns as one combined report to its direct parent. At most one fork per round.",
     "parameters": {
       "type": "object",
       "properties": {

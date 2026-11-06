@@ -2,7 +2,7 @@
 
 Ivenna coordinates independent external observations, model sessions, and explicit tool effects within one body. The application exposes health and reception status. The kernel retains execution histories in process memory and coordinates communication and autonomous memory as required capabilities.
 
-The [design intent](design.md) explains these choices. The [input contract](input.md) defines observations, [communication](communication.md) defines outgoing messages, and the [usage guide](usage.md) explains external interaction.
+The [design intent](design.md) explains these choices. The [input contract](input.md) defines retained records and current requests, [communication](communication.md) defines outgoing messages, and the [usage guide](usage.md) explains external interaction.
 
 ## Responsibilities
 
@@ -10,23 +10,23 @@ The [design intent](design.md) explains these choices. The [input contract](inpu
 | --- | --- |
 | [Application](../apps/ivenna) | Load configuration, assemble shared and domain components, and own startup and shutdown |
 | [Service](../apps/ivenna/src/service.zig) | Serve listener health and the kernel's reception status |
-| [Work](../packages/agent/src/work.zig) | Own input, assignment, and report deliveries, with optional consumption receipts |
+| [Work](../packages/agent/src/work.zig) | Own event deliveries and their consumption receipts |
 | [Sessions](../packages/agent/src/sessions.zig) | Own contexts, queues, fork publication, and synchronized scheduling |
 | [Kernel](../packages/agent/src/kernel.zig) | Coordinate execution, email, internal state, and worker scopes |
 | [Communication](../packages/agent/src/communication.zig) | Define contacts, outgoing messages, and submission references |
-| [Email transport](../packages/agent/src/email_transport.zig) | Project correspondence into observations, persist contact mappings, and submit messages |
+| [Email transport](../packages/agent/src/email_transport.zig) | Project correspondence into native material, persist contact mappings, and submit messages |
 | [Mail state](../packages/agent/src/mail_state.zig) | Track physical input consumption and store handovers by state key |
 | [Mail sources](../packages/agent/src/mail_sources.zig) | Own shared source records, opaque receipts, caching, and immutable source artifacts |
 | [Mail client](../packages/agent/src/mail.zig) | Decode the required JMAP operations into typed results |
-| [Input](../packages/agent/src/input.zig) | Own native observation types and render them as YAML |
+| [Input](../packages/agent/src/input.zig) | Own model-input types and YAML rendering |
 | [Engine](../packages/agent/src/engine.zig) | Execute one model response and its complete tool batch |
-| [Context](../packages/agent/src/context.zig) | Own histories and copy complete contexts for forks and handovers |
+| [Context](../packages/agent/src/context.zig) | Own retained history, copy contexts, and assemble temporary model requests |
 | [Compaction](../packages/agent/src/compaction.zig) | Construct and bound summary requests and validate output |
 | [Provider](../packages/agent/src/provider.zig) | Encode model requests and tool replies and decode output |
 | [Memory](../packages/agent/src/memory.zig) | Exchange operations with the shared file workspace over SSH |
 | [Host](../packages/agent/src/host.zig) | Route shell operations and select returned content |
 
-The email adapter supplies native input with content, contacts, and optional provenance. The kernel pairs it with the mail integration's opaque physical receipt. Work owns that delivery; Sessions tracks the receipt to prevent duplicate intake while the message remains visible to polling. The kernel uses it to record consumption when processing completes. Model-facing input and communication use the native contracts independently of mail records or thread identifiers.
+The email adapter supplies native material with content, contacts, and optional provenance. The kernel pairs each arrival with the mail integration's opaque physical receipt. Work owns the delivery's event and receipts; Sessions tracks receipts to prevent duplicate intake while messages remain visible to polling. A fork's assignment can hold the receipts of several original inputs. The kernel records their consumption when processing completes. Model-facing input and communication use the native contracts independently of mail records or thread identifiers.
 
 The application owns service, kernel, and shutdown tasks. The kernel owns intake and execution tasks within that scope. Task failures close reception and cancel and join concurrent work before shared dependencies are released. Sessions serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
 
@@ -35,7 +35,7 @@ flowchart LR
     Gateway[SMTP receiving gate] -. readiness check .-> Service[Service status]
     Service -. reception state .-> Kernel[Kernel]
     Kernel <--> Sessions[Sessions and work]
-    Kernel <--> Email[EmailTransport: observations and explicit sends]
+    Kernel <--> Email[EmailTransport: material and explicit sends]
     Kernel <--> State[MailState: consumption and handovers]
     Email --> Shared[Shared mail client and source records]
     State --> Shared
@@ -57,38 +57,46 @@ Reception status belongs to the service boundary. Model reasoning and tools do n
 | Task | Work to be accomplished; it may continue across activations |
 | Core session | Coordinating context retained for the kernel's lifetime, with its own queue and execution lane |
 | Work session | A fork with an independent history, queue, parent, and any children |
-| Input | Content with any contacts, source information, and context |
-| Delivery | An owned input, assignment, or report being queued or executed, with an optional consumption receipt |
-| Activation | One session processing a delivery through model and tool rounds, until a final response or a fork |
+| Input | Independently received material with any contacts and provenance |
+| Delivery | An owned event being queued or executed, with zero or more consumption receipts |
+| Activation | One session processing a selected group of deliveries through model and tool rounds, until a final response or a fork |
 | Model round | One model response followed by all tools it invoked |
 
 Every external input enters the core independently, including messages a mail client groups into one thread. Ivenna interprets the content alongside its retained understanding. Sessions own internal execution histories and queues; external conversation state does not route input or restore a work context.
 
-The core exposes `send_message` and `fork_session`. Work sessions have the full tool interface and can fork further sessions. `send_message` is available independently of the active delivery's source or result destination. A response without tool calls ends the current activation: its final text is an internal result in the core or a report to a work session's direct parent. The broader task can remain open.
+The core exposes `send_message` and `fork_session`. Work sessions have the full tool interface and can fork further sessions. `send_message` is available independently of the activation's sources or result destination. For ordinary work, a response without tool calls ends the current activation: its final text is an internal result in the core or a report to a work session's direct parent. The broader task can remain open.
 
-`MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core. It also bounds each session's active and queued deliveries plus reserved child reports. Input that cannot be admitted stays with its producer; the mail integration leaves it available for later polling. Idle parents retain context while their children work without consuming a work slot. The core still processes its requests serially, so responsiveness also depends on short coordination turns and service latency.
+`MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core. It also bounds each session's active and queued deliveries plus reserved child reports. Every active delivery counts; a child assignment carrying several receipts is still one delivery. Input that cannot be admitted stays with its producer; the mail integration leaves it available for later polling. Idle parents retain context while their children work without consuming a work slot. The core still processes its requests serially, so responsiveness also depends on short coordination turns and service latency.
 
-Publishing a fork replaces the caller's active delivery with one reserved report slot in that caller's admission budget. Queue storage preserves room for outstanding report slots. When the child returns, its report consumes the slot and joins the queue, so later input cannot take its place. Runtime `queued_inputs` counts actual queued deliveries, excluding these reservations.
+Publishing a fork replaces the caller's active delivery group with one reserved report slot in that caller's admission budget. Queue storage preserves room for outstanding report slots. When the child returns, its report consumes the slot and joins the queue, so later input cannot take its place. Runtime `queued_inputs` counts actual queued deliveries, excluding these reservations.
+
+## Activation admission
+
+When a session is ready, Sessions claims the events already in its queue. The kernel selects the longest nonempty FIFO prefix that fits the complete ordinary request, including retained history, the record for the new event group, current state, and tool definitions. Selection starts from the available queue without waiting for more arrivals. The selected group enters retained history as one record and shares one inference. Events arriving during admission or later tool rounds stay queued for a later activation.
+
+When old working history prevents even the first event from fitting, the kernel summarizes that history and selects again. That summary does not process the new events. If the first event cannot fit after compaction, or there is no earlier work to compact, admission fails with `ContextBudgetExhausted`. Events excluded by the budget return to the queue's front, before arrivals received during selection, preserving FIFO order.
 
 ## Forks and work ownership
 
-`fork_session` accepts a `task` and passes the current work to a new work session. A model round can create at most one fork. The [tool definitions](../packages/agent/src/tools.json) own its parameters.
+`fork_session` accepts a `task` and passes the whole activation's work to one new work session. A model round can create at most one fork. The [tool definitions](../packages/agent/src/tools.json) own its parameters.
 
 Sessions reserves child identity and context capacity during tool invocation. It publishes the fork only after committing model output and one result for every tool call, so inherited history contains a complete exchange.
 
-A fork copies the caller's complete current context, including any compaction handover. It receives an assignment and fresh runtime state. Histories then grow independently while the host, memory, and world effects remain shared. The [input contract](input.md#assignments-and-handovers) defines assignment and provenance fields.
+A fork copies the caller's complete retained context, including any compaction handover. It receives an assignment, and its model request supplies its current state. Histories then grow independently while the host, memory, and world effects remain shared. The [input contract](input.md#assignments-and-reports) defines assignment and report fields.
 
-Publishing a fork ends the caller's activation and transfers its delivery's consumption receipt, when present, to the child's assignment. The child handles that assignment in a new activation. Queued deliveries remain with the caller, which returns to its own queue without another inference to conclude the transfer. Later external messages still arrive at the core.
+Publishing a fork ends the caller's activation and transfers all of its deliveries' consumption receipts to one child assignment. That assignment collects source references from the group's inputs and assignments, while the inherited records keep each source's provenance. The child handles the assignment in a new activation. Queued deliveries remain with the caller, which returns to its own queue without another inference to conclude the transfer. Later external messages still arrive at the core.
 
-A work session's final text is delivered to the session that created it. The report enters the tail of that parent's FIFO queue and is added to context when it becomes the parent's next activation. It does not modify history during an ongoing model round. Nested forks return through their direct parents; a child does not inherit an ancestor's reporting destination. Report deliveries have no consumption receipt.
+A work session's final text returns one combined result to the session that created it. The report enters the tail of that parent's FIFO queue and can join other events in a later activation. It does not modify history during an ongoing model round. Nested forks return through their direct parents; a child does not inherit an ancestor's reporting destination. Report deliveries have no consumption receipts.
 
-Session identifiers, queues, and report reservations last for one kernel process. Peer assignments, steering, parallel subtasks within one activation, and durable work recovery remain outside the implemented interface.
+Session identifiers, queues, and report reservations last for one kernel process.
 
-## Structured observations and response destinations
+## Records, context, and current requests
 
-Input renders typed observations inside a common session envelope. The [input contract](input.md) owns their payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+Input defines and renders retained `Record` messages and temporary `Request` messages. The [input contract](input.md) owns their payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
-An ordinary request appends a fresh runtime observation to its inference snapshot. It describes the current session, execution counts, and result destination, and is discarded with that request view. Retained observations supply history; they do not override this current state. Compaction supplies current state inside its dedicated summary request.
+Sessions fixes the selected delivery group, returns the unselected suffix, and installs the selected history under the registry lock. Context owns retained records and the complete model/tool exchanges that follow. Startup recollection records the core handover and recent correspondence as supporting context. Forks copy retained history with its original session identifiers.
+
+For each inference, the kernel takes an owned history snapshot and obtains current state from Sessions. `Context.request` assembles a view of that history followed by one temporary request, without changing the snapshot. The kernel keeps the snapshot alive until the model/tool round returns. Request state and summary instructions stay outside retained history; later rounds use that history or its replacement handover.
 
 ## Content and provider boundary
 
@@ -102,7 +110,7 @@ Provider decodes and validates the complete model output before Engine executes 
 
 Engine completes each tool batch with one result per call. Sessions copies accepted model output, including reasoning items, and tool results into retained history before the model-round arena ends. A published fork ends the caller's activation; otherwise, tool results feed another round. Intermediate assistant text and complete exchanges remain in history.
 
-A final response without tool calls ends the activation. The kernel marks its physical receipt handled, when present, then completes the delivery in Sessions. A receipt follows successive forks and is consumed once at the final worker; returning reports do not consume it again. A work session's final text, including empty text, is copied into a report delivery for its direct parent. Core final text remains internal. Sending occurs only when a `send_message` tool call executes, so an activation can submit several messages or none.
+An ordinary final response without tool calls completes the selected group. The kernel records consumption for every physical receipt, then completes the deliveries in Sessions. Receipts follow successive forks and are consumed once at the final worker; returning reports do not consume them again. A work session's combined final text, including empty text, is copied into one report delivery for its direct parent. Core final text remains internal. Sending occurs only when a `send_message` tool call executes, so an activation can submit several messages or none.
 
 Sessions checks active and queued deliveries, children, and worker ownership before releasing a work context. Children retain an idle parent without occupying a work slot; a worker's borrow keeps its session alive until the worker returns. A queued report owns its text independently of the child's context and model-round arena. No external conversation state is saved on completion.
 
@@ -110,13 +118,15 @@ The permanent core stays available between activations. Its context is summarize
 
 ## Bounded model context
 
-`CONTEXT_REQUEST_BYTES` bounds the complete ordinary request, including instructions, tools, native observations, retained output, tool replies, and encoded images. `LLM_MAX_OUTPUT_TOKENS` separately bounds generated output.
+`CONTEXT_REQUEST_BYTES` bounds the complete ordinary request, including system instructions, retained records and exchanges, current state, tools, and encoded images. Budget measurement uses the same assembled payload sent to the provider. `LLM_MAX_OUTPUT_TOKENS` separately bounds generated output.
 
-Compaction builds a `context_compaction` observation from [compaction.md](../packages/agent/src/compaction.md) and current state with response `summary`. The frame retains session identity. Provider disables tools with `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
+After admission, each tool continuation checks the complete request budget again and can compact the activation's retained history when needed.
 
-The kernel checks that the replacement fits the ordinary budget and installs the native handover in working context. Core compaction also saves the summary under the fixed internal state key `core`; work-session compaction remains in memory. The handover replaces the entire earlier working view; no raw transcript tail is retained. Summary instructions preserve needed session identifiers and source and contact references alongside ongoing work, commitments, and completed effects.
+Compaction uses the same request assembly with response `summary` and instructions from [compaction.md](../packages/agent/src/compaction.md). It appends one summary request to retained history. Provider disables tools with `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
 
-Byte counts are local measurements, not model-token estimates. Model-specific accounting remains planned. If a request or summary cannot meet its bound, execution fails explicitly rather than cutting an unfinished exchange.
+The kernel builds the replacement's ordinary request with a fresh state snapshot and checks its complete budget before installing the handover record. Core compaction also saves the summary under the fixed internal state key `core`; work-session compaction remains in memory. The handover replaces the entire earlier working view; no raw transcript tail is retained. Summary instructions preserve needed session identifiers and source and contact references alongside ongoing work, commitments, and completed effects.
+
+Byte counts are local measurements, not model-token estimates. If a request or summary cannot meet its bound, execution fails explicitly rather than cutting an unfinished exchange.
 
 ## Email boundary and source materials
 

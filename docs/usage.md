@@ -46,11 +46,11 @@ About the French practice plan: use Tuesday and Saturday, and keep each
 session to 20 minutes. Please retain the vocabulary goals we agreed on.
 ```
 
-You can use your client's reply action or compose a new message. Every arrival goes to the core; email thread headers do not select an internal work session. Ivenna interprets the relationship using its retained core understanding and memory. Passing new instructions into an already running work focus remains unimplemented.
+You can use your client's reply action or compose a new message. Ivenna relates messages through its retained understanding and memory; the mail client's thread grouping does not select an internal work session. A message cannot directly update a work focus that is already running.
 
 ## Ongoing work and memory
 
-Ivenna can continue sustained work while receiving other messages. Forked work shares the host and memory and returns its final result to the focus that created it. See [work ownership](architecture.md#forks-and-work-ownership) for their lifecycle.
+Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. Its focuses share the host and memory; each work focus returns its result to the focus that created it. See [work ownership](architecture.md#forks-and-work-ownership) for details.
 
 Detailed work contexts can be released. Autonomous memory, retained correspondence, source files, and core handovers provide material for continued understanding. Processing leaves source letters in their existing folders. See [local data](running.md#local-data) for storage and cleanup.
 

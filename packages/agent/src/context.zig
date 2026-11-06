@@ -1,4 +1,5 @@
 const std = @import("std");
+const Input = @import("input.zig");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
@@ -15,7 +16,7 @@ pub const Context = struct {
         errdefer arena.deinit();
         const a = arena.allocator();
         const messages = try a.alloc(Value, 1);
-        messages[0] = try message(a, "system", system_text);
+        messages[0] = try message(a, "system", try a.dupe(u8, system_text));
         return .{
             .allocator = allocator,
             .arena = arena,
@@ -40,11 +41,21 @@ pub const Context = struct {
         return self.copy(allocator, 0);
     }
 
-    pub fn appendInput(self: *Context, rendered_input: []const u8) !void {
+    pub fn appendRecord(self: *Context, record: Input.Record) !void {
         var next = try self.copy(self.allocator, 1);
         errdefer next.deinit();
-        next.messages[self.messages.len] = try message(next.arena.allocator(), "user", rendered_input);
+        const a = next.arena.allocator();
+        next.messages[self.messages.len] = try message(a, "user", try Input.renderRecord(a, record));
         self.replace(next);
+    }
+
+    /// History is borrowed until mutation or deinit; the temporary user message
+    /// and the returned slice belong to a. No request state enters history.
+    pub fn request(self: *const Context, a: Allocator, current: Input.Request) ![]const Value {
+        const messages = try a.alloc(Value, self.messages.len + 1);
+        @memcpy(messages[0..self.messages.len], self.messages);
+        messages[self.messages.len] = try message(a, "user", try Input.renderRequest(a, current));
+        return messages;
     }
 
     /// Engine supplies the full model output and one result per tool call.
@@ -60,18 +71,19 @@ pub const Context = struct {
         self.replace(next);
     }
 
-    /// Prepare a bounded replacement candidate. The caller validates the full
-    /// provider request and, when a state key exists, persists the handover
-    /// before installing it. The handover is a user observation, keeping
-    /// recalled material separate from system instructions.
-    /// The handover replaces the entire earlier working view.
-    pub fn withHandover(self: *const Context, allocator: Allocator, rendered_handover: []const u8) !Context {
+    /// Replace the entire earlier working view with system instructions and a
+    /// handover record. The caller validates the complete request budget and
+    /// owns the handover's storage policy.
+    pub fn withHandover(self: *const Context, allocator: Allocator, session_id: u64, handover: Input.Handover) !Context {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
         const messages = try a.alloc(Value, 2);
         messages[0] = try cloneValue(a, self.messages[0]);
-        messages[1] = try message(a, "user", rendered_handover);
+        messages[1] = try message(a, "user", try Input.renderRecord(a, .{
+            .session_id = session_id,
+            .context = &.{.{ .handover = handover }},
+        }));
         return .{
             .allocator = allocator,
             .arena = arena,
@@ -101,7 +113,7 @@ pub const Context = struct {
 fn message(a: Allocator, role: []const u8, text: []const u8) !Value {
     var fields: std.json.ObjectMap = .empty;
     try fields.put(a, "role", .{ .string = role });
-    try fields.put(a, "content", .{ .string = try a.dupe(u8, text) });
+    try fields.put(a, "content", .{ .string = text });
     return .{ .object = fields };
 }
 

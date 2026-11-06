@@ -113,25 +113,26 @@ pub const Kernel = struct {
         defer arena.deinit();
         const a = arena.allocator();
         if (try self.state.loadHandover(a, "core", self.limits.handover_bytes)) |record| {
-            try self.sessions.appendCoreInput(try Input.serialize(a, 1, .{ .background = .{ .items = &.{.{ .handover = record }} } }));
+            try self.sessions.appendCoreContext(&.{.{ .handover = record }});
         }
-        var background: std.ArrayList(Input.Background) = .empty;
+        var context: std.ArrayList(Input.ContextItem) = .empty;
         var base = try self.sessions.snapshotCore();
         defer base.deinit();
         var provider = self.engine.provider;
         provider.tool_scope = .coordination;
+        const snapshot = try self.sessions.runtimeSnapshot(self.sessions.core);
+        const request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
         const reserve = @min(4096, self.limits.request_bytes / 4);
-        var selected: ?[]const u8 = null;
+        var selected: usize = 0;
         for (try self.email.recent(a, 32)) |material| {
-            try background.append(a, .{ .evidence = material });
-            const rendered = try Input.serialize(a, 1, .{ .background = .{ .items = background.items } });
+            try context.append(a, .{ .evidence = material });
             var candidate = try base.fork(self.allocator);
             defer candidate.deinit();
-            try candidate.appendInput(rendered);
-            if (try provider.requestBytes(a, candidate.history()) > self.limits.request_bytes - reserve) break;
-            selected = rendered;
+            try candidate.appendRecord(.{ .session_id = snapshot.session_id, .context = context.items });
+            if (try provider.requestBytes(a, try candidate.request(a, request)) > self.limits.request_bytes - reserve) break;
+            selected = context.items.len;
         }
-        if (selected) |rendered| try self.sessions.appendCoreInput(rendered);
+        if (selected != 0) try self.sessions.appendCoreContext(context.items[0..selected]);
     }
 
     fn dispatch(self: *Kernel, tasks: *Tasks) !void {
@@ -189,18 +190,7 @@ pub const Kernel = struct {
 
     fn respond(self: *Kernel, work: Work) !void {
         const session = work.session;
-        if (!work.delivery.supplied) {
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            const observation: Input.Observation = switch (work.delivery.input) {
-                .input => |input| .{ .input = input },
-                .assignment => |assignment| .{ .assignment = assignment },
-                .report => |report| .{ .report = report },
-            };
-            try self.sessions.appendInput(session, try Input.serialize(a, session.session_id, observation));
-            work.delivery.supplied = true;
-        }
+        try self.beginActivation(work);
         while (true) {
             try self.io.checkCancel();
             var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -210,7 +200,7 @@ pub const Kernel = struct {
             defer view.deinit();
             var runtime: RuntimeRound = .{ .kernel = self, .work = work };
             defer runtime.deinit();
-            const round = try self.engine.turn(a, session.session_id, view.history(), .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role == .core);
+            const round = try self.engine.turn(a, session.session_id, view.input, .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role == .core);
             const committed = try self.sessions.commitRound(work, round.output, round.replies, runtime.plan);
             runtime.committed = true;
             if (committed != .continuing) return;
@@ -223,31 +213,105 @@ pub const Kernel = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        if (work.delivery.receipt) |receipt|
-            try self.state.complete(a, receipt);
+        for (work.activation.deliveries.items) |delivery|
+            for (delivery.receipts) |receipt|
+                try self.state.complete(a, receipt);
         return self.sessions.finish(work, text);
     }
 
-    fn requestContext(self: *Kernel, a: Allocator, session: *Session) !Context {
+    const Selection = struct { count: usize, context: Context };
+
+    /// Choose from the queue snapshot owned by this activation. Later arrivals
+    /// stay queued; excluded deliveries return ahead of them when selected
+    /// history is installed.
+    fn selectActivation(self: *Kernel, a: Allocator, work: Work, history: *const Context, request: Input.Request) !?Selection {
+        var provider = self.engine.provider;
+        provider.tool_scope = if (work.session.role == .core) .coordination else .all;
+        var selected = try history.fork(self.allocator);
+        errdefer selected.deinit();
+        var count: usize = 0;
+        const deliveries = work.activation.deliveries.items;
+        const events = try a.alloc(Input.Event, deliveries.len);
+        for (deliveries, events) |delivery, *event| event.* = delivery.event;
+        for (1..events.len + 1) |end| {
+            var candidate = try history.fork(self.allocator);
+            errdefer candidate.deinit();
+            try candidate.appendRecord(.{ .session_id = work.session.session_id, .events = events[0..end] });
+            var current = request;
+            current.state.runtime.queued_inputs += events.len - end;
+            const input = try candidate.request(a, current);
+            if (try provider.requestBytes(a, input) > self.limits.request_bytes) {
+                candidate.deinit();
+                break;
+            }
+            selected.deinit();
+            selected = candidate;
+            count = end;
+        }
+        if (count == 0) {
+            selected.deinit();
+            return null;
+        }
+        return .{ .count = count, .context = selected };
+    }
+
+    fn beginActivation(self: *Kernel, work: Work) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var history = try self.sessions.snapshot(work.session);
+        defer history.deinit();
+        const snapshot = try self.sessions.runtimeSnapshot(work.session);
+        var request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
+        var selection = try self.selectActivation(a, work, &history, request);
+        var handover: ?[]const u8 = null;
+        if (selection == null and history.history().len > 1) {
+            handover = try Compaction.summarize(self.engine.provider, a, &history, request, self.limits.compaction_bytes, self.limits.handover_bytes);
+            var compacted = try history.withHandover(self.allocator, work.session.session_id, .{ .summary = handover.? });
+            defer compacted.deinit();
+            request.state = (try self.sessions.runtimeSnapshot(work.session)).state;
+            selection = try self.selectActivation(a, work, &compacted, request);
+        }
+        var selected = selection orelse return error.ContextBudgetExhausted;
+        errdefer selected.context.deinit();
+        if (handover) |summary| if (work.session.role == .core)
+            try self.state.saveHandover(a, "core", summary);
+        try self.sessions.beginActivation(work, selected.count, selected.context);
+    }
+
+    /// Owns the history snapshot borrowed by the request-arena input view.
+    const RequestView = struct {
+        context: Context,
+        input: []const std.json.Value,
+
+        fn deinit(self: *RequestView) void {
+            self.context.deinit();
+            self.* = undefined;
+        }
+    };
+
+    fn requestContext(self: *Kernel, a: Allocator, session: *Session) !RequestView {
         var provider = self.engine.provider;
         provider.tool_scope = if (session.role == .core) .coordination else .all;
         var view = try self.sessions.snapshot(session);
         errdefer view.deinit();
-        const current = try Input.serializeSnapshot(a, try self.sessions.runtimeSnapshot(session));
-        try view.appendInput(current);
-        if (try provider.requestBytes(a, view.history()) <= self.limits.request_bytes) return view;
-        const summary = try Compaction.summarize(provider, a, view.history(), try self.sessions.runtimeSnapshot(session), self.limits.compaction_bytes, self.limits.handover_bytes);
-        const rendered = try Input.serialize(a, session.session_id, .{ .handover = .{ .summary = summary } });
-        var candidate = try view.withHandover(self.allocator, rendered);
+        const snapshot = try self.sessions.runtimeSnapshot(session);
+        const request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
+        const input = try view.request(a, request);
+        if (try provider.requestBytes(a, input) <= self.limits.request_bytes) return .{ .context = view, .input = input };
+        const summary = try Compaction.summarize(provider, a, &view, request, self.limits.compaction_bytes, self.limits.handover_bytes);
+        var candidate = try view.withHandover(self.allocator, session.session_id, .{ .summary = summary });
         errdefer candidate.deinit();
-        var request = try candidate.fork(self.allocator);
-        errdefer request.deinit();
-        try request.appendInput(current);
-        if (try provider.requestBytes(a, request.history()) > self.limits.request_bytes) return error.ContextBudgetExhausted;
+        var replacement = try candidate.fork(self.allocator);
+        errdefer replacement.deinit();
+        var replacement_request = request;
+        replacement_request.state = (try self.sessions.runtimeSnapshot(session)).state;
+        const replacement_input = try replacement.request(a, replacement_request);
+        if (try provider.requestBytes(a, replacement_input) > self.limits.request_bytes) return error.ContextBudgetExhausted;
         if (session.role == .core) try self.state.saveHandover(a, "core", summary);
         try self.sessions.replaceContext(session, candidate);
         view.deinit();
-        return request;
+        return .{ .context = replacement, .input = replacement_input };
     }
 };
 

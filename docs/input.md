@@ -1,44 +1,71 @@
 # Model input and response scope
 
-Ivenna supplies content, contacts, assignments, reports, and runtime state as typed observations. [Input](../packages/agent/src/input.zig) defines and renders them as YAML user messages; the [system prompt](../packages/agent/src/system.md) explains their structure and meaning to the model. Task text and source material remain free-form strings within those types.
+Ivenna's YAML user messages contain retained records or a current request. Records preserve events, startup material, and handovers in working history. The request adds current state and, for summarization, instructions. [Input](../packages/agent/src/input.zig) defines both forms; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
-## Frame envelope
+## Retained records
 
-A `Frame` has two fields:
+A `Record` combines an event group with a list of context items:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `session_id` | `u64` | Session receiving the observation |
-| `observation` | `Observation` | Exactly one named observation branch |
+| `session_id` | `u64` | Session receiving the record |
+| `events` | `Event[]` | Events admitted together, in queue order; defaults to an empty array |
+| `context` | `ContextItem[]` | Supporting material retained with the record; defaults to an empty array |
 
-`Observation`, `Content`, `Background`, and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` below denotes a free-form string.
+The events and context fields can coexist. Each activation records its selected group once in `events`; startup recollection and compaction create context-only records with `events: []`. Startup recollection records the latest core handover and evidence from recent correspondence. Compaction replaces earlier history with a handover.
 
-Session identifiers are scoped to one kernel process. A fork inherits earlier frames with their original session identifiers. The latest runtime observation identifies the current session and state.
+Session identifiers are scoped to one kernel process. Forked history keeps the original records and their session identifiers. The current request identifies the session performing the inference.
 
-## Observation branches
+Each activation's record preserves its admitted event group and the order of those events in history. Each event keeps its own material, contacts, and provenance. See [activation admission](architecture.md#activation-admission) for how the runtime selects a group and handles later arrivals.
+
+## Events and context items
+
+`Event` contains one of these branches:
 
 | Branch | Payload | Meaning |
 | --- | --- | --- |
-| `input` | `Input` | Independently received content, contacts, optional provenance, and supporting context |
+| `input` | `Material` | Independently received content, contacts, and optional provenance |
 | `assignment` | `Assignment` | Initial work for a fork |
 | `report` | `Report` | A child activation's final text |
-| `handover` | `Handover` | Working understanding for continuation |
-| `background` | `items: Background[]` | Evidence and handovers supplied as context |
-| `runtime` | `State` | Current execution state and response destination |
-| `context_compaction` | `instructions: Text`, `state: State` | Summary task with current state |
 
-Reports carry activation results; the broader task can remain open.
+`ContextItem` contains either `evidence: Material` or `handover: Handover`. Startup correspondence is supplied as evidence items; recalled and generated summaries are handover items. Each evidence item keeps its own contacts and provenance.
 
-## Content, source, and context
+A `Handover` contains `summary: Text` and `source: Resource | null`. The optional source identifies stored material behind the summary. Generated handovers use `source: null`.
 
-`Input` contains:
+`Event`, `ContextItem`, `Content`, and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` denotes a free-form string.
+
+For example, a fork's assignment forms a one-event group:
+
+```yaml
+session_id: 2
+events:
+  - assignment:
+      task: Update the French practice plan.
+      from_session: 1
+      source_refs: []
+context: []
+```
+
+Compaction can replace earlier history with a context-only handover record:
+
+```yaml
+session_id: 1
+events: []
+context:
+  - handover:
+      summary: Keep each practice session to 20 minutes.
+      source: null
+```
+
+## Material and provenance
+
+`Material` represents both incoming content and supporting evidence:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `content` | `Content` | Material for the receiving session |
 | `contacts` | `Contact[]` | Available recipients; defaults to an empty array |
 | `source` | `Source` or null | Optional provenance |
-| `context` | `Background[]` | Supporting material; defaults to an empty array |
 
 `Content` has two branches:
 
@@ -60,17 +87,13 @@ An optional `Source` contains:
 
 A `Resource` has `file: Text` and `byte_length: usize`. It identifies a file and its content length. Work sessions can inspect that file through host tools when they need material omitted from the observation.
 
-An `Evidence` record has `content: Content`, `contacts: Contact[]` (default empty), and `source: Source | null`. `Background` contains either `evidence: Evidence` or `handover: Handover`. Both `Input.context` and startup `background.items` use these types to supply context for current work.
-
-The [email boundary](architecture.md#email-boundary-and-source-materials) defines how correspondence becomes content and source resources.
-
 ## Contacts and outgoing messages
 
-[Communication](../packages/agent/src/communication.zig) defines a `Contact` with `reference: Text` and `description: Text | null` (default null). Its reference identifies a recipient for `send_message`; its description provides human-readable context. Contacts and source provenance are independent. Input can have either, both, or neither.
+[Communication](../packages/agent/src/communication.zig) defines a `Contact` with `reference: Text` and `description: Text | null` (default null). Its reference identifies a recipient for `send_message`; its description provides human-readable context. Contacts and source provenance are independent. Material can have either, both, or neither.
 
 Outgoing messages use [the communication tool](communication.md#sending-a-message). Sending is an explicit external action; an activation's final text is a core result or a report to its parent.
 
-## Assignments and handovers
+## Assignments and reports
 
 An `Assignment` contains:
 
@@ -80,13 +103,23 @@ An `Assignment` contains:
 | `from_session` | Direct parent that created the fork |
 | `source_refs` | References to relevant source material; defaults to an empty array |
 
-`fork_session` gives the child this assignment with a copy of the caller's working context. The child handles it in its own activation; the caller's activation ends when work is handed off. See [fork ownership](architecture.md#forks-and-work-ownership) for publication, queueing, and context lifetimes.
+An assignment describes the caller activation's whole work. Its source references collect relevant references from the group's inputs and assignments, and the child inherits the caller's retained history. See [fork ownership](architecture.md#forks-and-work-ownership) for publication, queueing, and context lifetimes.
 
-A `Report` contains `from_session: u64` and `text: Text`, which may be empty. Each branch activation's final text is queued for its direct parent. The parent handles it as a later activation in its own context; the arrival does not interrupt its current work. The identifiers in fork results and reports let the parent associate results with the child that produced them.
+A `Report` contains `from_session: u64` and `text: Text`, which may be empty. It carries a branch activation's combined result for its direct parent. The identifiers in fork results and reports let the parent associate results with the child that produced them.
 
-A `Handover` contains `summary: Text` and `source: Resource | null`. Generated summaries can have `source: null`; a recalled handover can reference its stored material. This type carries working understanding. Persistent lookup uses execution state keys, as described in [internal mail state](architecture.md#internal-mail-state).
+## Current requests
 
-## Current state and response destinations
+Every inference appends one temporary `Request` after retained history:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `session_id` | `u64` | Session performing this inference |
+| `state` | `State` | Current session, execution counts, and response destination |
+| `instructions` | `Text` or null | Summary instructions; null for ordinary execution |
+
+The request adds current state alongside retained history or its handover, without replaying the events. Request state and summary instructions are discarded after inference; they are not appended to history or inherited by forks.
+
+### State and response destinations
 
 `State` contains `session`, `runtime`, and `response`:
 
@@ -105,13 +138,36 @@ A `Handover` contains `summary: Text` and `source: Resource | null`. Generated s
 | Branch | Payload | Meaning |
 | --- | --- | --- |
 | `report` | `session_id: u64` | Return the branch result to its direct parent |
-| `internal` | Empty object | Complete core work |
+| `internal` | Empty object | Keep the core activation's result internal |
 | `summary` | Empty object | Produce a handover for the summary operation |
 
-These destinations govern activation results. Outgoing communication uses the independent `send_message` tool and its explicit recipients.
+These destinations identify how an ordinary activation's final text or a summary result is used. Outgoing communication uses the independent `send_message` tool and its explicit recipients.
 
-Each ordinary request ends with a fresh `runtime` observation in its request view. These snapshots do not accumulate in retained history. For compaction, `context_compaction.state` supplies current state with response `summary`. Instructions come from the dedicated [summary resource](../packages/agent/src/compaction.md), and the model request disables tools.
+For example, an ordinary core request can be:
 
-A response without tool calls ends the current activation. Available final text becomes its parent report, core result, or summary, according to the current `response`.
+```yaml
+session_id: 1
+state:
+  session:
+    role: core
+    parent_generation: null
+    parent_session_id: null
+    active_children: 1
+  runtime:
+    active_sessions: 2
+    running_sessions: 2
+    queued_inputs: 0
+  response:
+    internal: {}
+instructions: null
+```
 
-See [architecture](architecture.md) for session, delivery, and internal-state ownership, and [tool content](content.md) for text and media returned by tools.
+In ordinary execution, a response without tool calls completes the whole selected group. Its text becomes one combined parent report or core result, according to the current `response`; a branch report may be empty. Text accompanying tool calls is retained with the model output and does not itself complete the activation or create a report.
+
+### Compaction and budgets
+
+Compaction uses the same request form with response `summary` and instructions from the dedicated [summary resource](../packages/agent/src/compaction.md), with tools disabled. The resulting handover replaces history as a context-only record; the summary instructions and state remain temporary, and ordinary work continues in the replacement context. The [architecture guide](architecture.md#bounded-model-context) explains when compaction occurs and how its request is bounded.
+
+Records, current state, instructions, tools, and encoded content all contribute to the complete [request budget](architecture.md#bounded-model-context). Budget measurement uses the same assembled payload sent to the provider.
+
+For implementation details, [architecture](architecture.md) explains request assembly and ownership. Its [email boundary](architecture.md#email-boundary-and-source-materials) and [internal mail state](architecture.md#internal-mail-state) sections describe the current correspondence projection and handover storage. See [tool content](content.md) for text and media returned by tools.

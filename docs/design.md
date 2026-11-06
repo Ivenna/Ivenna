@@ -20,7 +20,7 @@ Tool descriptions explain how to choose and invoke an operation and interpret it
 
 Keep these interfaces concise and leave room for the model's knowledge and judgment. Detailed field references and implementation explanations belong in developer documentation unless they affect how the interface is used or interpreted.
 
-Model input distinguishes incoming content, assignments, reports, handovers, current state, and summary requests. The system prompt describes their meaning and response scope. Task text and source material remain free-form within those observations, with any contacts, provenance, context, and references to original source details. The [input contract](input.md) defines their structure.
+Keep task text and source material free-form, with contacts and provenance alongside the material they describe. Working history preserves understanding for continuation; current execution state and summary instructions apply to the inference that uses them. The system prompt explains their meaning and response scope; the [input contract](input.md) defines their structure.
 
 Tool results can combine text, media, and information about an operation's outcome and source. Classifying or interpreting one source preserves the other observations in the result. When a provider or budget cannot carry content, retain its source information and describe the omission.
 
@@ -34,7 +34,7 @@ Email is the current external channel. Its adapter owns addresses, headers, deli
 
 ## Internal work and state
 
-Work is defined by a task and the understanding needed to continue it. A session owns a working context and a queue. An activation is one session handling an input, assignment, or report through model and tool rounds. It ends with a final response or a fork that passes the work to a child. Arrivals enter the queue for later processing.
+Work is defined by a task and the understanding needed to continue it. A session owns a working context and a queue. An activation handles a bounded group of already queued inputs, assignments, or reports together through model and tool rounds. It ends with a final response or a fork that passes the group's work to a child. Events arriving during an activation remain queued for later processing.
 
 Execution state coordinates ongoing work in process memory. Mail storage records which correspondence has been processed and retains handovers for continuation. External correspondence and internal state have their own responsibilities and lifecycles within the shared mail service.
 
@@ -44,9 +44,9 @@ Activation completion, task completion, context release, and mail retention have
 
 One core session coordinates Ivenna throughout the kernel's lifetime. It handles a queue of observations and keeps its turns focused on reception and coordination. It can send a brief message directly; sustained work moves to separate sessions so the core can receive further input. Later external arrivals still enter the core.
 
-Forking is an explicit model decision available to core and work sessions alike. It passes the current work to another focus of Ivenna's attention with the complete working context, including any earlier handover. The caller's activation ends and it returns to its queue; the child starts an activation for its assignment.
+Forking is an explicit model decision available to core and work sessions alike. It passes the whole activation's work to another focus of Ivenna's attention with the complete retained working context, including any earlier handover. The caller's activation ends and it returns to its queue; the child starts an activation for its assignment.
 
-A work session's final text returns to the session that forked it. The report remains queued until that parent can process it in a later activation. Nested work returns through each creating parent, preserving the relationship between the work and its result.
+A work session's final text returns one combined result to the session that forked it. The report remains queued until that parent can process it, potentially alongside other queued events, in a later activation. Nested work returns through each creating parent, preserving the relationship between the work and its result.
 
 After a fork, the histories grow independently. The core retains its reception and coordination history; execution detail accumulates in the session carrying out the work. This keeps the core's context useful for further coordination and forks.
 
@@ -72,7 +72,7 @@ Automatic retry, reconnection, and execution resumption after runtime failure re
 
 The deployment user owns Ivenna's mailbox, artifacts, and autonomous memory, and chooses where they live. External correspondence and internal state records both use mail storage, with their ownership and retention kept distinct. Artifacts and autonomous memory remain files. Keep these forms open to inspection, retention, and management within the user's deployment.
 
-Diagnostic records support troubleshooting and analysis, with their own retention and export lifecycle. They are separate from the source material and handovers used for continuity.
+Diagnostics support troubleshooting and analysis. Keep them separate from the source material and handovers used for continuity.
 
 ## Reference designs
 

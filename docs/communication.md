@@ -1,19 +1,17 @@
 # Communication
 
-`send_message` submits text to recipients identified by contact references. Both core and work sessions can use it. Each activation can send zero, one, or several messages; final text completes core work or returns a branch result to its parent. For sending messages to Ivenna, see the [usage guide](usage.md).
+`send_message` submits text to recipients identified by contact references. Both core and work sessions can use it, sending zero, one, or several messages while handling their work. An activation's final text remains internal to the core or returns as a report to a work session's parent. For sending messages to Ivenna, see the [usage guide](usage.md).
 
 ## Contacts
 
-An [input or evidence record](input.md#content-source-and-context) can supply contacts independently of its source provenance. Each contact contains:
+Incoming material and supporting [evidence](input.md#material-and-provenance) can supply contacts independently of their source provenance. Each contact contains:
 
 | Field | Meaning |
 | --- | --- |
 | `reference` | Opaque recipient reference accepted by `send_message` |
 | `description` | Optional human-readable context about that recipient |
 
-A contact reference identifies a recipient independently of the input's source and the current session. References remain usable after the originating input and working context have been released; retain the ones needed for ongoing work in handovers or autonomous memory.
-
-Native addresses and delivery protocols belong to the communication adapter. The current [email adapter](architecture.md#email-boundary-and-source-materials) persists contact mappings in the deployment's data directory.
+A contact reference identifies a recipient independently of the material's source and the current session. References remain usable after the originating material and working context have been released; retain the ones needed for ongoing work in handovers or autonomous memory.
 
 ## Sending a message
 
@@ -24,7 +22,7 @@ The [`send_message` declaration](../packages/agent/src/tools.json) defines two r
 | `recipients` | Nonempty array of contact references |
 | `text` | Nonempty message text |
 
-For example, using a reference supplied by an observation:
+For example, using a reference supplied with incoming material or context:
 
 ```json
 {

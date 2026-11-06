@@ -20,7 +20,7 @@ Follow the component boundaries in the [architecture guide](architecture.md#resp
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
-[Input](../packages/agent/src/input.zig) defines the closed observation union and its payload types. Construct those variants directly and render their declared fields. Native input can have content alone or include contacts, provenance, and context. [Communication](../packages/agent/src/communication.zig) defines recipient references and outgoing messages; the adapter resolves those references to native destinations. [Work](../packages/agent/src/work.zig) owns delivery payloads and optional private consumption receipts. External input enters the core, fork assignments enter new children, and final reports enter their direct parents' queues.
+[Input](../packages/agent/src/input.zig) owns model-input types and YAML rendering. Construct typed payloads at their owning boundaries and use the renderer for model messages. [Work](../packages/agent/src/work.zig) owns delivery events and private consumption receipts. [Communication](../packages/agent/src/communication.zig) defines recipient references and outgoing messages; the adapter resolves references to native destinations. The [input contract](input.md) documents serialized fields.
 
 ### Model-facing resources
 
@@ -28,17 +28,21 @@ Treat prompts and tool descriptions as editable interfaces:
 
 | Resource | Purpose |
 | --- | --- |
-| [system.md](../packages/agent/src/system.md) | Ongoing instructions, observation meanings, and response scope |
-| [tools.json](../packages/agent/src/tools.json) | Operation parameters, behavior, and results |
-| [compaction.md](../packages/agent/src/compaction.md) | Handover summary instructions |
+| [system.md](../packages/agent/src/system.md) | Input interpretation and response scope needed by the model |
+| [tools.json](../packages/agent/src/tools.json) | Available actions, invocation parameters, and observable behavior and results |
+| [compaction.md](../packages/agent/src/compaction.md) | What a handover must preserve |
 
 Put task facts and observations in user input. Keep model-facing descriptions concise; detailed field references belong in the [input contract](input.md). Update the owning resource, renderer, and documentation together when a contract changes.
 
-Keep outgoing messages, internal reports, handovers, and diagnostics distinct. Outgoing communication occurs through `send_message`; final model text completes the activation and supplies an internal result in the core or a report to a work session's parent. Preserve text, media, and source descriptions together when handling [tool content](content.md).
+Include runtime rules in these resources when they affect a model decision or the meaning of input, actions, or results. Explain how scheduling and storage are implemented, and how to operate the system, in the architecture and running guides.
+
+Keep outgoing messages, internal reports, handovers, and diagnostics distinct. Outgoing communication occurs through `send_message`. For ordinary work, final model text completes the activation and supplies a core result or parent report; summary text supplies a handover for continued execution. Preserve text, media, and source descriptions together when handling [tool content](content.md).
 
 ### Execution and storage
 
-Sessions synchronizes contexts, queues, and work ownership. The kernel coordinates adapter operations and owns worker task scopes. Infrastructure and execution failures propagate to the application's task scope, which closes reception, cancels, and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
+Sessions synchronizes contexts, queues, and activation ownership. The kernel coordinates adapter operations and worker task scopes. Context retains records and complete model/tool exchanges, assembling temporary requests without changing that history. Keep current state and summary instructions in the request.
+
+Infrastructure and execution failures propagate to the application's task scope, which closes reception, cancels, and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
 
 The application serves health and reception status. The mail server's receiving boundary uses that status before accepting external SMTP traffic. Keep this gate separate from model reasoning and in-process work queues; its readiness check does not reserve an activation or establish an atomic delivery transaction.
 
@@ -87,12 +91,12 @@ Build the application and exercise the affected behavior through communication a
 
 | Area changed | Checks |
 | --- | --- |
-| Execution | Tool-result continuation, single-fork handoff, queued direct-parent reports, independent arrivals, report-slot capacity, and context release |
+| Execution | Joint processing of queued events, budget-limited FIFO admission, tool-result continuation, whole-group handoff and receipt consumption, direct-parent reports, and context release |
 | Failure handling | Required-capability failures stop the runtime and join concurrent work; ordinary tool outcomes allow continuation |
 | Communication | Explicit zero, one, or multiple sends; recipient reference lifetime; final text without implicit sending |
 | Email | Standalone submissions, material projection, and independent intake regardless of thread, read, starred, or archived state |
 | Service | Health and reception status during startup, operation, and shutdown; SMTP rejection when reception is closed |
 | Internal state | Private consumption and outbound markers, core handovers, receipt cleanup, and affected retention behavior |
-| Model-facing interfaces | Complete serialized requests, YAML observations, response variants, tool selection, and budget accounting |
+| Model-facing interfaces | Record and request serialization, response variants, tool selection, and complete-payload budget accounting |
 
 Report the checks performed. Distinguish reconstruction of understanding from execution recovery.

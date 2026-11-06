@@ -25,17 +25,10 @@ pub const Source = struct {
     details: ?Resource = null,
 };
 
-pub const Evidence = struct {
+pub const Material = struct {
     content: Content,
     contacts: []const Communication.Contact = &.{},
     source: ?Source = null,
-};
-
-pub const Input = struct {
-    content: Content,
-    contacts: []const Communication.Contact = &.{},
-    source: ?Source = null,
-    context: []const Background = &.{},
 };
 
 pub const Handover = struct {
@@ -54,8 +47,8 @@ pub const Report = struct {
     text: []const u8,
 };
 
-pub const Background = union(enum) {
-    evidence: Evidence,
+pub const ContextItem = union(enum) {
+    evidence: Material,
     handover: Handover,
 };
 
@@ -80,45 +73,46 @@ pub const State = struct {
     response: Response = .{ .internal = .{} },
 };
 
-/// Current state for one model request.
+/// Current session state supplied by the registry.
 pub const Snapshot = struct {
     session_id: u64,
     state: State,
 };
 
-pub const Observation = union(enum) {
-    input: Input,
+pub const Event = union(enum) {
+    input: Material,
     assignment: Assignment,
     report: Report,
-    handover: Handover,
-    background: struct {
-        items: []const Background,
-    },
-    runtime: State,
-    context_compaction: struct {
-        instructions: []const u8,
-        state: State,
-    },
 };
 
-pub const Frame = struct {
+/// A retained event group and any supporting material in a session's history.
+pub const Record = struct {
     session_id: u64,
-    observation: Observation,
+    events: []const Event = &.{},
+    context: []const ContextItem = &.{},
 };
 
-/// The typed observation determines the complete YAML shape. Source text is
-/// serialized as a value; callers cannot merge arbitrary envelope fields.
-/// Returned bytes belong to arena.
-pub fn serialize(arena: Allocator, session_id: u64, observation: Observation) ![]const u8 {
-    const frame: Frame = .{ .session_id = session_id, .observation = observation };
-    const bytes = try std.json.Stringify.valueAlloc(arena, frame, .{});
+/// Current state and optional instructions for one model request.
+pub const Request = struct {
+    session_id: u64,
+    state: State,
+    instructions: ?[]const u8 = null,
+};
+
+/// Render declared fields as YAML values. Returned bytes belong to arena.
+pub fn renderRecord(arena: Allocator, record: Record) ![]const u8 {
+    return render(arena, record);
+}
+
+pub fn renderRequest(arena: Allocator, request: Request) ![]const u8 {
+    return render(arena, request);
+}
+
+fn render(arena: Allocator, value: anytype) ![]const u8 {
+    const bytes = try std.json.Stringify.valueAlloc(arena, value, .{});
     const document = try yaml.parse(arena, bytes, .{});
     var output = std.Io.Writer.Allocating.init(arena);
     defer output.deinit();
     try yaml.emit(&output.writer, document, .{});
     return output.toOwnedSlice();
-}
-
-pub fn serializeSnapshot(arena: Allocator, snapshot: Snapshot) ![]const u8 {
-    return serialize(arena, snapshot.session_id, .{ .runtime = snapshot.state });
 }

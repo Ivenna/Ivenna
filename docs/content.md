@@ -1,6 +1,6 @@
 # Tool content
 
-Memory reads and host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#content-source-and-context) separately defines native input text and excerpts. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
+Memory reads and host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#material-and-provenance) separately defines native input text and excerpts. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
 
 ## Automatic classification
 

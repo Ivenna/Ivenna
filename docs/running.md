@@ -157,7 +157,7 @@ The settings below configure the kernel. Stop it, edit `.env`, reload the variab
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
 | `MAX_PARALLEL_ATTENTION` | Maximum concurrently executing work sessions; core has a separate lane | `4` |
-| `MAX_ATTENTION_CONTEXTS` | Maximum retained contexts, including the core; also sets each session's input budget | `32` |
+| `MAX_ATTENTION_CONTEXTS` | Maximum retained contexts, including the core; also sets each session's capacity | `32` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
 | `HANDOVER_MAX_BYTES` | Maximum retained handover text | `8192` |
@@ -167,7 +167,7 @@ The settings below configure the kernel. Stop it, edit `.env`, reload the variab
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it. Numeric kernel settings must be positive. `CONTEXT_COMPACTION_BYTES` must be at least `CONTEXT_REQUEST_BYTES`. The work execution limit and retained-context limit are independent.
 
-Idle parents retained by ongoing forks count toward the context limit without occupying work execution slots. A session's input budget counts its active input, queued inputs, and results still expected from forks. A limit of one leaves room only for the core, so no fork can be admitted. Mail that cannot be admitted remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
+Idle parents retained by ongoing forks count toward the context limit without occupying work execution slots. The same limit applies to each session's active and queued events plus results expected from forks. Grouping several events in one activation does not reduce how many count toward this limit. A value of one leaves room only for the core, so no fork can be admitted. When capacity is full, pending mail remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
 
 Request byte limits cover the whole serialized body, including instructions, tool definitions, history, and encoded images. They do not estimate model tokens. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
 
@@ -215,7 +215,7 @@ Contact mappings let retained recipient references remain usable after a working
 
 Source files let a work session retrieve the complete material behind an excerpt and inspect mail details when needed. Correspondence text includes the subject and body supplied as input; JSON snapshots contain decoded fields rather than original MIME or live mailbox state. These files remain after the work finishes. See [source materials](architecture.md#email-boundary-and-source-materials) for their naming and publication contract.
 
-Core handovers are self-addressed state records saved locally in Archive when its context is compacted. Work sessions compact in memory. Saving a handover or releasing working context leaves source letters in their existing folders. Manage mailbox capacity through retention and deletion. Automatic mail retention and coordinated artifact cleanup are not implemented; see [mail retention](architecture.md#mail-retention).
+Core handovers are self-addressed state records stored in the mailbox's Archive folder when the core context is compacted. Work sessions compact in memory. Saving a handover or releasing working context leaves source letters in their existing folders. Manage mailbox capacity through retention and deletion. Automatic mail retention and coordinated artifact cleanup are not implemented; see [mail retention](architecture.md#mail-retention).
 
 ## Using an existing mail service
 

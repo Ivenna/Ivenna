@@ -16,18 +16,12 @@ pub const EmailTransport = struct {
         return .{ .io = io, .mailbox = mailbox, .sources = sources };
     }
 
-    pub fn receive(self: *EmailTransport, a: Allocator, receipt: []const u8, limit: usize) !Input.Input {
-        const letter = try self.sources.lookup(a, receipt);
-        const material = try self.project(a, letter, limit);
-        return .{
-            .content = material.content,
-            .source = material.source,
-            .contacts = material.contacts,
-        };
+    pub fn receive(self: *EmailTransport, a: Allocator, receipt: []const u8, limit: usize) !Input.Material {
+        return self.project(a, try self.sources.lookup(a, receipt), limit);
     }
 
-    pub fn recent(self: *EmailTransport, a: Allocator, limit: usize) ![]const Input.Evidence {
-        var result: std.ArrayList(Input.Evidence) = .empty;
+    pub fn recent(self: *EmailTransport, a: Allocator, limit: usize) ![]const Input.Material {
+        var result: std.ArrayList(Input.Material) = .empty;
         for (try self.mailbox.recent(a, limit)) |letter|
             try result.append(a, try self.project(a, letter, 512));
         return result.toOwnedSlice(a);
@@ -53,7 +47,7 @@ pub const EmailTransport = struct {
         return .{ .reference = try reference(a, "submission", &.{ self.mailbox.session_url, self.mailbox.account_id, submission.mail_id }) };
     }
 
-    fn project(self: *EmailTransport, a: Allocator, letter: Mail.Letter, limit: usize) !Input.Evidence {
+    fn project(self: *EmailTransport, a: Allocator, letter: Mail.Letter, limit: usize) !Input.Material {
         const text = if (letter.subject.len == 0)
             letter.body
         else
