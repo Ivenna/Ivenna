@@ -122,6 +122,8 @@ pub const Kernel = struct {
         provider.tool_scope = .coordination;
         const snapshot = try self.sessions.runtimeSnapshot(self.sessions.core);
         const request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
+        if (try provider.requestBytes(a, try base.request(a, request)) > self.limits.request_bytes)
+            return error.ContextBudgetExhausted;
         const reserve = @min(4096, self.limits.request_bytes / 4);
         var selected: usize = 0;
         for (try self.email.recent(a, 32)) |material| {
