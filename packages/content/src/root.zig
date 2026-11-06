@@ -1,9 +1,5 @@
 const std = @import("std");
-
-pub const image_size_limit = 32 * 1024 * 1024;
-
-/// Explicit interpretation of a complete text source as a resource reference.
-pub const Interpretation = enum { image_url };
+const zignal = @import("zignal");
 
 /// One tool's model-facing result. Parts and their payloads belong to
 /// the current turn; classification of one source does not remove sibling parts.
@@ -43,6 +39,11 @@ pub const ImageContent = union(enum) {
 
 pub const Image = @import("image.zig").Image;
 
+pub const image_size_limit = 32 * 1024 * 1024;
+
+/// Explicit interpretation of a complete text source as a resource reference.
+pub const Interpretation = enum { image_url };
+
 pub const Unavailable = struct {
     byte_length: u64,
     reason: enum { unsupported_binary, image_too_large },
@@ -54,12 +55,23 @@ pub const Classified = union(enum) {
     unavailable: Unavailable,
 };
 
+/// Recognize encoded image signatures without decoding pixels.
+pub fn detectFormat(bytes: []const u8) ?Image.Format {
+    return switch (zignal.image.Format.detectFromBytes(bytes) orelse return null) {
+        .jpeg => .jpeg,
+        .png => .png,
+        .gif => .gif,
+        .webp => .webp,
+        .bmp, .jxl => null,
+    };
+}
+
 /// Classify bytes by image signature or UTF-8 text. A textual address stays text.
 pub fn classify(bytes: []const u8) Classified {
-    if (Image.fromBytes(bytes)) |image| {
+    if (detectFormat(bytes)) |format| {
         if (bytes.len > image_size_limit)
             return .{ .unavailable = .{ .byte_length = bytes.len, .reason = .image_too_large } };
-        return .{ .image = .{ .data = image } };
+        return .{ .image = .{ .data = .{ .format = format, .bytes = bytes } } };
     }
     if (!isText(bytes))
         return .{ .unavailable = .{ .byte_length = bytes.len, .reason = .unsupported_binary } };

@@ -1,0 +1,294 @@
+[
+  {
+    "name": "inspect_memory_space",
+    "description": "Return current usage and shared capacity across memory rooms.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "browse_memory",
+    "description": "Inspect entry metadata or list a room's immediate entries. Memory is persistent and shared across sessions.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "Literal address of a memory entry or room, relative to the shared entrance. Omit to use the entrance, '.'."
+        },
+        "entry_only": {
+          "type": "boolean",
+          "description": "Return only the addressed entry or room's metadata; defaults to false."
+        },
+        "recursive_size": {
+          "type": "boolean",
+          "description": "Measure sizes of returned rooms, including descendants. Defaults to false, leaving room size_bytes null."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "find_memory",
+    "description": "Find memory entries and rooms by name within a room and its descendants.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The name or name pattern to find. Literal mode matches part of a name."
+        },
+        "room": {
+          "type": "string",
+          "description": "The room location, relative to the shared entrance. Omit to use the entrance, \".\"."
+        },
+        "match_mode": {
+          "type": "string",
+          "description": "Interpret query as literal text (default), a glob, or a regular expression.",
+          "enum": [
+            "literal",
+            "glob",
+            "regex"
+          ]
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "Match upper and lower case exactly. Omit to ignore case."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "recall_memory",
+    "description": "Search text in memory entries for matching lines within a room and its descendants.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "clue": {
+          "type": "string",
+          "description": "The text or pattern to find in memory entries."
+        },
+        "room": {
+          "type": "string",
+          "description": "The room location, relative to the shared entrance. Omit to use the entrance, \".\"."
+        },
+        "match_mode": {
+          "type": "string",
+          "description": "Interpret clue as literal text (default) or a regular expression.",
+          "enum": [
+            "literal",
+            "regex"
+          ]
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "Match upper and lower case exactly. Omit to ignore case."
+        }
+      },
+      "required": [
+        "clue"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "read_memory",
+    "description": "Read an entry's full text or image with its address. Image metadata accompanies native image content; unavailable content is reported with a diagnostic.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The memory entry location, relative to the shared entrance."
+        },
+        "interpretation": {
+          "type": "string",
+          "enum": [
+            "image_url"
+          ],
+          "description": "Present the entry's complete nonempty text as an image URL. Omit for automatic byte detection."
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "remember",
+    "description": "Write text or copy a host file into a memory entry.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The location for the memory entry, relative to the shared entrance."
+        },
+        "content": {
+          "type": "object",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "description": "Text to store."
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "file": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Source file on Ivenna's host, absolute or relative to its startup directory."
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Source of the content to store."
+        },
+        "mode": {
+          "type": "string",
+          "description": "create (default) requires a new entry; append adds bytes without a separator and creates a missing entry. Both require existing parent rooms. replace overwrites or creates the entry and missing parent rooms.",
+          "enum": [
+            "create",
+            "append",
+            "replace"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "content"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "revise_memory",
+    "description": "Replace matching text in a memory entry and report whether a match was found and whether the content changed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The memory entry location, relative to the shared entrance."
+        },
+        "old_text": {
+          "type": "string",
+          "description": "The text to match, or a regular expression when match_mode is regex."
+        },
+        "new_text": {
+          "type": "string",
+          "description": "The replacement text. Regex mode expands captures such as ${1} and ${name}; literal mode keeps this text as supplied."
+        },
+        "replace_all": {
+          "type": "boolean",
+          "description": "Replace every match. Omit to replace only the first."
+        },
+        "match_mode": {
+          "type": "string",
+          "description": "Interpret old_text as literal text (default) or a regular expression. Literal matching is case-sensitive; a regex can set inline flags.",
+          "enum": [
+            "literal",
+            "regex"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "old_text",
+        "new_text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "create_memory_room",
+    "description": "Create a memory room and any missing parent rooms. An existing room is reused.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The new room location, relative to the shared entrance."
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "move_memory",
+    "description": "Move or rename a memory entry or a room and its contents. An occupied target is reported as an error. References in memory content are not rewritten automatically.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The location of a memory entry or room, relative to the shared entrance."
+        },
+        "destination": {
+          "type": "string",
+          "description": "The new location, or an existing room to move into. Both are relative to the shared entrance."
+        }
+      },
+      "required": [
+        "address",
+        "destination"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "forget_memory",
+    "description": "Remove a memory entry or an empty room.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The location of a memory entry or room, relative to the shared entrance."
+        },
+        "recursive": {
+          "type": "boolean",
+          "description": "Remove all entries and child rooms at this location. Omit to remove only an entry or an empty room."
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

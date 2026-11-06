@@ -1,7 +1,8 @@
 const std = @import("std");
 const Input = @import("input.zig");
+const Model = @import("model.zig");
+const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
-const Value = std.json.Value;
 
 /// Owned model history for a core or branch session. Inputs and complete
 /// model/tool batches outlive request arenas. Registry synchronizes access;
@@ -9,14 +10,14 @@ const Value = std.json.Value;
 pub const Context = struct {
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
-    messages: []Value,
+    messages: []Model.Item,
 
     pub fn init(allocator: Allocator, system_text: []const u8) !Context {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
-        const messages = try a.alloc(Value, 1);
-        messages[0] = try message(a, "system", try a.dupe(u8, system_text));
+        const messages = try a.alloc(Model.Item, 1);
+        messages[0] = .{ .message = .{ .role = .system, .text = try a.dupe(u8, system_text) } };
         return .{
             .allocator = allocator,
             .arena = arena,
@@ -31,7 +32,7 @@ pub const Context = struct {
 
     /// Borrowed until the next mutation or deinit. Fork when the view must
     /// outlive synchronized access to this context.
-    pub fn history(self: *const Context) []const Value {
+    pub fn history(self: *const Context) []const Model.Item {
         return self.messages;
     }
 
@@ -45,29 +46,29 @@ pub const Context = struct {
         var next = try self.copy(self.allocator, 1);
         errdefer next.deinit();
         const a = next.arena.allocator();
-        next.messages[self.messages.len] = try message(a, "user", try Input.renderRecord(a, record));
+        next.messages[self.messages.len] = .{ .message = .{ .role = .user, .text = try Input.renderRecord(a, record) } };
         self.replace(next);
     }
 
     /// History is borrowed until mutation or deinit; the temporary user message
     /// and the returned slice belong to a. No request state enters history.
-    pub fn request(self: *const Context, a: Allocator, current: Input.Request) ![]const Value {
-        const messages = try a.alloc(Value, self.messages.len + 1);
+    pub fn request(self: *const Context, a: Allocator, current: Input.Request) ![]const Model.Item {
+        const messages = try a.alloc(Model.Item, self.messages.len + 1);
         @memcpy(messages[0..self.messages.len], self.messages);
-        messages[self.messages.len] = try message(a, "user", try Input.renderRequest(a, current));
+        messages[self.messages.len] = .{ .message = .{ .role = .user, .text = try Input.renderRequest(a, current) } };
         return messages;
     }
 
     /// Engine supplies the full model output and one result per tool call.
     /// Copy borrowed values before the request arena can be released.
-    pub fn appendBatch(self: *Context, output: []const Value, replies: []const Value) !void {
+    pub fn appendBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
         if (output.len == 0) return;
         var next = try self.copy(self.allocator, output.len + replies.len);
         errdefer next.deinit();
         const a = next.arena.allocator();
         const start = self.messages.len;
-        for (output, 0..) |item, i| next.messages[start + i] = try cloneValue(a, item);
-        for (replies, 0..) |item, i| next.messages[start + output.len + i] = try cloneValue(a, item);
+        for (output, 0..) |item, i| next.messages[start + i] = try cloneItem(a, item);
+        for (replies, 0..) |item, i| next.messages[start + output.len + i] = try cloneItem(a, item);
         self.replace(next);
     }
 
@@ -78,12 +79,12 @@ pub const Context = struct {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
-        const messages = try a.alloc(Value, 2);
-        messages[0] = try cloneValue(a, self.messages[0]);
-        messages[1] = try message(a, "user", try Input.renderRecord(a, .{
+        const messages = try a.alloc(Model.Item, 2);
+        messages[0] = try cloneItem(a, self.messages[0]);
+        messages[1] = .{ .message = .{ .role = .user, .text = try Input.renderRecord(a, .{
             .session_id = session_id,
             .context = &.{.{ .handover = handover }},
-        }));
+        }) } };
         return .{
             .allocator = allocator,
             .arena = arena,
@@ -95,8 +96,8 @@ pub const Context = struct {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
-        const messages = try a.alloc(Value, self.messages.len + extra_messages);
-        for (self.messages, 0..) |item, i| messages[i] = try cloneValue(a, item);
+        const messages = try a.alloc(Model.Item, self.messages.len + extra_messages);
+        for (self.messages, 0..) |item, i| messages[i] = try cloneItem(a, item);
         return .{
             .allocator = allocator,
             .arena = arena,
@@ -110,29 +111,20 @@ pub const Context = struct {
     }
 };
 
-fn message(a: Allocator, role: []const u8, text: []const u8) !Value {
-    var fields: std.json.ObjectMap = .empty;
-    try fields.put(a, "role", .{ .string = role });
-    try fields.put(a, "content", .{ .string = text });
-    return .{ .object = fields };
-}
-
-fn cloneValue(a: Allocator, value: Value) Allocator.Error!Value {
-    return switch (value) {
-        .string => |text| .{ .string = try a.dupe(u8, text) },
-        .number_string => |text| .{ .number_string = try a.dupe(u8, text) },
-        .array => |items| blk: {
-            var copied: std.array_list.Managed(Value) = .init(a);
-            try copied.ensureTotalCapacity(items.items.len);
-            for (items.items) |item| copied.appendAssumeCapacity(try cloneValue(a, item));
-            break :blk .{ .array = copied };
+fn cloneItem(a: Allocator, item: Model.Item) Allocator.Error!Model.Item {
+    return switch (item) {
+        .message => |message| .{ .message = .{ .role = message.role, .text = try a.dupe(u8, message.text) } },
+        .continuation => |bytes| .{ .continuation = try a.dupe(u8, bytes) },
+        .tool_result => |result| blk: {
+            const parts = try a.alloc(Content.Part, result.content.parts.len);
+            for (result.content.parts, parts) |part, *copy| copy.* = switch (part) {
+                .text => |text| .{ .text = try a.dupe(u8, text) },
+                .image => |image| .{ .image = switch (image) {
+                    .url => |url| .{ .url = try a.dupe(u8, url) },
+                    .data => |data| .{ .data = .{ .format = data.format, .bytes = try a.dupe(u8, data.bytes) } },
+                } },
+            };
+            break :blk .{ .tool_result = .{ .call_id = try a.dupe(u8, result.call_id), .content = .{ .parts = parts } } };
         },
-        .object => |fields| blk: {
-            var copied: std.json.ObjectMap = .empty;
-            for (fields.keys(), fields.values()) |key, item|
-                try copied.put(a, try a.dupe(u8, key), try cloneValue(a, item));
-            break :blk .{ .object = copied };
-        },
-        else => value,
     };
 }

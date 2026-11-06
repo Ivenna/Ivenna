@@ -2,7 +2,7 @@
 
 Work sessions execute commands through the kernel's OS account and share its filesystem. Commands from different sessions can run concurrently.
 
-The shell tools are defined in [tools.json](../packages/agent/src/tools.json):
+The shell tools are defined in [tools.json](../packages/host/src/tools.json):
 
 | Tool | Purpose |
 | --- | --- |
@@ -95,4 +95,4 @@ Stderr's `content` contains either a `text` preview or an `unavailable` diagnost
 
 Each invocation creates distinct log files under `<DATA_DIR>/host/<session_id>/`. They contain the full streams, including output omitted from the reply, and outlive the working session. Later shell calls can read or remove them. See [local data](running.md#local-data) for `DATA_DIR` configuration.
 
-A timeout returns the output captured so far. Timeout and cancellation leave completed effects in place. See [startup and interruption](architecture.md#startup-and-interruption) for continuation after a runtime failure or restart.
+A timeout returns the captured output. Runtime cancellation stops the invocation without returning an ordinary tool result. Effects already produced remain in place in either case. See [startup and interruption](architecture.md#startup-and-interruption) for continuation after a runtime failure or restart.

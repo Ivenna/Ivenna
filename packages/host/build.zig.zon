@@ -1,0 +1,11 @@
+.{
+    .name = .host,
+    .fingerprint = 0xcf2713fdfb6ebc2e,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .agent = .{ .path = "../agent" },
+        .content = .{ .path = "../content" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

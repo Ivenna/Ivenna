@@ -1,0 +1,48 @@
+[
+  {
+    "name": "get_host_shell",
+    "description": "Return the host shell executable, default working directory, and capability status.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "run_host_shell",
+    "description": "Run a command in a fresh noninteractive /bin/sh on the shared host, with no live stdin. Return its outcome, stdout/stderr descriptions, full log paths, and any stdout image. Remaining processes in its group are stopped when the invocation ends.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute.",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory, absolute or relative to Ivenna's startup directory (the default).",
+          "minLength": 1
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Command timeout in milliseconds. Omit for 600000 (10 minutes)."
+        },
+        "interpretation": {
+          "type": "string",
+          "enum": [
+            "image_url"
+          ],
+          "description": "Present complete nonempty stdout text as an image URL. Omit for automatic byte detection."
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

@@ -1,9 +1,12 @@
 const std = @import("std");
+const agent = @import("agent");
+const Model = agent.Model;
+const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
-const Content = @import("content.zig").Content;
 
-/// Every request uses the worker's Io, so canceling it also cancels its HTTP I/O.
+/// Responses wire encoding and HTTP transport. Tool selection and execution
+/// belong to the agent; every operation uses the caller's cancelable Io.
 pub const Provider = struct {
     pub const default_base_url = "https://api.deepseek.com";
     pub const default_model = "deepseek-flash";
@@ -13,44 +16,42 @@ pub const Provider = struct {
     api_key: []const u8 = "",
     model: []const u8 = default_model,
     max_output_tokens: u32 = 8192,
-    tool_scope: enum { all, coordination } = .all,
 
-    pub const FunctionCall = struct {
-        call_id: []const u8,
-        name: []const u8,
-        arguments: []const u8,
-    };
-
-    /// Output and call fields belong to the allocator supplied to next.
-    pub const Response = struct {
-        output: []const Value,
-        calls: []const FunctionCall,
-        text: ?[]const u8,
-    };
-
-    /// Encode content parts without changing their source descriptions.
-    /// limitToolReplies applies provider limits to the complete tool batch.
-    /// JSON storage and encoded local images use arena; call_id, text, and
-    /// remote URL strings borrow their inputs.
-    pub fn toolReply(arena: Allocator, call_id: []const u8, content: Content) !Value {
-        const parts = try arena.alloc(Value, content.parts.len);
-        for (content.parts, parts) |part, *encoded| encoded.* = try encodeContentPart(arena, part);
-        var reply: std.json.ObjectMap = .empty;
-        try reply.put(arena, "type", .{ .string = "function_call_output" });
-        try reply.put(arena, "call_id", .{ .string = call_id });
-        try reply.put(arena, "output", .{ .array = std.array_list.Managed(Value).fromOwnedSlice(arena, parts) });
-        return .{ .object = reply };
+    pub fn port(self: *Provider) Model.Port {
+        return .{ .context = self, .vtable = &.{
+            .next = next,
+            .requestBytes = requestBytes,
+            .limitToolReplies = limitToolReplies,
+        } };
     }
 
-    /// Limit new images in history[reply_start..], preserving all other parts
-    /// and earlier history. Keep images in order up to the count limit, then
-    /// remove from the end until the complete request fits the byte limit.
-    pub fn limitToolReplies(self: Provider, arena: Allocator, history: []Value, reply_start: usize) !void {
-        var count = imageCount(history[0..reply_start]);
+    fn next(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!Model.Response {
+        const self: *Provider = @ptrCast(@alignCast(context));
+        return self.send(arena, try self.requestPayload(arena, request));
+    }
+
+    /// Measure exactly the same payload that next serializes and sends.
+    fn requestBytes(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!u64 {
+        const self: *Provider = @ptrCast(@alignCast(context));
+        const payload = try self.requestPayload(arena, request);
+        var buffer: [4096]u8 = undefined;
+        var counter = std.Io.Writer.Discarding.init(&buffer);
+        try std.json.Stringify.value(payload, .{}, &counter.writer);
+        return counter.fullCount();
+    }
+
+    /// Preserve prior history and all non-image parts. Only the new reply
+    /// parts are copied and changed, keeping the caller's other observations.
+    fn limitToolReplies(context: *anyopaque, arena: Allocator, request: Model.Request, replies: []Model.Item) anyerror!void {
+        const earlier = request.history[0 .. request.history.len - replies.len];
+        var count = imageCount(earlier);
         var has_image = false;
-        for (history[reply_start..]) |reply| {
-            for (contentParts(reply)) |*part| {
-                if (imageUrl(part.*) == null) continue;
+        for (replies) |*reply| {
+            if (reply.* != .tool_result) continue;
+            const parts = try arena.dupe(Content.Part, reply.tool_result.content.parts);
+            reply.tool_result.content.parts = parts;
+            for (parts) |*part| {
+                if (part.* != .image) continue;
                 if (count >= 600) {
                     part.* = try contentLimitPart(arena, "Image omitted: the model request would contain more than 600 images.");
                 } else {
@@ -59,89 +60,58 @@ pub const Provider = struct {
                 }
             }
         }
-        if (!has_image or try self.requestBytes(arena, history) <= 48 * 1024 * 1024) return;
-        var index = history.len;
-        while (index > reply_start) {
+        if (!has_image or try requestBytes(context, arena, request) <= 48 * 1024 * 1024) return;
+        var index = replies.len;
+        while (index > 0) {
             index -= 1;
-            const parts = contentParts(history[index]);
+            if (replies[index] != .tool_result) continue;
+            // All tool result parts were copied above and belong to arena.
+            const parts = @constCast(replies[index].tool_result.content.parts);
             var part_index = parts.len;
             while (part_index > 0) {
                 part_index -= 1;
-                if (imageUrl(parts[part_index]) == null) continue;
+                if (parts[part_index] != .image) continue;
                 parts[part_index] = try contentLimitPart(arena, "Image omitted: the model request would exceed 48 MiB.");
-                if (try self.requestBytes(arena, history) <= 48 * 1024 * 1024) return;
+                if (try requestBytes(context, arena, request) <= 48 * 1024 * 1024) return;
             }
         }
     }
 
-    /// The complete serialized request, including tools and output settings.
-    /// Byte budgets bound request bodies; they are not model token estimates.
-    pub fn requestBytes(self: Provider, arena: Allocator, input: []const Value) !u64 {
-        return payloadBytes(try self.requestPayload(arena, input));
-    }
-
-    pub fn requestBytesWithoutTools(self: Provider, arena: Allocator, input: []const Value) !u64 {
-        return payloadBytes(self.withoutToolsPayload(arena, input));
-    }
-
-    fn payloadBytes(payload: Payload) !u64 {
-        var buffer: [4096]u8 = undefined;
-        var counter = std.Io.Writer.Discarding.init(&buffer);
-        try std.json.Stringify.value(payload, .{}, &counter.writer);
-        return counter.fullCount();
-    }
+    const WireTool = struct {
+        type: []const u8 = "function",
+        name: []const u8,
+        description: []const u8,
+        parameters: Value,
+    };
 
     const Payload = struct {
         model: []const u8,
         input: []const Value,
-        tools: Value,
-        tool_choice: []const u8 = "auto",
+        tools: []const WireTool,
+        tool_choice: []const u8,
         max_output_tokens: u32,
         stream: bool = false,
     };
 
-    fn requestPayload(self: Provider, arena: Allocator, input: []const Value) !Payload {
-        var declarations = try std.json.parseFromSliceLeaky(Value, arena, @embedFile("tools.json"), .{});
-        if (self.tool_scope == .coordination) {
-            var selected = std.array_list.Managed(Value).init(arena);
-            for (declarations.array.items) |tool| {
-                const name = tool.object.get("name") orelse continue;
-                if (name != .string) continue;
-                if (std.mem.eql(u8, name.string, "fork_session") or std.mem.eql(u8, name.string, "send_message")) {
-                    try selected.append(tool);
-                }
-            }
-            declarations = .{ .array = selected };
-        }
+    fn requestPayload(self: Provider, arena: Allocator, request: Model.Request) !Payload {
+        const input = try arena.alloc(Value, request.history.len);
+        for (request.history, input) |item, *encoded| encoded.* = try encodeItem(arena, item);
+        const tools = try arena.alloc(WireTool, request.tools.len);
+        for (request.tools, tools) |tool, *encoded| encoded.* = .{
+            .name = tool.name,
+            .description = tool.description,
+            .parameters = tool.parameters,
+        };
         return .{
             .model = self.model,
             .input = input,
-            .tools = declarations,
+            .tools = tools,
+            .tool_choice = if (tools.len == 0) "none" else "auto",
             .max_output_tokens = self.max_output_tokens,
         };
     }
 
-    pub fn next(self: Provider, arena: Allocator, input: []const Value) !Response {
-        return self.send(arena, try self.requestPayload(arena, input));
-    }
-
-    /// Request with no tool declarations and tool_choice set to none.
-    /// The caller supplies the task and validates its result.
-    pub fn nextWithoutTools(self: Provider, arena: Allocator, input: []const Value) !Response {
-        return self.send(arena, self.withoutToolsPayload(arena, input));
-    }
-
-    fn withoutToolsPayload(self: Provider, arena: Allocator, input: []const Value) Payload {
-        return .{
-            .model = self.model,
-            .input = input,
-            .tools = .{ .array = std.array_list.Managed(Value).init(arena) },
-            .tool_choice = "none",
-            .max_output_tokens = self.max_output_tokens,
-        };
-    }
-
-    fn send(self: Provider, arena: Allocator, request_payload: Payload) !Response {
+    fn send(self: Provider, arena: Allocator, request_payload: Payload) !Model.Response {
         try self.client.io.checkCancel();
 
         const payload = try std.json.Stringify.valueAlloc(arena, request_payload, .{});
@@ -180,10 +150,10 @@ pub const Provider = struct {
         return decodeResponse(arena, output.written());
     }
 
-    /// Decode and validate the complete response before any tool can run.
-    /// The raw output is retained for subsequent requests; execution consumes
-    /// only decoded calls and text.
-    fn decodeResponse(arena: Allocator, bytes: []const u8) !Response {
+    /// Validate the complete response before publishing any calls. Each output
+    /// item is retained as adapter-private continuation bytes, including fields
+    /// the execution core does not interpret.
+    fn decodeResponse(arena: Allocator, bytes: []const u8) !Model.Response {
         const decoded = std.json.parseFromSliceLeaky(struct {
             status: []const u8,
             output: []const Value,
@@ -192,7 +162,7 @@ pub const Provider = struct {
             else => return error.InvalidModelResponse,
         };
         if (!std.mem.eql(u8, decoded.status, "completed")) return error.ModelResponseNotCompleted;
-        var calls: std.ArrayList(FunctionCall) = .empty;
+        var calls: std.ArrayList(Model.Call) = .empty;
         defer calls.deinit(arena);
         var text = std.Io.Writer.Allocating.init(arena);
         defer text.deinit();
@@ -224,13 +194,37 @@ pub const Provider = struct {
                 .arguments = try textField(item, "arguments"),
             });
         }
+        const output = try arena.alloc(Model.Item, decoded.output.len);
+        for (decoded.output, output) |item, *retained|
+            retained.* = .{ .continuation = try std.json.Stringify.valueAlloc(arena, item, .{}) };
         return .{
-            .output = decoded.output,
+            .output = output,
             .calls = try calls.toOwnedSlice(arena),
             .text = if (text.written().len == 0) null else try text.toOwnedSlice(),
         };
     }
 };
+
+fn encodeItem(arena: Allocator, item: Model.Item) !Value {
+    switch (item) {
+        .continuation => |bytes| return std.json.parseFromSliceLeaky(Value, arena, bytes, .{}),
+        .message => |message| {
+            var fields: std.json.ObjectMap = .empty;
+            try fields.put(arena, "role", .{ .string = @tagName(message.role) });
+            try fields.put(arena, "content", .{ .string = message.text });
+            return .{ .object = fields };
+        },
+        .tool_result => |result| {
+            const parts = try arena.alloc(Value, result.content.parts.len);
+            for (result.content.parts, parts) |part, *encoded| encoded.* = try encodeContentPart(arena, part);
+            var fields: std.json.ObjectMap = .empty;
+            try fields.put(arena, "type", .{ .string = "function_call_output" });
+            try fields.put(arena, "call_id", .{ .string = result.call_id });
+            try fields.put(arena, "output", .{ .array = std.array_list.Managed(Value).fromOwnedSlice(arena, parts) });
+            return .{ .object = fields };
+        },
+    }
+}
 
 fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
     var encoded: std.json.ObjectMap = .empty;
@@ -259,36 +253,21 @@ fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
     return .{ .object = encoded };
 }
 
-fn contentLimitPart(arena: Allocator, message: []const u8) !Value {
-    const text = try std.json.Stringify.valueAlloc(arena, .{
+fn contentLimitPart(arena: Allocator, message: []const u8) !Content.Part {
+    return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
         .@"error" = .{ .code = "content_limit", .message = message },
-    }, .{});
-    return encodeContentPart(arena, .{ .text = text });
+    }, .{}) };
 }
 
-/// Count image parts without interpreting their URLs.
-fn imageCount(history: []const Value) usize {
+fn imageCount(history: []const Model.Item) usize {
     var count: usize = 0;
     for (history) |item| {
-        for (contentParts(item)) |part| {
-            if (imageUrl(part) != null) count += 1;
+        if (item != .tool_result) continue;
+        for (item.tool_result.content.parts) |part| {
+            if (part == .image) count += 1;
         }
     }
     return count;
-}
-
-fn contentParts(item: Value) []Value {
-    if (item != .object) return &.{};
-    const parts = item.object.get("content") orelse item.object.get("output") orelse return &.{};
-    return if (parts == .array) parts.array.items else &.{};
-}
-
-fn imageUrl(part: Value) ?[]const u8 {
-    if (part != .object) return null;
-    const kind = part.object.get("type") orelse return null;
-    if (kind != .string or !std.mem.eql(u8, kind.string, "input_image")) return null;
-    const url = part.object.get("image_url") orelse return null;
-    return if (url == .string) url.string else null;
 }
 
 fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {

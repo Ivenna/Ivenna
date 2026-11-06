@@ -1,8 +1,8 @@
 const std = @import("std");
 const Mail = @import("mail.zig");
 const MailSources = @import("mail_sources.zig").MailSources;
-const Input = @import("input.zig");
-const Communication = @import("communication.zig");
+const Input = @import("agent").Input;
+const Communication = @import("agent").Communication;
 const Allocator = std.mem.Allocator;
 
 /// Exchange messages with the outside world. MailState owns input consumption

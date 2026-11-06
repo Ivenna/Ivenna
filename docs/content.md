@@ -1,6 +1,6 @@
 # Tool content
 
-Memory reads and host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#material-and-provenance) separately defines native input text and excerpts. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
+Memory reads and host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#material-and-provenance) defines received material and excerpts. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
 
 ## Automatic classification
 
@@ -8,9 +8,11 @@ Memory reads and host commands can supply text and images together to the model.
 
 Each entry or stdout capture is treated as one source; classification does not split an arbitrary byte stream into multiple media parts. A URL remains text unless the caller explicitly asks to present it as an image reference. A filename or URL suffix does not select a media type.
 
+Memory reads return the full text of an entry. Shell text previews contain at most 16 KiB, retaining the beginning and end when truncated. For larger non-image shell output, text detection checks only the previewed bytes. Only stdout can supply an image; stderr returns a text preview or an `unavailable` diagnostic.
+
 ## Image URL references
 
-Set `interpretation: "image_url"` to present the complete nonempty text of a memory entry or stdout capture as one image URL reference. This declares how the text should be used; Ivenna passes it unchanged, without fetching or validating the address or referenced media. Recognized image bytes still return as image data, and empty output remains text. The configured model service handles the reference.
+Set `interpretation: "image_url"` to present the complete nonempty text of a memory entry or stdout capture as one image URL reference. For shell output, this uses the full stdout rather than a preview. Ivenna passes the text unchanged, without fetching or validating the address or referenced media. Recognized image bytes still return as image data, and empty output remains text. The configured model service handles the reference.
 
 For example, a shell command can return an image reference:
 
@@ -26,20 +28,18 @@ Each tool combines source content with its operation's result description. Image
 
 An image description has either `data` with `format` and `byte_length`, or `url` with an empty object. The native content part carries the encoded image bytes or URL itself. The [memory](memory.md#results-and-errors) and [shell](host.md#results-and-interruption) guides describe their surrounding result fields.
 
-Memory reads retain the full text of an entry. Shell text previews contain at most 16 KiB, retaining the beginning and end when truncated. For larger non-image shell output, text detection checks only the previewed bytes. Image URL interpretation reads the full stdout so that the reference is not truncated.
-
 The current readers return an `unavailable` description for content they cannot supply, with `byte_length` and reason `unsupported_binary` or `image_too_large`. This diagnostic concerns the returned content; it leaves the command outcome and stored memory entry unchanged. Shell stdout and stderr remain in full in their log files.
 
 ## Model request checks
 
-At the end of each tool batch, the provider applies these local checks to retained and newly returned images:
+At the end of each tool batch, the Responses adapter applies these local checks to retained and newly returned images:
 
 | Local check | Limit |
 | --- | --- |
 | Image count, including retained images and URL references | 600 |
 | Serialized model request body, including history, tool definitions, and base64 image data | 48 MiB |
 
-The provider keeps new images in order up to the count limit, replacing later images with text `content_limit` errors. If the serialized request exceeds the byte limit, newly returned images are then omitted from the end until it fits or no new images remain. Text descriptions, command outcomes, diagnostics, and earlier context remain available.
+The adapter keeps new images in order up to the count limit, replacing later images with text `content_limit` errors. If the serialized request exceeds the byte limit, newly returned images are then omitted from the end until it fits or no new images remain. Text descriptions, command outcomes, diagnostics, and earlier context remain available.
 
 The separate [whole-request budget](architecture.md#bounded-model-context) may require a handover before the next model round.
 

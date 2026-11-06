@@ -1,0 +1,13 @@
+.{
+    .name = .content,
+    .fingerprint = 0xfec530a934849b23,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .zignal = .{
+            .url = "https://github.com/arrufat/zignal/archive/1719dae43146b836f8382571300dcd84b3950072.tar.gz",
+            .hash = "zignal-0.11.0-OrZ3s2B2KgAZfNsqKBXBRlkdwSkNuXJzFPFCMG5Sxska",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

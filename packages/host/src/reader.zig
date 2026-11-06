@@ -1,10 +1,9 @@
 const std = @import("std");
-const content = @import("../content.zig");
+const content = @import("content");
 const output = @import("output.zig");
 
 const Allocator = std.mem.Allocator;
 const Interpretation = content.Interpretation;
-const Image = content.Image;
 
 /// Reads command stdout as text or native image content.
 pub const Reader = struct {
@@ -21,7 +20,7 @@ pub const Reader = struct {
         const length = try file.length(self.io);
         var header: [16]u8 = undefined;
         const header_read = try file.readPositionalAll(self.io, &header, 0);
-        const is_image = Image.detectFormat(header[0..header_read]) != null;
+        const is_image = content.detectFormat(header[0..header_read]) != null;
         if (is_image and length > content.image_size_limit)
             return .{ .unavailable = .{ .byte_length = length, .reason = .image_too_large } };
 

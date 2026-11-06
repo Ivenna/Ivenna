@@ -5,7 +5,7 @@ const WorkInput = @import("work.zig");
 const Delivery = WorkInput.Delivery;
 const Activation = WorkInput.Activation;
 const Allocator = std.mem.Allocator;
-const Value = std.json.Value;
+const Model = @import("model.zig");
 
 /// A session owns reasoning history independently of external correspondence.
 /// The core is permanent; branch sessions may retain an idle context while
@@ -182,7 +182,7 @@ pub const Registry = struct {
     /// Commit before child execution: every fork includes this response and
     /// exactly one result per call, never an unfinished exchange. The plan
     /// remains caller-owned on failure; success consumes it.
-    pub fn commitRound(self: *Registry, work: Work, output: []const Value, replies: []const Value, plan: ?ForkPlan) !Commit {
+    pub fn commitRound(self: *Registry, work: Work, output: []const Model.Item, replies: []const Model.Item, plan: ?ForkPlan) !Commit {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);

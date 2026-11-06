@@ -1,8 +1,10 @@
 const std = @import("std");
-const Shell = @import("host/shell.zig").Shell;
-const Content = @import("content.zig").Content;
+const Shell = @import("shell.zig").Shell;
+const Content = @import("content").Content;
 
 const Allocator = std.mem.Allocator;
+const Tools = @import("agent").Tools;
+const Model = @import("agent").Model;
 
 /// Routes host operations and returns content owned by the current turn.
 pub const Host = struct {
@@ -14,6 +16,21 @@ pub const Host = struct {
         return .{
             .shell = .{ .io = io, .directory = directory, .data_directory = data_directory, .environ = environ },
         };
+    }
+
+    /// Declarations belong to a and must outlive their registration with Engine.
+    pub fn tools(self: *Host, a: Allocator) !Tools {
+        return .{
+            .context = self,
+            .invoke = invokeTool,
+            .declarations = try std.json.parseFromSliceLeaky([]const Model.Tool, a, @embedFile("tools.json"), .{}),
+        };
+    }
+
+    fn invokeTool(context: *anyopaque, a: Allocator, session_id: u64, name: []const u8, arguments: []const u8) anyerror!?Content {
+        const self: *Host = @ptrCast(@alignCast(context));
+        const request = try Request.parse(a, name, arguments) orelse return null;
+        return try self.invoke(a, .{ .session_id = session_id }, request);
     }
 
     pub const Request = union(enum) {

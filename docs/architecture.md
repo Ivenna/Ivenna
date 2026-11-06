@@ -6,41 +6,55 @@ The [design intent](design.md) explains these choices. The [input contract](inpu
 
 ## Responsibilities
 
-| Component | Responsibility |
+| Unit | Responsibility |
 | --- | --- |
-| [Application](../apps/ivenna) | Load configuration, assemble shared and domain components, and own startup and shutdown |
-| [Service](../apps/ivenna/src/service.zig) | Serve listener health and the kernel's reception status |
-| [Work](../packages/agent/src/work.zig) | Own event deliveries and their consumption receipts |
-| [Sessions](../packages/agent/src/sessions.zig) | Own contexts, queues, fork publication, and synchronized scheduling |
-| [Kernel](../packages/agent/src/kernel.zig) | Coordinate execution, email, internal state, and worker scopes |
-| [Communication](../packages/agent/src/communication.zig) | Define contacts, outgoing messages, and submission references |
-| [Email transport](../packages/agent/src/email_transport.zig) | Project correspondence into native material, persist contact mappings, and submit messages |
-| [Mail state](../packages/agent/src/mail_state.zig) | Track physical input consumption and store handovers by state key |
-| [Mail sources](../packages/agent/src/mail_sources.zig) | Own shared source records, opaque receipts, caching, and immutable source artifacts |
-| [Mail client](../packages/agent/src/mail.zig) | Decode the required JMAP operations into typed results |
-| [Input](../packages/agent/src/input.zig) | Own model-input types and YAML rendering |
-| [Engine](../packages/agent/src/engine.zig) | Execute one model response and its complete tool batch |
-| [Context](../packages/agent/src/context.zig) | Own retained history, copy contexts, and assemble temporary model requests |
-| [Compaction](../packages/agent/src/compaction.zig) | Construct and bound summary requests and validate output |
-| [Provider](../packages/agent/src/provider.zig) | Encode model requests and tool replies and decode output |
-| [Memory](../packages/agent/src/memory.zig) | Exchange operations with the shared file workspace over SSH |
-| [Host](../packages/agent/src/host.zig) | Route shell operations and select returned content |
+| [apps/ivenna](../apps/ivenna) | Configure and assemble the runtime, serve HTTP status, and own process startup and shutdown |
+| [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
+| [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activations, forks, and retained history; define communication, continuity, model, and tool contracts |
+| [packages/email](../packages/email/src/root.zig) | Implement communication and continuity through mail, owning native records, contacts, source artifacts, and receipt caches |
+| [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, validate Responses output, and apply model content limits |
+| [packages/host](../packages/host/src/root.zig) | Define host tools and own shell execution, process cleanup, logs, and returned output |
+| [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
+| [packages/content](../packages/content/src/root.zig) | Define tool-result text and image content, classify source bytes, and interpret image references |
 
-The email adapter supplies native material with content, contacts, and optional provenance. The kernel pairs each arrival with the mail integration's opaque physical receipt. Work owns the delivery's event and receipts; Sessions tracks receipts to prevent duplicate intake while messages remain visible to polling. A fork's assignment can hold the receipts of several original inputs. The kernel records their consumption when processing completes. Model-facing input and communication use the native contracts independently of mail records or thread identifiers.
+`apps/ivenna` links the libraries into one process. Its [HTTP listener](../apps/ivenna/src/service.zig) runs alongside the kernel and shares the application's shutdown scope. `apps/memory` is a separate program reached through SSH; its handler and image sources live together, while local service orchestration remains in `dev`.
 
-The application owns service, kernel, and shutdown tasks. The kernel owns intake and execution tasks within that scope. Task failures close reception and cancel and join concurrent work before shared dependencies are released. Sessions serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
+The agent defines the contracts used by concrete capabilities. Content supplies the shared tool-result representation and image recognition; YAML supplies model-input rendering. The build declarations enforce the following module dependencies. Arrows show imports, not runtime message flow:
 
 ```mermaid
-flowchart LR
-    Gateway[SMTP receiving gate] -. readiness check .-> Service[Service status]
-    Service -. reception state .-> Kernel[Kernel]
-    Kernel <--> Sessions[Sessions and work]
-    Kernel <--> Email[EmailTransport: material and explicit sends]
-    Kernel <--> State[MailState: consumption and handovers]
-    Email --> Shared[Shared mail client and source records]
-    State --> Shared
-    Kernel <--> Engine[Model rounds and tools]
+flowchart TD
+    App[apps/ivenna] --> Agent[packages/agent]
+    App --> Email[packages/email]
+    App --> Responses[packages/responses]
+    App --> Host[packages/host]
+    App --> Memory[packages/memory]
+    Email --> Agent
+    Responses --> Agent
+    Host --> Agent
+    Memory --> Agent
+    Host --> Content[packages/content]
+    Memory --> Content
+    Responses --> Content
+    Agent --> Content
+    Content --> Zignal[Zignal]
+    Agent --> YAML[YAML]
 ```
+
+The agent's public contracts keep capability operations separate from their native protocols:
+
+| Contract | Operations | Implementation |
+| --- | --- | --- |
+| [Inbox](../packages/agent/src/integration.zig) | Poll observations with opaque receipts, supply recent material, record consumption, and release unused delivery handles | Email integration |
+| [Communication.Sender](../packages/agent/src/communication.zig) | Submit explicit outgoing messages using contact references | Email integration |
+| [HandoverStore](../packages/agent/src/integration.zig) | Load and save handovers by state key | Email integration |
+| [Model.Port](../packages/agent/src/model.zig) | Infer, measure the encoded request, and apply model content limits | Responses adapter |
+| [Tools](../packages/agent/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host and Memory |
+
+The email integration implements three contracts over one shared mail client and source cache. Correspondence and handovers keep their own semantics and retention within that resource. The kernel uses these operations without inspecting mail headers, folders, or native delivery identifiers.
+
+The email adapter supplies native material with content, contacts, optional provenance, and an opaque physical receipt. [Work](../packages/agent/src/work.zig) owns the delivery's event and receipts; Sessions tracks receipts to prevent duplicate intake while messages remain visible to polling. A fork's assignment can hold the receipts of several original inputs. The kernel records their consumption through `Inbox` when processing completes. Model-facing input and communication use the native contracts independently of mail records or thread identifiers.
+
+The application owns service, kernel, and shutdown tasks. The [kernel](../packages/agent/src/kernel.zig) owns intake and execution tasks within that scope. Task failures close reception and cancel and join concurrent work before shared dependencies are released. The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
 
 ## Service and reception
 
@@ -92,19 +106,21 @@ Session identifiers, queues, and report reservations last for one kernel process
 
 ## Records, context, and current requests
 
-Input defines and renders retained `Record` messages and temporary `Request` messages. The [input contract](input.md) owns their payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+[Input](../packages/agent/src/input.zig) defines and renders retained `Record` messages and temporary `Request` messages. The [input contract](input.md) owns their payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
-Sessions fixes the selected delivery group, returns the unselected suffix, and installs the selected history under the registry lock. Context owns retained records and the complete model/tool exchanges that follow. Startup recollection records the core handover and recent correspondence as supporting context. Forks copy retained history with its original session identifiers.
+Sessions fixes the selected delivery group, returns the unselected suffix, and installs the selected history under the registry lock. [Context](../packages/agent/src/context.zig) owns retained `Model.Item` values: native system and user messages, opaque adapter continuation bytes, and typed tool results. Continuations retain complete model output, including reasoning, in the producing adapter's format. Context copies those bytes without interpreting them; they remain meaningful to that adapter for the retained context's lifetime. Startup recollection records the core handover and recent correspondence as supporting context. Forks copy retained history with its original session identifiers.
 
 For each inference, the kernel takes an owned history snapshot and obtains current state from Sessions. `Context.request` assembles a view of that history followed by one temporary request, without changing the snapshot. The kernel keeps the snapshot alive until the model/tool round returns. Request state and summary instructions stay outside retained history; later rounds use that history or its replacement handover.
 
 ## Content and provider boundary
 
-[content.zig](../packages/agent/src/content.zig) defines text and image parts and classifies individual byte sources. The owning tool renders unavailable-content diagnostics as text. [image.zig](../packages/agent/src/image.zig) recognizes image signatures. Classification borrows bytes; a separate explicit interpretation can present source text as an image reference. Pixel decoding and URL retrieval belong to the model service.
+[Content](../packages/content/src/root.zig) owns native text and image parts, encoded image metadata in [image.zig](../packages/content/src/image.zig), and classification of individual byte sources. The owning tool renders unavailable-content diagnostics as text. Classification borrows bytes; a separate explicit interpretation can present source text as an image reference. Pixel decoding and URL retrieval belong to the model service.
 
-Memory and Host return content in the model-round arena. Provider encodes the supplied parts for the configured model protocol, matching each tool reply to its call ID. Local image bytes become request data; remote URLs remain references whose contents can change. Image rejection preserves accompanying text and reports the omitted image. Provider's image checks apply alongside the whole-context budget. See [tool content](content.md) for formats and limits.
+Memory and Host return content in the model-round arena. [Engine](../packages/agent/src/engine.zig) creates a native tool result with its call ID and content; the [Responses adapter](../packages/responses/src/provider.zig) encodes it for the configured model service. Local image bytes become request data; remote URLs remain references whose contents can change. Image rejection preserves accompanying text and reports the omitted image. The adapter's image checks apply alongside the whole-context budget. See [tool content](content.md) for formats and limits.
 
-Provider decodes and validates the complete model output before Engine executes any tool in the response. It supplies parsed calls and final text to execution and compaction; malformed or unsupported output fails explicitly. Unknown tools and invalid arguments become tool errors available to the next model round. Image limits apply once to the complete tool batch.
+The Responses adapter decodes and validates the complete model output before Engine executes any tool in the response. It supplies continuation items, parsed calls, and final text to execution and compaction; malformed or unsupported output fails explicitly. Unknown tools and invalid arguments become tool errors available to the next model round. Image limits apply once to the complete tool batch.
+
+Tool declarations live with their owning implementations: [communication and session tools](../packages/agent/src/tools.json), [host tools](../packages/host/src/tools.json), and [memory tools](../packages/memory/src/tools.json). Host and Memory register their declarations through `Tools`. Engine selects the agent's declarations for core coordination and adds declarations from registered capabilities for work sessions; summarization has no tools. The model adapter receives those selected declarations and adds protocol-specific fields when encoding them. It does not choose which capabilities a session can use.
 
 ## Activation completion and context release
 
@@ -118,11 +134,11 @@ The permanent core stays available between activations. Its context is summarize
 
 ## Bounded model context
 
-`CONTEXT_REQUEST_BYTES` bounds the complete ordinary request, including system instructions, retained records and exchanges, current state, tools, and encoded images. Budget measurement uses the same assembled payload sent to the provider. `LLM_MAX_OUTPUT_TOKENS` separately bounds generated output.
+`CONTEXT_REQUEST_BYTES` bounds the complete ordinary request, including system instructions, retained records and exchanges, current state, tools, and encoded images. The kernel requests measurements through `Model.Port`; the Responses adapter uses the same encoder for sizing and transmission, including protocol fields and encoded content. `LLM_MAX_OUTPUT_TOKENS` separately bounds generated output.
 
 After admission, each tool continuation checks the complete request budget again and can compact the activation's retained history when needed.
 
-Compaction uses the same request assembly with response `summary` and instructions from [compaction.md](../packages/agent/src/compaction.md). It appends one summary request to retained history. Provider disables tools with `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
+Compaction uses the same request assembly with response `summary` and instructions from [compaction.md](../packages/agent/src/compaction.md). It assembles retained history followed by one temporary summary request. The agent supplies no tools for that request; the Responses adapter encodes this as `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
 
 The kernel builds the replacement's ordinary request with a fresh state snapshot and checks its complete budget before installing the handover record. Core compaction also saves the summary under the fixed internal state key `core`; work-session compaction remains in memory. The handover replaces the entire earlier working view; no raw transcript tail is retained. Summary instructions preserve needed session identifiers and source and contact references alongside ongoing work, commitments, and completed effects.
 
@@ -130,7 +146,7 @@ Byte counts are local measurements, not model-token estimates. If a request or s
 
 ## Email boundary and source materials
 
-EmailTransport renders a nonempty subject, a blank line, and the body as input text; with an empty subject it uses the body alone. It supplies From descriptions as author provenance and contacts from Reply-To, falling back to From. Contact references identify available recipients independently of source provenance.
+[EmailTransport](../packages/email/src/email_transport.zig) renders a nonempty subject, a blank line, and the body as input text; with an empty subject it uses the body alone. It supplies From descriptions as author provenance and contacts from Reply-To, falling back to From. Contact references identify available recipients independently of source provenance.
 
 The adapter hashes each native recipient address into an opaque contact reference and atomically stores its native address record under `<DATA_DIR>/contacts/<reference>.json`. The mapping survives source-cache cleanup, context release, and restart. It is independent of any particular input or mail thread. Automatic contact retention and editing remain unimplemented.
 
@@ -140,7 +156,7 @@ The adapter hashes each native recipient address into an opaque contact referenc
 
 Material within the excerpt budget is supplied inline. Longer material includes an excerpt and a reference to the complete projection. The boundary captures source artifacts for both representations.
 
-EmailTransport derives source references from an available Message-ID, trimming surrounding whitespace and angle brackets before hashing; its fallback includes the service, account, and native letter identifier. MailSources derives physical receipts from the service endpoint, account, and native letter. MailState uses that receipt for consumption bookkeeping. Copies sharing a Message-ID can therefore share provenance while entering the core independently. Neither identifier establishes a conversation route.
+EmailTransport derives source references from an available Message-ID, trimming surrounding whitespace and angle brackets before hashing; its fallback includes the service, account, and native letter identifier. [MailSources](../packages/email/src/mail_sources.zig) derives physical receipts from the service endpoint, account, and native letter. MailState uses that receipt for consumption bookkeeping. Copies sharing a Message-ID can therefore share provenance while entering the core independently. Neither identifier establishes a conversation route.
 
 Shared source-cache cleanup checks receipts still retained by work. It does not delete mail or artifacts. Under `<DATA_DIR>/sources/`, projected content uses `receipt-<receipt-hash>-<content-hash>.txt` and decoded details use `receipt-<receipt-hash>.json`. Both hashes use SHA-256; the content hash covers the projected bytes. The text resource contains the same full material represented inline or excerpted in input, and its hash distinguishes different projections of one receipt. Each file is published once through an atomic link, so later reads and polling do not truncate or rewrite it. The details file preserves the first captured snapshot of selected `Mail.Letter` fields, including its body, rather than original MIME or current mailbox state.
 
@@ -148,7 +164,7 @@ The boundary prefers decoded plain text and falls back to UTF-8 HTML source. Uns
 
 ## Internal mail state
 
-MailState polls for physical input messages without the private `ivenna-handled` keyword. Intake spans ordinary mail folders and is independent of read and starred state. Runtime-created outgoing messages carry the private `ivenna-outbound` keyword; they are excluded along with drafts, Junk, Trash, and recognized state records. The supported deployment uses a dedicated Ivenna account, with ordinary correspondents sending from other accounts.
+[MailState](../packages/email/src/mail_state.zig) uses the [mail client](../packages/email/src/mail.zig) to poll for physical input messages without the private `ivenna-handled` keyword. Intake spans ordinary mail folders and is independent of read and starred state. Runtime-created outgoing messages carry the private `ivenna-outbound` keyword; they are excluded along with drafts, Junk, Trash, and recognized state records. The supported deployment uses a dedicated Ivenna account, with ordinary correspondents sending from other accounts.
 
 Completion sets `ivenna-handled` on the input copy. This records consumption of that physical message; it does not store model or tool progress. Sessions keeps receipt bookkeeping in memory. The completion operation leaves ordinary read, answered, and folder state unchanged.
 
@@ -180,11 +196,11 @@ One kernel owns an Ivenna account's execution state. External submission, intern
 
 ## Autonomous memory
 
-Memory is a file workspace shared by all sessions. The Memory component resolves local write sources and exchanges typed JSON operations over SSH with the fixed [memory.nu](../packages/agent/src/memory.nu) handler. The handler owns file operations and capacity enforcement. See [memory rooms](memory.md) for tool behavior and [remote memory setup](running.md#using-remote-memory) for deployment.
+Memory is a file workspace shared by all sessions. The Memory component resolves local write sources and exchanges typed JSON operations over SSH with the fixed [memory.nu](../apps/memory/src/memory.nu) handler. The handler owns file operations and capacity enforcement. See [memory rooms](memory.md) for tool behavior and [remote memory setup](running.md#using-remote-memory) for deployment.
 
 The handler returns explicitly defined operation errors, such as a missing entry or exhausted capacity, to the model as tool results. SSH failures, invalid protocol replies, and unclassified handler or backend failures propagate to the kernel. Finer error distinctions remain undefined.
 
-The [memory shell](../dev/memory/memory-shell.sh) locks the workspace for each handler invocation, including capacity checks and writes. Separate operations can observe changes made by another session. Direct filesystem changes can bypass this boundary.
+The [memory shell](../apps/memory/memory-shell.sh) locks the workspace for each handler invocation, including capacity checks and writes. Separate operations can observe changes made by another session. Direct filesystem changes can bypass this boundary.
 
 Transfers buffer complete files and payloads. Memory copies or decodes returned content into the caller's model-round arena before temporary SSH buffers are released. An incomplete exchange can leave the outcome of a write uncertain.
 
@@ -192,7 +208,7 @@ Transfers buffer complete files and payloads. Memory copies or decodes returned 
 
 Work sessions execute as the kernel's OS account and share its filesystem and startup environment. Forking a model context leaves these resources shared, so a prior observation may need to be checked again after another session acts.
 
-Host validates and routes requests. [Shell](../packages/agent/src/host/shell.zig) executes a fresh noninteractive `/bin/sh` command; [process.zig](../packages/agent/src/host/process.zig) owns process groups, timeouts, cancellation, and reaping. Complete output remains in host files, while [Reader](../packages/agent/src/host/reader.zig) selects the content returned to the model.
+Host validates and routes requests. [Shell](../packages/host/src/shell.zig) executes a fresh noninteractive `/bin/sh` command; [process.zig](../packages/host/src/process.zig) owns process groups, timeouts, cancellation, and reaping. Complete output remains in host files, while [Reader](../packages/host/src/reader.zig) selects the content returned to the model.
 
 Host propagates cancellation and allocation failure. Other invocation failures currently return `host_unavailable`, including failure to obtain a command result. Finer classification of these failures remains undefined.
 

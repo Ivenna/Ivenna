@@ -11,7 +11,9 @@ Incoming material and supporting [evidence](input.md#material-and-provenance) ca
 | `reference` | Opaque recipient reference accepted by `send_message` |
 | `description` | Optional human-readable context about that recipient |
 
-A contact reference identifies a recipient independently of the material's source and the current session. References remain usable after the originating material and working context have been released; retain the ones needed for ongoing work in handovers or autonomous memory.
+A contact reference identifies a recipient independently of the material's source and the current session. Retain references needed for ongoing work in handovers or autonomous memory.
+
+The email adapter supplies contacts from Reply-To, falling back to From, and keeps their address mappings in [deployment data](running.md#local-data). Preserving those mappings lets references remain usable after the originating material and working context have been released.
 
 ## Sending a message
 
@@ -31,7 +33,7 @@ For example, using a reference supplied with incoming material or context:
 }
 ```
 
-Each invocation submits one message to the specified recipients.
+Each successful invocation submits one message to the specified recipients. The email adapter creates a standalone message with the supplied text as its body.
 
 Success returns a submission reference:
 

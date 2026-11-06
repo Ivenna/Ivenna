@@ -2,27 +2,25 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const Compaction = @import("compaction.zig");
 const Engine = @import("engine.zig").Engine;
-const Content = @import("content.zig").Content;
+const Content = @import("content").Content;
 const Input = @import("input.zig");
 const Sessions = @import("sessions.zig");
-const WorkInput = @import("work.zig");
 const Communication = @import("communication.zig");
-const EmailTransport = @import("email_transport.zig").EmailTransport;
-const MailState = @import("mail_state.zig").MailState;
-const MailSources = @import("mail_sources.zig").MailSources;
+const Integration = @import("integration.zig");
+const Model = @import("model.zig");
 const Allocator = std.mem.Allocator;
 const Session = Sessions.Session;
 const Work = Sessions.Work;
 
-/// Coordinate sessions, model/tool rounds, email, and internal state within
+/// Coordinate sessions, model/tool rounds, communication, and handovers within
 /// worker scopes. Core coordination has an independent execution lane.
 pub const Kernel = struct {
     allocator: Allocator,
     io: std.Io,
     engine: *Engine,
-    email: *EmailTransport,
-    state: *MailState,
-    sources: *MailSources,
+    inbox: Integration.Inbox,
+    sender: Communication.Sender,
+    handovers: Integration.HandoverStore,
     limits: Limits,
     poll_interval_ms: u32,
     max_parallel: usize,
@@ -35,18 +33,32 @@ pub const Kernel = struct {
         handover_bytes: usize = 8192,
     };
 
-    pub fn init(allocator: Allocator, io: std.Io, engine: *Engine, email: *EmailTransport, state: *MailState, sources: *MailSources, limits: Limits, poll_interval_ms: u32, max_parallel: usize, max_contexts: usize) !Kernel {
+    pub const Dependencies = struct {
+        engine: *Engine,
+        inbox: Integration.Inbox,
+        sender: Communication.Sender,
+        handovers: Integration.HandoverStore,
+    };
+
+    pub const Config = struct {
+        limits: Limits,
+        poll_interval_ms: u32,
+        max_parallel: usize,
+        max_contexts: usize,
+    };
+
+    pub fn init(allocator: Allocator, io: std.Io, dependencies: Dependencies, config: Config) !Kernel {
         return .{
             .allocator = allocator,
             .io = io,
-            .engine = engine,
-            .email = email,
-            .state = state,
-            .sources = sources,
-            .limits = limits,
-            .poll_interval_ms = poll_interval_ms,
-            .max_parallel = max_parallel,
-            .sessions = try Sessions.Registry.init(allocator, io, max_contexts),
+            .engine = dependencies.engine,
+            .inbox = dependencies.inbox,
+            .sender = dependencies.sender,
+            .handovers = dependencies.handovers,
+            .limits = config.limits,
+            .poll_interval_ms = config.poll_interval_ms,
+            .max_parallel = config.max_parallel,
+            .sessions = try Sessions.Registry.init(allocator, io, config.max_contexts),
         };
     }
 
@@ -91,18 +103,10 @@ pub const Kernel = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            const pending = try self.state.pending(a, try self.sessions.intakeLimit());
-            var waiting: std.ArrayList(WorkInput.Incoming) = .empty;
-            for (pending) |candidate| {
-                const received = try self.email.receive(a, candidate.receipt, @intCast(@min(4096, self.limits.request_bytes / 8)));
-                try waiting.append(a, .{
-                    .input = received,
-                    .receipt = candidate.receipt,
-                });
-            }
-            try self.sessions.reconcile(waiting.items);
-            for (waiting.items) |incoming| _ = try self.sessions.accept(incoming);
-            try self.sources.sweep(try self.sessions.receiptsInUse(a));
+            const waiting = try self.inbox.poll(a, try self.sessions.intakeLimit(), @intCast(@min(4096, self.limits.request_bytes / 8)));
+            try self.sessions.reconcile(waiting);
+            for (waiting) |incoming| _ = try self.sessions.accept(incoming);
+            try self.inbox.releaseUnused(try self.sessions.receiptsInUse(a));
             try self.dispatch(tasks);
             try self.io.sleep(.fromMilliseconds(self.poll_interval_ms), .awake);
         }
@@ -112,26 +116,24 @@ pub const Kernel = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        if (try self.state.loadHandover(a, "core", self.limits.handover_bytes)) |record| {
+        if (try self.handovers.load(a, "core", self.limits.handover_bytes)) |record| {
             try self.sessions.appendCoreContext(&.{.{ .handover = record }});
         }
         var context: std.ArrayList(Input.ContextItem) = .empty;
         var base = try self.sessions.snapshotCore();
         defer base.deinit();
-        var provider = self.engine.provider;
-        provider.tool_scope = .coordination;
         const snapshot = try self.sessions.runtimeSnapshot(self.sessions.core);
         const request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
-        if (try provider.requestBytes(a, try base.request(a, request)) > self.limits.request_bytes)
+        if (try self.engine.requestBytes(a, try base.request(a, request), .coordination) > self.limits.request_bytes)
             return error.ContextBudgetExhausted;
         const reserve = @min(4096, self.limits.request_bytes / 4);
         var selected: usize = 0;
-        for (try self.email.recent(a, 32)) |material| {
+        for (try self.inbox.recent(a, 32)) |material| {
             try context.append(a, .{ .evidence = material });
             var candidate = try base.fork(self.allocator);
             defer candidate.deinit();
             try candidate.appendRecord(.{ .session_id = snapshot.session_id, .context = context.items });
-            if (try provider.requestBytes(a, try candidate.request(a, request)) > self.limits.request_bytes - reserve) break;
+            if (try self.engine.requestBytes(a, try candidate.request(a, request), .coordination) > self.limits.request_bytes - reserve) break;
             selected = context.items.len;
         }
         if (selected != 0) try self.sessions.appendCoreContext(context.items[0..selected]);
@@ -171,7 +173,7 @@ pub const Kernel = struct {
             if (std.mem.eql(u8, name, "send_message")) {
                 const message = try parseArguments(Communication.Message, a, arguments);
                 if (message.recipients.len == 0 or message.text.len == 0) return error.InvalidToolArguments;
-                const submission = self.kernel.email.send(a, message) catch |err| switch (err) {
+                const submission = self.kernel.sender.send(a, message) catch |err| switch (err) {
                     error.InvalidContactReference => return try runtimeError(a, "unknown_recipient", "The recipient reference is not available."),
                     else => return err,
                 };
@@ -217,7 +219,7 @@ pub const Kernel = struct {
         const a = arena.allocator();
         for (work.activation.deliveries.items) |delivery|
             for (delivery.receipts) |receipt|
-                try self.state.complete(a, receipt);
+                try self.inbox.complete(a, receipt);
         return self.sessions.finish(work, text);
     }
 
@@ -227,8 +229,7 @@ pub const Kernel = struct {
     /// stay queued; excluded deliveries return ahead of them when selected
     /// history is installed.
     fn selectActivation(self: *Kernel, a: Allocator, work: Work, history: *const Context, request: Input.Request) !?Selection {
-        var provider = self.engine.provider;
-        provider.tool_scope = if (work.session.role == .core) .coordination else .all;
+        const scope: Engine.Scope = if (work.session.role == .core) .coordination else .all;
         var selected = try history.fork(self.allocator);
         errdefer selected.deinit();
         var count: usize = 0;
@@ -242,7 +243,7 @@ pub const Kernel = struct {
             var current = request;
             current.state.runtime.queued_inputs += events.len - end;
             const input = try candidate.request(a, current);
-            if (try provider.requestBytes(a, input) > self.limits.request_bytes) {
+            if (try self.engine.requestBytes(a, input, scope) > self.limits.request_bytes) {
                 candidate.deinit();
                 break;
             }
@@ -268,7 +269,7 @@ pub const Kernel = struct {
         var selection = try self.selectActivation(a, work, &history, request);
         var handover: ?[]const u8 = null;
         if (selection == null and history.history().len > 1) {
-            handover = try Compaction.summarize(self.engine.provider, a, &history, request, self.limits.compaction_bytes, self.limits.handover_bytes);
+            handover = try Compaction.summarize(self.engine.model, a, &history, request, self.limits.compaction_bytes, self.limits.handover_bytes);
             var compacted = try history.withHandover(self.allocator, work.session.session_id, .{ .summary = handover.? });
             defer compacted.deinit();
             request.state = (try self.sessions.runtimeSnapshot(work.session)).state;
@@ -277,14 +278,14 @@ pub const Kernel = struct {
         var selected = selection orelse return error.ContextBudgetExhausted;
         errdefer selected.context.deinit();
         if (handover) |summary| if (work.session.role == .core)
-            try self.state.saveHandover(a, "core", summary);
+            try self.handovers.save(a, "core", summary);
         try self.sessions.beginActivation(work, selected.count, selected.context);
     }
 
     /// Owns the history snapshot borrowed by the request-arena input view.
     const RequestView = struct {
         context: Context,
-        input: []const std.json.Value,
+        input: []const Model.Item,
 
         fn deinit(self: *RequestView) void {
             self.context.deinit();
@@ -293,15 +294,14 @@ pub const Kernel = struct {
     };
 
     fn requestContext(self: *Kernel, a: Allocator, session: *Session) !RequestView {
-        var provider = self.engine.provider;
-        provider.tool_scope = if (session.role == .core) .coordination else .all;
+        const scope: Engine.Scope = if (session.role == .core) .coordination else .all;
         var view = try self.sessions.snapshot(session);
         errdefer view.deinit();
         const snapshot = try self.sessions.runtimeSnapshot(session);
         const request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
         const input = try view.request(a, request);
-        if (try provider.requestBytes(a, input) <= self.limits.request_bytes) return .{ .context = view, .input = input };
-        const summary = try Compaction.summarize(provider, a, &view, request, self.limits.compaction_bytes, self.limits.handover_bytes);
+        if (try self.engine.requestBytes(a, input, scope) <= self.limits.request_bytes) return .{ .context = view, .input = input };
+        const summary = try Compaction.summarize(self.engine.model, a, &view, request, self.limits.compaction_bytes, self.limits.handover_bytes);
         var candidate = try view.withHandover(self.allocator, session.session_id, .{ .summary = summary });
         errdefer candidate.deinit();
         var replacement = try candidate.fork(self.allocator);
@@ -309,8 +309,8 @@ pub const Kernel = struct {
         var replacement_request = request;
         replacement_request.state = (try self.sessions.runtimeSnapshot(session)).state;
         const replacement_input = try replacement.request(a, replacement_request);
-        if (try provider.requestBytes(a, replacement_input) > self.limits.request_bytes) return error.ContextBudgetExhausted;
-        if (session.role == .core) try self.state.saveHandover(a, "core", summary);
+        if (try self.engine.requestBytes(a, replacement_input, scope) > self.limits.request_bytes) return error.ContextBudgetExhausted;
+        if (session.role == .core) try self.handovers.save(a, "core", summary);
         try self.sessions.replaceContext(session, candidate);
         view.deinit();
         return .{ .context = replacement, .input = replacement_input };

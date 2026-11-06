@@ -29,7 +29,7 @@ services:
   memory:
     build:
       context: ..
-      dockerfile: dev/memory/Containerfile
+      dockerfile: apps/memory/Containerfile
     image: "${MEMORY_IMAGE:-localhost/ivenna-memory:dev}"
     container_name: "${MEMORY_CONTAINER_NAME:-ivenna-memory}"
     restart: unless-stopped

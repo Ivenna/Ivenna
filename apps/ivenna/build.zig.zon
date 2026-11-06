@@ -5,6 +5,10 @@
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .agent = .{ .path = "../../packages/agent" },
+        .email = .{ .path = "../../packages/email" },
+        .responses = .{ .path = "../../packages/responses" },
+        .host = .{ .path = "../../packages/host" },
+        .memory = .{ .path = "../../packages/memory" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

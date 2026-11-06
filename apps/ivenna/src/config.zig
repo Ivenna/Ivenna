@@ -1,5 +1,6 @@
 const std = @import("std");
 const agent = @import("agent");
+const responses = @import("responses");
 
 pub const Config = struct {
     service_address: std.Io.net.IpAddress,
@@ -48,9 +49,9 @@ pub const Config = struct {
                 .compaction_bytes = try number(u64, env, "CONTEXT_COMPACTION_BYTES", 131072),
                 .handover_bytes = try number(usize, env, "HANDOVER_MAX_BYTES", 8192),
             },
-            .llm_base_url = try nonempty(env, "LLM_BASE_URL", agent.Provider.default_base_url),
+            .llm_base_url = try nonempty(env, "LLM_BASE_URL", responses.Provider.default_base_url),
             .llm_api_key = try nonempty(env, "LLM_API_KEY", ""),
-            .llm_model = try nonempty(env, "LLM_MODEL", agent.Provider.default_model),
+            .llm_model = try nonempty(env, "LLM_MODEL", responses.Provider.default_model),
             .llm_max_output_tokens = try number(u32, env, "LLM_MAX_OUTPUT_TOKENS", 8192),
         };
         if (config.memory_ssh_config) |path| if (path.len == 0) return error.MissingMemorySshConfig;

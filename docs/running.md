@@ -6,7 +6,7 @@ Run the Ivenna kernel locally, with a mail account and an SSH workspace for auto
 
 Install the Zig version in [`.zig-version`](../.zig-version) and an OpenSSH client. The supplied local middleware uses [dev/compose.yaml](../dev/compose.yaml) with [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html); the examples below use Podman.
 
-The default model provider is DeepSeek; supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`.
+The application uses the Responses adapter with DeepSeek as the default model service. Supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`.
 
 Create the configuration file:
 
@@ -129,7 +129,7 @@ Startup diagnostics appear in the kernel's terminal and the `mail` and `memory` 
 | `GET /healthz` | `200 OK` for listener health |
 | `GET /readyz` | `200 OK` with `X-Ivenna-Ready: true` when reception is open; otherwise `503 Service Unavailable` |
 
-Reception opens after startup checks and core context preparation. It closes when the runtime stops or fails. Once the process has exited, its listener is also gone. Check the current state from another terminal:
+Reception opens after startup checks and core context preparation. It closes when the runtime stops or fails. These endpoints report lifecycle state; they do not probe mail or memory on each request. Once the process has exited, its listener is also gone. Check the current state from another terminal:
 
 ```sh
 curl --include http://127.0.0.1:8090/readyz
@@ -185,7 +185,7 @@ The settings below configure the kernel. Stop it, edit `.env`, reload the variab
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it. Numeric kernel settings must be positive. `CONTEXT_COMPACTION_BYTES` must be at least `CONTEXT_REQUEST_BYTES`. The work execution limit and retained-context limit are independent.
 
-Parents waiting for descendants count toward the context limit without occupying execution slots. The same limit bounds each session's active and queued events plus expected fork results; batching events does not reduce that count. With `MAX_ATTENTION_CONTEXTS=1`, only the core fits and forking is unavailable. At capacity, pending mail remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
+Parents waiting for descendants count toward the context limit without occupying execution slots. The same limit bounds each session's active and queued events plus reserved child reports; batching events does not reduce that count. With `MAX_ATTENTION_CONTEXTS=1`, only the core fits and forking is unavailable. At capacity, pending mail remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
 
 Request byte limits cover the whole serialized body, including instructions, tool definitions, history, and encoded images. They do not estimate model tokens. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
 
@@ -255,14 +255,14 @@ Configure SSH to an existing workspace and skip local memory preparation and sta
 unset MEMORY_SSH_CONFIG
 ```
 
-SSH configuration controls the host, user, keys, timeout, and host key verification. The remote host needs Nushell, ripgrep, fd, `flock`, and GNU or BusyBox `stat`, together with two fixed entry points:
+SSH configuration controls the host, user, keys, timeout, and host key verification. The remote host needs Nushell, ripgrep, fd, `flock`, and GNU or BusyBox `stat`. Use the Nushell version selected by the [Containerfile](../apps/memory/Containerfile), and install the programs on the `PATH` used by the memory shell. Prepare two fixed entry points:
 
-- Install [memory.nu](../packages/agent/src/memory.nu) at `/usr/local/lib/ivenna/memory.nu`.
-- Install `/usr/local/bin/memory-shell` using [memory-shell.sh](../dev/memory/memory-shell.sh) as a reference. It changes to `/memory` and holds `/run/ivenna/memory.lock` while running the handler. Export `MEMORY_CAPACITY_BYTES` there or use the SSH server's `SetEnv`.
+- Install [memory.nu](../apps/memory/src/memory.nu) at `/usr/local/lib/ivenna/memory.nu`.
+- Install `/usr/local/bin/memory-shell` using [memory-shell.sh](../apps/memory/memory-shell.sh) as a reference. Set its working directory to your memory workspace; the supplied script uses `/memory`. It holds `/run/ivenna/memory.lock` while running the handler. Export `MEMORY_CAPACITY_BYTES` there or use the SSH server's `SetEnv`.
 
-The SSH account needs read and write access to the workspace and lock. Create `/run/ivenna/` and `memory.lock` for that account at startup; [entrypoint.sh](../dev/memory/entrypoint.sh) provides an example. All handler processes sharing the workspace must use the same lock.
+The SSH account needs read and write access to the workspace and lock. Create `/run/ivenna/` and `memory.lock` for that account at startup; [entrypoint.sh](../apps/memory/entrypoint.sh) provides an example. All handler processes sharing the workspace must use the same lock.
 
-Use the [Containerfile](../dev/memory/Containerfile) and [sshd_config](../dev/memory/sshd_config) as references for remote installation.
+Use [sshd_config](../apps/memory/sshd_config) as a reference for the SSH entry point.
 
 ## Optional host tools
 

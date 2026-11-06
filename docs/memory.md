@@ -16,14 +16,14 @@ All addresses are relative to the shared entrance, including those returned by t
 
 ## Tools
 
-[tools.json](../packages/agent/src/tools.json) defines the memory tools available to work sessions. The table below lists their required arguments. Omit optional arguments to use their defaults.
+[tools.json](../packages/memory/src/tools.json) defines the memory tools available to work sessions. The table below lists their required arguments. Omit optional arguments to use their defaults.
 
 | Tool | Required arguments | Purpose |
 | --- | --- | --- |
 | `browse_memory` | None | List a room's entries or inspect an entry or room's metadata |
 | `inspect_memory_space` | None | Inspect occupied space and remaining shared capacity across all rooms |
 | `find_memory` | `query` | Find entries and rooms by name |
-| `recall_memory` | `clue` | Recall relevant entries by content |
+| `recall_memory` | `clue` | Search entry text for matching lines |
 | `read_memory` | `address` | Read an entry as text or an image |
 | `remember` | `address`, `content` | Write text or copy a host file into an entry |
 | `revise_memory` | `address`, `old_text`, `new_text` | Revise matching text in an entry |
@@ -76,7 +76,7 @@ Set `entry_only: true` to return one record for the selected entry or room. The 
 
 `find_memory` searches names with `literal`, `glob`, or `regex` matching. `recall_memory` searches entry text with `literal` or `regex` matching. Both default to literal, case-insensitive matching; literal name searches match any part of a name. Set `case_sensitive: true` to make a search case-sensitive.
 
-`read_memory` uses the shared [content handling](content.md) rules. Its optional `interpretation: "image_url"` presents the entry's complete text as an [image reference](content.md#image-url-references).
+`read_memory` uses the shared [content handling](content.md) rules. Its optional `interpretation: "image_url"` presents the entry's complete nonempty text as an [image reference](content.md#image-url-references).
 
 For example, call `find_memory` with a glob to find Markdown entries under `languages`:
 

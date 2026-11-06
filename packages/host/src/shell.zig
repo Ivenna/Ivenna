@@ -2,8 +2,8 @@ const std = @import("std");
 const process = @import("process.zig");
 const Reader = @import("reader.zig").Reader;
 const output = @import("output.zig");
-const Interpretation = @import("../content.zig").Interpretation;
-const ImageContent = @import("../content.zig").ImageContent;
+const Interpretation = @import("content").Interpretation;
+const ImageContent = @import("content").ImageContent;
 
 const Allocator = std.mem.Allocator;
 

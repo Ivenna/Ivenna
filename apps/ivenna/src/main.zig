@@ -1,5 +1,9 @@
 const std = @import("std");
 const agent = @import("agent");
+const email = @import("email");
+const responses = @import("responses");
+const host = @import("host");
+const memory = @import("memory");
 const Config = @import("config.zig").Config;
 const Service = @import("service.zig").Service;
 
@@ -19,31 +23,40 @@ pub fn main(init: std.process.Init) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, data_directory, .fromMode(0o700));
     var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
     defer client.deinit();
-    var mailbox: agent.Mailbox = .{
-        .client = &client,
+    var mail: email.Integration = undefined;
+    try mail.init(init.gpa, io, &client, .{
         .session_url = config.mail_session_url,
         .authorization = try config.authorization(a),
         .address = config.mail_address,
+    }, data_directory);
+    defer mail.deinit();
+    var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
+    try memory_client.checkAvailable(a);
+    var host_tools = host.Host.init(io, host_directory, data_directory, init.environ_map);
+    var provider: responses.Provider = .{
+        .client = &client,
+        .base_url = config.llm_base_url,
+        .api_key = config.llm_api_key,
+        .model = config.llm_model,
+        .max_output_tokens = config.llm_max_output_tokens,
     };
-    try mailbox.discover(a);
+    const tools = [_]agent.Tools{ try memory_client.tools(a), try host_tools.tools(a) };
     var engine: agent.Engine = .{
         .io = io,
-        .memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config },
-        .host = .init(io, host_directory, data_directory, init.environ_map),
-        .provider = .{
-            .client = &client,
-            .base_url = config.llm_base_url,
-            .api_key = config.llm_api_key,
-            .model = config.llm_model,
-            .max_output_tokens = config.llm_max_output_tokens,
-        },
+        .model = provider.port(),
+        .tools = &tools,
     };
-    try engine.memory.checkAvailable(a);
-    var sources = agent.MailSources.init(init.gpa, io, &mailbox, data_directory);
-    defer sources.deinit();
-    var email = agent.EmailTransport.init(io, &mailbox, &sources);
-    var state = agent.MailState.init(&mailbox, &sources);
-    var kernel = try agent.Kernel.init(init.gpa, io, &engine, &email, &state, &sources, config.context_limits, config.mail_poll_interval_ms, config.max_parallel_attention, config.max_attention_contexts);
+    var kernel = try agent.Kernel.init(init.gpa, io, .{
+        .engine = &engine,
+        .inbox = mail.inbox(),
+        .sender = mail.sender(),
+        .handovers = mail.handovers(),
+    }, .{
+        .limits = config.context_limits,
+        .poll_interval_ms = config.mail_poll_interval_ms,
+        .max_parallel = config.max_parallel_attention,
+        .max_contexts = config.max_attention_contexts,
+    });
     defer kernel.deinit();
     var service = try Service.listen(io, config.service_address, &kernel);
     defer service.deinit();

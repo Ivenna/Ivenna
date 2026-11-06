@@ -14,13 +14,23 @@ During development, do not write tests in advance or introduce test frameworks. 
 
 ## Implementation boundaries
 
+### Packages and dependencies
+
+Organize packages around cohesive capabilities, keeping their types, rules, resources, and implementation together. Public interfaces should let callers use a capability without coordinating its internal components. Keep supporting mechanisms with their owning capability. Applications own program startup, configuration, and deployment.
+
+Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities). Keep execution policy and its contracts in `packages/agent`. Concrete capabilities implement `Inbox`, `Communication.Sender`, `HandoverStore`, `Model.Port`, and `Tools`; `apps/ivenna` selects and assembles them. Capability packages depend on agent contracts, and the agent uses those contracts without importing their implementations.
+
 ### Types and protocols
 
-Follow the component boundaries in the [architecture guide](architecture.md#responsibilities). Decode external protocols in their owning components and give execution code typed operations. Work, session scheduling, and model observations must not depend on mail records, headers, folders, or native thread identifiers.
+Decode external protocols in their owning components and give execution code typed operations. Work, session scheduling, and model observations must not depend on mail records, headers, folders, or native thread identifiers.
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
 [Input](../packages/agent/src/input.zig) owns model-input types and YAML rendering. Construct typed payloads at their owning boundaries and use the renderer for model messages. [Work](../packages/agent/src/work.zig) owns delivery events and private consumption receipts. [Communication](../packages/agent/src/communication.zig) defines recipient references and outgoing messages; the adapter resolves references to native destinations. The [input contract](input.md) documents serialized fields.
+
+[Content](../packages/content/src/root.zig) owns tool-result text and image types, byte-source classification, and explicit image reference interpretation. Input material's text and excerpt variants belong to Input; tool results use Content's parts.
+
+[Model](../packages/agent/src/model.zig) defines native history items and model operations. Keep messages and tool results typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields. The model adapter measures requests with the same encoder it uses to send them, including declarations and content.
 
 ### Model-facing resources
 
@@ -29,10 +39,14 @@ Treat prompts and tool descriptions as editable interfaces:
 | Resource | Purpose |
 | --- | --- |
 | [system.md](../packages/agent/src/system.md) | Input interpretation and response scope needed by the model |
-| [tools.json](../packages/agent/src/tools.json) | Available actions, invocation parameters, and observable behavior and results |
+| [Agent tools](../packages/agent/src/tools.json) | Communication and session-fork actions |
+| [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
+| [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | What a handover must preserve |
 
-Put task facts and observations in user input. Keep model-facing descriptions concise; detailed field references belong in the [input contract](input.md). Update the owning resource, renderer, and documentation together when a contract changes.
+Each capability owns its tool names, descriptions, and parameter schemas alongside its implementation. Host and Memory register those declarations through `Tools`. Engine combines the registered capabilities with the agent's communication and session declarations for work sessions; core coordination exposes only the agent's declarations, and summarization exposes none. Model adapters add protocol-specific declaration fields when encoding the selected tools.
+
+Put task facts and observations in user input. Keep model-facing descriptions concise; detailed field references belong in the [input contract](input.md). Update the owning resource, implementation, and interface documentation together when a contract changes.
 
 Include runtime rules in these resources when they affect a model decision or the meaning of input, actions, or results. Explain how scheduling and storage are implemented, and how to operate the system, in the architecture and running guides.
 
@@ -40,7 +54,7 @@ Keep outgoing messages, internal reports, handovers, and diagnostics distinct. O
 
 ### Execution and storage
 
-Sessions synchronizes contexts, queues, and activation ownership. The kernel coordinates adapter operations and worker task scopes. Context retains records and complete model/tool exchanges, assembling temporary requests without changing that history. Keep current state and summary instructions in the request.
+The session registry synchronizes contexts, queues, and activation ownership. The kernel coordinates adapter operations and worker task scopes. Context retains records and complete model/tool exchanges, assembling temporary requests without changing that history. Keep current state and summary instructions in the request.
 
 Infrastructure and execution failures propagate to the application's task scope, which closes reception, cancels, and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
 
@@ -52,11 +66,14 @@ Keep context release and stored-record retention independent. Follow the archite
 
 | Location | Responsibility |
 | --- | --- |
-| [apps/ivenna](../apps/ivenna) | Configuration, service status, application startup and shutdown |
-| [packages/agent](../packages/agent) | Work and session execution, communication contract and email adapter, internal mail state, native observations, model provider, host and memory tools |
+| [apps/ivenna](../apps/ivenna) | Configuration, adapter assembly, HTTP status, application startup and shutdown |
+| [apps/memory](../apps/memory) | Remote memory handler, image, and SSH entry point |
+| [packages](../packages) | Runtime libraries and their resources; see the [architecture map](architecture.md#responsibilities) for each package's interface and responsibility |
 | [dev/compose.yaml](../dev/compose.yaml) | Local mail and memory service builds, containers, and volumes |
 | [dev/mail](../dev/mail) | Stalwart configuration and native provisioning plan |
-| [dev/memory](../dev/memory) | Memory image, SSH entry point, and local SSH preparation |
+| [dev/memory](../dev/memory) | Local SSH key and connection preparation |
+
+Each Zig library declares its module and dependencies in `build.zig` and `build.zig.zon`, with public exports in `src/root.zig`. When adding or moving a unit, update its consuming build declarations, the [root package's exported source paths](../build.zig.zon), and the architecture map. `apps/ivenna` links the libraries into one executable. The memory app is a separately deployed Nushell program built from its Containerfile.
 
 Build the application from the repository root:
 
@@ -72,9 +89,9 @@ zig build run
 
 ## Updating the kernel and middleware
 
-The executable embeds [system.md](../packages/agent/src/system.md), [tools.json](../packages/agent/src/tools.json), and [compaction.md](../packages/agent/src/compaction.md). Stop the kernel and run `zig build run` after editing code or these resources. Restart follows the [continuity contract](architecture.md#startup-and-interruption).
+The executable embeds the [model-facing resources](#model-facing-resources) from their owning packages. Stop the kernel and run `zig build run` after editing code or these resources. Restart follows the [continuity contract](architecture.md#startup-and-interruption).
 
-The memory [Containerfile](../dev/memory/Containerfile) installs [memory.nu](../packages/agent/src/memory.nu). After changing the handler, container contents, or SSH entry point, stop the kernel, rebuild the image, and recreate the memory service. These commands use the example engine from the [running guide](running.md#prerequisites-and-configuration):
+The memory [Containerfile](../apps/memory/Containerfile) installs [memory.nu](../apps/memory/src/memory.nu). After changing the handler, container contents, or SSH entry point, stop the kernel, rebuild the image, and recreate the memory service. These commands use the example engine from the [running guide](running.md#prerequisites-and-configuration):
 
 ```sh
 podman compose -f dev/compose.yaml build --pull --no-cache memory

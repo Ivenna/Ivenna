@@ -12,7 +12,7 @@ The following example requires `curl` and submits through the supplied local ser
 set -a
 . ./.env
 set +a
-curl --url "smtp://127.0.0.1:${MAIL_SMTP_PORT:-2525}" \
+curl --url "smtp://127.0.0.1:${MAIL_SMTP_PORT:-2525}" --crlf \
   --user "$OPERATOR_MAIL_ADDRESS:$OPERATOR_MAIL_PASSWORD" \
   --mail-from "$OPERATOR_MAIL_ADDRESS" \
   --mail-rcpt "$MAIL_ADDRESS" \

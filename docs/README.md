@@ -5,7 +5,7 @@ Choose a guide for your task:
 | Task | Guide |
 | --- | --- |
 | Understand the project's goals and interface principles | [Design intent](design.md) |
-| Trace execution and component ownership | [Architecture guide](architecture.md) |
+| Trace execution, package dependencies, and component ownership | [Architecture guide](architecture.md) |
 | Build from source, edit interfaces, and update middleware | [Development guide](development.md) |
 | Set up middleware, choose storage, and start Ivenna | [Running guide](running.md) |
 | Send messages and understand reception and responses | [Usage guide](usage.md) |

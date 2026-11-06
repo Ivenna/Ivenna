@@ -2,6 +2,8 @@
 
 Ivenna's YAML user messages contain retained records or a current request. Records preserve events, startup material, and handovers in working history. The request adds current state and, for summarization, instructions. [Input](../packages/agent/src/input.zig) defines both forms; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
+These YAML messages sit alongside retained model output and tool replies. The [architecture guide](architecture.md#records-context-and-current-requests) describes that complete history and its adapter-owned continuation data.
+
 ## Retained records
 
 A `Record` combines an event group with a list of context items:
@@ -16,7 +18,7 @@ The events and context fields can coexist. Each activation records its selected 
 
 Session identifiers are scoped to one kernel process. Forked history keeps the original records and their session identifiers. The current request identifies the session performing the inference.
 
-Each activation's record preserves its admitted event group and the order of those events in history. Each event keeps its own material, contacts, and provenance. See [activation admission](architecture.md#activation-admission) for how the runtime selects a group and handles later arrivals.
+Each activation's record preserves its admitted event group and the order of those events in history. Each input keeps its own material, contacts, and provenance within that group. See [activation admission](architecture.md#activation-admission) for how the runtime selects a group and handles later arrivals.
 
 ## Events and context items
 
@@ -34,15 +36,21 @@ A `Handover` contains `summary: Text` and `source: Resource | null`. The optiona
 
 `Event`, `ContextItem`, `Content`, and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` denotes a free-form string.
 
-For example, a fork's assignment forms a one-event group:
+For example, two arrivals can enter the core as one event group:
 
 ```yaml
-session_id: 2
+session_id: 1
 events:
-  - assignment:
-      task: Update the French practice plan.
-      from_session: 1
-      source_refs: []
+  - input:
+      content:
+        text: Keep practice sessions to 20 minutes.
+      contacts: []
+      source: null
+  - input:
+      content:
+        text: Include ten minutes of listening.
+      contacts: []
+      source: null
 context: []
 ```
 
@@ -53,7 +61,7 @@ session_id: 1
 events: []
 context:
   - handover:
-      summary: Keep each practice session to 20 minutes.
+      summary: Keep each practice session to 20 minutes, including ten minutes of listening.
       source: null
 ```
 
@@ -74,7 +82,7 @@ context:
 | `text` | `Text` | Complete inline content |
 | `excerpt` | `text: Text`, `full: Resource` | Included text and a reference to the full material |
 
-Both representations count toward the [whole-request budget](architecture.md#bounded-model-context).
+The [whole-request budget](architecture.md#bounded-model-context) counts the inline text and resource-reference fields.
 
 An optional `Source` contains:
 
@@ -101,9 +109,21 @@ An `Assignment` contains:
 | --- | --- |
 | `task` | Work for the receiving session to continue |
 | `from_session` | Direct parent that created the fork |
-| `source_refs` | References to relevant source material; defaults to an empty array |
+| `source_refs` | Source references carried by the transferred inputs and assignments; defaults to an empty array |
 
-An assignment describes the caller activation's whole work. Its source references collect relevant references from the group's inputs and assignments, and the child inherits the caller's retained history. See [fork ownership](architecture.md#forks-and-work-ownership) for publication, queueing, and context lifetimes.
+An assignment describes the caller activation's whole work, and the child inherits the caller's retained history. See [fork ownership](architecture.md#forks-and-work-ownership) for publication, queueing, and context lifetimes.
+
+The new session receives its assignment as a one-event group:
+
+```yaml
+session_id: 2
+events:
+  - assignment:
+      task: Update the French practice plan.
+      from_session: 1
+      source_refs: []
+context: []
+```
 
 A `Report` contains `from_session: u64` and `text: Text`, which may be empty. It carries a branch activation's combined result for its direct parent. The identifiers in fork results and reports let the parent associate results with the child that produced them.
 
@@ -117,7 +137,7 @@ Every inference appends one temporary `Request` after retained history:
 | `state` | `State` | Current session, execution counts, and response destination |
 | `instructions` | `Text` or null | Summary instructions; null for ordinary execution |
 
-The request adds current state alongside retained history or its handover, without replaying the events. Request state and summary instructions are discarded after inference; they are not appended to history or inherited by forks.
+Each inference receives the retained records and model/tool exchanges followed by this fresh state snapshot. Constructing the request does not add another event record. Request state and summary instructions are discarded after inference; they are not appended to history or inherited by forks.
 
 ### State and response destinations
 
@@ -126,9 +146,9 @@ The request adds current state alongside retained history or its handover, witho
 | Field | Meaning |
 | --- | --- |
 | `session.role` | `core` or `branch` |
-| `session.parent_generation` | Generation of inherited context, or null |
+| `session.parent_generation` | Parent context generation copied when the fork was published, or null |
 | `session.parent_session_id` | Session that created this fork, or null |
-| `session.active_children` | Child contexts retained under this session |
+| `session.active_children` | Direct child contexts retained under this session |
 | `runtime.active_sessions` | Retained contexts, including the core |
 | `runtime.running_sessions` | Sessions currently executing work |
 | `runtime.queued_inputs` | Deliveries waiting in queues |

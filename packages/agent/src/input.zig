@@ -92,7 +92,7 @@ pub const Record = struct {
     context: []const ContextItem = &.{},
 };
 
-/// Current state and optional instructions for one model request.
+/// Temporary current-state message appended for one inference.
 pub const Request = struct {
     session_id: u64,
     state: State,

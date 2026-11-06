@@ -1,0 +1,11 @@
+.{
+    .name = .responses,
+    .version = "0.1.0",
+    .fingerprint = 0x315f9f945362d8ca,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .agent = .{ .path = "../agent" },
+        .content = .{ .path = "../content" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

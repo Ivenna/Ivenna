@@ -1,7 +1,9 @@
 const std = @import("std");
-const content = @import("content.zig");
+const content = @import("content");
 
 const Allocator = std.mem.Allocator;
+const Tools = @import("agent").Tools;
+const Model = @import("agent").Model;
 const Value = std.json.Value;
 const Content = content.Content;
 const Interpretation = content.Interpretation;
@@ -10,6 +12,21 @@ pub const Memory = struct {
     io: std.Io,
     ssh_target: []const u8,
     ssh_config: ?[]const u8 = null,
+
+    /// Declarations belong to a and must outlive their registration with Engine.
+    pub fn tools(self: *Memory, a: Allocator) !Tools {
+        return .{
+            .context = self,
+            .invoke = invokeTool,
+            .declarations = try std.json.parseFromSliceLeaky([]const Model.Tool, a, @embedFile("tools.json"), .{}),
+        };
+    }
+
+    fn invokeTool(context: *anyopaque, a: Allocator, _: u64, name: []const u8, arguments: []const u8) anyerror!?Content {
+        const self: *Memory = @ptrCast(@alignCast(context));
+        const request = try Request.parse(a, name, arguments) orelse return null;
+        return try self.invoke(a, request);
+    }
 
     const MatchMode = enum { literal, regex };
 

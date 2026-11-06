@@ -1,7 +1,7 @@
 const std = @import("std");
 const Mail = @import("mail.zig");
 const MailSources = @import("mail_sources.zig").MailSources;
-const Input = @import("input.zig");
+const Input = @import("agent").Input;
 const Allocator = std.mem.Allocator;
 
 /// Track mail intake and store continuity handovers.
