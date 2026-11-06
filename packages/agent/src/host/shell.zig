@@ -105,15 +105,15 @@ pub const Shell = struct {
     }
 
     // TODO(process_sessions): design process state that outlives model-turn
-    // arenas, including how process handles relate to conversation identity.
+    // arenas, including how process handles relate to session identity.
     // TODO(stdin, pty, process_control): design incremental output, input/EOF,
     // terminal transport, interruption, and cleanup for that runtime.
-    // TODO(background_jobs): design completion delivery through Engine scheduling.
+    // TODO(background_jobs): design completion delivery through Kernel scheduling.
 
     pub fn run(self: Shell, a: Allocator, context: Context, args: Command) !Result {
         const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromMilliseconds(args.timeout_ms orelse default_timeout_ms), .clock = .awake });
-        const conversation = try std.fmt.allocPrint(a, "{d}", .{context.session_id});
-        const log_directory = try std.fs.path.join(a, &.{ self.data_directory, "host", conversation });
+        const session = try std.fmt.allocPrint(a, "{d}", .{context.session_id});
+        const log_directory = try std.fs.path.join(a, &.{ self.data_directory, "host", session });
         _ = try std.Io.Dir.cwd().createDirPathStatus(self.io, log_directory, .fromMode(0o700));
         var random: [16]u8 = undefined;
         self.io.random(&random);
