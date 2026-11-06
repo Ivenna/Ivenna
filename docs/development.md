@@ -54,10 +54,11 @@ Keep context release and stored-record retention independent. Follow the archite
 | --- | --- |
 | [apps/ivenna](../apps/ivenna) | Configuration, service status, application startup and shutdown |
 | [packages/agent](../packages/agent) | Work and session execution, communication contract and email adapter, internal mail state, native observations, model provider, host and memory tools |
-| [dev/mail](../dev/mail) | Stalwart Compose deployment and native provisioning plan |
-| [dev/memory](../dev/memory) | Memory container, SSH entry point, and local startup |
+| [dev/compose.yaml](../dev/compose.yaml) | Local mail and memory service builds, containers, and volumes |
+| [dev/mail](../dev/mail) | Stalwart configuration and native provisioning plan |
+| [dev/memory](../dev/memory) | Memory image, SSH entry point, and local SSH preparation |
 
-The application and mail integration build with Zig:
+Build the application from the repository root:
 
 ```sh
 zig build
@@ -73,17 +74,17 @@ zig build run
 
 The executable embeds [system.md](../packages/agent/src/system.md), [tools.json](../packages/agent/src/tools.json), and [compaction.md](../packages/agent/src/compaction.md). Stop the kernel and run `zig build run` after editing code or these resources. Restart follows the [continuity contract](architecture.md#startup-and-interruption).
 
-The memory [Containerfile](../dev/memory/Containerfile) installs [memory.nu](../packages/agent/src/memory.nu). After changing the handler, container contents, or SSH entry point, stop the kernel and recreate the memory container:
+The memory [Containerfile](../dev/memory/Containerfile) installs [memory.nu](../packages/agent/src/memory.nu). After changing the handler, container contents, or SSH entry point, stop the kernel, rebuild the image, and recreate the memory service. These commands use the example engine from the [running guide](running.md#prerequisites-and-configuration):
 
 ```sh
-dev/memory/start.sh down
-dev/memory/start.sh up
+podman compose -f dev/compose.yaml build --pull --no-cache memory
+podman compose -f dev/compose.yaml up -d --wait memory
 zig build run
 ```
 
-This retains the memory volume and SSH keys. For another workspace, update its handler and entry point as described in [remote memory setup](running.md#using-remote-memory).
+This retains the external memory volume and SSH keys. The build context includes only the memory image sources selected by [`.dockerignore`](../.dockerignore). For another workspace, update its handler and entry point as described in [remote memory setup](running.md#using-remote-memory).
 
-In [dev/mail](../dev/mail), `compose.yaml` defines normal Stalwart operation and `setup.yaml` enables the official CLI provisioning flow. Configuration lives in Stalwart's data store; `config.json` holds the store connection. Changes to the local provisioning plan can update server settings and account credentials. Apply them through the setup flow, then return to normal operation, retaining the mail volume. See [local mail setup](running.md#configuring-local-mail).
+Stalwart's account and policy configuration lives in its data store; [config.json](../dev/mail/config.json) selects that store. Apply provisioning-plan changes through [local mail setup](running.md#configuring-local-mail), then return to normal operation. Container recreation retains the stored configuration and mail.
 
 ## Validation
 

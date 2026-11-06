@@ -1,0 +1,7 @@
+# Only the memory image's source files belong in the build context.
+**
+!dev/memory/Containerfile
+!dev/memory/entrypoint.sh
+!dev/memory/memory-shell.sh
+!dev/memory/sshd_config
+!packages/agent/src/memory.nu

@@ -1,10 +1,12 @@
 # Running Ivenna
 
-Run Ivenna as a local service, with a mail account and an SSH workspace for autonomous memory. This guide prepares the supplied Stalwart and memory services, starts Ivenna, and checks whether reception is open. If using [existing mail](#using-an-existing-mail-service) or [remote memory](#using-remote-memory), configure that connection and skip the corresponding local service. Run commands from the repository root.
+Run the Ivenna kernel locally, with a mail account and an SSH workspace for autonomous memory. This guide covers configuration, service preparation, startup, and reception checks. Run commands from the repository root.
 
 ## Prerequisites and configuration
 
-Install the Zig version in [`.zig-version`](../.zig-version) and an OpenSSH client. The supplied local services also need Podman with a Compose provider. The first build and local service startup download dependencies and images. The default model provider is DeepSeek; supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`.
+Install the Zig version in [`.zig-version`](../.zig-version) and an OpenSSH client. The supplied local middleware uses [dev/compose.yaml](../dev/compose.yaml) with [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html); the examples below use Podman.
+
+The default model provider is DeepSeek; supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`.
 
 Create the configuration file:
 
@@ -12,9 +14,11 @@ Create the configuration file:
 cp -n .env.example .env
 ```
 
-Set `LLM_API_KEY`. The sample mail credentials match the [provisioning example](../dev/mail/provision.example.ndjson); keep them aligned with the private plan prepared below. The kernel authenticates with `MAIL_*`; the submission examples use `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` to send messages and read Ivenna's outgoing mail through a separate account.
+Set `LLM_API_KEY` and configure the mail and memory connections. The sample settings match the supplied local services. For [existing mail](#using-an-existing-mail-service) or [remote memory](#using-remote-memory), configure those connections and prepare only the services you run locally.
 
-The kernel and memory script read their process environment. Load `.env` in each terminal used for these commands, and reload it after editing its values:
+The kernel authenticates with `MAIL_*`; the [correspondence example](usage.md#sending-a-request) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account. Keep local account credentials aligned with the private [mail provisioning plan](#configuring-local-mail).
+
+The kernel, Compose, and memory preparation script use the exported configuration. Load `.env` in each terminal used for these commands, and reload it after editing its values:
 
 ```sh
 set -a
@@ -22,9 +26,22 @@ set -a
 set +a
 ```
 
-Git ignores the credential files `.env` and `dev/mail/provision.ndjson`, as well as the default `.ivenna/` data directory. The [configuration reference](#changing-configuration) distinguishes kernel settings from local service settings and records defaults when variables are unset.
+Git ignores the credential files `.env` and `dev/mail/provision.ndjson`, as well as the default `.ivenna/` data directory. The [kernel settings](#changing-configuration) and [local middleware settings](#local-middleware-settings) record their defaults and how to apply changes.
 
-## Configuring local mail
+## Preparing local services
+
+Before provisioning or starting local services for the first time, create their external data volumes:
+
+```sh
+podman volume create "${MAIL_VOLUME_NAME:-ivenna-mail}"
+podman volume create "${MEMORY_VOLUME_NAME:-ivenna-memory}"
+```
+
+Create only the corresponding volume when using one local service. Existing setups reuse their volumes. The [data reference](#local-data) lists their contents and the SSH files retained outside them.
+
+When replacing independently managed local middleware with this Compose project, stop the kernel and remove the old containers before the preparation below. Retain the named volumes and `.ivenna/dev-memory/` to reuse their data and SSH keys.
+
+### Configuring local mail
 
 Stalwart stores accounts and receiving policy in its data volume. Prepare a private provisioning plan before first use:
 
@@ -43,23 +60,18 @@ Set the account credentials in the plan and put the matching kernel and operator
 
 The plan also defines the `ivenna-ready` script and its `MtaStageRcpt` rule. Set the script's recipient to Ivenna's address and its readiness URL to an endpoint reachable from the mail container. The example uses `ivenna@ivenna.test` and `http://host.containers.internal:8090/readyz`; Compose maps that host name to the host. Keep the address and URL aligned with `MAIL_ADDRESS` and `SERVICE_ADDRESS`. See [reception readiness](#service-status-and-reception) for the policy's scope.
 
-For an existing private plan, compare it with the example while preserving the deployment's accounts, credentials, and domains. Include the readiness script, its RCPT rule, and the Domain's disabled `subAddressing` setting. Restarting a container does not update this stored policy.
-
-For a new deployment, load the updated `.env` and create the external mail volume:
-
-```sh
-podman volume create "${MAIL_VOLUME_NAME:-ivenna-mail}"
-```
+When updating a private plan, preserve the deployment's accounts, credentials, and domains. Keep the readiness gate for Ivenna's address and the domain's disabled `subAddressing` setting. Restarting a container does not update this stored policy.
 
 To apply the initial plan or later edits, stop the kernel, load the updated `.env`, and run:
 
 ```sh
-podman compose -f dev/mail/compose.yaml -f dev/mail/setup.yaml run --rm provision
+podman compose -f dev/compose.yaml -f dev/mail/setup.yaml up -d --wait mail
+podman compose -f dev/compose.yaml -f dev/mail/setup.yaml run --rm --no-deps provision
 ```
 
 The [setup override](../dev/mail/setup.yaml) starts Stalwart in recovery mode for the official CLI to apply the plan. `MAIL_SETUP_PASSWORD` controls the temporary setup credential; the administrator account in the plan supplies normal administration credentials. Applying the plan can replace account passwords.
 
-Continue with [normal startup](#starting-the-kernel), which recreates the mail service from [compose.yaml](../dev/mail/compose.yaml). Later starts reuse the volume and credentials; provisioning is needed when the stored configuration changes. Updates to kernel code, prompts, or service images follow the [development guide](development.md#updating-the-kernel-and-middleware).
+The mail service remains in recovery mode until [normal startup](#starting-the-kernel) recreates it without the setup override. Later starts reuse its stored configuration; apply the plan again when that configuration changes.
 
 The default local endpoints are:
 
@@ -71,6 +83,19 @@ The default local endpoints are:
 
 Published ports bind to loopback. The plan requires authenticated submission with a matching sender; its listener, spam, and rate policies are defined in the plan. Stalwart stores mail, accounts, and configuration in the external volume, which remains after the Compose containers are removed.
 
+### Configuring local memory
+
+Prepare the SSH connection and build the memory image from the current source:
+
+```sh
+dev/memory/prepare.sh
+podman compose -f dev/compose.yaml build memory
+```
+
+The preparation script creates or reuses the client and host keys under `.ivenna/dev-memory/` and writes the `ivenna-memory` SSH target to its `config` file, matching the sample `MEMORY_SSH_CONFIG`. It pins the generated host key for verification. The default endpoint is `127.0.0.1:2222`.
+
+Later starts reuse this image and connection. After changing the handler or container sources, follow the [memory rebuild steps](development.md#updating-the-kernel-and-middleware). Changes to the local port or capacity follow the [middleware settings](#local-middleware-settings).
+
 ## Mail intake
 
 Reserve the kernel account and its sending identity for Ivenna. Use the operator account, or another correspondent account, to send messages and receive Ivenna's outgoing mail. The kernel reads ordinary unprocessed correspondence across mail folders, including Archive. Drafts and messages in Junk or Trash are excluded, along with the runtime's own outgoing and internal state records.
@@ -79,27 +104,21 @@ Ivenna tracks processing with a private completion marker. Eligible mail without
 
 ## Starting the kernel
 
-After configuration, use the same commands for the first run and later starts:
+After preparing the services, load the configuration and start them with the kernel. The commands below start both local services. If only one is local, name it (`mail` or `memory`) in the Compose command; if both are external, skip that command.
 
 ```sh
 set -a
 . ./.env
 set +a
-podman compose -f dev/mail/compose.yaml up -d --wait mail
-dev/memory/start.sh up
+podman compose -f dev/compose.yaml up -d --wait
 zig build run
 ```
 
-On first creation, the memory script builds the image, prepares a volume and SSH keys, and waits for the handler to respond. It writes the `ivenna-memory` SSH target to `.ivenna/dev-memory/config`, matching the sample `MEMORY_SSH_CONFIG`. The default endpoint is `127.0.0.1:2222`. Subsequent starts reuse the container, volume, and keys. The script uses `CONTAINER_ENGINE`, set to `podman` in `.env.example`.
+Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers.
 
 `zig build run` builds and runs the kernel. Startup discovers the mail account and checks memory with a read-only space inspection. Both must succeed before Ivenna can run. Keep the kernel running in this terminal and use one kernel per mailbox. From a second terminal, check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message.
 
-For startup diagnostics, inspect the kernel's terminal output and the middleware state:
-
-```sh
-podman compose -f dev/mail/compose.yaml ps
-dev/memory/start.sh status
-```
+Startup diagnostics appear in the kernel's terminal and the `mail` and `memory` service logs.
 
 ## Service status and reception
 
@@ -133,8 +152,7 @@ An interrupted operation may already have changed files, memory, or mail. Inspec
 To remove the local middleware containers while retaining mail, memory, and SSH keys:
 
 ```sh
-podman compose -f dev/mail/compose.yaml down
-dev/memory/start.sh down
+podman compose -f dev/compose.yaml down
 ```
 
 Use [normal startup](#starting-the-kernel) to start the services and kernel again.
@@ -167,7 +185,7 @@ The settings below configure the kernel. Stop it, edit `.env`, reload the variab
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it. Numeric kernel settings must be positive. `CONTEXT_COMPACTION_BYTES` must be at least `CONTEXT_REQUEST_BYTES`. The work execution limit and retained-context limit are independent.
 
-Idle parents retained by ongoing forks count toward the context limit without occupying work execution slots. The same limit applies to each session's active and queued events plus results expected from forks. Grouping several events in one activation does not reduce how many count toward this limit. A value of one leaves room only for the core, so no fork can be admitted. When capacity is full, pending mail remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
+Parents waiting for descendants count toward the context limit without occupying execution slots. The same limit bounds each session's active and queued events plus expected fork results; batching events does not reduce that count. With `MAX_ATTENTION_CONTEXTS=1`, only the core fits and forking is unavailable. At capacity, pending mail remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling behavior.
 
 Request byte limits cover the whole serialized body, including instructions, tool definitions, history, and encoded images. They do not estimate model tokens. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
 
@@ -175,7 +193,7 @@ Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's star
 
 ## Local middleware settings
 
-These settings configure the supplied local services. Compose reads the mail settings; `dev/memory/start.sh` reads the memory settings. Stop the kernel before recreating a service.
+These settings configure the supplied local services in [dev/compose.yaml](../dev/compose.yaml). Stop the kernel before recreating a service.
 
 | Variable | Purpose | Default when unset |
 | --- | --- | --- |
@@ -184,32 +202,34 @@ These settings configure the supplied local services. Compose reads the mail set
 | `MAIL_HTTP_PORT` | Loopback HTTP/JMAP port | `8088` |
 | `MAIL_SMTP_PORT` | Loopback SMTP submission port | `2525` |
 | `MAIL_SETUP_PASSWORD` | Temporary recovery-mode credential | `local-setup-password` |
-| `CONTAINER_ENGINE` | Container CLI used by the memory script | Required; `.env.example` uses `podman` |
 | `MEMORY_SSH_PORT` | Loopback memory SSH port | `2222` |
 | `MEMORY_CONTAINER_NAME` | Memory container name | `ivenna-memory` |
-| `MEMORY_VOLUME_NAME` | Memory data volume | `ivenna-memory` |
+| `MEMORY_VOLUME_NAME` | Existing external memory data volume | `ivenna-memory` |
 | `MEMORY_IMAGE` | Memory image | `localhost/ivenna-memory:dev` |
 | `MEMORY_CAPACITY_BYTES` | Shared memory-room capacity | `1073741824` (1 GiB) |
 
 If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Account and server policy changes belong in the private provisioning plan; apply them through [local mail setup](#configuring-local-mail).
 
-Memory port, image, and capacity changes take effect when the memory container is created. Remove the existing container with its current settings using `dev/memory/start.sh down`, then load the changed settings and run `up`. The volume and SSH keys are retained. For a remote memory workspace, configure capacity at its entry point; see [memory space](memory.md#memory-space).
+After changing service settings, reload `.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed.
+
+Source changes inside the memory image require a [rebuild](development.md#updating-the-kernel-and-middleware). For a remote memory workspace, configure capacity at its entry point; see [memory space](memory.md#memory-space).
 
 ## Local data
 
-`DATA_DIR` selects the kernel's artifact and contact directory. The kernel creates it with private permissions when missing. Mail storage, the memory workspace, and the local memory script's state have separate locations:
+`DATA_DIR` selects the kernel's artifact and contact directory. The kernel creates it with private permissions when missing. Mail storage, the memory workspace, and local SSH connection files have separate locations:
 
 | Location | Contents |
 | --- | --- |
 | Stalwart volume, `ivenna-mail` by default | Mail, handovers, accounts, and Stalwart configuration |
+| Memory volume, `ivenna-memory` by default | Shared memory rooms and entries for the local service |
 | `dev/mail/provision.ndjson` | Private mail configuration plan |
 | `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
 | `<DATA_DIR>/sources/` | Captured input text and decoded mail snapshots |
 | `<DATA_DIR>/contacts/` | Persistent mappings from contact references to delivery addresses |
 | `.ivenna/dev-memory/` | Local memory SSH configuration and keys |
-| Memory workspace selected by SSH configuration | Shared memory rooms and entries |
+| Remote memory workspace, when configured | Shared memory rooms and entries |
 
-Changing `DATA_DIR` changes where the kernel writes artifacts; it does not move existing files, middleware volumes, or the memory script's state under the repository's `.ivenna/dev-memory/` directory.
+Changing `DATA_DIR` changes where the kernel writes artifacts; it does not move existing files, middleware volumes, or the SSH connection files under the repository's `.ivenna/dev-memory/` directory.
 
 Contact mappings let retained recipient references remain usable after a working context ends or the source cache is cleared. Preserve these files when moving deployment data; removing a mapping can make a retained reference unavailable for sending.
 
@@ -229,7 +249,7 @@ Correspondence and core state records share the mailbox. The [intake rules](#mai
 
 ## Using remote memory
 
-Configure SSH to an existing workspace and skip `dev/memory/start.sh up`. Set `MEMORY_SSH_TARGET` to its SSH target. Set `MEMORY_SSH_CONFIG` to a dedicated file, or remove it from `.env` and unset its exported value to use normal OpenSSH configuration:
+Configure SSH to an existing workspace and skip local memory preparation and startup. Set `MEMORY_SSH_TARGET` to its SSH target. Set `MEMORY_SSH_CONFIG` to a dedicated file, or remove it from `.env` and unset its exported value to use normal OpenSSH configuration:
 
 ```sh
 unset MEMORY_SSH_CONFIG
