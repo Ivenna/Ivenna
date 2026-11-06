@@ -16,9 +16,13 @@ During development, do not write tests in advance or introduce test frameworks. 
 
 ### Packages and dependencies
 
-Organize packages around cohesive capabilities, keeping their types, rules, resources, and implementation together. Public interfaces should let callers use a capability without coordinating its internal components. Keep supporting mechanisms with their owning capability. Applications own program startup, configuration, and deployment.
+Organize packages around cohesive capabilities, keeping their types, rules, resources, and implementation together. Public interfaces should let callers use a capability without coordinating its internal components. Keep supporting mechanisms with their owning capability. Applications select implementations, load deployment settings, and own program startup and shutdown.
 
-Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities). Keep execution policy and its contracts in `packages/agent`. Concrete capabilities implement `Inbox`, `Communication.Sender`, `HandoverStore`, `Model.Port`, and `Tools`; `apps/ivenna` selects and assembles them. Capability packages depend on agent contracts, and the agent uses those contracts without importing their implementations.
+Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities). Shared material types and the `Inbox`, `Communication.Sender`, `HandoverStore`, `Model.Port`, and `Tools` contracts belong to `packages/agent_contracts`. The execution core and capability implementations depend on that package; `apps/ivenna` selects and assembles the implementations. Update producers and consumers together when changing a shared type or operation.
+
+Keep execution policy, model-input rendering, prompts, and runtime tool declarations in `packages/agent`. The agent exposes `Kernel`, `Engine`, and its own `Input` schemas and renderer.
+
+Keep configuration with the behavior it controls. `Kernel.Config` and `Kernel.Limits` belong to execution; connection settings and protocol parameters belong to their capability packages. The application translates environment values into those configurations and owns HTTP listener settings.
 
 ### Types and protocols
 
@@ -26,11 +30,15 @@ Decode external protocols in their owning components and give execution code typ
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
-[Input](../packages/agent/src/input.zig) owns model-input types and YAML rendering. Construct typed payloads at their owning boundaries and use the renderer for model messages. [Work](../packages/agent/src/work.zig) owns delivery events and private consumption receipts. [Communication](../packages/agent/src/communication.zig) defines recipient references and outgoing messages; the adapter resolves references to native destinations. The [input contract](input.md) documents serialized fields.
+[Material](../packages/agent_contracts/src/material.zig) defines observation content and provenance with contact and resource references. [Inbox](../packages/agent_contracts/src/inbox.zig) owns the incoming observation and receipt envelope. Construct these typed values at their producing boundary. [Communication](../packages/agent_contracts/src/communication.zig) defines recipient references and outgoing messages; the adapter resolves references to native destinations.
 
-[Content](../packages/content/src/root.zig) owns tool-result text and image types, byte-source classification, and explicit image reference interpretation. Input material's text and excerpt variants belong to Input; tool results use Content's parts.
+[Input](../packages/agent/src/input.zig) owns event groups, assignments, reports, execution state, and YAML rendering. Its records incorporate shared material and handover values; temporary requests add current state and instructions. [Work](../packages/agent/src/work.zig) owns delivery and activation lifetimes inside the core. The [input contract](input.md) documents the serialized fields.
 
-[Model](../packages/agent/src/model.zig) defines native history items and model operations. Keep messages and tool results typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields. The model adapter measures requests with the same encoder it uses to send them, including declarations and content.
+[Content](../packages/content/src/root.zig) owns tool-result text and image types, byte-source classification, and explicit image reference interpretation. Observation text and excerpts use `MaterialContent`; tool results use Content's parts. Content is the sole package dependency of `agent_contracts`.
+
+[Model](../packages/agent_contracts/src/model.zig) defines native history items and model operations. Keep messages and tool results typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields. The model adapter measures requests with the same encoder it uses to send them, including declarations and content.
+
+`Model.Request` passes the assembled message sequence and selected tool declarations to the model adapter. `Input.Request` supplies one temporary YAML state message in that sequence. Input renders this message; the model adapter encodes the complete model-service payload.
 
 ### Model-facing resources
 

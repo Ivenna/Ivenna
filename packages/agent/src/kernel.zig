@@ -5,9 +5,9 @@ const Engine = @import("engine.zig").Engine;
 const Content = @import("content").Content;
 const Input = @import("input.zig");
 const Sessions = @import("sessions.zig");
-const Communication = @import("communication.zig");
-const Integration = @import("integration.zig");
-const Model = @import("model.zig");
+const contracts = @import("agent_contracts");
+const Communication = contracts.Communication;
+const Model = contracts.Model;
 const Allocator = std.mem.Allocator;
 const Session = Sessions.Session;
 const Work = Sessions.Work;
@@ -18,9 +18,9 @@ pub const Kernel = struct {
     allocator: Allocator,
     io: std.Io,
     engine: *Engine,
-    inbox: Integration.Inbox,
+    inbox: contracts.Inbox,
     sender: Communication.Sender,
-    handovers: Integration.HandoverStore,
+    handovers: contracts.HandoverStore,
     limits: Limits,
     poll_interval_ms: u32,
     max_parallel: usize,
@@ -35,9 +35,9 @@ pub const Kernel = struct {
 
     pub const Dependencies = struct {
         engine: *Engine,
-        inbox: Integration.Inbox,
+        inbox: contracts.Inbox,
         sender: Communication.Sender,
-        handovers: Integration.HandoverStore,
+        handovers: contracts.HandoverStore,
     };
 
     pub const Config = struct {

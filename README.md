@@ -14,4 +14,4 @@ Start with the [running guide](docs/running.md) to configure model access, mail,
 
 ## Development
 
-The monorepo contains the Ivenna application, the remote memory service, and their runtime libraries. The [development guide](docs/development.md) covers conventions, builds, and application updates; the [architecture guide](docs/architecture.md) explains package boundaries, dependencies, and execution ownership. See the [documentation index](docs/README.md) for interface and operational references.
+The monorepo contains the Ivenna application, the remote memory service, and runtime libraries for execution, shared contracts, and concrete capabilities. The [development guide](docs/development.md) covers conventions, builds, and application updates; the [architecture guide](docs/architecture.md) explains package boundaries, dependencies, and execution ownership. See the [documentation index](docs/README.md) for interface and operational references.

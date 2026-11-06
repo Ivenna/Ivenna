@@ -3,8 +3,8 @@ const Shell = @import("shell.zig").Shell;
 const Content = @import("content").Content;
 
 const Allocator = std.mem.Allocator;
-const Tools = @import("agent").Tools;
-const Model = @import("agent").Model;
+const Tools = @import("agent_contracts").Tools;
+const Model = @import("agent_contracts").Model;
 
 /// Routes host operations and returns content owned by the current turn.
 pub const Host = struct {

@@ -1,6 +1,5 @@
 const std = @import("std");
-const Input = @import("input.zig");
-const Work = @import("work.zig");
+const Material = @import("material.zig").Material;
 const Allocator = std.mem.Allocator;
 
 /// External observations and their opaque consumption receipts. Returned values
@@ -9,11 +8,16 @@ pub const Inbox = struct {
     context: *anyopaque,
     vtable: *const VTable,
 
-    pub const Incoming = Work.Incoming;
+    /// An arrival with an optional opaque receipt for consumption bookkeeping.
+    /// The receipt is independent of the material's source provenance.
+    pub const Incoming = struct {
+        input: Material,
+        receipt: ?[]const u8 = null,
+    };
 
     pub const VTable = struct {
         poll: *const fn (*anyopaque, Allocator, usize, usize) anyerror![]const Incoming,
-        recent: *const fn (*anyopaque, Allocator, usize) anyerror![]const Input.Material,
+        recent: *const fn (*anyopaque, Allocator, usize) anyerror![]const Material,
         complete: *const fn (*anyopaque, Allocator, []const u8) anyerror!void,
         releaseUnused: *const fn (*anyopaque, []const []const u8) anyerror!void,
     };
@@ -22,7 +26,7 @@ pub const Inbox = struct {
         return self.vtable.poll(self.context, a, limit, excerpt_bytes);
     }
 
-    pub fn recent(self: Inbox, a: Allocator, limit: usize) ![]const Input.Material {
+    pub fn recent(self: Inbox, a: Allocator, limit: usize) ![]const Material {
         return self.vtable.recent(self.context, a, limit);
     }
 
@@ -34,26 +38,5 @@ pub const Inbox = struct {
     /// artifacts and stored correspondence keep their independent lifetimes.
     pub fn releaseUnused(self: Inbox, retained: []const []const u8) !void {
         return self.vtable.releaseUnused(self.context, retained);
-    }
-};
-
-/// Durable handovers reconstruct understanding after startup. This contract
-/// does not persist execution checkpoints or restore work-session identities.
-/// Loaded values belong to the supplied allocator.
-pub const HandoverStore = struct {
-    context: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        load: *const fn (*anyopaque, Allocator, []const u8, usize) anyerror!?Input.Handover,
-        save: *const fn (*anyopaque, Allocator, []const u8, []const u8) anyerror!void,
-    };
-
-    pub fn load(self: HandoverStore, a: Allocator, key: []const u8, limit: usize) !?Input.Handover {
-        return self.vtable.load(self.context, a, key, limit);
-    }
-
-    pub fn save(self: HandoverStore, a: Allocator, key: []const u8, summary: []const u8) !void {
-        return self.vtable.save(self.context, a, key, summary);
     }
 };

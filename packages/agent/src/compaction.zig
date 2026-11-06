@@ -1,5 +1,5 @@
 const std = @import("std");
-const Model = @import("model.zig");
+const Model = @import("agent_contracts").Model;
 const Input = @import("input.zig");
 const Context = @import("context.zig").Context;
 const Allocator = std.mem.Allocator;

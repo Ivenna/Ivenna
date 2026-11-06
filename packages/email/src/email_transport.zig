@@ -1,8 +1,8 @@
 const std = @import("std");
 const Mail = @import("mail.zig");
 const MailSources = @import("mail_sources.zig").MailSources;
-const Input = @import("agent").Input;
-const Communication = @import("agent").Communication;
+const Material = @import("agent_contracts").Material;
+const Communication = @import("agent_contracts").Communication;
 const Allocator = std.mem.Allocator;
 
 /// Exchange messages with the outside world. MailState owns input consumption
@@ -16,12 +16,12 @@ pub const EmailTransport = struct {
         return .{ .io = io, .mailbox = mailbox, .sources = sources };
     }
 
-    pub fn receive(self: *EmailTransport, a: Allocator, receipt: []const u8, limit: usize) !Input.Material {
+    pub fn receive(self: *EmailTransport, a: Allocator, receipt: []const u8, limit: usize) !Material {
         return self.project(a, try self.sources.lookup(a, receipt), limit);
     }
 
-    pub fn recent(self: *EmailTransport, a: Allocator, limit: usize) ![]const Input.Material {
-        var result: std.ArrayList(Input.Material) = .empty;
+    pub fn recent(self: *EmailTransport, a: Allocator, limit: usize) ![]const Material {
+        var result: std.ArrayList(Material) = .empty;
         for (try self.mailbox.recent(a, limit)) |letter|
             try result.append(a, try self.project(a, letter, 512));
         return result.toOwnedSlice(a);
@@ -47,7 +47,7 @@ pub const EmailTransport = struct {
         return .{ .reference = try reference(a, "submission", &.{ self.mailbox.session_url, self.mailbox.account_id, submission.mail_id }) };
     }
 
-    fn project(self: *EmailTransport, a: Allocator, letter: Mail.Letter, limit: usize) !Input.Material {
+    fn project(self: *EmailTransport, a: Allocator, letter: Mail.Letter, limit: usize) !Material {
         const text = if (letter.subject.len == 0)
             letter.body
         else

@@ -1,5 +1,5 @@
 const std = @import("std");
-const agent = @import("agent");
+const contracts = @import("agent_contracts");
 const Mailbox = @import("mail.zig").Mailbox;
 const MailSources = @import("mail_sources.zig").MailSources;
 const EmailTransport = @import("email_transport.zig").EmailTransport;
@@ -44,26 +44,26 @@ pub const Integration = struct {
         self.* = undefined;
     }
 
-    pub fn inbox(self: *Integration) agent.Inbox {
+    pub fn inbox(self: *Integration) contracts.Inbox {
         return .{ .context = self, .vtable = &inbox_vtable };
     }
 
-    pub fn sender(self: *Integration) agent.Communication.Sender {
+    pub fn sender(self: *Integration) contracts.Communication.Sender {
         return .{ .context = self, .submit = submit };
     }
 
-    pub fn handovers(self: *Integration) agent.HandoverStore {
+    pub fn handovers(self: *Integration) contracts.HandoverStore {
         return .{ .context = self, .vtable = &handover_vtable };
     }
 
-    const inbox_vtable: agent.Inbox.VTable = .{
+    const inbox_vtable: contracts.Inbox.VTable = .{
         .poll = poll,
         .recent = recent,
         .complete = complete,
         .releaseUnused = releaseUnused,
     };
 
-    const handover_vtable: agent.HandoverStore.VTable = .{
+    const handover_vtable: contracts.HandoverStore.VTable = .{
         .load = loadHandover,
         .save = saveHandover,
     };
@@ -72,10 +72,10 @@ pub const Integration = struct {
         return @ptrCast(@alignCast(context));
     }
 
-    fn poll(context: *anyopaque, a: Allocator, limit: usize, excerpt_bytes: usize) ![]const agent.Inbox.Incoming {
+    fn poll(context: *anyopaque, a: Allocator, limit: usize, excerpt_bytes: usize) ![]const contracts.Inbox.Incoming {
         const self = fromContext(context);
         const pending = try self.state.pending(a, limit);
-        const incoming = try a.alloc(agent.Inbox.Incoming, pending.len);
+        const incoming = try a.alloc(contracts.Inbox.Incoming, pending.len);
         for (pending, incoming) |candidate, *item| item.* = .{
             .input = try self.transport.receive(a, candidate.receipt, excerpt_bytes),
             .receipt = candidate.receipt,
@@ -83,7 +83,7 @@ pub const Integration = struct {
         return incoming;
     }
 
-    fn recent(context: *anyopaque, a: Allocator, limit: usize) ![]const agent.Input.Material {
+    fn recent(context: *anyopaque, a: Allocator, limit: usize) ![]const contracts.Material {
         return fromContext(context).transport.recent(a, limit);
     }
 
@@ -95,11 +95,11 @@ pub const Integration = struct {
         return fromContext(context).sources.sweep(retained);
     }
 
-    fn submit(context: *anyopaque, a: Allocator, message: agent.Communication.Message) !agent.Communication.Submission {
+    fn submit(context: *anyopaque, a: Allocator, message: contracts.Communication.Message) !contracts.Communication.Submission {
         return fromContext(context).transport.send(a, message);
     }
 
-    fn loadHandover(context: *anyopaque, a: Allocator, key: []const u8, limit: usize) !?agent.Input.Handover {
+    fn loadHandover(context: *anyopaque, a: Allocator, key: []const u8, limit: usize) !?contracts.Handover {
         return fromContext(context).state.loadHandover(a, key, limit);
     }
 

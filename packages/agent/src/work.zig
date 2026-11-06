@@ -2,11 +2,6 @@ const std = @import("std");
 const Input = @import("input.zig");
 const Allocator = std.mem.Allocator;
 
-pub const Incoming = struct {
-    input: Input.Material,
-    receipt: ?[]const u8 = null,
-};
-
 pub const Delivery = struct {
     arena: std.heap.ArenaAllocator,
     event: Input.Event,

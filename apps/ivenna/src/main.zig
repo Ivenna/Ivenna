@@ -1,5 +1,6 @@
 const std = @import("std");
 const agent = @import("agent");
+const contracts = @import("agent_contracts");
 const email = @import("email");
 const responses = @import("responses");
 const host = @import("host");
@@ -40,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
         .model = config.llm_model,
         .max_output_tokens = config.llm_max_output_tokens,
     };
-    const tools = [_]agent.Tools{ try memory_client.tools(a), try host_tools.tools(a) };
+    const tools = [_]contracts.Tools{ try memory_client.tools(a), try host_tools.tools(a) };
     var engine: agent.Engine = .{
         .io = io,
         .model = provider.port(),

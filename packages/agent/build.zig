@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const yaml = b.dependency("yaml", .{ .target = target, .optimize = optimize });
     const content = b.dependency("content", .{ .target = target, .optimize = optimize });
+    const contracts = b.dependency("agent_contracts", .{ .target = target, .optimize = optimize });
     _ = b.addModule("agent", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -12,6 +13,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "yaml", .module = yaml.module("yaml") },
             .{ .name = "content", .module = content.module("content") },
+            .{ .name = "agent_contracts", .module = contracts.module("agent_contracts") },
         },
     });
 }

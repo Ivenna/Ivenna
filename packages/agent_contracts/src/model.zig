@@ -30,15 +30,14 @@ pub const Tool = struct {
     parameters: std.json.Value,
 };
 
+/// History and selected tool declarations borrowed for one model operation.
 pub const Request = struct {
     history: []const Item,
     tools: []const Tool,
 };
 
-/// All returned values belong to the supplied allocator. The application keeps
-/// the implementation alive until every model request has been joined.
-/// The provider measures exactly the payload it sends. Content limits apply
-/// to a complete tool batch; the replies slice aliases history's mutable tail.
+/// The application keeps the implementation alive until every model request
+/// has been joined. Each operation borrows its request data for the call.
 pub const Port = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -49,14 +48,18 @@ pub const Port = struct {
         limitToolReplies: *const fn (*anyopaque, Allocator, Request, []Item) anyerror!void,
     };
 
+    /// Returned output, calls, and text belong to a.
     pub fn next(self: Port, a: Allocator, request: Request) !Response {
         return self.vtable.next(self.context, a, request);
     }
 
+    /// Measure the complete request using the same encoding as next.
     pub fn requestBytes(self: Port, a: Allocator, request: Request) !u64 {
         return self.vtable.requestBytes(self.context, a, request);
     }
 
+    /// Apply model content limits to a complete tool batch. replies aliases
+    /// the mutable tail of request.history; newly allocated content uses a.
     pub fn limitToolReplies(self: Port, a: Allocator, request: Request, replies: []Item) !void {
         return self.vtable.limitToolReplies(self.context, a, request, replies);
     }

@@ -1,6 +1,5 @@
 const std = @import("std");
-const agent = @import("agent");
-const Model = agent.Model;
+const Model = @import("agent_contracts").Model;
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;

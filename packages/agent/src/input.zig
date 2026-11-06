@@ -1,40 +1,11 @@
 const std = @import("std");
 const yaml = @import("yaml");
-const Communication = @import("communication.zig");
+const contracts = @import("agent_contracts");
 const Allocator = std.mem.Allocator;
+const Material = contracts.Material;
+const Handover = contracts.Handover;
 
 pub const Role = enum { core, branch };
-
-pub const Resource = struct {
-    file: []const u8,
-    byte_length: usize,
-};
-
-pub const Content = union(enum) {
-    text: []const u8,
-    excerpt: struct {
-        text: []const u8,
-        full: Resource,
-    },
-};
-
-pub const Source = struct {
-    reference: []const u8,
-    description: ?[]const u8 = null,
-    observed_at_unix_ms: ?i64 = null,
-    details: ?Resource = null,
-};
-
-pub const Material = struct {
-    content: Content,
-    contacts: []const Communication.Contact = &.{},
-    source: ?Source = null,
-};
-
-pub const Handover = struct {
-    summary: []const u8,
-    source: ?Resource = null,
-};
 
 pub const Assignment = struct {
     task: []const u8,

@@ -1,8 +1,8 @@
 # Model input and response scope
 
-Ivenna's YAML user messages contain retained records or a current request. Records preserve events, startup material, and handovers in working history. The request adds current state and, for summarization, instructions. [Input](../packages/agent/src/input.zig) defines both forms; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+Ivenna's YAML user messages contain retained records or a current request. Records preserve events, startup material, and handovers in working history. The request adds current state and, for summarization, instructions. These YAML messages sit alongside retained model output and tool replies; the [architecture guide](architecture.md#records-context-and-current-requests) describes that complete history and its adapter-owned continuation data.
 
-These YAML messages sit alongside retained model output and tool replies. The [architecture guide](architecture.md#records-context-and-current-requests) describes that complete history and its adapter-owned continuation data.
+The core's [Input](../packages/agent/src/input.zig) module defines the record and request structures and renders them as YAML. Shared [material](../packages/agent_contracts/src/material.zig) and [handover](../packages/agent_contracts/src/handover.zig) types supply their native payloads. The [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
 ## Retained records
 
@@ -34,7 +34,7 @@ Each activation's record preserves its admitted event group and the order of tho
 
 A `Handover` contains `summary: Text` and `source: Resource | null`. The optional source identifies stored material behind the summary. Generated handovers use `source: null`.
 
-`Event`, `ContextItem`, `Content`, and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` denotes a free-form string.
+`Event`, `ContextItem`, `MaterialContent`, and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` denotes a free-form string.
 
 For example, two arrivals can enter the core as one event group:
 
@@ -67,15 +67,17 @@ context:
 
 ## Material and provenance
 
-`Material` represents both incoming content and supporting evidence:
+The shared `Material` type represents both incoming content and supporting evidence. Adapters supply new arrivals in an [Inbox.Incoming](../packages/agent_contracts/src/inbox.zig) envelope, which can also carry an opaque consumption receipt. The runtime keeps receipts for processing bookkeeping; only the material enters the YAML `input` event.
+
+`Material` contains:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `content` | `Content` | Material for the receiving session |
+| `content` | `MaterialContent` | Material for the receiving session |
 | `contacts` | `Contact[]` | Available recipients; defaults to an empty array |
 | `source` | `Source` or null | Optional provenance |
 
-`Content` has two branches:
+`MaterialContent` has two branches:
 
 | Branch | Payload | Meaning |
 | --- | --- | --- |
@@ -97,7 +99,7 @@ A `Resource` has `file: Text` and `byte_length: usize`. It identifies a file and
 
 ## Contacts and outgoing messages
 
-[Communication](../packages/agent/src/communication.zig) defines a `Contact` with `reference: Text` and `description: Text | null` (default null). Its reference identifies a recipient for `send_message`; its description provides human-readable context. Contacts and source provenance are independent. Material can have either, both, or neither.
+[Communication](../packages/agent_contracts/src/communication.zig) defines a `Contact` with `reference: Text` and `description: Text | null` (default null). Its reference identifies a recipient for `send_message`; its description provides human-readable context. Contacts and source provenance are independent. Material can have either, both, or neither.
 
 Outgoing messages use [the communication tool](communication.md#sending-a-message). Sending is an explicit external action; an activation's final text is a core result or a report to its parent.
 

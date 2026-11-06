@@ -1,6 +1,7 @@
 const std = @import("std");
 const Input = @import("input.zig");
-const Model = @import("model.zig");
+const contracts = @import("agent_contracts");
+const Model = contracts.Model;
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
@@ -75,7 +76,7 @@ pub const Context = struct {
     /// Replace the entire earlier working view with system instructions and a
     /// handover record. The caller validates the complete request budget and
     /// owns the handover's storage policy.
-    pub fn withHandover(self: *const Context, allocator: Allocator, session_id: u64, handover: Input.Handover) !Context {
+    pub fn withHandover(self: *const Context, allocator: Allocator, session_id: u64, handover: contracts.Handover) !Context {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const a = arena.allocator();

@@ -10,7 +10,8 @@ The [design intent](design.md) explains these choices. The [input contract](inpu
 | --- | --- |
 | [apps/ivenna](../apps/ivenna) | Configure and assemble the runtime, serve HTTP status, and own process startup and shutdown |
 | [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
-| [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activations, forks, and retained history; define communication, continuity, model, and tool contracts |
+| [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activations, forks, and retained history; own model-input rendering, execution policy, and model-facing resources |
+| [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the native material and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Implement communication and continuity through mail, owning native records, contacts, source artifacts, and receipt caches |
 | [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, validate Responses output, and apply model content limits |
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own shell execution, process cleanup, logs, and returned output |
@@ -19,40 +20,47 @@ The [design intent](design.md) explains these choices. The [input contract](inpu
 
 `apps/ivenna` links the libraries into one process. Its [HTTP listener](../apps/ivenna/src/service.zig) runs alongside the kernel and shares the application's shutdown scope. `apps/memory` is a separate program reached through SSH; its handler and image sources live together, while local service orchestration remains in `dev`.
 
-The agent defines the contracts used by concrete capabilities. Content supplies the shared tool-result representation and image recognition; YAML supplies model-input rendering. The build declarations enforce the following module dependencies. Arrows show imports, not runtime message flow:
+The execution core and concrete capabilities share `agent_contracts`, which depends only on Content. Content supplies tool-result text and image representation and source classification. YAML rendering belongs to the agent. The build declarations enforce the following module dependencies; each arrow points from a module to one it imports:
 
 ```mermaid
 flowchart TD
     App[apps/ivenna] --> Agent[packages/agent]
+    App --> Contracts[packages/agent_contracts]
     App --> Email[packages/email]
     App --> Responses[packages/responses]
     App --> Host[packages/host]
     App --> Memory[packages/memory]
-    Email --> Agent
-    Responses --> Agent
-    Host --> Agent
-    Memory --> Agent
+    Agent --> Contracts
+    Email --> Contracts
+    Responses --> Contracts
+    Host --> Contracts
+    Memory --> Contracts
     Host --> Content[packages/content]
     Memory --> Content
     Responses --> Content
     Agent --> Content
+    Contracts --> Content
     Content --> Zignal[Zignal]
     Agent --> YAML[YAML]
 ```
 
-The agent's public contracts keep capability operations separate from their native protocols:
+At runtime, the application supplies concrete capability implementations to the core through these contracts. Kernel calls the input, sending, and handover operations; Engine calls the model and registered tools. These calls dispatch to the supplied implementations, whose code runs in the same process.
+
+The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer. Session scheduling, owned deliveries, activations, and retained context remain core implementation details. `Kernel.Config` and `Kernel.Limits` describe execution policy. Connection settings and protocol parameters belong to their capability packages; the application loads environment values and owns HTTP listener settings.
+
+Shared [material types](../packages/agent_contracts/src/material.zig) describe observations with content, contacts, and provenance; [handovers](../packages/agent_contracts/src/handover.zig) carry continued understanding. The shared capability contracts define calls and data exchanged within the process. The core owns the YAML supplied to the model, and each adapter owns its external protocol encoding:
 
 | Contract | Operations | Implementation |
 | --- | --- | --- |
-| [Inbox](../packages/agent/src/integration.zig) | Poll observations with opaque receipts, supply recent material, record consumption, and release unused delivery handles | Email integration |
-| [Communication.Sender](../packages/agent/src/communication.zig) | Submit explicit outgoing messages using contact references | Email integration |
-| [HandoverStore](../packages/agent/src/integration.zig) | Load and save handovers by state key | Email integration |
-| [Model.Port](../packages/agent/src/model.zig) | Infer, measure the encoded request, and apply model content limits | Responses adapter |
-| [Tools](../packages/agent/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host and Memory |
+| [Inbox](../packages/agent_contracts/src/inbox.zig) | Poll `Inbox.Incoming` observations with opaque receipts, supply recent material, record consumption, and release unused delivery handles | Email integration |
+| [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Submit explicit outgoing messages using contact references | Email integration |
+| [HandoverStore](../packages/agent_contracts/src/handover.zig) | Load and save handovers by state key | Email integration |
+| [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure the encoded request, and apply model content limits | Responses adapter |
+| [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host and Memory |
 
 The email integration implements three contracts over one shared mail client and source cache. Correspondence and handovers keep their own semantics and retention within that resource. The kernel uses these operations without inspecting mail headers, folders, or native delivery identifiers.
 
-The email adapter supplies native material with content, contacts, optional provenance, and an opaque physical receipt. [Work](../packages/agent/src/work.zig) owns the delivery's event and receipts; Sessions tracks receipts to prevent duplicate intake while messages remain visible to polling. A fork's assignment can hold the receipts of several original inputs. The kernel records their consumption through `Inbox` when processing completes. Model-facing input and communication use the native contracts independently of mail records or thread identifiers.
+The email adapter supplies `Inbox.Incoming` with native material and an opaque physical receipt. Inside the core, [Work](../packages/agent/src/work.zig) owns the accepted delivery's event and receipts; Sessions tracks receipts to prevent duplicate intake while messages remain visible to polling. A fork's assignment can hold the receipts of several original inputs. The kernel records their consumption through `Inbox` when processing completes. Model-facing input and communication use the native contracts independently of mail records or thread identifiers.
 
 The application owns service, kernel, and shutdown tasks. The [kernel](../packages/agent/src/kernel.zig) owns intake and execution tasks within that scope. Task failures close reception and cancel and join concurrent work before shared dependencies are released. The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
 
@@ -106,7 +114,7 @@ Session identifiers, queues, and report reservations last for one kernel process
 
 ## Records, context, and current requests
 
-[Input](../packages/agent/src/input.zig) defines and renders retained `Record` messages and temporary `Request` messages. The [input contract](input.md) owns their payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+[Input](../packages/agent/src/input.zig) defines and renders retained `Record` messages and temporary `Request` messages. Records incorporate shared material and handover types from `agent_contracts`; requests supply current state and instructions. Event grouping, assignments, reports, and execution state belong to the core. The [input contract](input.md) owns their serialized payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
 Sessions fixes the selected delivery group, returns the unselected suffix, and installs the selected history under the registry lock. [Context](../packages/agent/src/context.zig) owns retained `Model.Item` values: native system and user messages, opaque adapter continuation bytes, and typed tool results. Continuations retain complete model output, including reasoning, in the producing adapter's format. Context copies those bytes without interpreting them; they remain meaningful to that adapter for the retained context's lifetime. Startup recollection records the core handover and recent correspondence as supporting context. Forks copy retained history with its original session identifiers.
 
@@ -118,7 +126,7 @@ For each inference, the kernel takes an owned history snapshot and obtains curre
 
 Memory and Host return content in the model-round arena. [Engine](../packages/agent/src/engine.zig) creates a native tool result with its call ID and content; the [Responses adapter](../packages/responses/src/provider.zig) encodes it for the configured model service. Local image bytes become request data; remote URLs remain references whose contents can change. Image rejection preserves accompanying text and reports the omitted image. The adapter's image checks apply alongside the whole-context budget. See [tool content](content.md) for formats and limits.
 
-The Responses adapter decodes and validates the complete model output before Engine executes any tool in the response. It supplies continuation items, parsed calls, and final text to execution and compaction; malformed or unsupported output fails explicitly. Unknown tools and invalid arguments become tool errors available to the next model round. Image limits apply once to the complete tool batch.
+The Responses adapter decodes and validates the complete model output before Engine executes any tool in the response. It supplies continuation items, parsed calls, and assistant text to execution and compaction; malformed or unsupported output fails explicitly. Unknown tools and invalid arguments become tool errors available to the next model round. Image limits apply once to the complete tool batch.
 
 Tool declarations live with their owning implementations: [communication and session tools](../packages/agent/src/tools.json), [host tools](../packages/host/src/tools.json), and [memory tools](../packages/memory/src/tools.json). Host and Memory register their declarations through `Tools`. Engine selects the agent's declarations for core coordination and adds declarations from registered capabilities for work sessions; summarization has no tools. The model adapter receives those selected declarations and adds protocol-specific fields when encoding them. It does not choose which capabilities a session can use.
 

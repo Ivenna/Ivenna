@@ -1,6 +1,7 @@
 const std = @import("std");
-const Model = @import("model.zig");
-const Tools = @import("tool.zig").Tools;
+const contracts = @import("agent_contracts");
+const Model = contracts.Model;
+const Tools = contracts.Tools;
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 

@@ -5,7 +5,9 @@ const WorkInput = @import("work.zig");
 const Delivery = WorkInput.Delivery;
 const Activation = WorkInput.Activation;
 const Allocator = std.mem.Allocator;
-const Model = @import("model.zig");
+const contracts = @import("agent_contracts");
+const Model = contracts.Model;
+const Incoming = contracts.Inbox.Incoming;
 
 /// A session owns reasoning history independently of external correspondence.
 /// The core is permanent; branch sessions may retain an idle context while
@@ -78,7 +80,7 @@ pub const Registry = struct {
 
     /// Every external input enters the core. Source evidence does not select
     /// an existing focus or impose a response obligation.
-    pub fn accept(self: *Registry, incoming: WorkInput.Incoming) !bool {
+    pub fn accept(self: *Registry, incoming: Incoming) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         const session = self.core;
@@ -305,7 +307,7 @@ pub const Registry = struct {
         parent.pending.appendAssumeCapacity(report);
     }
 
-    pub fn reconcile(self: *Registry, waiting: []const WorkInput.Incoming) !void {
+    pub fn reconcile(self: *Registry, waiting: []const Incoming) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         var absent: std.ArrayList([]const u8) = .empty;

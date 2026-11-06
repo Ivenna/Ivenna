@@ -1,7 +1,7 @@
 const std = @import("std");
 const Mail = @import("mail.zig");
 const MailSources = @import("mail_sources.zig").MailSources;
-const Input = @import("agent").Input;
+const Handover = @import("agent_contracts").Handover;
 const Allocator = std.mem.Allocator;
 
 /// Track mail intake and store continuity handovers.
@@ -33,7 +33,7 @@ pub const MailState = struct {
         try self.mailbox.markHandled(a, origin.id);
     }
 
-    pub fn loadHandover(self: *MailState, a: Allocator, key: []const u8, limit: usize) !?Input.Handover {
+    pub fn loadHandover(self: *MailState, a: Allocator, key: []const u8, limit: usize) !?Handover {
         const letter = try self.mailbox.latestState(a, key) orelse return null;
         const files = try self.sources.capture(a, letter, letter.body);
         return .{

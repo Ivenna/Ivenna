@@ -4,7 +4,7 @@
     .fingerprint = 0x315f9f945362d8ca,
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
-        .agent = .{ .path = "../agent" },
+        .agent_contracts = .{ .path = "../agent_contracts" },
         .content = .{ .path = "../content" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
