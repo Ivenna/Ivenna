@@ -1,26 +1,36 @@
-# Model input and response scope
+# Model input and inference operations
 
-Ivenna presents working history as YAML user messages alongside retained model output and tool replies. Each inference adds a temporary YAML request with current state and, for summarization, instructions. This document defines that model-facing form. The [architecture guide](architecture.md#records-context-and-current-requests) explains how it is assembled from stored history.
+Ivenna presents working history as YAML records alongside retained model output and tool replies. Each inference appends a temporary YAML request with current state and an operation. This document defines those records and requests. The [architecture guide](architecture.md#records-context-and-current-requests) explains how they are assembled from stored history.
 
 The [Input definitions](../packages/agent/src/input.zig) and shared [incoming-message type](../packages/agent_contracts/src/communication.zig) define these fields. The [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
+## Format and lifetimes
+
+Records and requests are user messages. `Text` denotes a free-form string. Tagged unions serialize as a YAML mapping containing exactly one branch name and its payload; a branch with no payload uses an empty object (`{}`). This applies to record content, events, session roles, and request operations.
+
+Both forms identify a `session_id`. Session identifiers survive with retained working contexts across restart. Forked history keeps the original records and their session identifiers; the current request identifies the session performing this inference.
+
+Records form the retained working history together with model output and tool replies. A request applies only to its inference: its state and operation are discarded afterward and are not inherited by forks. Later inferences receive fresh requests after the retained history.
+
 ## Retained records
 
-A `Record` contains an event group or a compaction handover:
+A `Record` identifies its source session and contains one kind of content:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `session_id` | `u64` | Session that admitted the events or produced the handover |
-| `events` | `Event[]` | Events admitted together, in queue order; defaults to an empty array |
-| `handover` | `Handover` or null | Compacted understanding; omitted from YAML when null |
+| `content` | Tagged union | An event group or a compaction handover |
 
-Each activation records its selected group once in `events`. Compaction replaces earlier history with a handover record with `events: []`.
+`content` selects one branch:
 
-Session identifiers survive with retained working contexts across restart. Forked history keeps the original records and their session identifiers. The current request identifies the session performing the inference and supplies its current execution state.
+| Branch | Payload | Meaning |
+| --- | --- | --- |
+| `events` | `Event[]` | Events admitted together, in queue order |
+| `handover` | `Handover` | Compacted understanding needed for continuation |
 
-Each input keeps its own `from` IDs, text, and observation time within the admitted group. See [activation admission](architecture.md#activation-admission) for how the runtime selects a group and handles later arrivals.
+### Event groups
 
-## Events and handovers
+Each activation records its selected group once in `content.events`. Events stay in queue order, and arrivals during the activation remain queued for later processing. See [activation admission](architecture.md#activation-admission) for group selection.
 
 `Event` contains one of these branches:
 
@@ -31,35 +41,23 @@ Each input keeps its own `from` IDs, text, and observation time within the admit
 | `assignment` | `Assignment` | Initial work for a fork |
 | `report` | `Report` | A child activation's final text |
 
-A `Handover` contains `summary: Text`, the retained understanding needed to continue work.
-
-`Event` and `Response` are tagged unions. Their YAML representation is a mapping with one branch name and that branch's payload. `Text` denotes a free-form string.
-
-For example, two arrivals can enter the core as one event group:
+For example, two arrivals can enter the core as one event group, each preserving its own source, text, and observation time:
 
 ```yaml
 session_id: 1
-events:
-  - input:
-      from: [operator]
-      text: Keep practice sessions to 20 minutes.
-      observed_at_unix_ms: 1793966400000
-  - input:
-      from: [operator]
-      text: Include ten minutes of listening.
-      observed_at_unix_ms: 1793966401000
+content:
+  events:
+    - input:
+        from: [operator]
+        text: Keep practice sessions to 20 minutes.
+        observed_at_unix_ms: 1793966400000
+    - input:
+        from: [operator]
+        text: Include ten minutes of listening.
+        observed_at_unix_ms: 1793966401000
 ```
 
-Compaction can replace earlier history with a handover record:
-
-```yaml
-session_id: 1
-events: []
-handover:
-  summary: Keep each practice session to 20 minutes, including ten minutes of listening.
-```
-
-## Incoming messages
+#### Incoming messages
 
 The shared `Communication.IncomingMessage` represents an observation of who said what. It does not imply that the words were addressed specifically to Ivenna or require a response. An admitted arrival appears as an `input` event in the receiving session's working history.
 
@@ -73,24 +71,13 @@ The shared `Communication.IncomingMessage` represents an observation of who said
 
 `from` contains readable [correspondent IDs](communication.md#correspondents-and-ids) accepted by `send_message`. The timestamp records when the runtime observed the message. Restoring history preserves that observation time.
 
-The [whole-request budget](architecture.md#bounded-model-context) counts the complete message. The runtime admits whole observations; a single input that cannot fit after compaction fails with `ContextBudgetExhausted`.
-
-## Startup and restart
+#### Startup and restart
 
 At startup, each retained session queues a `startup` event before its unread assignments and reports. Normal FIFO budget admission selects the events for a fresh activation, which can include startup and unread work together. `Startup` carries `observed_at_unix_ms: i64`, the observation time at the beginning of this runtime in Unix milliseconds. A newly created fork begins with an assignment instead.
 
-For example, a session can receive:
-
-```yaml
-session_id: 1
-events:
-  - startup:
-      observed_at_unix_ms: 1793966400000
-```
-
 Earlier records, model output, and tool replies describe prior observations and actions. The current request's state describes the live runtime. Loading a historical tool exchange does not invoke its calls, and an interrupted action may already have had effects. Ivenna chooses how to continue from that evidence. See [startup and interruption](architecture.md#startup-and-interruption) for session reconstruction and unread events.
 
-## Assignments and reports
+#### Assignments and reports
 
 An `Assignment` contains:
 
@@ -105,13 +92,32 @@ The new session receives its assignment as a one-event group:
 
 ```yaml
 session_id: 2
-events:
-  - assignment:
-      task: Update the French practice plan.
-      from_session: 1
+content:
+  events:
+    - assignment:
+        task: Update the French practice plan.
+        from_session: 1
 ```
 
-A `Report` contains `from_session: u64` and `text: Text`, which may be empty. It carries a branch activation's combined result for its direct parent. The identifiers in fork results and reports let the parent associate results with the child that produced them. A report can remain queued after the child's context is released.
+A `Report` carries a branch activation's combined result for its direct parent:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `from_session` | `u64` | Child session that produced the result |
+| `text` | `Text` | Combined result text; may be empty |
+
+The identifiers in fork results and reports let the parent associate results with the child that produced them. A report can remain queued after the child's context is released.
+
+### Handovers
+
+A `Handover` contains `summary: Text`, the retained understanding needed to continue work. Compaction replaces earlier working history with one `content.handover` record:
+
+```yaml
+session_id: 1
+content:
+  handover:
+    summary: Keep each practice session to 20 minutes, including ten minutes of listening.
+```
 
 ## Current requests
 
@@ -120,35 +126,50 @@ Every inference appends one temporary `Request` after retained history:
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `session_id` | `u64` | Session performing this inference |
-| `state` | `State` | Current session, execution counts, and response destination |
-| `instructions` | `Text` or null | Summary instructions; null for ordinary execution |
+| `state` | `State` | Current session and execution counts |
+| `operation` | Tagged union | Ordinary execution or summarization with its instructions |
 
-Each inference receives the retained records and model/tool exchanges followed by this fresh state snapshot. Constructing the request does not add another event record. Request state and summary instructions are discarded after inference; they are not appended to history or inherited by forks.
+### Current state and session roles
 
-### State and response destinations
-
-`State` contains `session`, `runtime`, and `response`:
+`State` contains `session` and `runtime`:
 
 | Field | Meaning |
 | --- | --- |
-| `session.role` | `core` or `branch` |
-| `session.parent_session_id` | Session that created this fork, or null |
+| `session.role` | Tagged union selecting the core or a branch with its parent |
 | `session.active_children` | Direct child contexts retained under this session |
 | `runtime.active_sessions` | Retained contexts, including the core |
 | `runtime.running_sessions` | Sessions currently handling an activation |
 | `runtime.queued_inputs` | Events waiting in session queues, excluding reserved report slots |
 
-The serialized role `branch` denotes a work session. Counts describe the snapshot for this request; other sessions can continue acting while it is processed.
+Counts describe the snapshot for this request; other sessions can continue acting while it is processed.
 
-`Response` contains one destination:
+`Role` selects one branch:
 
 | Branch | Payload | Meaning |
 | --- | --- | --- |
-| `report` | `session_id: u64` | Return the branch result to its direct parent |
-| `internal` | Empty object | Keep the core activation's result internal |
-| `summary` | Empty object | Produce a handover for the summary operation |
+| `core` | Empty object | Permanent coordination session with no parent |
+| `branch` | `parent_session_id: u64` | Work session belonging to the session that forked it |
 
-These destinations identify how an ordinary activation's final text or a summary result is used. Outgoing communication uses the independent `send_message` tool and its explicit recipients.
+The serialized role `branch` denotes a work session. For example, a branch forked by session 1 has:
+
+```yaml
+role:
+  branch:
+    parent_session_id: 1
+```
+
+The role and parent relationship survive compaction and restart.
+
+### Inference operations
+
+`operation` selects one branch:
+
+| Branch | Payload | Meaning |
+| --- | --- | --- |
+| `execute` | Empty object | Continue ordinary work using the retained history and current state |
+| `summarize` | `instructions: Text` | Condense retained history into a handover according to these instructions |
+
+During `execute`, a response without tool calls completes the whole selected group. Its text stays internal for the core or becomes one combined report to the branch's direct parent; a report may be empty. The broader task may remain open. Text accompanying tool calls is retained with the model output and does not itself complete the activation or create a report. Outgoing communication uses the independent `send_message` tool and its explicit recipients.
 
 For example, an ordinary core request can be:
 
@@ -156,24 +177,21 @@ For example, an ordinary core request can be:
 session_id: 1
 state:
   session:
-    role: core
-    parent_session_id: null
+    role:
+      core: {}
     active_children: 1
   runtime:
     active_sessions: 2
     running_sessions: 2
     queued_inputs: 0
-  response:
-    internal: {}
-instructions: null
+operation:
+  execute: {}
 ```
-
-In ordinary execution, a response without tool calls completes the whole selected group. Its text becomes one combined parent report or core result, according to the current `response`; a branch report may be empty. Text accompanying tool calls is retained with the model output and does not itself complete the activation or create a report.
 
 ### Compaction and budgets
 
-Compaction uses the same request form with response `summary` and instructions from the dedicated [summary resource](../packages/agent/src/compaction.md), with tools disabled. The resulting handover starts a replacement working history in a record with an empty `events` list. The session identity remains the same; summary instructions and state stay temporary, and ordinary work continues in the replacement context. The [architecture guide](architecture.md#bounded-model-context) explains when compaction occurs and how its request is bounded.
+Compaction selects `operation.summarize` with instructions from the dedicated [summary resource](../packages/agent/src/compaction.md) and disables tools. This inference summarizes retained history without continuing its tasks. Its handover starts a replacement working history in a `content.handover` record. The session identity, role, and parent relationship remain the same. Ordinary work then continues with an `execute` request and fresh state. The [architecture guide](architecture.md#bounded-model-context) explains when compaction occurs and how its request is bounded.
 
-Records, current state, instructions, tools, and encoded content all contribute to the complete [request budget](architecture.md#bounded-model-context). Budget measurement uses the same assembled payload sent to the provider.
+Records, current state, operation, tools, and encoded content all contribute to the complete request budget, including summary instructions when present. Budget measurement uses the same assembled payload sent to the provider. The runtime admits whole observations; a single input that cannot fit after compaction fails with `ContextBudgetExhausted`.
 
 See [tool content](content.md) for text and media returned by tools, and [persistent working history](architecture.md#persistent-working-history) for the stored records underlying this model-facing view.

@@ -212,7 +212,7 @@ pub const Kernel = struct {
             const trial = trial_arena.allocator();
             var current = request;
             current.state.runtime.queued_inputs += events.len - end;
-            const input = try history.requestWithRecord(trial, .{ .session_id = work.session.session_id, .events = events[0..end] }, current);
+            const input = try history.requestWithRecord(trial, .{ .session_id = work.session.session_id, .content = .{ .events = events[0..end] } }, current);
             const bytes = try self.engine.requestBytes(trial, input, work.session.role);
             _ = trial_arena.reset(.retain_capacity);
             if (bytes > self.limits.request_bytes) break;
@@ -221,7 +221,7 @@ pub const Kernel = struct {
         if (count == 0) return null;
         var selected = try history.fork(self.allocator);
         errdefer selected.deinit();
-        try selected.appendRecord(.{ .session_id = work.session.session_id, .events = events[0..count] });
+        try selected.appendRecord(.{ .session_id = work.session.session_id, .content = .{ .events = events[0..count] } });
         return .{ .count = count, .context = selected };
     }
 
@@ -232,11 +232,11 @@ pub const Kernel = struct {
         var history = try self.sessions.snapshot(work.session);
         defer history.deinit();
         const snapshot = try self.sessions.runtimeSnapshot(work.session);
-        var request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
+        var request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state, .operation = .execute };
         var selection = try self.selectActivation(a, work, &history, request);
         if (selection == null and history.history().len > 1) {
-            const summary = try Compaction.summarize(self.engine.model, a, &history, request, self.limits.compaction_bytes, self.limits.handover_bytes);
-            var compacted = try history.withHandover(self.allocator, work.session.session_id, .{ .summary = summary });
+            const summary = try Compaction.summarize(self.engine.model, a, &history, snapshot, self.limits.compaction_bytes, self.limits.handover_bytes);
+            var compacted = try history.withHandover(self.allocator, .{ .summary = summary });
             defer compacted.deinit();
             request.state = (try self.sessions.runtimeSnapshot(work.session)).state;
             selection = try self.selectActivation(a, work, &compacted, request);
@@ -270,11 +270,11 @@ pub const Kernel = struct {
         var view = try self.sessions.snapshot(session);
         errdefer view.deinit();
         const snapshot = try self.sessions.runtimeSnapshot(session);
-        const request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
+        const request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state, .operation = .execute };
         const input = try view.request(a, request);
         if (try self.engine.requestBytes(a, input, session.role) <= self.limits.request_bytes) return .{ .context = view, .input = input };
-        const summary = try Compaction.summarize(self.engine.model, a, &view, request, self.limits.compaction_bytes, self.limits.handover_bytes);
-        var candidate = try view.withHandover(self.allocator, session.session_id, .{ .summary = summary });
+        const summary = try Compaction.summarize(self.engine.model, a, &view, snapshot, self.limits.compaction_bytes, self.limits.handover_bytes);
+        var candidate = try view.withHandover(self.allocator, .{ .summary = summary });
         var installed = false;
         errdefer if (!installed) candidate.deinit();
         var replacement = try candidate.fork(self.allocator);

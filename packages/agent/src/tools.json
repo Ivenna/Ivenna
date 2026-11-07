@@ -29,7 +29,7 @@
   },
   {
     "name": "fork_session",
-    "description": "Transfer the whole current activation's work to one child that inherits the complete retained working context, and return its session_id. The caller's activation ends. The child's final text returns as one combined report to its direct parent. At most one fork per round.",
+    "description": "Transfer this activation's whole work to a new child that inherits the complete retained working context, and return its session_id. On success, this activation ends and the caller returns to its queue. The child's final text joins this session's queue as one combined report. At most one fork per model round.",
     "parameters": {
       "type": "object",
       "properties": {

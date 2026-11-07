@@ -90,6 +90,8 @@ Reception status belongs to the service boundary. Model reasoning and tools do n
 | Activation | One session processing a selected group of deliveries through model and tool rounds, until a final response or a fork |
 | Model round | One model response followed by all tools it invoked |
 
+The registry stores each session's `Input.Role`: the core has no parent, and a branch's `parent_session_id` identifies the session that forked it. The registry uses that relationship for reports, capacity reservations, and context release. Current request state and the history codec's session and checkpoint records use the same role type.
+
 Every incoming message enters the core independently, including messages a mail client groups into one thread. Receiving an observation does not imply that Ivenna was addressed or must respond. All correspondents share its FIFO queue; scheduling distinctions by correspondent ID remain undecided. Ivenna interprets each message alongside retained understanding, while Sessions owns execution histories and queues.
 
 Core and work sessions expose `send_message`, `fork_session`, and the full shared memory interface. Work sessions also expose host tools. Engine assembles each [model request](#model-requests-and-tools) using the current session's role. `send_message` is available independently of the activation's incoming messages or result destination. For ordinary work, a response without tool calls ends the current activation: its final text is an internal result in the core or a report to a work session's direct parent. The broader task can remain open.
@@ -132,11 +134,11 @@ The permanent core stays available between activations. Its context is summarize
 
 ## Records, context, and current requests
 
-[Input](../packages/agent/src/input.zig) defines and renders retained `Record` messages and temporary `Request` messages. Records contain admitted events or a compaction handover; requests supply current state and instructions. Communication observations use `Event.input`, and startup uses `Event.startup`. Event grouping, assignments, reports, and execution state belong to the core. The [input contract](input.md) owns their serialized payload and field reference; the [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+[Input](../packages/agent/src/input.zig) defines the typed records and requests used for model input and renders them as YAML. The [input contract](input.md) defines their fields; the [system prompt](../packages/agent/src/system.md) explains input interpretation and response scope.
 
 Sessions fixes the selected delivery group, returns the unselected suffix, and installs the selected history under the registry lock. [Context](../packages/agent/src/context.zig) owns typed admitted event groups, complete model/tool exchanges, and handovers. Model exchanges retain native `Model.Item` values, including opaque adapter continuation bytes and typed tool results. Continuations preserve complete model output, including reasoning, in the producing adapter's format. The agent copies and persists those bytes without interpreting them; they remain specific to the producing adapter. Forks inherit the same earlier history entries with their original receiving session identifiers.
 
-Context derives and caches native model messages from the current system prompt, rendered event groups and handovers, and stored model/tool exchanges when restoring or changing its source entries. For each inference, the kernel takes an owned history snapshot and obtains current state from Sessions. `Context.request` appends one temporary request to that cached model-message view without changing the snapshot. The kernel keeps the snapshot alive until the model/tool round returns. Request state and summary instructions stay outside retained history; later rounds use that history or its replacement handover.
+Context derives and caches native model messages from the current system prompt, rendered event groups and handovers, and stored model/tool exchanges when restoring or changing its source entries. For each inference, the kernel takes an owned history snapshot and obtains current state from Sessions. `Context.request` appends one temporary request to that cached model-message view without changing the snapshot. The kernel keeps the snapshot alive until the model/tool round returns. Request state and operation stay outside retained history; later rounds use that history or its replacement handover.
 
 Appending history clones and renders only the new entry, with amortized growth of the entry and message arrays. Forks and inference snapshots still copy their retained contents for independent ownership. Admission candidates borrow the snapshot's model messages and render only the proposed event group and current request; the selected context is copied once after measurement.
 
@@ -162,7 +164,7 @@ Memory and Host return content in the model-round arena. Engine creates a native
 
 After admission, each tool continuation checks the complete request budget again and can compact the activation's retained history when needed.
 
-Compaction presents retained history followed by a temporary `Input.Request` with response `summary` and instructions from [compaction.md](../packages/agent/src/compaction.md). Its `Model.Request` has no tools and uses `high` reasoning effort, independently of the ordinary session settings. The Responses adapter encodes the absence of tools as `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
+Compaction presents retained history followed by a temporary `Input.Request` whose `operation.summarize` carries instructions from [compaction.md](../packages/agent/src/compaction.md). Its `Model.Request` has no tools and uses `high` reasoning effort, independently of the ordinary session settings. The Responses adapter encodes the absence of tools as `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
 
 The kernel builds the replacement's ordinary request with a fresh state snapshot and checks its complete budget before installing the handover record. Compaction starts a new active working history from that handover, preserving the session identity and parent relationships. It replaces the entire earlier working view, including its raw transcript tail. Retention of earlier history records is a separate storage lifecycle. Summary instructions preserve relevant session and correspondent IDs, relationships, ongoing work, commitments, and completed effects.
 
@@ -176,7 +178,7 @@ The agent's [history codec](../packages/agent/src/history.zig) stores immutable 
 
 | Term | Meaning |
 | --- | --- |
-| Session | A core or work session with its own identity and parent relationship |
+| Session | A core or work session with its own identity and role |
 | Segment | An append-only sequence identified by `Scope { session_id, epoch }`; a fork starts its own segment, and compaction advances its session's epoch |
 | Storage group | An opaque identifier used by `HistoryStore` to discover a segment's records |
 | Span | A checkpoint's selected prefix of a segment, identified by its group, head key, and entry count |
@@ -185,7 +187,7 @@ Each entry retains its segment identity and either a complete admitted `Input.Re
 
 Records use compact UTF-8 ZON bodies. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. Segment identity and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal assignments and reports are stored together in a separate immutable observation-array record in the session's current group.
 
-The checkpoint contains the next session identifier and each retained session's identity, parent relationship, epoch, current group, and ordered spans. An optional key selects the unread observation array in the current group; its text stays outside the checkpoint. Appending advances a span's head and count without adding a per-entry reference. The latest confirmed checkpoint selects both the contexts restored at startup and the records kept by [history maintenance](#history-retention).
+The checkpoint contains the next session identifier and each retained session's ID, role, epoch, current group, and ordered spans. The branch role carries its parent relationship. An optional key selects the unread observation array in the current group; its text stays outside the checkpoint. Appending advances a span's head and count without adding a per-entry reference. The latest confirmed checkpoint selects both the contexts restored at startup and the records kept by [history maintenance](#history-retention).
 
 ### Saving and restoration
 

@@ -86,9 +86,10 @@ pub const Context = struct {
         return messages;
     }
 
-    pub fn withHandover(self: *const Context, allocator: Allocator, session_id: u64, handover: Input.Handover) !Context {
-        const scope: Scope = .{ .session_id = session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
-        return restore(allocator, scope, &.{.{ .scope = scope, .value = .{ .record = .{ .session_id = session_id, .handover = handover } } }}, self.messages.items[0].message.text);
+    pub fn withHandover(self: *const Context, allocator: Allocator, handover: Input.Handover) !Context {
+        const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
+        const record: Input.Record = .{ .session_id = scope.session_id, .content = .{ .handover = handover } };
+        return restore(allocator, scope, &.{.{ .scope = scope, .value = .{ .record = record } }}, self.messages.items[0].message.text);
     }
 
     fn append(self: *Context, entry: Entry) !void {
@@ -99,8 +100,10 @@ pub const Context = struct {
                 try self.messages.ensureUnusedCapacity(self.allocator, 1);
                 const copy: Input.Record = .{
                     .session_id = record.session_id,
-                    .events = try cloneEvents(a, record.events),
-                    .handover = if (record.handover) |handover| .{ .summary = try a.dupe(u8, handover.summary) } else null,
+                    .content = switch (record.content) {
+                        .events => |events| .{ .events = try cloneEvents(a, events) },
+                        .handover => |handover| .{ .handover = .{ .summary = try a.dupe(u8, handover.summary) } },
+                    },
                 };
                 const text = try Input.renderRecord(a, copy);
                 self.entries.appendAssumeCapacity(.{ .scope = entry.scope, .value = .{ .record = copy } });

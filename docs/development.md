@@ -53,13 +53,13 @@ Model coexisting fields together and mutually exclusive alternatives as distinct
 
 [Communication](../packages/agent_contracts/src/communication.zig) defines incoming observations with `from` IDs and outgoing messages addressed by recipient ID. [Inbox](../packages/agent_contracts/src/inbox.zig) owns the incoming-message and receipt envelope and acknowledges durable admission. Construct these typed values at their producing boundary. The email adapter owns the internal domain and conversion between IDs and native addresses.
 
-[Input](../packages/agent/src/input.zig) owns event groups, startup observations, assignments, reports, handovers, execution state, and YAML rendering. Its records incorporate shared incoming messages; temporary requests add current state and instructions. [Work](../packages/agent/src/work.zig) owns delivery and activation lifetimes inside the core. The [input contract](input.md) documents the serialized fields.
+[Input](../packages/agent/src/input.zig) owns model-facing events, records, session roles, execution state, inference operations, and YAML rendering. Update the input types and their execution and persistence consumers together when changing this interface. [Work](../packages/agent/src/work.zig) owns delivery and activation lifetimes inside the agent. The [input contract](input.md) defines the serialized fields.
 
 [Content](../packages/content/src/root.zig) owns tool-result text and image types, byte-source classification, and explicit image reference interpretation. Observations carry complete text strings; tool results use Content's parts. Content is the sole package dependency of `agent_contracts`.
 
 [Model](../packages/agent_contracts/src/model.zig) defines native history items and model operations. Keep messages and tool results typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields.
 
-Keep input rendering separate from provider encoding: Input renders the temporary current-state message; the agent selects tools and reasoning effort for each model request. The model adapter encodes and measures the complete request with those settings, including while applying tool-result limits. Use the same encoder for measurement and inference, and pass settings per request without mutating a shared provider.
+Keep input rendering separate from provider encoding: Input renders retained records and temporary current requests; the agent selects tools and reasoning effort for each model request. The model adapter encodes and measures the complete request with those settings, including while applying tool-result limits. Use the same encoder for measurement and inference, and pass settings per request without mutating a shared provider.
 
 ### Model-facing resources
 
@@ -83,7 +83,7 @@ Keep outgoing messages, internal reports, handovers, and diagnostics distinct. O
 
 ### Execution and storage
 
-Keep context, queue, and activation changes under the session registry's synchronization; the kernel coordinates adapter operations and worker task scopes. Retain typed event groups, complete model/tool exchanges, and handovers in Context. Derive model input from those entries and append a fresh temporary request for each inference. Keep current state and summary instructions in that request. The [architecture guide](architecture.md#records-context-and-current-requests) describes history ownership and request assembly.
+Keep context, queue, and activation changes under the session registry's synchronization; the kernel coordinates adapter operations and worker task scopes. Retain typed event groups, complete model/tool exchanges, and handovers in Context. Derive model input from those entries and append a fresh temporary request for each inference. Keep current state and the inference operation outside retained history. The [architecture guide](architecture.md#records-context-and-current-requests) describes history ownership and request assembly.
 
 Persist the core and every still-retained work context, preserving complete model/tool exchanges and unread internal assignments and reports. Confirm the selected incoming observations and their checkpoint before acknowledging their receipts; acknowledgement releases transport copies independently of task completion. Restore saved understanding and session relationships with fresh startup activations and the current system prompt. Execution ownership, external deliveries, receipts, and process handles belong to the running process. Loading history must not execute historical tool calls. Storage failures end the runtime through the normal execution failure path.
 
@@ -131,6 +131,6 @@ Build the application and exercise the affected behavior through communication a
 | History storage | Metadata queries discover groups and selected reads preserve order; body hashes, predecessor keys, scopes, and committed counts validate history; failed creates prevent checkpoint publication; uncommitted suffixes stay outside restored history; numeric revision selects the current checkpoint after interruption; unchanged saves reuse publication |
 | History maintenance | Current groups remain writable; sealed inherited prefixes restore from Archive; unreferenced records, obsolete observations, and old checkpoints enter Trash; selected records survive maintenance; existing Trash remains with the mail service; maintenance failures stop the runtime |
 | Communication-copy maintenance | Retirement of acknowledged inputs and abandoned outgoing copies, preservation of pending input and in-progress sends, and service-owned Trash expiry |
-| Model-facing interfaces | Record and request serialization, response variants, tool selection, and complete-payload budget accounting |
+| Model-facing interfaces | Record and request serialization, content, role, and operation variants, tool selection, and complete-payload budget accounting |
 
 Report the checks performed. Distinguish reconstruction of understanding from execution recovery.

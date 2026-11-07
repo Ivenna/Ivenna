@@ -22,7 +22,7 @@ Tool descriptions explain how to choose and invoke an operation and interpret it
 
 Keep these interfaces concise and leave room for the model's knowledge and judgment. Detailed field references and implementation explanations belong in developer documentation unless they affect how the interface is used or interpreted.
 
-Keep task text and message text free-form. Working history preserves understanding for continuation; current execution state and summary instructions apply to the inference that uses them. The system prompt explains their meaning and response scope; the [input contract](input.md) defines their structure.
+Keep task text and message text free-form. Working history preserves understanding for continuation. Each inference receives current execution state and an operation: continue ordinary work or summarize retained history with its summary instructions. State and operation apply only to that inference; later work uses retained understanding with fresh execution state. The system prompt explains their meaning and response scope; the [input contract](input.md) defines their structure.
 
 Tool results can combine text, media, and information about an operation's outcome and source. Classifying or interpreting one source preserves the other observations in the result. When a provider or budget cannot carry content, retain its source information and describe the omission.
 
@@ -32,7 +32,7 @@ People and programs communicate with Ivenna through messages. Each arrival enter
 
 The communication interface supplies received text, the IDs of participants it came from, and observation time. Retained model and tool exchanges preserve Ivenna's outgoing communication with its chosen recipient IDs. Correspondent IDs link observations with explicit communication actions. Understanding correspondents and their relationships to Ivenna can inform coordination. Policies based on correspondent IDs, including any participant whitelist or scheduling distinctions, remain undecided.
 
-Ivenna explicitly chooses whether to send a message, to whom, and what it says through `send_message`. An activation can send zero, one, or several messages. Final model text supplies an internal result in the core or a report to a work session's parent; outgoing communication requires an explicit send. The [communication guide](communication.md) describes the interface and its current implementation.
+Ivenna explicitly chooses whether to send a message, to whom, and what it says through `send_message`. An activation can send zero, one, or several messages. For ordinary work, final model text supplies an internal result in the core or a report to a work session's parent. The [communication guide](communication.md) describes the interface and its current implementation.
 
 ## Internal work and state
 
@@ -44,7 +44,7 @@ A final response completes the activation's event group and returns control; it 
 
 ## Core and concurrent attention
 
-One core session coordinates Ivenna throughout the kernel's lifetime. It relates incoming observations to its retained understanding and shared memory, and can maintain memory or send a brief message directly. Sustained work moves to separate sessions so the core can return to its queue. Later messages still enter the core.
+One core session coordinates Ivenna throughout the kernel's lifetime. It has no parent. It relates incoming observations to its retained understanding and shared memory, and can maintain memory or send a brief message directly. Sustained work moves to separate sessions so the core can return to its queue. Later messages still enter the core.
 
 Forking is an explicit model decision available to core and work sessions alike. It passes the whole activation's work to another focus of Ivenna's attention with the complete retained working context, including any earlier handover. The caller's activation ends and it returns to its queue; the child starts an activation for its assignment.
 

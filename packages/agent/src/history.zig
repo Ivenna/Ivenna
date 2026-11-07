@@ -29,7 +29,7 @@ pub const History = struct {
 
     pub const Session = struct {
         session_id: u64,
-        parent_session_id: ?u64,
+        role: Input.Role,
         epoch: u64,
         entries: []const Entry,
         observations: []const Input.Event,
@@ -55,11 +55,14 @@ pub const History = struct {
                 const owner_epoch = epochs.get(entry.scope.session_id) orelse return error.InvalidHistory;
                 if (entry.scope.epoch > owner_epoch) return error.InvalidHistory;
             }
-            if (session.parent_session_id) |parent_id| {
-                if (parent_id >= session.session_id or !epochs.contains(parent_id)) return error.InvalidHistory;
-            } else {
-                if (session.session_id != 1) return error.InvalidHistory;
-                cores += 1;
+            switch (session.role) {
+                .core => {
+                    if (session.session_id != 1) return error.InvalidHistory;
+                    cores += 1;
+                },
+                .branch => |branch| {
+                    if (branch.parent_session_id >= session.session_id or !epochs.contains(branch.parent_session_id)) return error.InvalidHistory;
+                },
             }
         }
         if (cores != 1) return error.InvalidHistory;
@@ -76,7 +79,7 @@ const Checkpoint = struct {
 
     const Session = struct {
         session_id: u64,
-        parent_session_id: ?u64,
+        role: Input.Role,
         epoch: u64,
         group: []const u8,
         history: []const Span,
@@ -254,7 +257,7 @@ pub const Persistence = struct {
             const scope: Scope = .{ .session_id = session.session_id, .epoch = session.epoch };
             restored.* = .{
                 .session_id = session.session_id,
-                .parent_session_id = session.parent_session_id,
+                .role = session.role,
                 .epoch = session.epoch,
                 .entries = entries,
                 .observations = if (session.observations) |key| selections.source(scope, key).observations else &.{},
@@ -303,7 +306,7 @@ pub const Persistence = struct {
             const observations = if (session.observations.len == 0) null else try builder.observations(current, session.observations);
             saved.* = .{
                 .session_id = session.session_id,
-                .parent_session_id = session.parent_session_id,
+                .role = session.role,
                 .epoch = session.epoch,
                 .group = group,
                 .history = spans.items,

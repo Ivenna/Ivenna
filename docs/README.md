@@ -27,7 +27,7 @@ Choose a guide for your task:
 
 | Task | Guide |
 | --- | --- |
-| Interpret model-facing records, current requests, and response destinations | [Input contract](input.md) |
+| Interpret model-facing records, session roles, and inference operations | [Input contract](input.md) |
 | Use correspondent IDs and explicitly send messages | [Communication](communication.md) |
 | Use memory rooms and understand their shared capacity | [Memory rooms](memory.md) |
 | Run host commands and interpret their results | [Host shell](host.md) |

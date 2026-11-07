@@ -18,7 +18,6 @@ pub const Session = struct {
     session_id: u64,
     role: Input.Role,
     context: Context,
-    parent_session_id: ?u64 = null,
     active: ?*Activation = null,
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
@@ -69,8 +68,7 @@ pub const Registry = struct {
                 errdefer context.deinit();
                 session.* = .{
                     .session_id = record.session_id,
-                    .role = if (record.parent_session_id == null) .core else .branch,
-                    .parent_session_id = record.parent_session_id,
+                    .role = record.role,
                     .context = context,
                 };
                 try self.sessions.put(allocator, session.session_id, session);
@@ -90,7 +88,7 @@ pub const Registry = struct {
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
             const session = entry.*;
-            if (session.parent_session_id) |parent_id| {
+            if (session.role.parentSessionId()) |parent_id| {
                 const parent = self.sessions.get(parent_id).?;
                 parent.children += 1;
             }
@@ -215,9 +213,8 @@ pub const Registry = struct {
         errdefer delivery.destroy(self.allocator);
         child.* = .{
             .session_id = self.next_session_id,
-            .role = .branch,
+            .role = .{ .branch = .{ .parent_session_id = work.session.session_id } },
             .context = undefined,
-            .parent_session_id = work.session.session_id,
             .return_reserved = true,
         };
         try child.pending.append(self.allocator, delivery);
@@ -231,7 +228,7 @@ pub const Registry = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.reserved -= 1;
-        self.sessions.get(plan.child.parent_session_id.?).?.return_slots -= 1;
+        self.sessions.get(plan.child.role.branch.parent_session_id).?.return_slots -= 1;
         for (plan.child.pending.items) |delivery| delivery.destroy(self.allocator);
         plan.child.pending.deinit(self.allocator);
         self.allocator.destroy(plan.child);
@@ -306,7 +303,7 @@ pub const Registry = struct {
             var ancestor = session;
             while (!needed.contains(ancestor.session_id)) {
                 try needed.put(a, ancestor.session_id, {});
-                ancestor = self.sessions.get(ancestor.parent_session_id orelse break).?;
+                ancestor = self.sessions.get(ancestor.role.parentSessionId() orelse break).?;
             }
         }
         var retained: std.ArrayList(History.Session) = .empty;
@@ -330,7 +327,7 @@ pub const Registry = struct {
             };
             try retained.append(a, .{
                 .session_id = session.session_id,
-                .parent_session_id = session.parent_session_id,
+                .role = session.role,
                 .epoch = session.context.scope.epoch,
                 .entries = session.context.records(),
                 .observations = observations.items,
@@ -361,13 +358,8 @@ pub const Registry = struct {
             .state = .{
                 .session = .{
                     .role = session.role,
-                    .parent_session_id = session.parent_session_id,
                     .active_children = session.children,
                 },
-                .response = if (session.parent_session_id) |parent_id|
-                    .{ .report = .{ .session_id = parent_id } }
-                else
-                    .{ .internal = .{} },
                 .runtime = .{
                     .active_sessions = self.sessions.count(),
                     .running_sessions = running,
@@ -401,7 +393,7 @@ pub const Registry = struct {
     }
 
     fn notifyParent(self: *Registry, session: *Session, text: []const u8) !void {
-        const target = session.parent_session_id orelse return;
+        const target = session.role.parentSessionId() orelse return;
         const parent = self.sessions.get(target).?;
         const report = try Delivery.create(self.allocator, .{ .report = .{ .from_session = session.session_id, .text = text } }, null);
         std.debug.assert(session.return_reserved and parent.return_slots > 0);
@@ -438,7 +430,7 @@ pub const Registry = struct {
 
     fn releaseIdle(self: *Registry, session: *Session) void {
         if (session == self.core or session.active != null or session.pending.items.len != 0 or session.children != 0 or session.borrowed_workers != 0) return;
-        const parent_id = session.parent_session_id;
+        const parent_id = session.role.parentSessionId();
         _ = self.sessions.remove(session.session_id);
         self.destroySession(session);
         if (parent_id) |id| if (self.sessions.get(id)) |parent| {
@@ -467,7 +459,7 @@ pub const Registry = struct {
     fn takeReady(self: *Registry, session: *Session) !?Work {
         if (session.active != null or session.pending.items.len == 0) return null;
         const parent = if (!session.return_reserved)
-            if (session.parent_session_id) |id| self.sessions.get(id).? else null
+            if (session.role.parentSessionId()) |id| self.sessions.get(id).? else null
         else
             null;
         if (parent) |target| {
