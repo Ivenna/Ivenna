@@ -111,7 +111,7 @@ A source file path can be absolute or relative to Ivenna's startup directory. Th
 
 Create and append require an existing containing room. Replace also creates missing parent rooms. Use `create_memory_room` to create rooms explicitly; an existing room is reused.
 
-`revise_memory` requires the entry to contain UTF-8 text without NUL bytes. Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`. Regular expressions also support inline flags.
+`revise_memory` requires the entry to contain UTF-8 text without NUL bytes. Revisions default to literal, case-sensitive matching and replace only the first match. Set `replace_all: true` to replace every match. Set `match_mode: "regex"` to use a regular expression; replacement text can reference capture groups such as `${1}` and `${name}`.
 
 For example, call `create_memory_room` with:
 
@@ -154,7 +154,7 @@ All rooms and sessions share one capacity. Call `inspect_memory_space` with `{}`
 
 `used_bytes` counts regular-file lengths across all rooms, including hidden files. Each hard-linked name counts separately; directories, symlinks, and special files do not contribute. `capacity_bytes` is the shared limit for that total.
 
-`remaining_bytes` is capacity minus used space, with a minimum of zero. `used_ratio` is used space divided by capacity; multiply by 100 for a percentage. The deployment user [configures the capacity at the memory service](running.md#memory-service). Lowering it below the size of existing memories leaves them intact and can produce a ratio above 1.
+`remaining_bytes` is capacity minus used space, with a minimum of zero. `used_ratio` is used space divided by capacity. The deployment user [configures the capacity at the memory service](running.md#memory-service). Lowering it below the size of existing memories leaves them intact and can produce a ratio above 1.
 
 Before `remember` or a content-changing `revise_memory`, Ivenna checks how much space the memories would occupy. Growth beyond the shared capacity returns `memory_capacity_exceeded` without changing the entry. A change can exactly fill the remaining space. Changes that shrink or preserve occupied space remain possible when already over capacity, as do reading, moving, and forgetting memories.
 

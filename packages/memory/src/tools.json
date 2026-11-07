@@ -216,7 +216,7 @@
         },
         "match_mode": {
           "type": "string",
-          "description": "Interpret old_text as literal text (default) or a regular expression. Literal matching is case-sensitive; a regex can set inline flags.",
+          "description": "Interpret old_text as literal text (default) or a regular expression. Literal matching is case-sensitive.",
           "enum": [
             "literal",
             "regex"

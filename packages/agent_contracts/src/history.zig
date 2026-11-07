@@ -25,6 +25,7 @@ pub const HistoryStore = struct {
         group: []const u8,
         key: Key,
         previous: ?Key,
+        /// Opaque to execution; only the adapter interprets its contents.
         locator: []const u8,
     };
 
@@ -61,14 +62,16 @@ pub const HistoryStore = struct {
         return self.vtable.allocateGroup(self.context, a);
     }
 
-    /// Discover all record metadata in the requested groups, in any order.
+    /// Discover decoded record metadata confined to the requested groups, in
+    /// any order. Keys follow the Key contract; locators remain adapter-owned.
     /// Results can include uncommitted records and repeated logical keys.
     pub fn query(self: HistoryStore, a: Allocator, groups: []const []const u8) ![]const Reference {
         return self.vtable.query(self.context, a, groups);
     }
 
-    /// Return one complete body per reference in input order, checking its
-    /// stored metadata, or return an error. The agent verifies body hashes.
+    /// Return one complete body per reference in input order, including repeats,
+    /// or return an error. Stored group, key, and predecessor must match the
+    /// reference; the agent verifies body hashes.
     pub fn read(self: HistoryStore, a: Allocator, references: []const Reference) ![]const []const u8 {
         return self.vtable.read(self.context, a, references);
     }

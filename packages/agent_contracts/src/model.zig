@@ -17,7 +17,7 @@ pub const Call = struct {
     arguments: []const u8,
 };
 
-/// Complete validated output, with its decoded calls and assistant text.
+/// Complete output batch with decoded calls and assistant text.
 pub const Response = struct {
     output: []const Item,
     calls: []const Call,

@@ -4,7 +4,7 @@ This setup runs the kernel from the source checkout, with mail and memory servic
 
 ## Prerequisites
 
-Install the Zig version in [`.zig-version`](../.zig-version), an OpenSSH client, and `curl`. Zig builds the kernel; OpenSSH connects to memory and prepares its keys; `curl` checks reception and sends the example message.
+Install the Zig version in [`.zig-version`](../.zig-version), an OpenSSH client, and `curl`.
 
 Use [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html) for the middleware. The commands below use Podman. The [development guide](../docs/development.md) covers build conventions and validation.
 
@@ -28,7 +28,7 @@ set -a
 set +a
 ```
 
-Git ignores `.env`, `dev/mail/provision.ndjson`, and the default `.ivenna/` directory. The kernel reads the exported environment; it does not load `.env` itself. When removing a variable from `.env`, also unset its previously exported value or start a new terminal. See [kernel settings](../docs/running.md#configuration) and [local middleware settings](#service-settings) for defaults and how to apply changes.
+Git ignores `.env`, `dev/mail/provision.ndjson`, and the default `.ivenna/` directory. The kernel reads the exported environment; it does not load `.env` itself. See [kernel settings](../docs/running.md#configuration) and [local middleware settings](#service-settings) for defaults and how to apply changes.
 
 ## Preparing service storage
 
@@ -62,9 +62,7 @@ The plan's `ivenna-ready` script runs during SMTP `RCPT` handling through its `M
 
 The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. JMAP imports and delivery between accounts through the same server's JMAP interface bypass this gate; use the SMTP path for correspondence. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
 
-For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days). When updating an existing private plan, copy or update that operation from the example before provisioning.
-
-This [Stalwart policy](https://stalw.art/docs/email/settings/maintenance/) applies server-wide to Trash and Junk, including ordinary mail, and runs while the kernel is stopped. Auto-expunge follows the server's configured schedule, which is daily by default. Expunging credits account quota; blob cleanup and physical disk reclamation follow later, as described in [Stalwart storage maintenance](https://stalw.art/docs/storage/maintenance/).
+For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days), applying to Trash and Junk across all accounts. See Stalwart's [mail retention](https://stalw.art/docs/email/settings/maintenance/) and [storage maintenance](https://stalw.art/docs/storage/maintenance/) documentation for policy and space reclamation.
 
 To apply the initial plan or later edits, stop the kernel, load the updated `.env`, and run:
 

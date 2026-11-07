@@ -338,15 +338,12 @@ pub const Mailbox = struct {
         return references.toOwnedSlice(a);
     }
 
-    /// Fetch complete bodies, recheck ownership and the selected group, key,
-    /// and predecessor metadata, and preserve the requested order.
+    /// Fetch one complete body per reference in input order, including repeats.
+    /// Recheck ownership, group, key, and predecessor after discovery.
     pub fn readHistory(self: Mailbox, a: Allocator, references: []const HistoryStore.Reference) ![]const []const u8 {
         const ids = try a.alloc([]const u8, references.len);
-        var unique: std.StringHashMapUnmanaged(void) = .empty;
-        defer unique.deinit(a);
         for (references, ids) |reference, *id| {
             id.* = reference.locator;
-            if (id.len == 0 or (try unique.getOrPut(a, id.*)).found_existing) return error.InvalidHistory;
         }
         const data = try a.alloc([]const u8, references.len);
         var offset: usize = 0;
@@ -400,7 +397,6 @@ pub const Mailbox = struct {
         defer retained.deinit(a);
         for (retention.records) |record| {
             _ = try historyGroupKeyword(a, record.group);
-            if (!isLowerHex(&record.key)) return error.InvalidHistory;
             try retained.put(a, try historyRecordIdentity(a, record), false);
         }
         const inventory = try self.historyInventory(a);
@@ -522,10 +518,7 @@ pub const Mailbox = struct {
                 count += 1;
             }
             if (count == 0) return error.MailRequestTooLarge;
-            const response = try self.call(a, "Email/set", .{ .accountId = self.account_id, .update = Value{ .object = batch } });
-            const confirmed = try field(response, "updated");
-            if (confirmed != .object or confirmed.object.count() != count) return error.InvalidMailReply;
-            for (batch.keys()) |id| if (!confirmed.object.contains(id)) return error.InvalidMailReply;
+            _ = try self.call(a, "Email/set", .{ .accountId = self.account_id, .update = Value{ .object = batch } });
             offset += count;
         }
     }
@@ -535,12 +528,10 @@ pub const Mailbox = struct {
         checkpoint: struct { body: []const u8, revision: u64 },
     };
 
-    /// Confirm every native create before returning its ID. Failed batches
-    /// may leave unconfirmed objects in storage.
+    /// Correlate each successful create by its creation ID. JMAP owns native ID
+    /// allocation; failed batches may leave unconfirmed objects in storage.
     fn createHistory(self: Mailbox, a: Allocator, writes: []const HistoryWrite) ![]const []const u8 {
         const ids = try a.alloc([]const u8, writes.len);
-        var unique: std.StringHashMapUnmanaged(void) = .empty;
-        defer unique.deinit(a);
         var offset: usize = 0;
         while (offset < writes.len) {
             var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
@@ -559,14 +550,8 @@ pub const Mailbox = struct {
                 count += 1;
             }
             const response = try self.call(temporary, "Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } });
-            const created = try field(response, "created");
-            if (created != .object or created.object.count() != count) return error.InvalidMailReply;
             for (creates.keys(), ids[offset..][0..count]) |creation_id, *id| {
-                const native = try createdId(response, creation_id);
-                if (native.len == 0) return error.InvalidMailReply;
-                const owned = try a.dupe(u8, native);
-                if ((try unique.getOrPut(a, owned)).found_existing) return error.InvalidMailReply;
-                id.* = owned;
+                id.* = try a.dupe(u8, try createdId(response, creation_id));
             }
             offset += count;
         }
@@ -598,11 +583,9 @@ pub const Mailbox = struct {
         });
         switch (write) {
             .record => |record| {
-                if (!isLowerHex(&record.key)) return error.InvalidHistory;
                 try message.object.put(a, kind_property, .{ .string = "record" });
                 try message.object.put(a, key_property, .{ .string = try a.dupe(u8, &record.key) });
                 if (record.previous) |previous| {
-                    if (!isLowerHex(&previous)) return error.InvalidHistory;
                     try message.object.put(a, previous_property, .{ .string = try a.dupe(u8, &previous) });
                 }
             },
@@ -709,25 +692,17 @@ pub const Mailbox = struct {
         return count;
     }
 
-    /// Require one response per requested native ID and restore input order.
+    /// Return one record per requested ID, preserving input order and repeats,
+    /// or fail if any requested record is missing.
     fn getHistoryRecords(self: Mailbox, a: Allocator, ids: []const []const u8, body: bool) ![]const Value {
         const response = try self.call(a, "Email/get", self.historyGet(ids, body));
-        if ((try arrayField(response, "notFound")).len != 0) return error.InvalidHistory;
-        const records = try arrayField(response, "list");
-        if (records.len != ids.len) return error.InvalidHistory;
-        var expected: std.StringHashMapUnmanaged(usize) = .empty;
-        defer expected.deinit(a);
-        for (ids, 0..) |id, index| {
-            const entry = try expected.getOrPut(a, id);
-            if (entry.found_existing) return error.InvalidHistory;
-            entry.value_ptr.* = index;
-        }
+        var records: std.StringHashMapUnmanaged(Value) = .empty;
+        defer records.deinit(a);
+        for (try arrayField(response, "list")) |record|
+            try records.put(a, try textField(record, "id"), record);
         const ordered = try a.alloc(Value, ids.len);
-        for (records) |record| {
-            const entry = expected.getPtr(try textField(record, "id")) orelse return error.InvalidHistory;
-            if (entry.* == ids.len) return error.InvalidHistory;
-            ordered[entry.*] = record;
-            entry.* = ids.len;
+        for (ids, ordered) |id, *record| {
+            record.* = records.get(id) orelse return error.InvalidHistory;
         }
         return ordered;
     }

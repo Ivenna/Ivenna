@@ -46,7 +46,7 @@ Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's star
 
 ## Mail service
 
-Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna History` and `Ivenna Archive` folders and a mailbox with role `trash` when missing; the history folders have no special mail role. The account must permit folder creation. The JMAP session must advertise positive integer `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits; the adapter uses these to bound native requests.
+Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna History` and `Ivenna Archive` folders and a mailbox with role `trash` when missing; the history folders have no special mail role. The account must permit folder creation.
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
@@ -70,7 +70,7 @@ Eligible correspondence without the private acknowledgement marker is pending, i
 
 ### SSH connection
 
-Set `MEMORY_SSH_TARGET` to the memory service's SSH target. Set `MEMORY_SSH_CONFIG` to a dedicated file, or leave it unset to use standard OpenSSH configuration. SSH configuration controls the host, user, keys, timeout, and host key verification. The connection must work without interactive input.
+Set `MEMORY_SSH_TARGET` to the memory service's SSH target. Set `MEMORY_SSH_CONFIG` to a dedicated file, or leave it unset to use standard OpenSSH configuration. The connection must work without interactive input.
 
 ### Handler and entry point
 
@@ -112,7 +112,7 @@ Startup discovers the mail account and retires leftover communication copies, th
 | `GET /healthz` | `200 OK` for listener health |
 | `GET /readyz` | `200 OK` with `X-Ivenna-Ready: true` when reception is open; otherwise `503 Service Unavailable` |
 
-Reception opens after initialization and initial storage maintenance. Startup model work runs with reception open. Reception closes when the runtime stops or fails. These endpoints report lifecycle state; they do not probe mail or memory on each request. Once the process has exited, its listener is also gone. For a listener reachable at `127.0.0.1:8090`, check the current state with:
+Reception opens after initialization and initial storage maintenance. Startup model work runs with reception open. Reception closes when the runtime stops or fails. These endpoints report lifecycle state; they do not probe mail or memory on each request. For a listener reachable at `127.0.0.1:8090`, check the current state with:
 
 ```sh
 curl --include http://127.0.0.1:8090/readyz
@@ -121,8 +121,6 @@ curl --include http://127.0.0.1:8090/readyz
 Configure the mail receiving boundary to check the readiness header at an address it can reach and reject incoming traffic when the header is absent, including when the endpoint cannot be reached. Apply the policy to every receiving address and delivery path used for correspondence. The [local Stalwart setup](../dev/README.md#configuring-mail) demonstrates an SMTP recipient check.
 
 Readiness describes the kernel's reception state when queried. It reserves no processing capacity, and the runtime can stop after a successful check or accepted delivery. The kernel continues to read [pending correspondence](#mail-intake) already present in its account.
-
-With SMTP, a recipient rejection reaches the sending server during that delivery attempt. A normal mail client may already have submitted to its own server, which handles the delivery result. Connection failures can also lead that server to queue and retry mail. See SMTP's [delivery responsibilities](https://www.rfc-editor.org/rfc/rfc5321.html#section-4.2.5) and [retry behavior](https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.4.1).
 
 ## Stopping and restarting
 
@@ -198,7 +196,3 @@ Earlier checkpoints are retired through Trash and do not provide rollback. Prese
 Host output files remain available after the command and work session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
 
 Keep provisioning files, credentials, and SSH keys with the deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by the supplied setup.
-
-## Optional host tools
-
-Host commands use the kernel's startup directory by default and inherit its environment. Install additional programs in the kernel's execution environment and make them executable by its OS account. Include their locations in `PATH` or invoke them by path. Restart the kernel to apply startup environment changes.

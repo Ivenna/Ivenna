@@ -27,6 +27,8 @@ Keep each document focused on its role:
 | Architecture guide | The current implementation's package ownership, dependencies, algorithms, synchronization, storage representation, and service protocols |
 | Running and local development guides | Deployment configuration and service procedures |
 
+Keep project guidance focused on Ivenna's interfaces, integration choices, and their operational effects. Refer readers to component documentation for general use and administration, keeping Ivenna-specific settings and procedures here.
+
 Design can name an operation or concept when it expresses a behavioral choice, such as explicit sending or work ownership. When behavior changes, update the affected design, interface contracts, model-facing resources, and implementation together. When replacing a mechanism while preserving behavior, update its implementation and architecture description. Describe any remaining implementation limitation and its effect in the relevant interface or operational guide.
 
 ## Implementation boundaries
@@ -43,7 +45,9 @@ Keep configuration with the behavior it controls. `Kernel.Config` and `Kernel.Li
 
 ### Types and protocols
 
-Decode external protocols in their owning components and give execution code typed operations. Work, session scheduling, and model observations must not depend on mail records, headers, folders, or native thread identifiers.
+Decode external protocols in their owning components and give execution code typed operations. Callers rely on the guarantees established by language types and supplying components within their documented scope and lifecycle. Validate additional requirements at the boundary that owns them.
+
+Work, session scheduling, and model observations must not depend on mail records, headers, folders, or native thread identifiers.
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 

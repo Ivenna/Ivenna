@@ -4,7 +4,7 @@ Send messages to Ivenna while [reception is open](running.md#service-status-and-
 
 ## Sending a request
 
-Use a correspondent account in the domain of `MAIL_ADDRESS`. For example, `operator@ivenna.test` can correspond with `ivenna@ivenna.test`. Send through your mail client, give the request a useful subject, and put the task and relevant context in its body:
+Use a correspondent account in the domain of `MAIL_ADDRESS`. For example, `operator@ivenna.test` can correspond with `ivenna@ivenna.test`. The message body carries the task and its context:
 
 ```text
 To: <Ivenna's address>
@@ -13,7 +13,7 @@ Subject: French practice
 Please remember that I am learning French and propose a practice plan.
 ```
 
-Your mail client may confirm submission to its own server before delivery to Ivenna. A rejection while reception is closed can arrive later as a delivery result; see [reception readiness](running.md#service-status-and-reception).
+Your mail service can report a delivery failure when Ivenna's [reception is closed](running.md#service-status-and-reception).
 
 Ivenna sees who said what: your readable correspondent ID (`operator` in this example) and your message text. Every From address must map to a supported ID in the configured domain; otherwise the message is excluded from intake. To ask Ivenna to contact someone else, describe that request and their correspondent ID in the text. See [email addressing](communication.md#current-email-addressing) for supported addresses.
 
@@ -25,7 +25,7 @@ For a command to verify the supplied local environment, see [sending a developme
 
 ## Continuing correspondence
 
-Describe what you are referring to, what changed, and what you want to happen next. For example:
+Follow-up messages enter the core as new observations. Ivenna relates them through retained understanding and memory; mail thread grouping does not select an internal work session. A message cannot directly update a work focus that is already running. For example:
 
 ```text
 To: <Ivenna's address>
@@ -34,8 +34,6 @@ Subject: French practice schedule
 About the French practice plan: use Tuesday and Saturday, and keep each
 session to 20 minutes. Please retain the vocabulary goals we agreed on.
 ```
-
-You can use your client's reply action or compose a new message. Ivenna relates messages through its retained understanding and memory; the mail client's thread grouping does not select an internal work session. A message cannot directly update a work focus that is already running.
 
 ## Ongoing work and memory
 

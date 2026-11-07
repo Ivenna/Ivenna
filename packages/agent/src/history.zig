@@ -171,10 +171,8 @@ pub const Persistence = struct {
             var metadata: std.AutoHashMapUnmanaged(Scope, Metadata) = .empty;
             for (batch) |group| try metadata.put(temporary, owners.get(group).?, .empty);
             for (references) |reference| {
-                const scope = owners.get(reference.group) orelse return error.InvalidHistory;
-                const records = metadata.getPtr(scope) orelse return error.InvalidHistory;
-                if (!validKey(reference.key) or reference.locator.len == 0) return error.InvalidHistory;
-                if (reference.previous) |previous| if (!validKey(previous)) return error.InvalidHistory;
+                const scope = owners.get(reference.group).?;
+                const records = metadata.getPtr(scope).?;
                 const result = try records.getOrPut(temporary, reference.key);
                 if (result.found_existing) {
                     if (!equalPrevious(result.value_ptr.previous, reference.previous)) return error.InvalidHistory;
@@ -222,7 +220,6 @@ pub const Persistence = struct {
             var references: [source_batch_count]Store.Reference = undefined;
             for (batch, references[0..count]) |selected, *reference| reference.* = selected.reference;
             const bodies = try self.store.read(scratch.allocator(), references[0..count]);
-            if (bodies.len != count) return error.InvalidHistory;
             for (batch, bodies) |*selected, body| {
                 if (!equalKey(digest(body), selected.reference.key)) return error.InvalidHistory;
                 const source = try decode(Source, a, body);

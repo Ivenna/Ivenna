@@ -149,9 +149,9 @@ pub const Provider = struct {
         return decodeResponse(arena, output.written());
     }
 
-    /// Validate the complete response before publishing any calls. Each output
-    /// item is retained as adapter-private continuation bytes, including fields
-    /// the execution core does not interpret.
+    /// Decode every output item before returning calls for execution. Check
+    /// fields needed for text and call extraction; retain each complete item
+    /// as adapter-private continuation, including uninterpreted fields.
     fn decodeResponse(arena: Allocator, bytes: []const u8) !Model.Response {
         const decoded = std.json.parseFromSliceLeaky(struct {
             status: []const u8,
@@ -169,7 +169,6 @@ pub const Provider = struct {
             const kind = try textField(item, "type");
             if (std.mem.eql(u8, kind, "reasoning")) continue;
             if (std.mem.eql(u8, kind, "message")) {
-                if (!std.mem.eql(u8, try textField(item, "role"), "assistant")) return error.InvalidModelResponse;
                 const parts = try field(item, "content");
                 if (parts != .array) return error.InvalidModelResponse;
                 for (parts.array.items) |part| {

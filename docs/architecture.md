@@ -13,7 +13,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activations, forks, and retained history; own model-input rendering, execution policy, and model-facing resources |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
-| [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, validate Responses output, and apply model content limits |
+| [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, decode Responses output, and apply model content limits |
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own shell execution, process cleanup, logs, and returned output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result text and image content, classify source bytes, and interpret image references |
@@ -173,7 +173,7 @@ The checkpoint contains the next session identifier and each retained session's 
 
 ### Saving and restoration
 
-`HistoryStore` provides grouped record operations, checkpoint loading and publication, and maintenance against a retention selection. The agent owns segment identity, record encoding, content keys, order, committed paths, and retention selection. The adapter owns group representation, native locators, placement, request limits, and result correlation. Native locators do not appear in the checkpoint.
+`HistoryStore` provides grouped record operations, checkpoint loading and publication, and maintenance against a retention selection. The agent's codec owns segment identity, record encoding, content keys, committed paths, and retention selection, and validates the checkpoint and selected history. The adapter owns native group representation, locators, placement, and request limits. It decodes reference metadata and returns one complete body per requested reference in input order. Native locators do not appear in the checkpoint.
 
 The runtime saves after activation admission, accepted complete model/tool batches, compaction, fork publication, and context release. A save encodes and hashes records to compare each segment against its cached prefix, then creates new occurrences and changed unread-observation records in batches. Each batch holds up to 32 records and about 1 MiB of encoded bodies, allowing a single larger record. All required creates must be confirmed before publishing the checkpoint. An interrupted or unconfirmed create can leave records outside the selected paths; neither exactly-once creation nor archive-wide deduplication is guaranteed.
 
@@ -223,7 +223,7 @@ Infrastructure failures in communication and memory, along with model execution,
 
 Memory and Host return content in the model-round arena. [Engine](../packages/agent/src/engine.zig) creates a native tool result with its call ID and content; the [Responses adapter](../packages/responses/src/provider.zig) encodes it for the configured model service. Local image bytes become request data; remote URLs remain references whose contents can change. Image rejection preserves accompanying text and reports the omitted image. The adapter's image checks apply alongside the whole-context budget. See [tool content](content.md) for formats and limits.
 
-The Responses adapter decodes and validates the complete model output before Engine executes any tool in the response. It supplies continuation items, parsed calls, and assistant text to execution and compaction; malformed or unsupported output fails explicitly. Unknown tools and invalid arguments become tool errors available to the next model round. Image limits apply once to the complete tool batch.
+The Responses adapter decodes the entire output batch before Engine executes any tool in it. It validates the fields needed to extract calls and assistant text, and retains each output item as opaque continuation data. Execution and compaction use those decoded values. In ordinary work, unknown tools and invalid arguments become tool errors available to the next model round. Image limits apply once to the complete tool batch.
 
 Tool declarations live with their owning implementations: [communication and session tools](../packages/agent/src/tools.json), [host tools](../packages/host/src/tools.json), and [memory tools](../packages/memory/src/tools.json). Host and Memory register their declarations through `Tools`. Engine selects the agent's declarations for core coordination and adds declarations from registered capabilities for work sessions; summarization has no tools. The model adapter encodes the selected declarations with its protocol-specific fields.
 

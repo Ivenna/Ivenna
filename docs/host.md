@@ -42,12 +42,12 @@ Call `run_host_shell` with a command string:
 
 | Argument | Meaning |
 | --- | --- |
-| `command` | Required command in `/bin/sh` syntax; supports pipes, redirection, and heredocs |
+| `command` | Required command in `/bin/sh` syntax |
 | `cwd` | Working directory; absolute or relative to the kernel's startup directory, which is also the default |
 | `timeout_ms` | Positive integer in milliseconds; defaults to `600000` (10 minutes) |
 | `interpretation` | Optional `"image_url"` to present complete stdout text as an [image reference](content.md#image-url-references) |
 
-Each call starts a fresh noninteractive `/bin/sh` with no terminal or live input. It inherits the kernel's startup environment and finds programs through its `PATH` or an explicit path; see [optional host tools](running.md#optional-host-tools). Changing `cwd` does not reload the environment. Shell variables and directory changes last for that call; filesystem changes persist.
+Each call starts a fresh noninteractive `/bin/sh` with no terminal or live input, inheriting the kernel's startup environment.
 
 The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled. Background processes in that group end with the invocation; no later job-completion observation is supplied.
 
