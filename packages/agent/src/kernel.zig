@@ -164,10 +164,9 @@ pub const Kernel = struct {
         kernel: *Kernel,
         work: Work,
         plan: ?Sessions.ForkPlan = null,
-        committed: bool = false,
 
         fn deinit(self: *RuntimeRound) void {
-            if (!self.committed) if (self.plan) |plan| self.kernel.sessions.abandonFork(plan);
+            if (self.plan) |plan| self.kernel.sessions.abandonFork(plan);
         }
 
         fn registerCallback(context: *anyopaque) anyerror!u64 {
@@ -232,7 +231,7 @@ pub const Kernel = struct {
             const round = try self.engine.turn(a, session.session_id, view.input, .{ .context = &runtime, .invoke = RuntimeRound.invoke, .register_callback = RuntimeRound.registerCallback }, session.role);
             delivery = .none;
             const committed = try self.sessions.commitRound(work, round.output, round.replies, runtime.plan);
-            runtime.committed = true;
+            runtime.plan = null;
             try self.sessions.save();
             if (committed != .continuing) return;
             if (round.replies.len == 0 and try self.sessions.finish(work, round.text)) return;
@@ -286,10 +285,10 @@ pub const Kernel = struct {
             selection = try self.selectEvents(a, work, &compacted, snapshot);
         }
         var selected = selection orelse return error.ContextBudgetExhausted;
-        var installed = false;
-        errdefer if (!installed) selected.context.deinit();
-        try self.sessions.admitEvents(work, selected.count, selected.context);
-        installed = true;
+        {
+            errdefer selected.context.deinit();
+            try self.sessions.admitEvents(work, selected.count, selected.context);
+        }
         try self.sessions.save();
         for (work.activation.deliveries.items) |delivery| {
             const receipt = delivery.receipt orelse continue;

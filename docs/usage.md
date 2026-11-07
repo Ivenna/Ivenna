@@ -4,7 +4,7 @@ Send messages to Ivenna while [reception is open](running.md#service-status-and-
 
 ## Sending a request
 
-Use a correspondent account in the domain of `MAIL_ADDRESS`. For example, `operator@ivenna.test` can correspond with `ivenna@ivenna.test`. The message body carries the task and its context:
+Use a correspondent account in the same domain as Ivenna's configured address. For example, `operator@ivenna.test` can correspond with `ivenna@ivenna.test`. The message body carries the task and its context:
 
 ```text
 To: <Ivenna's address>

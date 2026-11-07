@@ -372,7 +372,6 @@ pub const Persistence = struct {
     }
 
     pub fn save(self: *Persistence, a: Allocator, history: History) !void {
-        try history.validate(a);
         var candidate: Cache = .init(self.allocator);
         defer candidate.deinit();
         var builder: Builder = .init(self, &candidate, a);

@@ -213,4 +213,4 @@ An operation error contains `code` and `message`. Common codes include:
 | `unsupported_content` | Revision requires UTF-8 text without NUL bytes; no revision was written |
 | `memory_capacity_exceeded` | The proposed growth exceeds shared capacity; the entry was not changed |
 
-Connection and protocol failures, and handler failures without an operation-error reply, stop the kernel and its concurrent work. Finer error classification and execution recovery remain undefined; see [startup and interruption](architecture.md#startup-and-interruption).
+Connection and protocol failures, and handler failures without an operation-error reply, stop the kernel and its concurrent work. See [startup and interruption](architecture.md#startup-and-interruption) for continuation after restart.

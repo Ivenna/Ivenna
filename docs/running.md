@@ -45,13 +45,11 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 
 Core and work sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
 
-Session identities, pending events, and execution slots have independent limits. Sleeping sessions can unload their contexts without occupying execution slots or losing their IDs. With `MAX_SESSIONS=1`, only the core fits and forking is unavailable. The session limit must accommodate the identities already registered in the mailbox; reducing it below that count prevents startup. At the session limit, creating a new fork returns a capacity outcome and existing sessions can still receive work. Automatic retirement of old identities is not implemented.
+Session identities, event queues, callbacks, background commands, and execution slots have independent limits. Sleeping sessions occupy no execution slot. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Identities are not automatically retired.
 
-`MAX_PENDING_EVENTS` bounds ordinary events and reserved reports separately for each session. Internal control observations do not consume this allowance. When capacity is unavailable, correspondence and callback mail remain stored for later admission. `MAX_PENDING_CALLBACKS` bounds registrations awaiting durable admission, including future wakeups and completed host results not yet admitted. `MAX_BACKGROUND_COMMANDS` separately limits host commands still running. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling and report reservations.
+Ordinary events and report reservations share each session's `MAX_PENDING_EVENTS` allowance; startup and nested creation notices are excluded. Callback mail waits when its destination is full. Correspondence and callbacks have independent intake allowances, and eligible work sessions rotate through available slots without preempting running activations. Capacity and polling can delay scheduled work.
 
-Correspondence and callback intake have independent allowances, so an older correspondence backlog cannot consume the callback allowance. Processing can wait for a poll, destination queue capacity, and an execution slot. Fairness gives waiting work sessions opportunities to start activations; running model and tool work is not preempted. Scheduled times and accepted delivery do not guarantee an immediate inference or response.
-
-Request byte limits cover the whole serialized body, including instructions, tool definitions, history, the fresh runtime-state snapshot, complete incoming text, and encoded images. They do not estimate model tokens. A larger session roster or pending-callback list increases the snapshot repeated in each request, leaving less space for history and new observations. If a single input cannot fit after context compaction, admission fails with `ContextBudgetExhausted` and the runtime stops. `HANDOVER_MAX_BYTES` bounds the retained handover text. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
+Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. A larger roster or callback list leaves less room for history and observations. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
@@ -65,7 +63,7 @@ Use the [supported email addresses](communication.md#current-email-addressing). 
 
 Install the [reception-readiness policy](#service-status-and-reception) on the service's receiving paths before using them for correspondence.
 
-Internal callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped; their producer processes do not survive a restart. See [callback mail](communication.md#callback-mail) for the delivery contract.
+Internal callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped; host processes are not restored on restart. See [callback mail](communication.md#callback-mail) for the delivery contract.
 
 Configure automatic Trash expiry and cleanup of unreferenced storage in the mail service. These processes must continue independently of the kernel. Choose retention with the provider's full policy scope in mind: Trash and Junk policies can also remove ordinary mail. The [local Stalwart setup](../dev/README.md#configuring-mail) provides a concrete configuration.
 
@@ -141,15 +139,19 @@ Readiness describes the kernel's reception state when queried. It reserves no pr
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work and background host commands, and wait for the runtime's tasks to end. Infrastructure and execution failures also stop the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
-When an incoming message fails admission with `ContextBudgetExhausted`, it remains unacknowledged. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
-
-Restoration requires a history format understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; the account is not cleared automatically.
-
 Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
 
-The core, interrupted work, and unread internal input receive fresh startup observations. Other branches remain asleep until an event arrives. Every session's pending wakeups survive restart, including deadlines that passed while the runtime was unavailable, and their callbacks return to the original session.
+The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other branches remain asleep until an event arrives. Every session's pending wakeups survive restart, including deadlines that passed while the runtime was unavailable, and their callbacks return to the original session.
 
 Stored host callbacks remain available. A registered host activity without a stored completion instead produces an interrupted observation with an unknown outcome. Host processes are not restored and commands are not replayed. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
+
+### Recovering from an admission failure
+
+When an incoming message fails admission with `ContextBudgetExhausted`, it remains unacknowledged. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
+
+### Updating the executable
+
+Restoration requires a history format understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; the account is not cleared automatically.
 
 ## Data and retention
 
@@ -178,7 +180,7 @@ Ivenna releases a communication copy when its observation has been durably admit
 
 Acknowledgement confirms durable admission, not completion of the requested work. Pending supported input remains available for admission. Internal assignments and reports are saved as working history rather than separate communication copies.
 
-Duplicate callback publication reuses an identifiable stored copy, including one in Trash. Once no identifiable copy remains, the publisher cannot recognize the original stored result and may create a new copy. This storage limit does not cause another model observation for an already admitted callback ID; [admission deduplication](architecture.md#event-sources-and-callback-admission) remains in the saved runtime state.
+Publisher first-result preservation lasts while an identifiable callback copy remains, including in Trash. Losing that copy permits new publication, but saved [admission deduplication](architecture.md#event-sources-and-callback-admission) still prevents another observation for a consumed ID.
 
 The mail account is not a permanent transcript: original copies expire under the Trash policy, and compaction can replace detailed observations and tool exchanges with a handover. Preserve original correspondence separately when it needs a longer lifetime. A correspondent's own account and received copies remain outside Ivenna's copy management.
 

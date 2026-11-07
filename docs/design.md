@@ -6,90 +6,66 @@ This guide sets the intended behavior and interface principles. See the [documen
 
 ## Capabilities and acquired knowledge
 
-The runtime's interfaces expose the body's capabilities to a model with broad prior knowledge, like a knowledgeable person encountering the tools at hand. They should make available actions discoverable and their effects understandable.
+The runtime exposes capabilities to a model with broad prior knowledge, like a knowledgeable person encountering the tools at hand. Interfaces should make available actions discoverable and their effects understandable.
 
-Program choices and general tool use draw on the model's prior knowledge and what it learns through interaction. Its identity, preferences, working methods, and memory organization can develop with that experience.
+The model draws on prior knowledge and interaction to choose programs and use tools. Its identity, preferences, working methods, and memory organization can develop with that experience.
 
 ## Runtime availability
 
-Communication and autonomous memory are required for Ivenna to operate. The runtime starts with both available; infrastructure failures in either end the runtime and its concurrent work. Failures in model and session execution also end the runtime. Defined tool outcomes, such as a missing memory entry, a capacity limit, or a command's nonzero exit, remain observations for the model to understand.
+Communication and autonomous memory are required for Ivenna to operate. Infrastructure, model, and session-execution failures end the runtime and its concurrent work. Defined tool outcomes, such as a missing memory entry, a capacity limit, or a command's nonzero exit, remain observations for the model.
 
-Ivenna exposes its health and whether reception is open. Senders must expect reception to close when Ivenna is starting, stopping, or unavailable. The receiving boundary checks that state before accepting new messages. Retry and queuing by a sender belong to that sender; automatic offline reception and recovery are outside the current design.
+The receiving boundary checks Ivenna's reception status before accepting correspondence. Reception closes during startup, shutdown, or failure; sender retry and queuing belong to the sender. See [reception readiness](running.md#service-status-and-reception) for the precheck's limits.
 
 ## Model-facing descriptions and results
 
-Tool descriptions explain how to choose and invoke an operation and interpret its result. Model input identifies each observation's source, content, and context, with the runtime state needed to understand ongoing work. Results convey the state and outcome of the particular invocation.
+Tool descriptions explain how to choose an operation, invoke it, and interpret its result. Keep them concise and leave room for the model's knowledge and judgment. Detailed field references and implementation explanations belong in developer documentation unless they affect use.
 
-Keep these interfaces concise and leave room for the model's knowledge and judgment. Detailed field references and implementation explanations belong in developer documentation unless they affect how the interface is used or interpreted.
+Task and message text remain free-form. Each inference combines current execution facts with one purpose: ordinary work with observations, or handover generation. Earlier observations, model output, tool replies, handovers, and autonomous memory carry understanding; transient execution state supplements that understanding. The [input contract](input.md) defines these lifetimes and structures.
 
-Keep task text and message text free-form. Each inference receives a turn combining current execution facts with one purpose: ordinary work with new observations, or handover generation with summary instructions. Earlier observations, model output, tool replies, and handovers carry the understanding needed to continue. New observations remain in that history; transient execution state does not. The system prompt explains these lifetimes and response scope; the [input contract](input.md) defines their structure.
-
-Tool results can combine text, media, and information about an operation's outcome and source. Classifying or interpreting one source preserves the other observations in the result. When a provider or budget cannot carry content, retain its source information and describe the omission.
+Tool results preserve operation outcomes, source descriptions, and supported media together. When content cannot be supplied, retain its source information and describe the omission.
 
 ## Communication with people and programs
 
-People and programs communicate with Ivenna through messages. Each arrival enters the core as an observation of who said what. An observation does not imply that the words were addressed specifically to Ivenna or require a response. Ivenna relates it to its ongoing understanding and work.
+Messages enter the core as observations of who said what, with correspondent IDs and observation time. Receiving one does not imply that Ivenna was addressed or must respond. These IDs connect observations with explicit outgoing communication and its retained model/tool exchanges.
 
-The communication interface supplies received text, the IDs of participants it came from, and observation time. Retained model and tool exchanges preserve Ivenna's outgoing communication with its chosen recipient IDs. Correspondent IDs link observations with explicit communication actions. Understanding correspondents and their relationships to Ivenna can inform coordination. Policies based on correspondent IDs, including any participant whitelist or scheduling distinctions, remain undecided.
-
-Ivenna explicitly chooses whether to send a message, to whom, and what it says through `send_message`. An activation can send zero, one, or several messages. For ordinary work, final model text supplies an internal result in the core or a report to a work session's parent and the core. The [communication guide](communication.md) describes the interface and its current implementation.
+Ivenna chooses whether to communicate, to whom, and what to say through `send_message`. An activation can send zero, one, or several messages; final text remains an internal result or work report. The [communication guide](communication.md) defines these interfaces.
 
 ## Internal work and state
 
-Work is defined by a task and the understanding needed to continue it. A session has a stable identity, retained understanding, and an event queue. An activation continues work through model and tool rounds. Before each new inference, it can admit queued events after the preceding model response and its complete tool batch have been retained. New observations can therefore inform the next decision without interrupting a running inference or tool.
+A task describes work to accomplish. A session has a stable identity, retained understanding, and an event queue. An activation continues its work through model/tool rounds, admitting further events between complete rounds so new information can adjust the next decision without interrupting an inference or tool.
 
-Execution state coordinates ongoing work. Retained working contexts persist independently of execution. Incoming correspondence is acknowledged once its complete observation is durably retained, independently of task completion.
-
-A final response ends the activation once queued arrivals and any pending core attention signal have been considered, leaving the session sleeping when no work remains. It does not certify task success or retire the session. A later event wakes the same session with its retained understanding. The runtime can unload sleeping contexts and restore them from durable history; Ivenna does not need to decide which histories occupy memory. Activation completion, task completion, memory residency, and data retention have separate lifecycles.
+A final response ends the activation when no queued arrivals or core attention signal require more reasoning. The session can then sleep and later resume with its retained understanding. The runtime manages context residency and restoration. Activation completion, task success, memory residency, and data retention have separate lifecycles; durable input acknowledgement transfers responsibility independently of task completion.
 
 ## Core and concurrent attention
 
-One core session coordinates Ivenna throughout the kernel's lifetime. It has no parent. It relates incoming observations to its retained understanding and shared memory, and can maintain memory or send a brief message directly. Sustained work moves to separate sessions so the core can return to its queue. Later messages still enter the core.
+One core session coordinates Ivenna, relating correspondence to retained understanding and shared memory. Sustained work moves to separate sessions so the core can return to its queue. Core responsiveness depends on both an independent execution lane and short coordination turns.
 
-Forking is an explicit model decision available to core and work sessions alike. It passes the activation's work to another focus of Ivenna's attention with the complete retained working context, including any earlier handover. The caller's activation ends and it returns to its queue; the child starts an activation for its assignment. The child and its parent remain addressable after either activation ends.
+Core and work sessions can explicitly fork an activation's whole work and retained context to a new child. The caller returns to its queue; their histories then grow independently. A work activation's final result reaches its direct parent and the core automatically, with one copy when they coincide. The core also learns the identity, parent, and assignment of nested forks.
 
-A work session's final text returns one combined result for that activation to its direct parent and the core, with one copy when they are the same session. The runtime delivers both reports without asking a model to relay them. When a work session creates a child, the core also observes its identity, parent, and assignment; the core already knows its own forks through their tool exchanges. Parent relationships preserve the origin of work; they do not require other notifications to travel through the parent chain.
+Execution limits separately bound registered sessions, pending events, pending callbacks, background commands, and concurrent work. Eligible work sessions receive rotating opportunities to start activations; running activations are not preempted. See [scheduling and capacity](architecture.md#scheduling-and-capacity).
 
-After a fork, the histories grow independently. The core retains its reception and coordination history; execution detail accumulates in the session carrying out the work. This keeps the core's context useful for further coordination and forks.
-
-Separate reasoning settings favor responsive coordination and deeper sustained work. The runtime separately bounds registered sessions, pending events, pending callbacks, background commands, and concurrent work, and preserves an independent execution lane for the core. Work sessions eligible to start an activation receive rotating opportunities to claim available execution slots; running model and tool rounds are allowed to finish. Forking returns the core to its queue without waiting for the work session. Core responsiveness depends on keeping coordination turns short as well as scheduling them promptly.
-
-These contexts share a body: files, memory, communication, and host processes. Core and work sessions can recall, record, and organize the same autonomous memory. Ivenna chooses what to remember and how to organize it wherever its attention is focused. Sessions account for effects another session may already have produced.
+Sessions share one body: files, memory, communication, and host processes. They can hold different understanding and must account for effects another session may already have produced. Ivenna chooses what to remember and how to organize shared autonomous memory wherever its attention is focused.
 
 ## Events and waiting
 
-Ivenna decides what an observation means and how to respond. The runtime owns delivery and resumption: a known destination must not depend on a model remembering to relay a result or reactivate a sleeping session.
+Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a sleeping session. Direct session messages identify their sender; the receiver weighs their content against its own evidence and understanding.
 
-Sessions can send observations directly to another session. A message identifies the session that actually sent it; its contents remain evidence for the receiver to interpret alongside its own understanding. Different sessions may hold different or outdated information. Source attribution preserves those distinctions without giving one session's account automatic precedence.
+Each inference receives a complete snapshot of the finite runtime state exposed by the interface. This remains self-contained after a fork, restart, or compaction, at the cost of repeated request bytes. A delta interface would also need a baseline, addition and removal semantics, and recovery when that baseline becomes invalid. Task meaning and prior effects remain in model messages, handovers, and memory. Concurrent attention can schedule the core to reconsider fresh state without adding a historical event.
 
-Each inference receives a complete snapshot of the finite runtime state exposed by the interface, including session execution state and pending callbacks. A full snapshot remains self-contained after a fork, restart, or compaction without requiring Ivenna to maintain a baseline of changes. It adds repeated bytes to the request budget. Task meaning, reasoning, prior effects, and external-world understanding remain in model messages, handovers, and autonomous memory rather than being recopied into execution state.
+Every session can schedule a durable one-time `wakeup` for itself. Work sessions can run host commands in the background and receive completion callbacks. Sources bind to their receiving session before starting and retain that destination across forks. See [session communication](communication.md#session-communication-and-wakeups) and [background commands](host.md#background-commands).
 
-A delta interface would require a defined baseline per session, addition and removal semantics, and recovery when that baseline becomes invalid. The current design keeps the finite snapshot complete; an incremental form needs a concrete use case to justify those additional responsibilities.
-
-Changes in concurrent attention can prompt the core to reconsider that state even without a new event. This scheduling signal does not add a historical notice; the core reasons from its retained understanding and fresh state.
-
-Each session can register a durable one-time `wakeup` for itself. Work sessions can start a host command in the background and return control while it runs. Completion becomes a callback observation for the session that started it. The runtime records the source and destination before starting the activity and retains them until the observation is durably admitted. A fork does not transfer already registered callbacks to the child. The [communication guide](communication.md#session-communication-and-wakeups) and [host guide](host.md#background-commands) define the available operations and their limits.
-
-Sleeping sessions keep their identity and durable working history even when their context is unloaded. At the registered-session limit, creating another session fails explicitly; existing sessions can still receive work. Automatic retirement of old session identities remains undefined. The [architecture guide](architecture.md#activation-completion-and-sleep) describes these lifetimes.
+Sleeping sessions keep their identities and histories. At the registered-session limit, new forks fail while existing sessions remain addressable. Automatic identity retirement is not implemented.
 
 ## Context and continuity
 
-Working contexts retain observations, complete model output, and tool results. All registered sessions preserve that understanding across runtime interruption, along with session identities, parent relationships, unread internal events, and pending callback registrations. Working history persists independently of whether its context is loaded and independently of host execution artifacts.
+Working contexts retain observations, complete model output, and tool results across interruption. Limits cover complete model requests and generated responses, with byte counts and token allowances stated separately.
 
-Limits cover the complete model request, including instructions, tool definitions, observations, and tool results, as well as the generated response. Each limit states what it measures; byte counts and model tokens are separate units.
+Compaction first reads retained LLM messages to generate a handover without continuing tasks or admitting waiting observations. After successful generation and validation, the runtime replaces those messages with the system prompt and handover for the next ordinary inference. The free-form handover preserves commitments, uncertainty, effects, and the identities needed to continue; session relationships persist.
 
-When context needs to be shortened, a maintenance inference reads the retained LLM messages and generates a handover. It does not continue tasks or consume observations waiting for admission. Only after that handover is successfully generated and validated does the runtime replace those messages with the system prompt and handover for a new ordinary inference.
-
-The handover remains free-form text. It should preserve commitments, relevant uncertainty, completed effects, and correspondent IDs and relationships needed for continued understanding. Replacement preserves the session and its relationships.
-
-Startup restores the session registry and wakes the core, interrupted work, and sessions with unread internal input. Sleeping work stays asleep until a real event arrives; its first activation in the new runtime includes a startup observation. Stored callbacks remain eligible for admission and due wakeups deliver after restart. A host activity without a stored completion produces an interrupted observation with an unknown outcome; the runtime does not rerun its command. Current execution state describes the new runtime; earlier observations describe what was known then. Ivenna decides how to relate that history to the present and what to do next. The [startup contract](architecture.md#startup-and-interruption) defines what survives and what is rebuilt.
-
-An interrupted action may already have affected the world before its result was retained. Persistence supplies historical evidence; it does not establish that effects occurred exactly once or that external state is unchanged. The runtime does not replay past tool calls. Automatic retry and reconnection after runtime failure remain undefined.
+Startup restores sessions, unread internal work, callback registrations, and wakeups. Interrupted work resumes with a startup observation; dormant branches wait for an event. Host processes and old tool calls are not replayed. A missing host completion becomes an interrupted observation with unknown effects, while a stored result remains available. Persistence does not establish exactly-once effects. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 
 ## Data ownership
 
-The deployment user owns Ivenna's correspondence, retained working histories, artifacts, and autonomous memory, and chooses where they live. Keep these forms open to inspection, retention, and management within the user's deployment.
+The deployment user owns Ivenna's correspondence, working histories, artifacts, and autonomous memory, and chooses where they live. Keep them open to inspection and management.
 
-Correspondence, working history, and host artifacts have separate retention lifecycles. History remains available while any retained context needs it. History no longer needed for continuation follows the deployment user's retention policy. The [architecture guide](architecture.md#history-retention) explains how storage tracks that use; the [running guide](running.md#data-and-retention) describes retention and cleanup in the current deployment.
-
-Diagnostics support troubleshooting and analysis. Keep them separate from the source material and handovers used for continuity.
+These stores have separate retention lifecycles. History remains available while a retained context needs it; other material follows deployment policy. See [history retention](architecture.md#history-retention) and [running Ivenna](running.md#data-and-retention). Diagnostics remain separate from the source material and handovers used for continuity.

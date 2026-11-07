@@ -164,7 +164,7 @@ Use the [startup steps](#starting-the-kernel) to recreate the services and run t
 
 ### Kernel
 
-The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Before running an updated executable against an existing mailbox, check the [history-format requirements](../docs/running.md#stopping-and-restarting). After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild and restart it.
+The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Before running an updated executable against an existing mailbox, check the [history-format requirements](../docs/running.md#updating-the-executable). After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild and restart it.
 
 ### Memory
 

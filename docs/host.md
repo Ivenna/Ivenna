@@ -84,9 +84,9 @@ In the result description, both `stdout` and `stderr` contain an absolute `path`
 
 Stderr's `content` contains either a `text` preview or an `unavailable` diagnostic. See [tool content](content.md) for classification, image descriptions, preview bounds, and model-input limits. Content diagnostics leave the command outcome and stream descriptions available.
 
-`run_host_shell` stores output in distinct log files under `<DATA_DIR>/host/<session_id>/`, creating missing directories when invoked. The files contain the full streams, including output omitted from the reply, and remain available while the session sleeps or its context is unloaded. Later shell calls can read or remove them. See [host output and deployment files](running.md#host-output-and-deployment-files) for `DATA_DIR` configuration and retention.
+`run_host_shell` creates distinct full-stream logs under `<DATA_DIR>/host/<session_id>/`. They survive session sleep and context unloading; later shell calls can read or remove them. See [host artifact retention](running.md#host-output-and-deployment-files).
 
-An invocation error returns JSON `error` with `code` and `message`:
+Defined tool errors return JSON `error` with `code` and `message`:
 
 | Code | Meaning |
 | --- | --- |
@@ -106,8 +106,8 @@ Set `background: true` to receive an activity ID while the command runs independ
 {"result":{"running":{"activity_id":1}}}
 ```
 
-The runtime binds completion to the invoking session. Its later `callback` observation has `source: host` and an `id` matching this `activity_id`. The session can continue other work or return control and sleep. A sleeping session becomes ready when the result arrives; a running session admits it before a later inference, after retaining its current complete model/tool batch. Scheduling and capacity can delay that inference. See [callback mail](communication.md#callback-mail) for delivery and duplicate handling.
+Completion returns to the invoking session as a `source: host` callback whose `id` matches the returned `activity_id`. The session can continue or sleep while waiting; delivery and scheduling follow [callback mail](communication.md#callback-mail).
 
 On completion, the callback's `text` contains the JSON `result` described [above](#results-and-interruption), including outcome, both stream descriptions, and full log paths. For image stdout, the text also includes `"media_omission":"asynchronous_media_unavailable"`; no native image accompanies the callback. Use synchronous execution when the model needs the image itself. A failure to obtain a complete command result can instead produce a JSON `host_unavailable` error description.
 
-`MAX_BACKGROUND_COMMANDS` bounds concurrently running background tasks, and each registration uses the session's `MAX_PENDING_CALLBACKS` allowance. Returning control leaves the task running; runtime shutdown cancels and joins it. After restart, an existing stored completion is preserved. If no result was stored, the callback instead carries a plain-text notice of an interrupted activity with an unknown outcome. The command is not replayed, so inspect its possible effects before deciding how to continue. Intermediate script-emitted events, asynchronous media return, and processes that survive kernel restart are not implemented.
+`MAX_BACKGROUND_COMMANDS` bounds running tasks; registrations use the session's `MAX_PENDING_CALLBACKS` allowance. Shutdown cancels and joins commands. After restart, stored completions remain available; unfinished registrations instead receive a plain-text notice of unknown interrupted effects. Commands are not replayed, so inspect uncertain effects before repeating work.

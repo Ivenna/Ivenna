@@ -182,14 +182,9 @@ pub const Mailbox = struct {
     const OrderedArrival = struct {
         arrival: Arrival,
         received_at: []const u8,
-        ordinal: usize,
 
         fn lessThan(_: void, left: OrderedArrival, right: OrderedArrival) bool {
-            return switch (std.mem.order(u8, left.received_at, right.received_at)) {
-                .lt => true,
-                .gt => false,
-                .eq => left.ordinal < right.ordinal,
-            };
+            return std.mem.lessThan(u8, left.received_at, right.received_at);
         }
     };
 
@@ -219,7 +214,6 @@ pub const Mailbox = struct {
                 try arrivals.append(a, .{
                     .arrival = arrival,
                     .received_at = try receptionKey(record),
-                    .ordinal = arrivals.items.len,
                 });
                 accepted += 1;
             }

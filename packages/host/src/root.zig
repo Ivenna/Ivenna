@@ -157,10 +157,7 @@ pub const Host = struct {
         const accepted = try Content.fromText(a, try success(a, .{ .running = .{ .activity_id = activity.callback_id } }));
         self.active += 1;
         errdefer self.active -= 1;
-        self.tasks.concurrent(self.shell.io, runBackground, .{ self, activity }) catch |err| {
-            self.failLocked(err);
-            return err;
-        };
+        try self.tasks.concurrent(self.shell.io, runBackground, .{ self, activity });
         launched = true;
         return accepted;
     }

@@ -6,9 +6,7 @@ Ivenna communicates externally through `send_message` and internally through ses
 
 Each [incoming message](input.md#incoming-messages) records the correspondent IDs it came `from` and its free-form text. If `operator` relays Alice's words, `from` is `[operator]`; the text carries that attribution and context. The model relates the message to its ongoing understanding and decides whether to respond.
 
-IDs identify people and programs Ivenna can choose to contact through `send_message`. For example, `alice` can ask Ivenna in the message text to send an update to `support`. The model decides whether to send it and explicitly supplies the recipient IDs.
-
-Retained working history preserves incoming observations and the model/tool exchanges that send messages. Outgoing tool arguments include the chosen `recipients` and text; tool results record submission outcomes. Handovers can preserve correspondent IDs along with the understanding needed for continued interaction.
+Retained observations, sending exchanges, and handovers preserve correspondent IDs and their context. Outgoing arguments record chosen recipients and text; results record submission outcomes.
 
 ## Sending a message
 
@@ -63,11 +61,9 @@ Core and work sessions can use both [agent tools](../packages/agent/src/tools.js
 | `send_session_message` | `session_id`, nonempty `text` | `{"result":{"session_id":2}}` identifies the recipient whose queue accepted the observation |
 | `wakeup` | `at_unix_ms`, nonempty `text` | `{"result":{"callback_id":5}}` identifies a scheduled observation for the calling session |
 
-Session IDs remain usable across activations, context unloading, and restart. A session message records the actual sending session in `from_session`. If session 2 relays session 3's report, the sender remains 2; its text carries the original attribution and uncertainty. The recipient interprets the message alongside its own evidence and understanding. Successful sending confirms durable queue acceptance rather than agreement or task completion.
+Session IDs survive sleep, unloading, and restart. Sending confirms durable queue acceptance. The observation records the actual sending session; attribution to an earlier source belongs in the message text. A sleeping recipient wakes, while a running recipient admits the message between complete model/tool rounds. Reports and [nested creation notices](input.md#assignments-and-reports) reach their destinations automatically.
 
-An accepted observation makes a sleeping session ready for an activation, subject to scheduling and capacity. A running session admits new observations between its complete model/tool batch and a later inference. Direct messages leave parent relationships and report destinations unchanged. The core receives [nested creation notices and work reports](input.md#assignments-and-reports) automatically; its own forks are already recorded in tool exchanges. Sessions can use direct messages for further coordination.
-
-`wakeup` binds its source to the calling session and retains the supplied text and deadline across restart. Past timestamps are immediately due. The eventual callback returns that text to the same session, which can sleep while waiting. Actual publication follows the intake polling cadence, and admission waits for queue capacity; the requested time does not guarantee an immediate inference. This interface has no cancellation operation.
+`wakeup` retains its text and deadline across restart and returns the text to the calling session. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The session can sleep while waiting. Cancellation is unavailable.
 
 The tools report defined failures without ending the runtime:
 
@@ -82,8 +78,6 @@ See [configuration](running.md#configuration) for capacity limits and [session m
 
 ## Callback mail
 
-Background host commands and wakeups register their callback IDs and receiving sessions before producing observations. A host completion returns to the invoking work session; a wakeup returns to the session that scheduled it. Forking preserves those destinations. The callback ID identifies its source, and the callback text supplies the outcome or reminder for that session to interpret.
+Background host commands and wakeups register an ID and receiving session before producing results. Callbacks keep that destination across forks and arrive through durable JMAP mailbox delivery, independently of SMTP reception. The model relates each result to its initiating tool exchange by ID.
 
-Callbacks use internal durable mailbox delivery in the existing JMAP account, independently of the SMTP reception gate used for correspondence. Their stored text can survive kernel shutdown. While an identifiable stored copy remains, the publisher preserves the first result for its ID. After the observation is durably admitted, later deliveries of that ID are retired without another observation. Unknown callback IDs fail explicitly rather than becoming core correspondence.
-
-The [running guide](running.md#communication-copies) defines copy retention, and its [backup requirements](running.md#backups-and-transfers) describe what must be preserved for continuation. The [architecture guide](architecture.md#callback-delivery) describes callback storage and identification. See [background commands](host.md#background-commands) for host completion and interruption behavior; preserving a callback result does not preserve the process that produced it.
+Publication reuses the first identifiable result while its copy and metadata remain [retained in the account](running.md#communication-copies). Admission persists the observation once; later copies are retired without another observation. Unknown IDs fail explicitly. See [callback delivery and admission](architecture.md#event-sources-and-callback-admission) for these guarantees and [background commands](host.md#background-commands) for process interruption.

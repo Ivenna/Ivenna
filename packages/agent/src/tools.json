@@ -1,7 +1,7 @@
 [
   {
     "name": "send_message",
-    "description": "Send text to one or more participants by ID. Each call submits one message and returns a submission reference; acceptance does not confirm delivery.",
+    "description": "Send text to one or more correspondents by ID. Each call submits one message and returns a submission reference; submission does not confirm recipient delivery.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -12,7 +12,7 @@
             "type": "string",
             "minLength": 1
           },
-          "description": "Participant IDs."
+          "description": "Correspondent IDs."
         },
         "text": {
           "type": "string",
@@ -29,7 +29,7 @@
   },
   {
     "name": "fork_session",
-    "description": "Transfer this activation's work to a new child with the retained working context, and return its stable session_id. The caller returns to its queue; unadmitted events and existing callbacks keep their destinations. Child results are reported automatically to the caller and core. At most one fork per model round.",
+    "description": "Transfer this activation's whole work and retained context to a child, returning its stable session_id. The caller returns to its queue; unadmitted events and existing callbacks keep their destinations. Results reach the caller and core automatically. At most one fork per round.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -47,7 +47,7 @@
   },
   {
     "name": "send_session_message",
-    "description": "Queue an observation or coordination message for an existing session, with your session recorded as its source. A dormant recipient becomes ready; a running recipient admits it between complete model/tool rounds. Success confirms durable queue acceptance.",
+    "description": "Durably queue an observation for an existing session, recording your session as its source. A dormant recipient wakes; a running recipient receives it before a later decision.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -71,7 +71,7 @@
   },
   {
     "name": "wakeup",
-    "description": "Schedule one observation for this session at a Unix time in milliseconds, and return its callback_id. The arrangement survives restart. Past times are immediately due; delivery and inference may occur later than the requested time. Return control when ready to let this session sleep.",
+    "description": "Schedule one observation for this session and return its callback_id. The arrangement survives restart. Past times are due immediately; inference can occur later. Return control when ready to sleep.",
     "parameters": {
       "type": "object",
       "properties": {

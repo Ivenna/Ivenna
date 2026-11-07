@@ -6,13 +6,16 @@ People and programs communicate with Ivenna through messages. The model observes
 
 The current implementation uses email for communication and stores working history in the same mail account. It provides [host commands](docs/host.md) and accesses shared [memory rooms](docs/memory.md) over SSH. Communication and memory must be available for it to run. It exposes [health and reception readiness](docs/running.md#service-status-and-reception), and tools can return [text and images](docs/content.md).
 
-Sessions can sleep and resume when new observations arrive, including [scheduled wakeups](docs/communication.md#session-communication-and-wakeups) and background command results. Their identities, working histories, and pending callbacks survive restart; running host processes do not. Startup observations distinguish the new runtime from earlier work.
+Sessions can sleep and resume when new observations arrive, including [scheduled wakeups](docs/communication.md#session-communication-and-wakeups) and background command results. Their identities, working histories, and pending callbacks survive restart; host processes are not restored. Startup observations distinguish the new runtime from earlier work.
 
 The deployment user owns Ivenna's correspondence, working histories, autonomous memory, and [host artifacts](docs/running.md#data-and-retention).
 
 ## Getting started
 
-Use the [running guide](docs/running.md) to configure services, start the kernel, and manage retained data. For development with the supplied mail and memory services, follow the [local development guide](dev/README.md).
+Choose a setup path:
+
+- Use the [local development guide](dev/README.md) to prepare the supplied mail and memory services and run from source.
+- Use the [running guide](docs/running.md) to configure another deployment, start the executable, and manage retained data.
 
 Once Ivenna is ready to receive mail, follow [Corresponding with Ivenna](docs/usage.md) to send a message and continue the correspondence.
 
