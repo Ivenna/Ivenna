@@ -4,13 +4,30 @@ The [design intent](design.md) guides product and interface decisions; the [arch
 
 ## Development conventions
 
-The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design. Start from Ivenna's overall behavior, establish responsibilities and interfaces, then complete the change across its producers, consumers, and documentation. Explain choices through the behavior they establish and the reasons for choosing them.
+The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design.
 
 Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided. When a design changes, remove superseded behavior and state; do not retain compatibility paths or introduce migration frameworks.
 
 Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 
 During development, do not write tests in advance or introduce test frameworks. Use the [local development environment](../dev/README.md) to run the kernel on the host and middleware in containers.
+
+## Design and implementation
+
+Start with the intended behavior and its reason, then establish responsibilities and interfaces. Explain design changes through their effects on Ivenna, its correspondents, or the deployment user. Implementation experience can inform these choices; a current code path or service limitation alone does not establish a design requirement.
+
+Keep each document focused on its role:
+
+| Document | Scope |
+| --- | --- |
+| Design guide | Goals, behavioral choices, interface principles, and their reasons |
+| Development guide | Change conventions, implementation boundaries, builds, and validation |
+| Interface guides | Operations, fields, formats, and outcomes |
+| Model-facing resources | Semantics needed to choose actions and interpret observations |
+| Architecture guide | The current implementation's package ownership, dependencies, algorithms, synchronization, storage representation, and service protocols |
+| Running and local development guides | Deployment configuration and service procedures |
+
+Design can name an operation or concept when it expresses a behavioral choice, such as explicit sending or work ownership. When behavior changes, update the affected design, interface contracts, model-facing resources, and implementation together. When replacing a mechanism while preserving behavior, update its implementation and architecture description. Describe any remaining implementation limitation and its effect in the relevant interface or operational guide.
 
 ## Implementation boundaries
 
@@ -38,7 +55,7 @@ Model coexisting fields together and mutually exclusive alternatives as distinct
 
 [Model](../packages/agent_contracts/src/model.zig) defines native history items and model operations. Keep messages and tool results typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields. The model adapter measures requests with the same encoder it uses to send them, including declarations and content.
 
-`Model.Request` passes the assembled message sequence and selected tool declarations to the model adapter. `Input.Request` supplies one temporary YAML state message in that sequence. Input renders this message; the model adapter encodes the complete model-service payload.
+Keep input rendering separate from provider encoding: Input renders the temporary current-state message; the model adapter encodes and measures the complete request, including the selected tool declarations.
 
 ### Model-facing resources
 
@@ -52,7 +69,7 @@ Treat prompts and tool descriptions as editable interfaces:
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | What a handover must preserve |
 
-Each capability owns its tool names, descriptions, and parameter schemas alongside its implementation. Host and Memory register those declarations through `Tools`. Engine combines the registered capabilities with the agent's communication and session declarations for work sessions; core coordination exposes only the agent's declarations, and summarization exposes none. Model adapters add protocol-specific declaration fields when encoding the selected tools.
+Keep tool names, descriptions, and parameter schemas with their owning implementation. Host and Memory register their declarations through `Tools`. Keep tool availability policy in the agent: core coordination exposes the agent's communication and session declarations, work sessions also expose registered capabilities, and summarization exposes no tools. Model adapters add protocol-specific declaration fields when encoding the selected tools.
 
 Put task facts and observations in user input. Keep model-facing descriptions concise; detailed field references belong in the [input contract](input.md). Update the owning resource, implementation, and interface documentation together when a contract changes.
 
@@ -62,7 +79,7 @@ Keep outgoing messages, internal reports, handovers, and diagnostics distinct. O
 
 ### Execution and storage
 
-The session registry synchronizes contexts, queues, and activation ownership. The kernel coordinates adapter operations and worker task scopes. Context retains typed event groups, complete model/tool exchanges, and handovers with their history-segment identities, deriving and caching their native model-message view as entries change. Append a fresh temporary request for each inference. Keep current state and summary instructions in that request.
+Keep context, queue, and activation changes under the session registry's synchronization; the kernel coordinates adapter operations and worker task scopes. Retain typed event groups, complete model/tool exchanges, and handovers in Context. Derive model input from those entries and append a fresh temporary request for each inference. Keep current state and summary instructions in that request. The [architecture guide](architecture.md#records-context-and-current-requests) describes history ownership and request assembly.
 
 Persist the core and every still-retained work context, preserving complete model/tool exchanges and unread internal assignments and reports. Confirm the selected incoming observations and their checkpoint before acknowledging their receipts; acknowledgement releases transport copies independently of task completion. Restore saved understanding and session relationships with fresh startup activations and the current system prompt. Execution ownership, external deliveries, receipts, and process handles belong to the running process. Loading history must not execute historical tool calls. Storage failures end the runtime through the normal execution failure path.
 
@@ -101,14 +118,15 @@ Build the application and exercise the affected behavior through communication a
 
 | Area changed | Checks |
 | --- | --- |
-| Execution | Joint processing of queued events, budget-limited FIFO admission, durable acknowledgement of only the admitted prefix before model work, tool-result continuation, whole-group handoff, direct-parent reports, and context release |
+| Execution | Joint processing of queued events, budget-limited FIFO admission, durable acknowledgement of only the admitted prefix before model work, tool-result continuation, whole-group handoff, direct-parent reports, report-capacity checks including after restart, and context release |
 | Failure handling | Required-capability failures stop the runtime and join concurrent work; ordinary tool outcomes allow continuation |
 | Communication | Explicit zero, one, or multiple sends; correspondent ID lifetime; incoming `from` IDs and outgoing tool arguments retained in history; final text without implicit sending |
 | Email | Same-domain address conversion, From-address filtering and unsupported-body skips across query pages, confirmed standalone submission and copy retirement, and independent intake regardless of thread, read, starred, or archived state |
 | Service | Health and reception status during startup, operation, and shutdown; SMTP rejection when reception is closed |
-| History and restart | Complete event groups, model/tool exchanges, and unread internal observations survive restart; model output and media round-trip; forks share inherited segment prefixes; compaction starts a new segment with session relationships preserved; metadata queries discover groups and selected reads preserve order; body hashes, predecessor keys, scopes, and committed counts validate history; failed creates prevent checkpoint publication; uncommitted suffixes stay outside restored history; numeric revision selects the current checkpoint after interruption; unchanged saves reuse publication; startup uses current state; old activations, external deliveries, receipts, and tool calls are not replayed |
+| History and restart | Complete event groups, model/tool exchanges, and unread internal observations survive restart; model output and media round-trip; forks share inherited segment prefixes; compaction preserves session relationships; startup uses current state; old activations, external deliveries, receipts, and tool calls are not replayed |
+| History storage | Metadata queries discover groups and selected reads preserve order; body hashes, predecessor keys, scopes, and committed counts validate history; failed creates prevent checkpoint publication; uncommitted suffixes stay outside restored history; numeric revision selects the current checkpoint after interruption; unchanged saves reuse publication |
 | History maintenance | Current groups remain writable; sealed inherited prefixes restore from Archive; unreferenced records, obsolete observations, and old checkpoints enter Trash; selected records survive maintenance; existing Trash remains with the mail service; maintenance failures stop the runtime |
-| Mail processing | Durable input acknowledgement, receipt release before forks and final responses, retirement of acknowledged copies and abandoned outgoing drafts, preservation of pending input and in-progress sends, and service-owned Trash expiry |
+| Communication-copy maintenance | Retirement of acknowledged inputs and abandoned outgoing copies, preservation of pending input and in-progress sends, and service-owned Trash expiry |
 | Model-facing interfaces | Record and request serialization, response variants, tool selection, and complete-payload budget accounting |
 
 Report the checks performed. Distinguish reconstruction of understanding from execution recovery.

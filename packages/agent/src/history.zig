@@ -30,8 +30,6 @@ pub const History = struct {
     pub const Session = struct {
         session_id: u64,
         parent_session_id: ?u64,
-        parent_generation: ?u64,
-        generation: u64,
         epoch: u64,
         entries: []const Entry,
         observations: []const Input.Event,
@@ -39,14 +37,13 @@ pub const History = struct {
 
     fn validate(self: History, a: Allocator) !void {
         if (self.sessions.len == 0) return error.InvalidHistory;
-        const State = struct { generation: u64, epoch: u64 };
-        var states: std.AutoHashMapUnmanaged(u64, State) = .empty;
-        defer states.deinit(a);
+        var epochs: std.AutoHashMapUnmanaged(u64, u64) = .empty;
+        defer epochs.deinit(a);
         for (self.sessions) |session| {
             if (session.session_id == 0 or session.session_id >= self.next_session_id) return error.InvalidHistory;
-            const result = try states.getOrPut(a, session.session_id);
+            const result = try epochs.getOrPut(a, session.session_id);
             if (result.found_existing) return error.InvalidHistory;
-            result.value_ptr.* = .{ .generation = session.generation, .epoch = session.epoch };
+            result.value_ptr.* = session.epoch;
         }
         var cores: usize = 0;
         for (self.sessions) |session| {
@@ -55,15 +52,13 @@ pub const History = struct {
                 else => return error.InvalidHistory,
             };
             for (session.entries) |entry| {
-                const owner = states.get(entry.scope.session_id) orelse return error.InvalidHistory;
-                if (entry.scope.epoch > owner.epoch) return error.InvalidHistory;
+                const owner_epoch = epochs.get(entry.scope.session_id) orelse return error.InvalidHistory;
+                if (entry.scope.epoch > owner_epoch) return error.InvalidHistory;
             }
             if (session.parent_session_id) |parent_id| {
-                if (parent_id >= session.session_id or session.parent_generation == null) return error.InvalidHistory;
-                const parent = states.get(parent_id) orelse return error.InvalidHistory;
-                if (session.parent_generation.? > parent.generation) return error.InvalidHistory;
+                if (parent_id >= session.session_id or !epochs.contains(parent_id)) return error.InvalidHistory;
             } else {
-                if (session.session_id != 1 or session.parent_generation != null) return error.InvalidHistory;
+                if (session.session_id != 1) return error.InvalidHistory;
                 cores += 1;
             }
         }
@@ -82,8 +77,6 @@ const Checkpoint = struct {
     const Session = struct {
         session_id: u64,
         parent_session_id: ?u64,
-        parent_generation: ?u64,
-        generation: u64,
         epoch: u64,
         group: []const u8,
         history: []const Span,
@@ -265,8 +258,6 @@ pub const Persistence = struct {
             restored.* = .{
                 .session_id = session.session_id,
                 .parent_session_id = session.parent_session_id,
-                .parent_generation = session.parent_generation,
-                .generation = session.generation,
                 .epoch = session.epoch,
                 .entries = entries,
                 .observations = if (session.observations) |key| selections.source(scope, key).observations else &.{},
@@ -316,8 +307,6 @@ pub const Persistence = struct {
             saved.* = .{
                 .session_id = session.session_id,
                 .parent_session_id = session.parent_session_id,
-                .parent_generation = session.parent_generation,
-                .generation = session.generation,
                 .epoch = session.epoch,
                 .group = group,
                 .history = spans.items,

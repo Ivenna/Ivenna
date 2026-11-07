@@ -92,7 +92,7 @@ pub const Integration = struct {
         return self.mailbox.acknowledge(a, receipt);
     }
 
-    fn submit(context: *anyopaque, a: Allocator, message: contracts.Communication.Message) !contracts.Communication.Submission {
+    fn submit(context: *anyopaque, a: Allocator, message: contracts.Communication.Message) !contracts.Communication.SendResult {
         const self = fromContext(context);
         try self.correspondence_mutex.lock(self.mailbox.client.io);
         defer self.correspondence_mutex.unlock(self.mailbox.client.io);

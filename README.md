@@ -6,7 +6,7 @@ People and programs communicate with Ivenna through messages. The model observes
 
 The current implementation uses email for communication and stores working history in the same mail account. It provides [host commands](docs/host.md) and accesses shared [memory rooms](docs/memory.md) over SSH. Communication and memory must be available for it to run. It exposes [health and reception readiness](docs/running.md#service-status-and-reception), and tools can return [text and images](docs/content.md).
 
-The deployment user owns Ivenna's correspondence, working histories, autonomous memory, and [host artifacts](docs/running.md#data-and-retention). The core and still-retained work histories survive restart; fresh startup observations acknowledge the beginning of each runtime.
+The deployment user owns Ivenna's correspondence, working histories, autonomous memory, and [host artifacts](docs/running.md#data-and-retention). The core and still-retained work histories survive restart; fresh startup observations mark the beginning of each runtime.
 
 ## Getting started
 

@@ -2,7 +2,7 @@
 
 Ivenna presents working history as YAML user messages alongside retained model output and tool replies. Each inference adds a temporary YAML request with current state and, for summarization, instructions. This document defines that model-facing form. The [architecture guide](architecture.md#records-context-and-current-requests) explains how it is assembled from stored history.
 
-The core's [Input](../packages/agent/src/input.zig) module defines records, handovers, and requests and renders them as YAML. Incoming observations use the shared [communication](../packages/agent_contracts/src/communication.zig) type. The [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
+The [Input definitions](../packages/agent/src/input.zig) and shared [incoming-message type](../packages/agent_contracts/src/communication.zig) define these fields. The [system prompt](../packages/agent/src/system.md) explains their meaning to the model.
 
 ## Retained records
 
@@ -77,7 +77,7 @@ The [whole-request budget](architecture.md#bounded-model-context) counts the com
 
 ## Startup and restart
 
-Each session retained at startup receives a fresh activation containing a `startup` event. `Startup` carries `observed_at_unix_ms: i64`, the runtime's startup observation time in Unix milliseconds. A newly created fork receives an assignment instead.
+At startup, each retained session queues a `startup` event before its unread assignments and reports. Normal FIFO budget admission selects the events for a fresh activation, which can include startup and unread work together. `Startup` carries `observed_at_unix_ms: i64`, the observation time at the beginning of this runtime in Unix milliseconds. A newly created fork begins with an assignment instead.
 
 For example, a session can receive:
 
@@ -94,10 +94,10 @@ Earlier records, model output, and tool replies describe prior observations and 
 
 An `Assignment` contains:
 
-| Field | Meaning |
-| --- | --- |
-| `task` | Work for the receiving session to continue |
-| `from_session` | Direct parent that created the fork |
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `task` | `Text` | Work for the receiving session to continue |
+| `from_session` | `u64` | Direct parent that created the fork |
 
 An assignment describes the caller activation's whole work, and the child inherits the caller's retained history. See [fork ownership](architecture.md#forks-and-work-ownership) for publication, queueing, and context lifetimes.
 
@@ -111,7 +111,7 @@ events:
       from_session: 1
 ```
 
-A `Report` contains `from_session: u64` and `text: Text`, which may be empty. It carries a branch activation's combined result for its direct parent. The identifiers in fork results and reports let the parent associate results with the child that produced them.
+A `Report` contains `from_session: u64` and `text: Text`, which may be empty. It carries a branch activation's combined result for its direct parent. The identifiers in fork results and reports let the parent associate results with the child that produced them. A report can remain queued after the child's context is released.
 
 ## Current requests
 
@@ -132,12 +132,13 @@ Each inference receives the retained records and model/tool exchanges followed b
 | Field | Meaning |
 | --- | --- |
 | `session.role` | `core` or `branch` |
-| `session.parent_generation` | Parent context generation copied when the fork was published, or null |
 | `session.parent_session_id` | Session that created this fork, or null |
 | `session.active_children` | Direct child contexts retained under this session |
 | `runtime.active_sessions` | Retained contexts, including the core |
-| `runtime.running_sessions` | Sessions currently executing work |
-| `runtime.queued_inputs` | Deliveries waiting in queues |
+| `runtime.running_sessions` | Sessions currently handling an activation |
+| `runtime.queued_inputs` | Events waiting in session queues, excluding reserved report slots |
+
+The serialized role `branch` denotes a work session. Counts describe the snapshot for this request; other sessions can continue acting while it is processed.
 
 `Response` contains one destination:
 
@@ -156,7 +157,6 @@ session_id: 1
 state:
   session:
     role: core
-    parent_generation: null
     parent_session_id: null
     active_children: 1
   runtime:

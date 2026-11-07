@@ -64,7 +64,7 @@ The kernel reads correspondence awaiting durable admission across the account's 
 
 Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. The adapter presents the corresponding IDs and complete supported text as an observation. Messages with missing, cross-domain, or unsupported From addresses are excluded from intake. Messages without a complete supported body produce a diagnostic and are skipped. These copies remain unchanged.
 
-Eligible correspondence without the private acknowledgement marker is pending, including existing messages that have been read or archived. Once its complete observation and checkpoint have been saved, Ivenna acknowledges the message and moves the original to Trash before reasoning about that input. Reading, starring, or moving correspondence does not acknowledge it. The [communication-copy lifecycle](#communication-copies) also applies to existing mail in this dedicated account.
+Eligible correspondence without the private acknowledgement marker is pending, including existing messages that have been read or archived. Once its complete observation and checkpoint have been saved, Ivenna acknowledges the message and moves its incoming copy to Trash before reasoning about that input. Reading, starring, or moving correspondence does not acknowledge it. The [communication-copy lifecycle](#communication-copies) also applies to existing mail in this dedicated account.
 
 ## Memory service
 
@@ -126,11 +126,15 @@ With SMTP, a recipient rejection reaches the sending server during that delivery
 
 ## Stopping and restarting
 
-Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception and wait for the kernel's workers to end. Communication or memory infrastructure failures and errors propagated by execution also stop the whole kernel. Diagnose the failure from its diagnostics and restore any unavailable services before restarting.
+Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception and wait for the kernel's workers to end. Communication or memory infrastructure failures and failures during model or session execution also stop the whole kernel. Diagnose the failure from its diagnostics and restore any unavailable services before restarting.
 
 When an incoming message fails admission with `ContextBudgetExhausted`, it remains unacknowledged. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
 
-Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work. Each retained session receives a fresh startup activation with the current observation time. Ivenna chooses how to continue from its history and current state; old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail, so include any known external changes when corresponding about the interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means.
+Restoration requires saved history in the executable's current format. The prototype provides no storage-format compatibility or migration path, so a source update that changes that format can prevent existing history from loading.
+
+Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
+
+Each retained session receives a fresh startup activation with the current observation time. Ivenna chooses how to continue from its history and current state; old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail, so include any known external changes when corresponding about the interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means.
 
 ## Data and retention
 
@@ -152,7 +156,7 @@ Ivenna releases a communication copy when its observation has been durably admit
 
 | Copy | Retirement |
 | --- | --- |
-| Incoming message | After its complete observation and checkpoint are saved, acknowledgement moves the original to Trash |
+| Incoming message | After its complete observation and checkpoint are saved, acknowledgement moves Ivenna's incoming copy to Trash |
 | Outgoing message | Created in Drafts; confirmed submission moves the copy to Trash without cancelling delivery |
 | Interrupted outgoing copy | Initialization or the next poll moves the runtime's leftover outgoing copy to Trash |
 
@@ -170,7 +174,7 @@ The latest checkpoint selects the histories needed to continue the core and reta
 | `Ivenna Archive` | Sealed history still needed by retained contexts |
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
-Archive has no retention deadline. Its records remain available to retained contexts until the checkpoint stops selecting them. A released work session's unique records may go directly to Trash. See [history retention](architecture.md#history-retention) for selection and sharing rules.
+`Ivenna Archive` has no age-based retention deadline. Its records remain available to retained contexts until the checkpoint stops selecting them. A released work session's unique records may go directly to Trash. See [history retention](architecture.md#history-retention) for selection and sharing rules.
 
 ### Backups and transfers
 
@@ -183,7 +187,7 @@ History records and checkpoints are JMAP Email objects. A backup or transfer use
 | Records | `ivenna-history-<token>`, `X-Ivenna-History-Key`, and `X-Ivenna-History-Previous` when present |
 | Current checkpoint candidates | Membership in `Ivenna History`, `ivenna-current`, and `X-Ivenna-History-Revision` |
 
-If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration discovers records through logical groups and keys. An import that preserves bodies alone is insufficient. The prototype provides no storage-format compatibility or migration path.
+If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration discovers records through logical groups and keys. An import that preserves bodies alone is insufficient. The executable must understand the saved [history format](#stopping-and-restarting).
 
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 

@@ -132,7 +132,7 @@ pub const Memory = struct {
     }
 
     fn exchange(self: Memory, scratch: Allocator, request: Request) !Reply {
-        // File sources belong to the service host; the remote handler receives
+        // File sources belong to Ivenna's host; the remote handler receives
         // bytes rather than a host path. Missing modes retain remote defaults.
         const payload = switch (request) {
             .remember => |args| blk: {

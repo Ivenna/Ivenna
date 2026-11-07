@@ -19,19 +19,24 @@ pub const EmailTransport = struct {
         };
     }
 
-    pub fn send(self: *EmailTransport, a: Allocator, message: Communication.Message) !Communication.Submission {
+    pub fn send(self: *EmailTransport, a: Allocator, message: Communication.Message) !Communication.SendResult {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         const scratch = arena.allocator();
         const recipients = try scratch.alloc(Mail.Address, message.recipients.len);
-        for (message.recipients, recipients) |id, *recipient|
-            recipient.* = .{ .email = try self.mailbox.addressing.address(scratch, id) };
+        for (message.recipients, recipients) |id, *recipient| {
+            const address = self.mailbox.addressing.address(scratch, id) catch |err| switch (err) {
+                error.InvalidRecipientId => return .invalid_recipient,
+                else => return err,
+            };
+            recipient.* = .{ .email = address };
+        }
         const mail_id = try self.mailbox.send(scratch, .{
             .to = recipients,
             .subject = "Ivenna",
             .body = message.text,
         });
-        return .{ .reference = try submissionReference(a, self.mailbox.*, mail_id) };
+        return .{ .submitted = .{ .reference = try submissionReference(a, self.mailbox.*, mail_id) } };
     }
 
     fn participantIds(self: *EmailTransport, a: Allocator, addresses: []const Mail.Address) ![]const []const u8 {

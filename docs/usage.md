@@ -41,7 +41,7 @@ You can use your client's reply action or compose a new message. Ivenna relates 
 
 Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. A work focus can return a result while the broader task remains open; see [work ownership](architecture.md#forks-and-work-ownership) for details.
 
-Continued work uses retained understanding and autonomous memory. Histories can be condensed or released, and Ivenna has no tool for looking up earlier histories. Keep relevant context in follow-up messages when it may no longer be available.
+Continued work uses retained understanding and autonomous memory. Histories can be condensed or released, and there is no dedicated history lookup tool. Include relevant context in follow-up messages when it may no longer be available.
 
 Ivenna moves its incoming copy to Trash after saving the complete observation, before working on that input. This does not indicate that the task is finished. Its outgoing copies enter Trash after confirmed submission. The mail service controls their eventual deletion; your received copies stay in your own account. See [data and retention](running.md#data-and-retention) for storage and cleanup.
 

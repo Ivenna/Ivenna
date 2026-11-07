@@ -19,8 +19,6 @@ pub const Session = struct {
     role: Input.Role,
     context: Context,
     parent_session_id: ?u64 = null,
-    parent_generation: ?u64 = null,
-    generation: u64 = 0,
     active: ?*Activation = null,
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
@@ -73,8 +71,6 @@ pub const Registry = struct {
                     .session_id = record.session_id,
                     .role = if (record.parent_session_id == null) .core else .branch,
                     .parent_session_id = record.parent_session_id,
-                    .parent_generation = record.parent_generation,
-                    .generation = record.generation,
                     .context = context,
                 };
                 try self.sessions.put(allocator, session.session_id, session);
@@ -89,14 +85,14 @@ pub const Registry = struct {
             try self.sessions.put(allocator, 1, core);
             self.core = core;
         }
+        // Fresh startup work reserves report space in takeReady, after unread
+        // reports have been restored and parent capacity can be checked.
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
             const session = entry.*;
             if (session.parent_session_id) |parent_id| {
                 const parent = self.sessions.get(parent_id).?;
                 parent.children += 1;
-                parent.return_slots += 1;
-                session.return_reserved = true;
             }
             const delivery = try Delivery.create(allocator, .{ .startup = .{
                 .observed_at_unix_ms = std.Io.Clock.real.now(io).toMilliseconds(),
@@ -112,10 +108,6 @@ pub const Registry = struct {
                 try session.pending.append(allocator, delivery);
             }
         };
-        sessions = self.sessions.valueIterator();
-        while (sessions.next()) |entry| {
-            try entry.*.pending.ensureUnusedCapacity(allocator, entry.*.return_slots);
-        }
         try self.save();
         return self;
     }
@@ -202,7 +194,6 @@ pub const Registry = struct {
         deliveries.items.len = count;
         session.context.deinit();
         session.context = context;
-        session.generation += 1;
         work.activation.admitted = true;
     }
 
@@ -264,10 +255,8 @@ pub const Registry = struct {
         }
         parent.context.deinit();
         parent.context = completed;
-        parent.generation += 1;
         if (plan) |fork| {
             const child = fork.child;
-            child.parent_generation = parent.generation;
             self.sessions.putAssumeCapacity(child.session_id, child);
             self.reserved -= 1;
             parent.children += 1;
@@ -342,8 +331,6 @@ pub const Registry = struct {
             try retained.append(a, .{
                 .session_id = session.session_id,
                 .parent_session_id = session.parent_session_id,
-                .parent_generation = session.parent_generation,
-                .generation = session.generation,
                 .epoch = session.context.scope.epoch,
                 .entries = session.context.records(),
                 .observations = observations.items,
@@ -357,7 +344,6 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         session.context.deinit();
         session.context = replacement;
-        session.generation += 1;
     }
 
     pub fn runtimeSnapshot(self: *Registry, session: *Session) !Input.Snapshot {
@@ -375,7 +361,6 @@ pub const Registry = struct {
             .state = .{
                 .session = .{
                     .role = session.role,
-                    .parent_generation = session.parent_generation,
                     .parent_session_id = session.parent_session_id,
                     .active_children = session.children,
                 },

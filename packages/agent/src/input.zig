@@ -33,7 +33,6 @@ pub const Response = union(enum) {
 pub const State = struct {
     session: struct {
         role: Role,
-        parent_generation: ?u64 = null,
         parent_session_id: ?u64 = null,
         active_children: usize = 0,
     },

@@ -44,7 +44,9 @@ flowchart TD
     Agent --> YAML[YAML]
 ```
 
-At runtime, the application supplies concrete capability implementations to the core through these contracts. Kernel calls the input, sending, and history storage operations; Engine calls the model and registered tools. These calls dispatch to the supplied implementations, whose code runs in the same process.
+### Shared contracts
+
+At runtime, the application supplies concrete capability implementations to the core through shared contracts. Kernel calls the input, sending, and history storage operations; Engine calls the model and registered tools. These calls dispatch to the supplied implementations, whose code runs in the same process.
 
 The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer. Session scheduling, owned deliveries, activations, and retained context remain core implementation details. `Kernel.Config` and `Kernel.Limits` describe execution policy. Connection settings and protocol parameters belong to their capability packages; the application loads environment values and owns HTTP listener settings.
 
@@ -58,6 +60,8 @@ Shared [communication types](../packages/agent_contracts/src/communication.zig) 
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure the encoded request, and apply model content limits | Responses adapter |
 | [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host and Memory |
 
+`Communication.SendResult` distinguishes a submitted message from an unsupported recipient. The sending adapter classifies recipient support before submission; execution renders the corresponding tool result. Infrastructure failures propagate through the error channel.
+
 The email integration uses the configured mail account for communication copies and working history. It owns native addressing, folders, markers, and record lifecycles behind the shared contracts. The [email boundary](#email-boundary) describes its storage protocols and operation ownership.
 
 The email adapter supplies `Inbox.Incoming` with a complete `Communication.IncomingMessage` and an optional opaque receipt. [Work](../packages/agent/src/work.zig) owns the accepted event and its receipt until admission is acknowledged. The receipt stays outside model input; [activation admission](#activation-admission) defines when it can be released.
@@ -66,7 +70,7 @@ The application owns service, kernel, and shutdown tasks. The [kernel](../packag
 
 ## Service and reception
 
-The application initializes the mail integration, including retirement of leftover communication copies, checks memory, and initializes the kernel with saved history and startup activations. It then binds `SERVICE_ADDRESS` and starts kernel tasks. The kernel completes initial history maintenance before opening reception and dispatching the startup activations; readiness does not wait for their model work to finish.
+The application initializes the mail integration, checks memory, and [restores sessions](#startup-and-interruption) before binding `SERVICE_ADDRESS` and starting kernel tasks. The kernel completes initial history maintenance before opening reception and dispatching startup activations. Readiness does not wait for their model work to finish.
 
 While the listener is running, `GET /healthz` reports that the HTTP service is responding. `GET /readyz` returns success with `X-Ivenna-Ready: true` only while reception is open; otherwise it returns `503`. Closing is terminal for that kernel instance. The status endpoint reads this lifecycle state; it does not perform fresh dependency checks or reserve processing capacity.
 
@@ -92,7 +96,7 @@ The core exposes `send_message` and `fork_session`. Work sessions have the full 
 
 `MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core. It also bounds each session's active and queued ordinary deliveries plus reserved child reports. Startup adds one control observation per session outside that ordinary delivery budget. Input that cannot be admitted stays with its producer; the mail integration leaves it available for later polling. Idle parents retain context while their children work without consuming a work slot. The core still processes its requests serially, so responsiveness also depends on short coordination turns and service latency.
 
-A work activation reserves space for its report in its direct parent's admission budget. The initial reservation is made when preparing a fork; a later activation reserves a new slot before it starts and waits if the parent has no capacity. A completed report consumes that slot and joins the parent's queue, so later input cannot take its place. Runtime `queued_inputs` counts actual queued deliveries, excluding these reservations.
+A work activation reserves space for its report in its direct parent's admission budget. The initial reservation is made when preparing a fork; a later activation, including a fresh startup activation, reserves a new slot before it starts and waits if the parent has no capacity. A completed report consumes that slot and joins the parent's queue, so later input cannot take its place. Runtime `queued_inputs` counts actual queued deliveries, excluding these reservations.
 
 ## Activation admission
 
@@ -165,7 +169,7 @@ Each entry retains its segment identity and either a complete admitted `Input.Re
 
 Records use compact UTF-8 ZON bodies. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. Segment identity and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal assignments and reports are stored together in a separate immutable observation-array record in the session's current group.
 
-The checkpoint contains the next session identifier and each retained session's identity, parent relationship, generation, epoch, current group, and ordered spans. An optional key selects the unread observation array in the current group; its text stays outside the checkpoint. Appending advances a span's head and count without adding a per-entry reference. The latest confirmed checkpoint selects both the contexts restored at startup and the records kept by [history maintenance](#history-retention).
+The checkpoint contains the next session identifier and each retained session's identity, parent relationship, epoch, current group, and ordered spans. An optional key selects the unread observation array in the current group; its text stays outside the checkpoint. Appending advances a span's head and count without adding a per-entry reference. The latest confirmed checkpoint selects both the contexts restored at startup and the records kept by [history maintenance](#history-retention).
 
 ### Saving and restoration
 
@@ -191,7 +195,7 @@ The [email integration](#mail-retention) maps writable, sealed, and unselected r
 
 ### Processing cost
 
-With expected hash-map lookup costs, local save work follows the entry bytes referenced across retained sessions plus checkpoint metadata, with an additional sort of the bounded retained-session list. Snapshot comparison still encodes and hashes retained entries, including shared inherited prefixes; unchanged saves skip native publication rather than this local work. Temporary record encoding space holds a bounded batch plus the largest record. The persistent group and key cache covers the last confirmed checkpoint.
+With expected hash-map lookup costs, local save work follows the entry bytes referenced across retained sessions plus checkpoint metadata, with an additional sort of the bounded retained-session list. Snapshot comparison still encodes and hashes retained entries, including shared inherited prefixes; unchanged saves skip native publication rather than this local work. Temporary record encoding space holds a bounded batch plus the largest record. The in-memory group and key cache covers the last confirmed checkpoint.
 
 Checkpoint size follows retained sessions and their segment spans rather than accumulated model rounds. A fork adds a segment while reusing its inherited spans; compaction replaces a session's spans with its new handover segment.
 
@@ -201,7 +205,9 @@ Group discovery can return metadata for uncommitted records and for a parent's l
 
 Startup discovers the mail account and checks memory through a read-only `inspect_memory_space` exchange. Both must succeed before the kernel starts. Memory is required throughout operation.
 
-The kernel loads the current checkpoint and its committed records through `HistoryStore`. If no history exists, it creates the core. It rebuilds session identities, parent relationships, and working contexts with the current system prompt. Each session receives a fresh activation containing `startup` with the current observation time. Unread internal assignments and reports are queued after that observation for normal FIFO request-budget admission. Before reception opens, the mail integration has retired leftover communication copies and the kernel has run [history maintenance](#history-retention). Startup activations can run without incoming mail; a newly forked session receives an assignment instead.
+The kernel loads the current checkpoint and its committed records through `HistoryStore`. If no history exists, it creates the core. It rebuilds session identities, parent relationships, and working contexts with the current system prompt.
+
+Each retained session queues a `startup` observation before its unread internal assignments and reports. Normal FIFO request-budget admission selects events for fresh activations, which can include startup and unread work together. A work activation reserves report space in its direct parent before it starts. Startup work can run without incoming mail; a newly forked session begins with an assignment instead. Before reception opens, the mail integration has retired leftover communication copies and the kernel has run [history maintenance](#history-retention).
 
 Startup creates fresh execution state without restoring prior activations, external input deliveries, receipts, or processes. Restored parent relationships route future reports to the direct parent. Current request state is authoritative about the new runtime; retained records describe earlier observations. Ivenna chooses how to continue from that evidence. Ordinary unacknowledged mail remains eligible for intake. A crash between history publication and acknowledgement can leave a message eligible even when its observation already survives in history. Correspondent IDs retain their destinations within the configured domain.
 
@@ -273,7 +279,7 @@ The email adapter maps the codec's [retention selection](#history-retention) to 
 
 | Object | Location and use |
 | --- | --- |
-| Latest checkpoint, or selected record in a current epoch group | `Ivenna History`; current groups can receive new records |
+| Latest checkpoint, or selected record in a current writable group | `Ivenna History`; current groups can receive new records |
 | Selected record in a sealed group | `Ivenna Archive`; it remains available for inherited context and restoration |
 | Unselected record or older checkpoint | Trash; further retention belongs to the mail service |
 
@@ -302,3 +308,11 @@ Host validates and routes requests. [Shell](../packages/host/src/shell.zig) exec
 Host propagates cancellation and allocation failure. Other invocation failures currently return `host_unavailable`, including failure to obtain a command result. Finer classification of these failures remains undefined.
 
 The shell entry reports capabilities that remain planned alongside command execution. Their operations are unimplemented. See [host shell](host.md) for available tools, output, and interruption behavior.
+
+## Implementation references
+
+These references inform context, scheduling, and handoff mechanisms within Ivenna's [design intent](design.md).
+
+[OpenAI Agents SDK handoffs](https://developers.openai.com/api/docs/guides/agents/orchestration#use-handoffs-for-delegated-ownership) provide a reference for transferring responsibility. [Codex thread forks](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread) provide a reference for continuing stored history in a separate context. Ivenna uses context inheritance and explicit work ownership within one body.
+
+[pi's sessions and context](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md) distinguish stored history from the active branch supplied to a model request. Its [agent interface](https://github.com/earendil-works/pi/blob/main/packages/agent/README.md) provides a reference for queued follow-up input.

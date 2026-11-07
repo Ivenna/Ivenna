@@ -2,6 +2,8 @@
 
 Ivenna is a body for an LLM soul: a runtime through which the model can act, perceive results, and organize memory. The project explores how persistent interaction and autonomous memory can sustain a sense of self over time. Ongoing communication and autonomous activity guide its interaction design.
 
+This guide sets the intended behavior and interface principles. See the [documentation index](README.md) for interface contracts and the [architecture guide](architecture.md) for the current implementation.
+
 ## Capabilities and acquired knowledge
 
 Core interfaces expose the body's capabilities to a model with broad prior knowledge, like a knowledgeable person encountering the tools at hand. They should make available actions discoverable and their effects understandable.
@@ -10,7 +12,7 @@ Program choices and general tool use draw on the model's prior knowledge and wha
 
 ## Runtime availability
 
-Communication and autonomous memory are required for Ivenna to operate. The runtime starts with both available; infrastructure failures in either end the runtime and its concurrent work. Errors propagated by model and session execution also end the runtime. Defined tool outcomes, such as a missing memory entry, a capacity limit, or a command's nonzero exit, remain observations for the model to understand.
+Communication and autonomous memory are required for Ivenna to operate. The runtime starts with both available; infrastructure failures in either end the runtime and its concurrent work. Failures in model and session execution also end the runtime. Defined tool outcomes, such as a missing memory entry, a capacity limit, or a command's nonzero exit, remain observations for the model to understand.
 
 Ivenna exposes its health and whether reception is open. Senders must expect reception to close when Ivenna is starting, stopping, or unavailable. The receiving boundary checks that state before accepting new messages. Retry and queuing by a sender belong to that sender; automatic offline reception and recovery are outside the current design.
 
@@ -36,9 +38,9 @@ Ivenna explicitly chooses whether to send a message, to whom, and what it says t
 
 Work is defined by a task and the understanding needed to continue it. A session owns a working context and a queue. An activation handles a bounded group of already queued inputs, assignments, or reports together through model and tool rounds. It ends with a final response or a fork that passes the group's work to a child. Events arriving during an activation remain queued for later processing.
 
-Execution state coordinates ongoing work in process memory. Retained working contexts persist independently of execution. Incoming correspondence is acknowledged once its complete observation is durably retained, independently of task completion. These forms have their own responsibilities and lifecycles.
+Execution state coordinates ongoing work. Retained working contexts persist independently of execution. Incoming correspondence is acknowledged once its complete observation is durably retained, independently of task completion.
 
-A final response completes the activation's event group and returns control; it does not certify task success, and a broader task can remain open. Context release follows the remaining work and session relationships. Storage retention follows the histories selected for continuation. These lifecycles are independent.
+A final response completes the activation's event group and returns control; it does not certify task success, and a broader task can remain open. Activation completion, task completion, context release, and data retention have separate lifecycles.
 
 ## Core and concurrent attention
 
@@ -50,21 +52,21 @@ A work session's final text returns one combined result for that activation to t
 
 After a fork, the histories grow independently. The core retains its reception and coordination history; execution detail accumulates in the session carrying out the work. This keeps the core's context useful for further coordination and forks.
 
-The runtime bounds retained contexts and concurrent work globally and preserves scheduling opportunities for the core. Forking returns the core to its queue without waiting for the work session. A single LLM session still processes one request at a time; core responsiveness depends on keeping coordination turns short as well as scheduling them promptly.
+The runtime bounds retained contexts and concurrent work globally and preserves scheduling opportunities for the core. Forking returns the core to its queue without waiting for the work session. Core responsiveness depends on keeping coordination turns short as well as scheduling them promptly.
 
 These contexts share a body: files, memory, communication, and host processes. Sessions account for effects another session may already have produced. Fork assignments and direct-parent reports organize work from the core through its descendants.
 
 A work session keeps its context while its work or descendants still need it. The context can be released after completion while the broader task awaits further input. The [architecture guide](architecture.md#activation-completion-and-context-release) describes these lifetimes and how child results are retained until processing.
 
-Peer assignments, steering retained work, and parallel subtasks within one activation remain undecided. Session identities and parent relationships survive with their retained contexts. Unread internal assignments and reports are retained until admission; activation ownership lasts for one process.
+Peer assignments, steering retained work, and parallel subtasks within one activation remain undecided.
 
 ## Context and continuity
 
-Working contexts retain observations, complete model output, and tool results. The core and every still-retained work context preserve that understanding across runtime interruption. Working history persists independently of host execution artifacts. Retention of earlier records has a separate lifecycle from the history selected for continuation.
+Working contexts retain observations, complete model output, and tool results. The core and every still-retained work context preserve that understanding across runtime interruption, along with session identities and parent relationships. Unread internal assignments and reports remain available for processing after interruption. Working history persists independently of host execution artifacts.
 
 Limits cover the complete model request, including instructions, tool definitions, observations, and tool results, as well as the generated response. Each limit states what it measures; byte counts and model tokens are separate units.
 
-When context needs to be shortened, the kernel asks the model for a handover. The replacement context should preserve commitments, relevant uncertainty, completed effects, and correspondent IDs and relationships needed for continued understanding. The handover remains free-form text. Compaction starts a replacement working history while preserving the session and its relationships.
+When context needs to be shortened, the runtime asks the model for a handover. It should preserve commitments, relevant uncertainty, completed effects, and correspondent IDs and relationships needed for continued understanding. The handover remains free-form text and replaces the earlier context while preserving the session and its relationships.
 
 Startup restores saved working histories and session relationships, then gives each retained session a fresh activation with a startup observation. Current execution state describes the new runtime; earlier observations describe what was known then. This preserves understanding while acknowledging the interruption. Ivenna decides how to relate that history to the present and what to do next. The [startup contract](architecture.md#startup-and-interruption) defines what survives and what is rebuilt.
 
@@ -72,16 +74,8 @@ An interrupted action may already have affected the world before its result was 
 
 ## Data ownership
 
-The deployment user owns Ivenna's correspondence, retained working histories, artifacts, and autonomous memory, and chooses where they live. Keep these forms open to inspection, retention, and management within the user's deployment. Storage implementations preserve their distinct ownership and retention needs.
+The deployment user owns Ivenna's correspondence, retained working histories, artifacts, and autonomous memory, and chooses where they live. Keep these forms open to inspection, retention, and management within the user's deployment.
 
-Each stored object has a lifecycle defined by its remaining use. Execution confirms durable input admission and selects the histories needed for continuation. Communication implementations own submission and the retirement of transport copies. History remains available while a retained context references it, even after its segment stops accepting new entries. Storage services apply the deployment's policy for disposal and space reclamation. Host artifacts have their own retention lifecycle.
+Correspondence, working history, and host artifacts have separate retention lifecycles. History remains available while any retained context needs it. History no longer needed for continuation follows the deployment user's retention policy. The [architecture guide](architecture.md#history-retention) explains how storage tracks that use; the [running guide](running.md#data-and-retention) describes retention and cleanup in the current deployment.
 
 Diagnostics support troubleshooting and analysis. Keep them separate from the source material and handovers used for continuity.
-
-## Reference designs
-
-These references inform context, scheduling, and handoff mechanisms within Ivenna's own design intent.
-
-[OpenAI Agents SDK handoffs](https://developers.openai.com/api/docs/guides/agents/orchestration#use-handoffs-for-delegated-ownership) provide a reference for transferring responsibility. [Codex thread forks](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread) provide a reference for continuing stored history in a separate context. Ivenna uses context inheritance and explicit work ownership within one body.
-
-[pi's sessions and context](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md) distinguish stored history from the active branch supplied to a model request. Its [agent interface](https://github.com/earendil-works/pi/blob/main/packages/agent/README.md) provides a reference for queued follow-up input.

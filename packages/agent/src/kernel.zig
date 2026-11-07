@@ -155,18 +155,18 @@ pub const Kernel = struct {
             if (std.mem.eql(u8, name, "send_message")) {
                 const message = try parseArguments(Communication.Message, a, arguments);
                 if (message.recipients.len == 0 or message.text.len == 0) return error.InvalidToolArguments;
-                const submission = self.kernel.sender.send(a, message) catch |err| switch (err) {
-                    error.InvalidRecipientId => return try runtimeError(a, "invalid_recipient", "The recipient ID is invalid."),
-                    else => return err,
+                return switch (try self.kernel.sender.send(a, message)) {
+                    .submitted => |submission| try runtimeResult(a, submission),
+                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "The recipient ID is invalid."),
                 };
-                return try runtimeResult(a, submission);
             }
             if (!std.mem.eql(u8, name, "fork_session")) return null;
             const request = try parseArguments(Sessions.ForkRequest, a, arguments);
             if (self.plan != null)
                 return try runtimeError(a, "invalid_fork_batch", "Only one fork is allowed in a model round.");
             const plan = self.kernel.sessions.prepareFork(self.work, request) catch |err| switch (err) {
-                error.InvalidForkArguments, error.AttentionCapacityUnavailable => return try runtimeError(a, "fork_unavailable", @errorName(err)),
+                error.InvalidForkArguments => return try runtimeError(a, "fork_unavailable", "The task must not be empty."),
+                error.AttentionCapacityUnavailable => return try runtimeError(a, "fork_unavailable", "No capacity is available for another work context or its result."),
                 else => return err,
             };
             self.plan = plan;

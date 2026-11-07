@@ -164,7 +164,7 @@ Use the [startup steps](#starting-the-kernel) to recreate the services and run t
 
 ### Kernel
 
-The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. After editing code or these resources, stop the kernel and run `zig build run` to rebuild and restart it. Restart follows the [continuity contract](../docs/architecture.md#startup-and-interruption).
+The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. After editing code or these resources, stop the kernel and run `zig build run` to rebuild and restart it. The [restart requirements](../docs/running.md#stopping-and-restarting) cover saved-history format changes and continuation after interruption.
 
 ### Memory
 
