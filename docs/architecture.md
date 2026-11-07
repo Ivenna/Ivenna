@@ -14,7 +14,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
 | [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, decode Responses output, and apply model content limits |
-| [packages/host](../packages/host/src/root.zig) | Define host tools and own synchronous and background shell execution, process cleanup, logs, and completion output |
+| [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, incremental interaction, process cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result text and image content, classify source bytes, and interpret image references |
 
@@ -69,7 +69,7 @@ The email integration uses the configured mail account for correspondence, callb
 
 ## Service and reception
 
-The application owns service, kernel, host supervision, and shutdown tasks. The [kernel](../packages/agent/src/kernel.zig) owns intake and session execution tasks; Host supervises background commands independently of those sessions. Task failures close reception and cancel and join concurrent work before shared dependencies are released.
+The application owns service, kernel, host supervision, and shutdown tasks. The [kernel](../packages/agent/src/kernel.zig) owns intake and session execution tasks; Host supervises commands independently of those sessions. Task failures close reception and cancel and join concurrent work before shared dependencies are released.
 
 The application initializes the mail integration, checks memory, and [restores sessions](#startup-and-interruption) before binding `SERVICE_ADDRESS` and starting kernel tasks. The kernel completes initial history maintenance before opening reception and dispatching startup activations. Readiness does not wait for their model work to finish.
 
@@ -99,7 +99,7 @@ The registry stores each session's `Input.Role` enum, `core` or `activity`. The 
 
 `MAX_PARALLEL_ATTENTION` bounds executing activity sessions; the core has an independent serial lane. Dispatch considers activity sessions in session-ID order after the last successful claim, wrapping once. This cursor resets on restart. Report-capacity checks can defer a session; rotation does not preempt running activations.
 
-Separate [limits](running.md#configuration) bound registered identities, pending events and callbacks per session, and background commands. Startup observations are outside the ordinary event budget. Existing sessions remain addressable at the identity limit; activity completion releases a registered-session slot.
+Separate [limits](running.md#configuration) bound registered identities, pending events and callbacks per session, and live host commands. Startup observations are outside the ordinary event budget. Existing sessions remain addressable at the identity limit; activity completion releases a registered-session slot.
 
 Each activity activation reserves one report slot within the core's event allowance; a fork reserves its first slot before publication. When an activity waits for callbacks, it releases the activation's reservation; its next activation reserves capacity again. Session completion consumes the reservation for its report, so later arrivals cannot take its place. Correspondence and callback mail stay stored when their destination cannot accept them.
 
@@ -131,11 +131,11 @@ The registry retains each complete model/tool exchange before its arena ends. To
 
 When an activity activation completes, pending callback registrations keep the activity dormant and available for resumption. With none remaining, the registry queues a report containing that round's nullable assistant text in the core's FIFO queue and removes the activity. The kernel then saves a checkpoint covering both the report and the activity's removal. The core sleeps between activations without being removed, and its final text remains internal. External sending occurs only through `send_message`; completion does not certify task success.
 
-After the checkpoint is confirmed and worker borrows end, a waiting activity can unload its context and later restore its selected history. A completed activity's in-memory state can instead be released. Reports own their text independently of the activity context; background commands remain in the host runtime's scope.
+After the checkpoint is confirmed and worker borrows end, a waiting activity can unload its context and later restore its selected history. A completed activity's in-memory state can instead be released. Reports own their text independently of the activity context; retained host commands remain in the host runtime's scope.
 
 ## Event sources and callback admission
 
-The registry persists monotonically increasing callback IDs with their source kind and destination before starting a source. Wakeups bind to their caller; background host commands bind to their invoking activity session. Producers retain only the ID and publish terminal text through `Callback.Publisher`. Forking and context unloading do not copy or retarget registrations.
+The registry persists monotonically increasing callback IDs with their source kind and destination. Wakeups register before starting. Host commands bind to their invoking activity session before launch; a command that outlives its tool call registers before the host detaches it and permits completion publication. A short command that finishes within the call returns directly without a callback. Producers retain only the ID and publish terminal text through `Callback.Publisher`. Forking and context unloading do not copy or retarget registrations.
 
 A wakeup also stores `History.Wakeup { id, at_unix_ms, text }`. The intake loop publishes due text before removing its deadline; registration remains until admission. After a crash, an unremoved deadline can publish again through the [first-result-preserving publisher](#callback-delivery). Polling, queue capacity, and scheduling can delay inference beyond the deadline.
 
@@ -159,7 +159,7 @@ Each turn repeats the complete finite runtime projection, including the roster a
 
 [Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). Role-filtered agent declarations are joined by Memory through `shared_tools` and, for activity sessions, Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection.
 
-Ordinary reasoning defaults to `low` for core and `high` for activity sessions. All sessions share the configured model and output-token limit. The [Responses adapter](../packages/responses/src/provider.zig) encodes these settings and uses the same payload encoder for measurement and inference. It decodes and validates the complete response before any calls execute; incomplete output fails execution. Unknown tools and invalid arguments become ordinary tool errors.
+Ordinary reasoning defaults to `low` for core and `high` for activity sessions. All sessions share the configured model and output-token limit. The [Responses adapter](../packages/responses/src/provider.zig) encodes these settings and uses the same payload encoder for measurement and inference. It decodes and validates the complete response before any calls execute; incomplete output fails execution. Engine invokes the returned calls in order, while other sessions can run their own tool batches concurrently. Unknown tools and invalid arguments become ordinary tool errors.
 
 The adapter distinguishes absent assistant text from empty text by whether message content contains an `output_text` part. A completion report preserves the resulting nullable value.
 
@@ -291,14 +291,62 @@ Restoration requires the latest checkpoint and all committed records with their 
 
 ## Autonomous memory
 
-Memory is a shared file workspace. The adapter resolves host write sources and exchanges typed JSON over SSH with [memory.nu](../apps/memory/src/memory.nu), which owns files and capacity. The [memory shell](../apps/memory/memory-shell.sh) locks each invocation; sequences of operations can observe another session's changes.
+[Memory](../packages/memory/src/root.zig) translates model-facing operations into typed JSON requests for [memory.nu](../apps/memory/src/memory.nu). The adapter owns host file sources and SSH transport; the handler owns workspace addresses, files, and capacity. The [memory shell](../apps/memory/memory-shell.sh) locks each request across observation, capacity checks, and publication. Other sessions can act between requests, so a sequence of calls is not a transaction. See [memory rooms](memory.md) for the operation contract and [service setup](running.md#memory-service) for deployment.
 
-Transfers buffer complete payloads and copy results into the model-round arena before releasing SSH buffers. Defined handler errors become tool outcomes; SSH, protocol, and unclassified backend failures end the runtime. See [memory rooms](memory.md) and [service setup](running.md#memory-service).
+### Reads and searches
+
+The handler reads byte ranges from Nushell streams and returns the source header, total length, and selected offset with each range. The adapter validates the response against its request and uses the shared [content](../packages/content/src/root.zig) text-prefix classifier to align text pages to UTF-8 boundaries. Supported images can require a second, complete read. That response is classified independently because another request may have changed the entry.
+
+Browse and search results are sorted and selected within the encoded reply budget. Name search gathers the matched names before pagination. Content search wraps the query to match each whole line once, avoiding a submatch record for every occurrence. It drains ripgrep's JSON incrementally and retains a bounded page and total count. Each matching line is still read and decoded as a whole before its preview is selected. A fixed shell wrapper appends the exit status to the stream so the handler can distinguish no matches from a failed search after draining it.
+
+### Writes and capacity
+
+Writes prepare complete content in the handler-owned `.ivenna-tmp` directory, then rename it onto the destination. The staging directory shares the workspace filesystem and is excluded from memory observations and logical capacity. Before removing abandoned unpublished files, each request verifies the directory's ownership marker.
+
+Publication replaces one file name, leaving other hard links on their previous content. Capacity counts regular-file lengths for each directory entry, including separate hard-link names. The projected usage is current usage plus the replacement length minus the addressed entry's previous length, checked while holding the workspace lock. Entry transfers and revisions have a separate size limit from the workspace's shared capacity.
+
+Unique revisions use Nushell's bounded `split row` to distinguish zero, one, and several matches before constructing a replacement. Literal replacement of all matches counts them from the byte-length reduction after deletion. Regex replacement of all matches retains a `parse` prepass: the selected Nushell version can panic on a backtracking error in `str replace`, whereas `parse` reports it as an operation error. That prepass still materializes its match list.
+
+### Transport and failures
+
+Transfers buffer each request and reply. Returned text and image content is copied into the model-round arena before the SSH buffers are released. The adapter supervises concurrent request writing, response draining, and child completion against one deadline. Timeout and cancellation stop SSH before joining its writer and protected wait.
+
+The handler translates selected-entry filesystem and pattern failures into tool outcomes. The adapter translates host source-file failures before transfer, while transport and protocol errors propagate to runtime supervision. The [memory interface](memory.md#results-and-errors) defines the outcomes, infrastructure failures, and uncertain effects.
 
 ## Host execution
 
-Host routes activity tools to [Shell](../packages/host/src/shell.zig); [process.zig](../packages/host/src/process.zig) owns process groups, timeout, cancellation, and reaping. Full output stays in log files, while [Reader](../packages/host/src/reader.zig) selects returned content. Sessions share the kernel's account, filesystem, and startup environment.
+[Host](../packages/host/src/root.zig) owns a shared command registry, tool operations, and completion delivery. Each command retains its arguments and startup configuration independently of the model-round arena. [Shell](../packages/host/src/shell.zig) prepares the environment and log files, resolves the working directory, and launches a fresh shell. See the [host interface](host.md) for modes, arguments, and results.
 
-For background commands, Host reserves execution capacity and a callback registration. `Host.run` supervises tasks independently of session workers. Each task owns its arguments and callback ID, never the registrar or model-round arena. Shutdown cancels and joins tasks before releasing their publisher and dependencies.
+### Command lifecycle
 
-Completion publishes JSON descriptions and log paths, with an explicit native-image omission. Unavailable shell descriptions or command results become `host_unavailable`; cancellation and allocation errors propagate, and background publication failures end host supervision. [Host shell](host.md) defines results and interruption behavior; [startup](#startup-and-interruption) handles unfinished registrations.
+Host reserves live capacity before launch and binds the command to its originating session. The initial call waits on `std.Io.Condition` for completion or its yield deadline. A command that finishes during that interval returns directly. Otherwise its operation lock holds completion publication until the session registry has saved a callback registration. The returned callback ID becomes the command handle. A failed handoff stops and joins the command before returning its captured observation.
+
+`Host.run` supervises commands independently of session workers. Jobs are reference-counted so returning from a call does not release state still in use by a task or another caller. Completion releases live capacity; a bounded cache can retain finished state and source handles for later collection. Full logs have independent [deployment retention](running.md#host-output-and-deployment-files).
+
+Shutdown cancels and joins command tasks before releasing their publisher, logs, terminals, or other dependencies. Startup reconstructs callback registrations and interrupted observations through the agent's [restoration contract](#startup-and-interruption); it does not reconstruct host processes or command handles.
+
+### Interaction and synchronization
+
+The Host mutex protects registry state, references, capacity, and input admission. Each command has an operation lock for handoff and consumption of its stdout/stderr cursors. Input, signal, and resize actions apply before taking that lock so an observation wait does not delay interaction. One input write can be in flight per command. It runs separately from the observation call; completion cancels and joins it before releasing the live slot.
+
+Explicit reads and completion callbacks consume the same text positions. Publication selects and renders its content under the operation lock, then sends the owned text after releasing the lock. Command lookup is shared across activities; interaction does not change the command's completion destination.
+
+### Processes and terminals
+
+[process.zig](../packages/host/src/process.zig) owns child supervision through `std.process.Child` and `std.Io.Select`, including deadlines, cancellation, and protected reaping. It selects the process transport from the command's input mode.
+
+[pty.zig](../packages/host/src/pty.zig) supplies the Linux terminal operations absent from `std.Io`. It opens the slave from the master with `TIOCGPTPEER`, resizes it with an ioctl, and uses `std.posix.tcgetpgrp` for foreground-group lookup. Launch uses `setsid --ctty` because `std.process.spawn` exposes process groups without a new-session option. The terminal master carries input and merged stdout/stderr; terminal EOF is a control byte rather than a pipe half-close.
+
+In terminal mode, interrupt targets the foreground group so an interactive shell can continue afterward. Terminal termination and cleanup cover the original session, including background job-control groups. The backend enumerates `/proc`, filters with `getsid`, then binds candidates with pidfds and rechecks their session before signaling. Batch and pipe cleanup uses the command's process group.
+
+Normal completion and timeout report cleanup failures as unavailable outcomes. Error unwinding and cancellation make a final best-effort cleanup before joining. A program can escape into another session; if it retains a terminal slave, output draining stops after a one-second wait. Terminal [deployment requirements](running.md#runtime-requirements) belong to the running guide.
+
+### Output and delivery
+
+Commands write to private log files. [Reader](../packages/host/src/reader.zig) owns complete-source classification and native versus callback media; stderr uses text-only reading. [output.zig](../packages/host/src/output.zig) selects byte ranges and previews. The tool decoder validates the combined encoded budget, and internal readers use its stream allocations. Both host and memory readers use the text-prefix classifier in Content.
+
+Continued observations periodically check regular log-file growth and wait on the condition so completion can wake them immediately. The same typed observation is rendered for tool results and callbacks, using the source selection described in the [host output contract](host.md#output-and-results).
+
+Final media is classified from complete stdout. A callback can describe an image or URL and mark its native-part omission while consuming stdout to its end. The first completed tool read can still supply that native media once, independently of the text cursor. The shared [content contract](content.md) defines formats, descriptions, and media limits.
+
+Shell preparation, source reading, and command controls translate their operation failures into tool outcomes. Callback registration, task scheduling, and publication failures propagate to runtime supervision, as do cancellation and allocation errors.

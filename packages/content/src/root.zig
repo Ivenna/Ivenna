@@ -40,13 +40,14 @@ pub const ImageContent = union(enum) {
 pub const Image = @import("image.zig").Image;
 
 pub const image_size_limit = 32 * 1024 * 1024;
+pub const reference_size_limit = 16 * 1024;
 
 /// Explicit interpretation of a complete text source as a resource reference.
 pub const Interpretation = enum { image_url };
 
 pub const Unavailable = struct {
     byte_length: u64,
-    reason: enum { unsupported_binary, image_too_large },
+    reason: enum { unsupported_binary, image_too_large, reference_too_large },
 };
 
 pub const Classified = union(enum) {
@@ -82,6 +83,8 @@ pub fn classify(bytes: []const u8) Classified {
 /// Recognized image bytes keep their data representation; empty text stays text.
 pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Classified {
     const classified = classify(bytes);
+    if (interpretation == .image_url and classified == .text and bytes.len > reference_size_limit)
+        return .{ .unavailable = .{ .byte_length = bytes.len, .reason = .reference_too_large } };
     if (interpretation == .image_url and classified == .text and bytes.len != 0)
         return .{ .image = .{ .url = bytes } };
     return classified;
@@ -89,4 +92,31 @@ pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Classified 
 
 pub fn isText(bytes: []const u8) bool {
     return std.mem.indexOfScalar(u8, bytes, 0) == null and std.unicode.utf8ValidateSlice(bytes);
+}
+
+/// Length of the UTF-8 text prefix, excluding a still-valid incomplete tail
+/// when allowed. Null means NUL or a sequence that cannot become valid text.
+pub fn textPrefixLength(bytes: []const u8, allow_partial: bool) ?usize {
+    var index: usize = 0;
+    while (index < bytes.len) {
+        const first = bytes[index];
+        if (first == 0 or (first >= 0xc0 and first < 0xc2) or first > 0xf4) return null;
+        const length = std.unicode.utf8ByteSequenceLength(first) catch return null;
+        if (length > bytes.len - index) {
+            if (!allow_partial) return null;
+            const rest = bytes[index..];
+            for (rest[1..]) |byte| if (byte & 0xc0 != 0x80) return null;
+            if (rest.len > 1) {
+                const second = rest[1];
+                if ((first == 0xe0 and second < 0xa0) or
+                    (first == 0xed and second >= 0xa0) or
+                    (first == 0xf0 and second < 0x90) or
+                    (first == 0xf4 and second >= 0x90)) return null;
+            }
+            return index;
+        }
+        _ = std.unicode.utf8Decode(bytes[index..][0..length]) catch return null;
+        index += length;
+    }
+    return index;
 }

@@ -3,35 +3,167 @@ const content = @import("content");
 
 const Allocator = std.mem.Allocator;
 
-pub const preview_limit = 16 * 1024;
-const truncation_marker = "\n[... output truncated; read the full source for more ...]\n";
+pub const preview_line_limit = 2000;
+pub const minimum_budget = 128;
+const marker_format = "\n[... {d} bytes omitted; read the full log ...]\n";
+const marker_reserve = std.fmt.count(marker_format, .{std.math.maxInt(u64)});
 
 pub const Preview = struct { text: []const u8, truncated: bool };
 
-/// Return a bounded text preview without replacing binary or invalid UTF-8.
-pub fn preview(a: Allocator, io: std.Io, file: std.Io.File) !Preview {
+pub const Chunk = struct {
+    offset: u64,
+    next_offset: u64,
+    byte_length: u64,
+    content: Content,
+
+    pub const Content = union(enum) {
+        text: Preview,
+        unavailable: struct { byte_length: u64, reason: enum { unsupported_binary } },
+    };
+};
+
+/// Return consecutive bytes without inserting a marker or skipping source text.
+/// `max_bytes` bounds the encoded content object, including its variant tag.
+/// A running stream's incomplete final character remains at the next cursor.
+pub fn chunk(a: Allocator, io: std.Io, file: std.Io.File, offset: u64, max_bytes: usize, finished: bool) !Chunk {
+    const budget = max_bytes;
     const length = try file.length(io);
-    if (length <= preview_limit) {
+    if (offset > length) return error.InvalidOutputOffset;
+    const capacity: usize = @intCast(@min(length - offset, budget));
+    const bytes = try a.alloc(u8, capacity);
+    errdefer a.free(bytes);
+    const read = try file.readPositionalAll(io, bytes, offset);
+    const window = linePrefix(bytes[0..read]);
+    const allow_partial = !finished or offset + window.len < length;
+    const prefix = content.textPrefixLength(window, allow_partial) orelse {
+        a.free(bytes);
+        return .{
+            .offset = offset,
+            .next_offset = offset + window.len,
+            .byte_length = length,
+            .content = .{ .unavailable = .{ .byte_length = window.len, .reason = .unsupported_binary } },
+        };
+    };
+    var end = prefix;
+    while (true) {
+        const next = offset + end;
+        const selected: Chunk.Content = .{ .text = .{ .text = bytes[0..end], .truncated = next < length } };
+        const encoded = encodedLength(selected);
+        if (encoded <= budget) return .{
+            .offset = offset,
+            .next_offset = next,
+            .byte_length = length,
+            .content = selected,
+        };
+        // The prefix is valid UTF-8. Shrink only at complete characters and
+        // leave all omitted bytes available at the returned cursor.
+        const target = @min(end - 1, end * budget / encoded);
+        end = completePrefix(bytes[0..target]).len;
+    }
+}
+
+/// Return a beginning/end preview whose encoded JSON object fits `max_bytes`.
+pub fn previewLimit(a: Allocator, io: std.Io, file: std.Io.File, max_bytes: usize) !Preview {
+    const budget = max_bytes;
+    const length = try file.length(io);
+    if (length <= budget) {
         const bytes = try a.alloc(u8, @intCast(length));
         const read = try file.readPositionalAll(io, bytes, 0);
         const value = bytes[0..read];
         if (!content.isText(value)) return error.UnsupportedBinary;
-        return .{ .text = value, .truncated = false };
+        const lines = std.mem.count(u8, value, "\n") + @intFromBool(value.len != 0 and value[value.len - 1] != '\n');
+        const complete: Preview = .{ .text = value, .truncated = false };
+        if (lines <= preview_line_limit and encodedLength(complete) <= budget) return complete;
+        return truncatedPreview(a, value, value, length, budget);
     }
 
-    const head_length = (preview_limit - truncation_marker.len) / 2;
-    const tail_length = preview_limit - truncation_marker.len - head_length;
+    const head_length = (budget - marker_reserve) / 2;
+    const tail_length = budget - marker_reserve - head_length;
     const head = try a.alloc(u8, head_length);
     const tail = try a.alloc(u8, tail_length);
     const head_read = try file.readPositionalAll(io, head, 0);
     const tail_read = try file.readPositionalAll(io, tail, length - tail_length);
-    const head_text = completePrefix(head[0..head_read]);
-    const tail_text = completeSuffix(tail[0..tail_read]);
-    if (!content.isText(head_text) or !content.isText(tail_text)) return error.UnsupportedBinary;
-    return .{
-        .text = try std.mem.concat(a, u8, &.{ head_text, truncation_marker, tail_text }),
-        .truncated = true,
-    };
+    return truncatedPreview(a, head[0..head_read], tail[0..tail_read], length, budget);
+}
+
+/// Whether a running source can advance its cursor. Use the same text prefix
+/// decision as chunk so malformed bytes are ready and partial characters wait.
+pub fn readable(io: std.Io, file: std.Io.File, offset: u64) !bool {
+    const length = try file.length(io);
+    if (length <= offset) return false;
+    if (length - offset >= 4) return true;
+    var bytes: [4]u8 = undefined;
+    const count = try file.readPositionalAll(io, bytes[0..@intCast(length - offset)], offset);
+    return if (content.textPrefixLength(bytes[0..count], true)) |prefix| prefix != 0 else true;
+}
+
+fn truncatedPreview(a: Allocator, head: []const u8, tail: []const u8, length: u64, budget: usize) !Preview {
+    var capacity: usize = @intCast(@min(budget - marker_reserve, length));
+    while (true) {
+        const head_capacity = capacity / 2;
+        const tail_capacity = capacity - head_capacity;
+        const head_text = headLines(completePrefix(head[0..@min(head.len, head_capacity)]));
+        const tail_text = tailLines(completeSuffix(tail[tail.len - @min(tail.len, tail_capacity) ..]));
+        if (!content.isText(head_text) or !content.isText(tail_text)) return error.UnsupportedBinary;
+        const selected = head_text.len + tail_text.len;
+        var marker_buffer: [marker_reserve]u8 = undefined;
+        const marker = std.fmt.bufPrint(&marker_buffer, marker_format, .{length - selected}) catch unreachable;
+        const text = try std.mem.concat(a, u8, &.{ head_text, marker, tail_text });
+        const result: Preview = .{ .text = text, .truncated = true };
+        // JSON escaping can expand one valid UTF-8 byte into six bytes. Bound
+        // the actual preview object so two diagnostic streams stay bounded
+        // when the shell result is serialized into a model tool message.
+        const encoded = encodedLength(result);
+        if (encoded <= budget) return result;
+        a.free(text);
+        capacity = @min(capacity - 1, selected * budget / encoded);
+    }
+}
+
+fn encodedLength(value: anytype) usize {
+    var buffer: [64]u8 = undefined;
+    var discard: std.Io.Writer.Discarding = .init(&buffer);
+    std.json.Stringify.value(value, .{}, &discard.writer) catch unreachable;
+    return @intCast(discard.fullCount());
+}
+
+fn linePrefix(bytes: []const u8) []const u8 {
+    var lines: usize = 0;
+    for (bytes, 0..) |byte, index| {
+        if (byte != '\n') continue;
+        lines += 1;
+        if (lines == preview_line_limit) return bytes[0 .. index + 1];
+    }
+    return bytes;
+}
+
+fn headLines(bytes: []const u8) []const u8 {
+    var lines: usize = 0;
+    var last_newline: ?usize = null;
+    for (bytes, 0..) |byte, index| {
+        if (byte != '\n') continue;
+        last_newline = index;
+        lines += 1;
+        if (lines == preview_line_limit / 2) return bytes[0 .. index + 1];
+    }
+    // Keep a partial line only when no complete line fits the byte limit.
+    return if (last_newline) |index| bytes[0 .. index + 1] else bytes;
+}
+
+fn tailLines(bytes: []const u8) []const u8 {
+    var lines: usize = 0;
+    var index = bytes.len;
+    if (index != 0 and bytes[index - 1] == '\n') index -= 1;
+    while (index != 0) {
+        index -= 1;
+        if (bytes[index] != '\n') continue;
+        lines += 1;
+        if (lines == preview_line_limit / 2) return bytes[index + 1 ..];
+    }
+    return if (std.mem.indexOfScalar(u8, bytes, '\n')) |newline|
+        if (newline + 1 < bytes.len) bytes[newline + 1 ..] else bytes
+    else
+        bytes;
 }
 
 fn completePrefix(bytes: []const u8) []const u8 {

@@ -4,6 +4,43 @@ def fail [code: string, message: string] {
     error make {code: $code, msg: $message}
 }
 
+# File operations are fallible at the selected entry. Keep their diagnostics as
+# tool outcomes; workspace preparation, accounting and programming errors still
+# fail the service request.
+def filesystem-operation [action: closure] {
+    try { do $action } catch {|failure|
+        fail operation_failed $failure.msg
+    }
+}
+
+def pattern-operation [action: closure] {
+    try { do $action } catch {|failure|
+        fail invalid_pattern ($failure.details.labels? | default [] | get -o text | str join "; " | default $failure.msg)
+    }
+}
+
+def staging-path [root: string] { [$root ".ivenna-tmp"] | path join }
+
+def prepare-workspace [root: string] {
+    let staging = staging-path $root
+    let marker = [$staging ".owner"] | path join
+    let owner = "Ivenna unpublished memory writes\n"
+    if ($staging | path exists --no-symlink) {
+        if ($staging | path type) != "dir" or ($marker | path type) != "file" {
+            error make {msg: "The reserved .ivenna-tmp address is occupied by unowned content."}
+        }
+        if (open --raw $marker) != $owner {
+            error make {msg: "The reserved .ivenna-tmp address is occupied by unowned content."}
+        }
+        # The lock excludes other requests. Retire only this application's
+        # unpublished files, including bytes left behind by a killed request.
+        ls --all $staging | where name != $marker | each {|item| rm --recursive $item.name } | ignore
+    } else {
+        mkdir $staging
+        $owner | save --raw $marker
+    }
+}
+
 def within [root: string, path: string] {
     $path == $root or ($path | str starts-with $"($root)/")
 }
@@ -15,10 +52,18 @@ def relative-address [root: string, path: string] {
 # Resolve the nearest existing ancestor as well as existing targets. This keeps
 # new addresses and symbolic links under the same workspace boundary.
 def resolve [root: string, address: string] {
-    if $address == "" or ($address | str starts-with "/") {
+    if $address == "" or ($address | str starts-with "/") or ($address | str contains (char nul)) {
         fail invalid_address "Use an address relative to the shared entrance; use '.' for the entrance."
     }
+    # Nu expands three-or-more dots even in string-valued filesystem paths.
+    # Reject that spelling before any path command can alias another address.
+    if ($address | split row "/" | any {|component| $component =~ '^\.{3,}$' }) {
+        fail invalid_address "Names consisting only of three or more dots are unsupported by the memory filesystem adapter."
+    }
     let lexical = [$root $address] | path join | path expand --no-symlink
+    if (within (staging-path $root) $lexical) {
+        fail invalid_address "This address is reserved for unpublished memory writes."
+    }
     if not (within $root $lexical) {
         fail invalid_address "This address is outside the memory workspace."
     }
@@ -28,7 +73,12 @@ def resolve [root: string, address: string] {
         $remaining = $remaining | prepend ($ancestor | path basename)
         $ancestor = $ancestor | path dirname
     }
-    let parent = $ancestor | path expand --strict
+    let parent = try { $ancestor | path expand --strict } catch {|failure|
+        fail invalid_address $"This address cannot be resolved: ($failure.msg)"
+    }
+    if (within (staging-path $root) $parent) {
+        fail invalid_address "This address resolves to unpublished memory writes."
+    }
     if not (within $root $parent) {
         fail invalid_address "This address resolves outside the memory workspace."
     }
@@ -64,6 +114,7 @@ def memory [root: string, address: string] {
 }
 
 def entry [root: string, path: string] {
+    if (within (staging-path $root) $path) { return null }
     let target = resolve $root (relative-address $root $path)
     let kind = match ($target.path | path type) {
         "dir" => "room",
@@ -75,42 +126,68 @@ def entry [root: string, path: string] {
     }
 }
 
-def file-identity [path: string] {
-    let identity = ^stat -c "%d:%i" -- $path | complete
-    if $identity.exit_code != 0 { error make {msg: "Could not inspect a memory entry."} }
-    $identity.stdout | str trim
-}
-
-# Scan regular files directly so unreadable directories fail the observation
-# rather than yielding a partial total.
-def workspace-usage [path: string, target: record = {inode: -1, identity: ""}] {
+# Count names, including hard-linked names, by their logical file lengths.
+# Published writes replace one name rather than modifying all links to an inode.
+def workspace-usage [path: string, root?: string] {
+    let root = $root | default $path
     mut logical_bytes = 0
-    mut target_names = 0
     for item in (ls --all --long $path) {
+        if $item.name == (staging-path $root) { continue }
         match $item.type {
-            "file" => {
-                $logical_bytes = $logical_bytes + ($item.size | into int)
-                if $item.inode == $target.inode and (file-identity $item.name) == $target.identity {
-                    $target_names = $target_names + 1
-                }
-            },
+            "file" => { $logical_bytes = $logical_bytes + ($item.size | into int) },
             "dir" => {
-                let child = workspace-usage $item.name $target
-                $logical_bytes = $logical_bytes + $child.logical_bytes
-                $target_names = $target_names + $child.target_names
+                if ($item.name | split row "/" | last) =~ '^\.{3,}$' {
+                    error make {msg: "A workspace directory has an unsupported all-dots name. Rename it before using the memory service."}
+                }
+                $logical_bytes = $logical_bytes + (workspace-usage $item.name $root)
             },
             _ => {}
         }
     }
-    {logical_bytes: $logical_bytes, target_names: $target_names}
+    $logical_bytes
+}
+
+# Pagination owns the model-facing result size. Stop before the encoded JSON
+# exceeds 32 KiB and leave an offset that resumes with the first omitted item.
+def page [items: list, args: record, context: record] {
+    let offset = $args.offset? | default 0
+    let maximum = $args.max_results? | default 100
+    if $offset < 0 or $maximum < 1 or $maximum > 1000 {
+        fail invalid_range "Use a nonnegative offset and max_results from 1 through 1000."
+    }
+    mut selected = []
+    for item in ($items | skip $offset | take $maximum) {
+        let candidate = $context | merge {items: ($selected | append $item), offset: $offset, total: ($items | length), next_offset: ($offset + ($selected | length) + 1)}
+        # Reserve the two extra bytes in 'entries'/'matches' versus 'items'.
+        if ({result: $candidate} | to json --raw | into binary | bytes length) > 32760 {
+            if ($selected | is-empty) {
+                fail result_too_large "One result exceeds the reply size. Use a shorter memory address or a narrower query."
+            }
+            break
+        }
+        $selected = $selected | append $item
+    }
+    let end = $offset + ($selected | length)
+    {items: $selected, offset: $offset, total: ($items | length), next_offset: (if $end < ($items | length) { $end } else { null })}
+}
+
+# Return a UTF-8 boundary-aligned prefix without replacing a partial character.
+def text-preview [text: string, maximum: int] {
+    let bytes = $text | into binary
+    let length = $bytes | bytes length
+    mut end = [$length $maximum] | math min
+    while $end > 0 and $end < $length and ((($bytes | bytes at $end..<($end + 1) | into int) | bits and 192) == 128) {
+        $end = $end - 1
+    }
+    $text | str substring 0..<$end
 }
 
 def describe-entry [root: string, item: record, recursive_size: bool] {
     let target = existing $root $item.address
     let size = if $item.kind == "memory" {
-        ls $target.path | first | get size | into int
+        filesystem-operation { ls $target.path | first | get size | into int }
     } else if $recursive_size {
-        (workspace-usage $target.path).logical_bytes
+        filesystem-operation { workspace-usage $target.path $root }
     } else { null }
     $item | merge {
         name: (if $item.address == "." { "." } else { $item.name }),
@@ -126,16 +203,113 @@ def memory-capacity [] {
 
 # The entry point holds the workspace lock across this check and the write.
 def check-write [root: string, path: string, byte_length: int, capacity: int] {
+    if $byte_length > 33554432 {
+        fail entry_too_large "An individual memory entry can contain at most 33554432 bytes (32 MiB)."
+    }
+    if ($path | path exists) and ($path | path type) != "file" {
+        fail invalid_address "A memory entry must be a regular file."
+    }
     let current = if ($path | path type) == "file" { ls --long $path | first } else { null }
-    let target = if $current != null and $current.num_links > 1 {
-        {inode: $current.inode, identity: (file-identity $path)}
-    } else { {inode: -1, identity: ""} }
-    let usage = workspace-usage $root $target
+    let usage = workspace-usage $root
     let old_length = if $current == null { 0 } else { $current.size | into int }
-    let names = if $target.inode == -1 { 1 } else { $usage.target_names }
-    let projected = $usage.logical_bytes + (($byte_length - $old_length) * $names)
-    if $projected > $capacity and $projected > $usage.logical_bytes {
+    let projected = $usage + $byte_length - $old_length
+    if $projected > $capacity and $projected > $usage {
         fail memory_capacity_exceeded $"The memories in all rooms would need ($projected) bytes, exceeding their shared capacity of ($capacity) bytes."
+    }
+}
+
+# Staging shares the memory filesystem, so rename publishes one complete entry.
+# No staged file is exposed as memory or counted toward logical capacity.
+def publish [root: string, path: string, bytes: binary, append: bool = false] {
+    filesystem-operation {
+        let staging = mktemp --tmpdir-path (staging-path $root) "write.XXXXXXXXXXXX"
+        try {
+            if $append and ($path | path exists) {
+                cp --force $path $staging
+                $bytes | save --raw --append $staging
+            } else {
+                $bytes | save --raw --force $staging
+            }
+            mv --force $staging $path
+        } finally {
+            rm --force $staging
+        }
+    }
+}
+
+def recall-pattern [clue: string, mode: string] {
+    let pattern = if $mode == "literal" {
+        $clue | str escape-regex
+    } else { $clue }
+    # Consume the rest of the line in byte mode, even around invalid UTF-8.
+    # Query flags remain scoped to the query; JSON keeps at most one submatch
+    # instead of expanding every occurrence on a long line.
+    ['(?-u:.*)(?:' $pattern ')(?-u:.*)'] | str join
+}
+
+# Drain ripgrep incrementally. Its final status travels in the same stream,
+# because Nushell's structured pipeline does not retain an external exit code.
+# Only a bounded result page and a scalar match count survive each input line.
+def recall [root: string, room: record, args: record] {
+    let mode = $args.match_mode? | default "literal"
+    if $mode not-in ["literal" "regex"] {
+        fail invalid_argument "Content matching mode must be literal or regex."
+    }
+    let pattern = recall-pattern $args.clue $mode
+    let case = if ($args.case_sensitive? | default false) { "--case-sensitive" } else { "--ignore-case" }
+    let offset = $args.offset? | default 0
+    let maximum = $args.max_results? | default 100
+    if $offset < 0 or $maximum < 1 or $maximum > 1000 {
+        fail invalid_range "Use a nonnegative offset and max_results from 1 through 1000."
+    }
+    let diagnostic = mktemp --tmpdir-path (staging-path $root) "search.XXXXXXXXXXXX"
+    try {
+        let state = ^sh -c 'rg --json --sort path --hidden --no-ignore --color never "$@"; status=$?; printf "{\"ivenna_exit\":%s}\n" "$status"' ivenna-memory-recall $case -- $pattern $room.path err> $diagnostic
+            | lines --strict
+            | reduce --fold {items: [], total: 0, full: false, exit_code: null} {|line, state|
+                if $state.exit_code != null {
+                    error make {msg: "The memory search emitted output after its final status."}
+                }
+                let item = $line | from json
+                if $item.ivenna_exit? != null {
+                    return ($state | upsert exit_code $item.ivenna_exit)
+                }
+                if $item.type? != "match" or $item.data.path.text? == null or $item.data.lines.text? == null {
+                    return $state
+                }
+                if (within (staging-path $root) $item.data.path.text) { return $state }
+                let total = $state.total + 1
+                if $total <= $offset or $state.full {
+                    return ($state | upsert total $total)
+                }
+                if ($state.items | length) >= $maximum {
+                    return ($state | merge {total: $total, full: true})
+                }
+                let target = resolve $root (relative-address $root $item.data.path.text)
+                let text = text-preview $item.data.lines.text 2048
+                let record = {address: $target.address, line: $item.data.line_number, text: $text, text_truncated: ($text != $item.data.lines.text)}
+                let candidate = {result: {room: $room.address, matches: ($state.items | append $record), offset: $offset, total: $total, next_offset: ($offset + ($state.items | length) + 1)}}
+                # Reserve space for the final total, which may grow as input is drained.
+                if ($candidate | to json --raw | into binary | bytes length) > 32700 {
+                    if ($state.items | is-empty) { fail result_too_large "One search result exceeds the encoded reply limit." }
+                    return ($state | merge {total: $total, full: true})
+                }
+                $state | merge {items: ($state.items | append $record), total: $total}
+            }
+        if $state.exit_code == null or $state.exit_code not-in [0 1 2] {
+            error make {msg: "The memory search did not return a valid completion status."}
+        }
+        if $state.exit_code == 2 {
+            # Diagnostics deliberately use lossy decoding if the byte bound
+            # splits a character; entry content keeps strict UTF-8 handling.
+            let message = open --raw $diagnostic | bytes at 0..<8192 | decode utf8 | str trim
+            let truncated = (ls $diagnostic | first | get size | into int) > 8192
+            fail search_failed (if $truncated { $"($message)\n[diagnostic truncated]" } else { $message })
+        }
+        let end = $offset + ($state.items | length)
+        {room: $room.address, matches: $state.items, offset: $offset, total: $state.total, next_offset: (if $end < $state.total { $end } else { null })}
+    } finally {
+        rm --force $diagnostic
     }
 }
 
@@ -144,10 +318,10 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
         "inspect_memory_space" => {
             let usage = workspace-usage $root
             {
-                used_bytes: $usage.logical_bytes,
+                used_bytes: $usage,
                 capacity_bytes: $capacity,
-                remaining_bytes: ([0 ($capacity - $usage.logical_bytes)] | math max),
-                used_ratio: ($usage.logical_bytes / $capacity)
+                remaining_bytes: ([0 ($capacity - $usage)] | math max),
+                used_ratio: ($usage / $capacity)
             }
         },
         "browse_memory" => {
@@ -160,12 +334,13 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
             let entries = if $kind == "memory" or ($args.entry_only? | default false) {
                 [(entry $root $target.entry_path)]
             } else {
-                ls --all $target.path
+                filesystem-operation { ls --all $target.path | collect }
                     | each {|item| entry $root $item.name }
                     | compact
             }
-            let described = $entries | each {|item| describe-entry $root $item ($args.recursive_size? | default false) }
-            {address: $target.address, entries: $described}
+            let described = $entries | sort-by address | each {|item| describe-entry $root $item ($args.recursive_size? | default false) }
+            let selected = page $described $args {address: $target.address}
+            {address: $target.address, entries: $selected.items, offset: $selected.offset, total: $selected.total, next_offset: $selected.next_offset}
         },
         "find_memory" => {
             let room = memory-room $root ($args.room? | default ".")
@@ -178,41 +353,37 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
             let case = if ($args.case_sensitive? | default false) { "--case-sensitive" } else { "--ignore-case" }
             let found = ^fd --hidden --no-ignore --print0 --color never $mode $case -- $args.query $room.path | complete
             if $found.exit_code != 0 {
-                error make {msg: ($found.stderr | str trim)}
+                fail search_failed ($found.stderr | str trim)
             }
             let matches = $found.stdout | split row (char nul)
                 | where {|path| $path != "" }
                 | each {|path| entry $root $path }
                 | compact
-            {room: $room.address, query: $args.query, matches: $matches}
+            let selected = page ($matches | sort-by address) $args {room: $room.address}
+            {room: $room.address, matches: $selected.items, offset: $selected.offset, total: $selected.total, next_offset: $selected.next_offset}
         },
         "recall_memory" => {
-            let room = memory-room $root ($args.room? | default ".")
-            let mode = match ($args.match_mode? | default "literal") {
-                "literal" => ["--fixed-strings"],
-                "regex" => [],
-                _ => { fail invalid_argument "Content matching mode must be literal or regex." }
-            }
-            let case = if ($args.case_sensitive? | default false) { "--case-sensitive" } else { "--ignore-case" }
-            let recalled = ^rg --json --hidden --no-ignore --color never ...$mode $case -- $args.clue $room.path | complete
-            if $recalled.exit_code > 1 {
-                error make {msg: ($recalled.stderr | str trim)}
-            }
-            let matches = $recalled.stdout | lines | each {|line| $line | from json }
-                | where type == "match"
-                | where {|item| $item.data.path.text? != null and $item.data.lines.text? != null }
-                | each {|item|
-                    let target = resolve $root (relative-address $root $item.data.path.text)
-                    {address: $target.address, line: $item.data.line_number, text: $item.data.lines.text}
-                }
-            {room: $room.address, clue: $args.clue, matches: $matches}
+            recall $root (memory-room $root ($args.room? | default ".")) $args
         },
         "read_memory" => {
             let target = memory $root $args.address
-            {address: $target.address, data: (open --raw $target.path | into binary | encode base64)}
+            let offset = $args.offset? | default 0
+            let maximum = $args.max_bytes? | default 8192
+            if $offset < 0 or $maximum < 4 or $maximum > 33554432 {
+                fail invalid_range "Use a nonnegative byte offset and a supported transfer size."
+            }
+            let byte_length = filesystem-operation { ls $target.path | first | get size | into int }
+            if $offset > $byte_length { fail invalid_range "The byte offset is beyond the end of this entry." }
+            let end = [$byte_length ($offset + $maximum)] | math min
+            let data = filesystem-operation { open --raw $target.path | bytes at $offset..<$end | into binary | encode base64 }
+            let header = filesystem-operation { open --raw $target.path | bytes at 0..<32 | into binary | encode base64 }
+            {address: $target.address, data: $data, header: $header, byte_length: $byte_length, offset: $offset}
         },
         "remember" => {
             let target = resolve $root $args.address
+            if ($args.data | str length --utf-8-bytes) > 44739244 {
+                fail entry_too_large "A memory write can transfer at most 33554432 bytes (32 MiB)."
+            }
             let content = $args.data | decode base64
             match ($args.mode? | default "create") {
                 "create" => {
@@ -220,16 +391,17 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
                         fail already_exists $"Address '($target.address)' already exists."
                     }
                     check-write $root $target.path ($content | bytes length) $capacity
-                    $content | save --raw $target.path
+                    publish $root $target.path $content
                 },
                 "append" => {
-                    let before = if ($target.path | path type) == "file" { ls $target.path | first | get size | into int } else { 0 }
+                    let before = if ($target.path | path type) == "file" { filesystem-operation { ls $target.path | first | get size | into int } } else { 0 }
                     check-write $root $target.path ($before + ($content | bytes length)) $capacity
-                    $content | save --raw --append $target.path
+                    publish $root $target.path $content true
                 },
                 "replace" => {
                     check-write $root $target.path ($content | bytes length) $capacity
-                    $content | save --raw --force $target.path
+                    filesystem-operation { mkdir ($target.path | path dirname) }
+                    publish $root $target.path $content
                 },
                 _ => { fail invalid_argument "The mode argument must be create, append, or replace." }
             }
@@ -242,13 +414,37 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
                 "regex" => true,
                 _ => { fail invalid_argument "Revision matching mode must be literal or regex." }
             }
-            let before = open --raw $target.path
+            if (filesystem-operation { ls $target.path | first | get size | into int }) > 33554432 {
+                fail entry_too_large "Text revision supports entries up to 33554432 bytes (32 MiB)."
+            }
+            let before = filesystem-operation { open --raw $target.path | collect }
             if ($before | describe) != "string" or ($before | str contains (char nul)) {
                 fail unsupported_content "Text revision requires UTF-8 content without NUL bytes."
             }
-            let matched = if $regex { $before =~ $args.old_text } else { $before | str contains $args.old_text }
-            let after = $before | str replace --all=($args.replace_all? | default false) --regex=$regex --no-expand=(not $regex) $args.old_text $args.new_text
-            let revision = if not $matched {
+            if $args.old_text == "" { fail invalid_argument "old_text must not be empty." }
+            let replace_all = $args.replace_all? | default false
+            let matches = pattern-operation {
+                if not $replace_all {
+                    # Unique edits need only distinguish zero, one and several
+                    # matches. Native splitn stops after the second occurrence.
+                    ($before | split row --number 3 --regex=$regex $args.old_text | length) - 1
+                } else if $regex {
+                    # parse reports runtime regex errors before str replace,
+                    # whose upstream API can panic on backtracking failure.
+                    $before | parse --regex $args.old_text | length
+                } else {
+                    # Literal counts need one string, not a value per match.
+                    let remaining = $before | str replace --all --no-expand $args.old_text "" | str length --utf-8-bytes
+                    (($before | str length --utf-8-bytes) - $remaining) // ($args.old_text | str length --utf-8-bytes)
+                }
+            }
+            if not $replace_all and $matches > 1 {
+                fail ambiguous_match "old_text matches more than once. Include more surrounding text or set replace_all to true."
+            }
+            let after = if $matches == 0 { $before } else {
+                pattern-operation { $before | str replace --all=$replace_all --regex=$regex --no-expand=(not $regex) $args.old_text $args.new_text }
+            }
+            let revision = if $matches == 0 {
                 "no_match"
             } else if $before == $after {
                 "unchanged"
@@ -256,14 +452,14 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
                 "revised"
             }
             if $revision == "revised" {
-                check-write $root $target.path ($after | into binary | bytes length) $capacity
-                $after | save --raw --force $target.path
+                check-write $root $target.path ($after | str length --utf-8-bytes) $capacity
+                publish $root $target.path ($after | into binary)
             }
-            {address: $target.address, revision: $revision}
+            {address: $target.address, revision: $revision, matches: $matches}
         },
         "create_memory_room" => {
             let target = resolve $root $args.address
-            mkdir $target.path
+            filesystem-operation { mkdir $target.path }
             {address: $target.address}
         },
         "move_memory" => {
@@ -276,13 +472,16 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
             if ($target.path | path exists) {
                 fail already_exists $"Destination address '($target.address)' already exists."
             }
-            mv $source.entry_path $target.entry_path
+            if (within $source.path $target.path) {
+                fail invalid_address "A memory room cannot be moved into itself or a descendant."
+            }
+            filesystem-operation { mv $source.entry_path $target.entry_path }
             {address: $target.address}
         },
         "forget_memory" => {
             let target = existing $root $args.address
             if $target.path == $root { fail invalid_address "The shared entrance cannot be removed." }
-            rm --recursive=($args.recursive? | default false) $target.entry_path
+            filesystem-operation { rm --recursive=($args.recursive? | default false) $target.entry_path }
             {address: $target.address}
         },
         _ => { fail invalid_operation "Unknown memory operation." }
@@ -291,8 +490,20 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
 
 def main [] {
     let input = $in
-    let root = $env.PWD | path expand --strict
-    let capacity = memory-capacity
+    let workspace = try {
+        if ($env.PWD | split row "/" | any {|component| $component =~ '^\.{3,}$' }) {
+            error make {msg: "The workspace path contains an unsupported all-dots directory name."}
+        }
+        let root = $env.PWD | path expand --strict
+        let capacity = memory-capacity
+        prepare-workspace $root
+        {root: $root, capacity: $capacity}
+    } catch {|failure|
+        print --stderr $failure.msg
+        exit 2
+    }
+    let root = $workspace.root
+    let capacity = $workspace.capacity
     let response = try {
         let request = $input | from json
         let operations = $request | columns
@@ -306,7 +517,13 @@ def main [] {
         }
         {result: (dispatch $root $operation $arguments $capacity)}
     } catch {|error|
-        let code = $error.details.code?
+        mut details = $error.details
+        # each/reduce add source context around an intentional operation error.
+        # Unwrap only that known wrapper; unknown Nushell errors remain fatal.
+        while $details.code? == "nu::shell::eval_block_with_input" and (($details.inner? | default []) | length) == 1 {
+            $details = $details.inner | first
+        }
+        let code = $details.code?
         if $code == null or ($code | str starts-with "nu::") {
             print --stderr $error.msg
             exit 2
@@ -314,10 +531,17 @@ def main [] {
         {
             error: {
                 code: $code,
-                message: $error.msg
+                message: $details.msg
             }
         }
     }
-    print ($response | to json --raw)
+    let encoded = $response | to json --raw
+    # Read transports carry binary data to the host adapter, which separately
+    # bounds the model-facing text and preserves complete supported images.
+    if ($encoded | into binary | bytes length) > 32768 and not (("result" in ($response | columns)) and ("data" in ($response.result | columns))) {
+        print ({error: {code: "result_too_large", message: "The result metadata exceeds the 32768-byte reply limit. Use a shorter address or a narrower query."}} | to json --raw)
+        exit 1
+    }
+    print $encoded
     if "error" in ($response | columns) { exit 1 }
 }

@@ -11,13 +11,13 @@
   },
   {
     "name": "browse_memory",
-    "description": "Inspect entry metadata or list a room's immediate entries. Memory is persistent and shared across sessions.",
+    "description": "Browse persistent memory shared across sessions. Inspect metadata without reading content, or list a room's immediate entries. Results are sorted by address; other sessions can change entries between pages.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "Literal address of a memory entry or room, relative to the shared entrance. Omit to use the entrance, '.'."
+          "description": "Literal path relative to the shared entrance, '.'. Omit to browse the entrance; use find_memory for name patterns."
         },
         "entry_only": {
           "type": "boolean",
@@ -26,6 +26,18 @@
         "recursive_size": {
           "type": "boolean",
           "description": "Measure the combined size of memories in each returned room and its descendants. Defaults to false, leaving room size_bytes null."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Zero-based result offset, default 0. Continue with a non-null next_offset from the previous reply; null means no more results."
+        },
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum results per page, default 100. The encoded reply limit can shorten a page."
         }
       },
       "required": [],
@@ -34,21 +46,21 @@
   },
   {
     "name": "find_memory",
-    "description": "Find memory entries and rooms by name within a room and its descendants.",
+    "description": "Locate entries and rooms by name within a room and its descendants. Results are sorted by address; other sessions can change matches between pages.",
     "parameters": {
       "type": "object",
       "properties": {
         "query": {
           "type": "string",
-          "description": "The name or name pattern to find. Literal mode matches part of a name."
+          "description": "Name or name pattern to find. Literal matching finds part of a name."
         },
         "room": {
           "type": "string",
-          "description": "The room location, relative to the shared entrance. Omit to use the entrance, \".\"."
+          "description": "Room address relative to the shared entrance. Omit to search from the entrance, '.'."
         },
         "match_mode": {
           "type": "string",
-          "description": "Interpret query as literal text (default), a glob, or a regular expression.",
+          "description": "Defaults to literal matching.",
           "enum": [
             "literal",
             "glob",
@@ -58,6 +70,18 @@
         "case_sensitive": {
           "type": "boolean",
           "description": "Match upper and lower case exactly. Omit to ignore case."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Zero-based result offset, default 0. Continue with a non-null next_offset from the previous reply; null means no more results."
+        },
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum results per page, default 100. The encoded reply limit can shorten a page."
         }
       },
       "required": [
@@ -68,7 +92,7 @@
   },
   {
     "name": "recall_memory",
-    "description": "Search text in memory entries for matching lines within a room and its descendants.",
+    "description": "Locate text by matching lines within a room and its descendants. Results are sorted by address and line; other sessions can change matches between pages. Each line has a bounded text preview and text_truncated; use read_memory for complete content.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -78,11 +102,11 @@
         },
         "room": {
           "type": "string",
-          "description": "The room location, relative to the shared entrance. Omit to use the entrance, \".\"."
+          "description": "Room address relative to the shared entrance. Omit to search from the entrance, '.'."
         },
         "match_mode": {
           "type": "string",
-          "description": "Interpret clue as literal text (default) or a regular expression.",
+          "description": "Defaults to literal matching.",
           "enum": [
             "literal",
             "regex"
@@ -91,6 +115,18 @@
         "case_sensitive": {
           "type": "boolean",
           "description": "Match upper and lower case exactly. Omit to ignore case."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Zero-based result offset, default 0. Continue with a non-null next_offset from the previous reply; null means no more results."
+        },
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum results per page, default 100. The encoded reply limit can shorten a page."
         }
       },
       "required": [
@@ -101,7 +137,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Read an entry's full text or image, along with its address.",
+    "description": "Read an entry's content as text pages or a complete supported image. Replies retain source byte_length and an unavailable diagnostic when content cannot be supplied.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -115,6 +151,18 @@
             "image_url"
           ],
           "description": "Present the entry's complete nonempty text as an image URL. Omit for automatic byte detection."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Byte offset at a UTF-8 character boundary, default 0. Continue with a non-null next_offset; null means the end. Images and image_url interpretation require offset 0.",
+          "maximum": 9223372036854775807
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 8192,
+          "description": "Maximum text bytes per page, default 8192. UTF-8 boundaries and the encoded reply limit can shorten a page. Complete images and image_url interpretation use their own limits."
         }
       },
       "required": [
@@ -125,7 +173,7 @@
   },
   {
     "name": "remember",
-    "description": "Write text or copy a host file into a memory entry.",
+    "description": "Store text or copy a host file into an entry, with a limit of 32 MiB for both transferred content and the updated entry. Failed preparation preserves the previous entry.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -158,7 +206,7 @@
                     "path": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Source file on Ivenna's host, absolute or relative to its startup directory."
+                      "description": "Regular source file on Ivenna's host, absolute or relative to its startup directory."
                     }
                   },
                   "required": [
@@ -177,7 +225,7 @@
         },
         "mode": {
           "type": "string",
-          "description": "create (default) requires a new entry; append adds bytes without a separator and creates a missing entry. Both require existing parent rooms. replace overwrites or creates the entry, creating any missing parent rooms.",
+          "description": "create (default) requires a new entry; append adds bytes without a separator and creates a missing entry. Both require existing parent rooms. replace overwrites or creates the entry, creating missing parent rooms. Replacing or appending changes only the addressed hard-linked name.",
           "enum": [
             "create",
             "append",
@@ -194,7 +242,7 @@
   },
   {
     "name": "revise_memory",
-    "description": "Replace matching text in a memory entry and report whether a match was found and whether the content changed.",
+    "description": "Revise UTF-8 text, with a 32 MiB limit for both the existing and revised entry. Replace one unique match by default: no match reports no_match, and multiple matches return ambiguous_match without writing. Replies report revision and matches.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -204,7 +252,8 @@
         },
         "old_text": {
           "type": "string",
-          "description": "The text to match, or a regular expression when match_mode is regex."
+          "description": "Text or pattern to replace.",
+          "minLength": 1
         },
         "new_text": {
           "type": "string",
@@ -212,11 +261,11 @@
         },
         "replace_all": {
           "type": "boolean",
-          "description": "Replace every match. Omit to replace only the first."
+          "description": "Replace every non-overlapping match instead of one unique match. Defaults to false."
         },
         "match_mode": {
           "type": "string",
-          "description": "Interpret old_text as literal text (default) or a regular expression. Literal matching is case-sensitive.",
+          "description": "Defaults to literal, case-sensitive matching.",
           "enum": [
             "literal",
             "regex"

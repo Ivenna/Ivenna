@@ -10,7 +10,9 @@ The model brings broad prior knowledge to the capabilities at hand. It chooses p
 
 Understanding, preferences, commitments, and working methods can develop through correspondence and autonomous activity. Ivenna chooses what to remember and how to organize shared autonomous memory wherever its attention is focused. Retained conversations, handovers, and memory support this continuing understanding.
 
-Capabilities preserve operation outcomes, source descriptions, and supported media together. When content cannot be supplied, its source and the omission remain available for Ivenna to interpret.
+Capabilities keep operation outcomes connected to their sources and supported content. Bounded observations provide a way to inspect further content, and omissions remain distinguishable from an empty source. This lets Ivenna decide which evidence needs further inspection.
+
+Changes to shared memory require a clear target. An edit that could select several occurrences requires an explicit choice, and the previous entry remains intact until its replacement is ready. Ivenna can refine an intended change without losing the memory it was trying to revise.
 
 ## Core and concurrent attention
 
@@ -18,7 +20,7 @@ One core session coordinates Ivenna, relating correspondence to retained underst
 
 Only the core can [fork an activity session](communication.md#forking-an-activity-session). An activity inherits the core's retained understanding and receives a free-form assignment to pursue from it. Inheritance carries relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
 
-Only the core can send direct session messages. Both roles can communicate externally and maintain autonomous memory; host tools belong to activities. An independent execution lane and short coordination turns support core responsiveness while activities pursue their work. See [scheduling and capacity](architecture.md#scheduling-and-capacity) for resource limits and dispatch.
+Only the core can send direct session messages. Both roles can communicate externally and maintain autonomous memory; host tools belong to activities. Core coordination must remain responsive while activities pursue their work. See [scheduling and capacity](architecture.md#scheduling-and-capacity) for the current dispatch and resource limits.
 
 ## Communication with people and programs
 
@@ -36,7 +38,9 @@ A response without tool calls ends the activation when no queued arrivals or cor
 
 Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a waiting session. Messages preserve their actual sources for the receiver to weigh against its own evidence and understanding.
 
-Sessions can schedule wakeups, and activities can receive results from background host commands. Sources bind to their receiving session before starting and retain that destination for their lifetime. This lets work continue without new correspondence. See [session communication](communication.md#session-communication-and-wakeups) and [background commands](host.md#background-commands).
+Sessions can schedule wakeups, and activities can receive results from host commands that outlive a tool call. Sources bind to their receiving session before starting and retain that destination for their lifetime. This lets work continue without new correspondence. See [session communication](communication.md#session-communication-and-wakeups) and [commands that outlive a call](host.md#commands-that-outlive-a-call).
+
+Host commands remain observable and controllable while they run. Returning from a tool call frees attention to continue reasoning; it does not end the process. Further calls can inspect progress, supply input, or interrupt work whose purpose has changed. Another activity can interact with the command while its completion still returns to the originating session.
 
 Each inference receives a self-contained snapshot of the runtime facts exposed by the interface, including after restart or compaction. These facts place retained understanding in its current circumstances; task meaning remains in model messages, handovers, and memory.
 
@@ -48,7 +52,7 @@ Restart restores saved understanding and pending work. Earlier actions remain ev
 
 ## Runtime availability
 
-Communication and autonomous memory are required for Ivenna to operate. Infrastructure, model, and session-execution failures end the runtime and its concurrent work. Defined tool outcomes, such as a missing memory entry, a capacity limit, or a command's nonzero exit, remain observations for the model.
+Communication and autonomous memory are required for Ivenna to operate. Infrastructure, model, and session-execution failures end the runtime and its concurrent work. Defined tool outcomes, including unsuccessful or uncertain actions, remain observations from which Ivenna decides how to continue.
 
 The receiving boundary checks Ivenna's reception status before accepting correspondence. Reception closes during startup, shutdown, or failure; sender retry and queuing belong to the sender. See [reception readiness](running.md#service-status-and-reception) for the precheck's limits.
 

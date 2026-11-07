@@ -69,19 +69,19 @@ Put task facts and observations in user input. Prompts and tool descriptions sho
 
 ### Session execution
 
-Keep queue, activation, context, and callback-registration changes under registry synchronization. The kernel coordinates adapter calls and worker lifetimes. Copy or transfer values that outlive a model-round arena, and admit events only between complete model/tool batches. Follow the [scheduling](architecture.md#scheduling-and-capacity), [fork](architecture.md#activity-forks), [completion](architecture.md#activation-and-session-completion), and [callback admission](architecture.md#event-sources-and-callback-admission) contracts.
+Execution owns session state and the boundaries at which new observations can affect it. Preserve complete model/tool rounds when changing admission or scheduling. The [architecture guide](architecture.md#sessions-work-and-communication) defines registry synchronization and the lifetimes of activations, contexts, and workers.
 
-Keep attention scheduling separate from durable observations and consume its signal only for an ordinary inference. Keep session identity separate from context residency, source destinations fixed for their lifetime, and execution limits separate from storage retention.
+Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values, keep source destinations fixed, and cancel and join tasks before releasing their dependencies. A capability may retain a callback ID, never its invocation-scoped registrar; see [event sources](architecture.md#event-sources-and-callback-admission).
 
-A capability may retain a callback ID, never its invocation-scoped registrar. Background host tasks belong to the application runtime: shutdown cancels and joins them before releasing dependencies. Infrastructure and execution failures close reception and end concurrent work; ordinary tool outcomes remain observations.
+A session's identity and retained work must remain available when it sleeps or unloads its context. Execution limits govern scheduling; storage retention follows the session's continuation needs. The [availability contract](design.md#runtime-availability) governs whether a failure is an observation or ends execution.
 
 ### Working history
 
-Context owns retained observations, complete model/tool exchanges, and handovers. Input adds current facts and one tagged purpose to each inference; it does not replace the model's understanding. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [two-stage handover contract](input.md#handover-generation-and-replacement).
+Working history records what a session can safely continue from. Context owns retained observations, complete model/tool exchanges, and handovers; current facts accompany them for one inference. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
 
-Measure admission against its resulting state, with independent candidate projections. Confirm admitted records and their checkpoint before acknowledging receipts. Keep callback registration removal and observation persistence together, preserving the duplicate barrier through acknowledgement. Unload only confirmed history selected by the checkpoint.
+Persistence changes must keep the saved context, admitted observations, and pending registrations consistent, including when saving succeeds but acknowledgement does not. The agent owns history encoding and retention selection; `HistoryStore` adapters own native representation and protocol limits. The [history contract](architecture.md#persistent-working-history) explains publication, restoration, and retirement.
 
-The agent owns history encoding and retention selection; `HistoryStore` adapters own native representation and protocol limits. Serialize publication and maintenance through the registry, and reconcile against the confirmed checkpoint before retirement. [Startup](architecture.md#startup-and-interruption) reconstructs execution without replaying old calls or processes; storage failures must not silently replace history with an empty context.
+Storage failures must not silently replace history with an empty context. [Startup](architecture.md#startup-and-interruption) reconstructs understanding and pending work without replaying effects.
 
 ## Repository and build
 
@@ -104,15 +104,8 @@ The executable is installed at `zig-out/bin/ivenna` and embeds the [model-facing
 
 ## Validation
 
-Build the application and exercise the affected behavior through communication and model/tool work. Select checks relevant to the change:
+Build the application and exercise the affected behavior through communication and model/tool work. Choose checks from the contract being changed: establish what Ivenna or its correspondents should observe, then follow that outcome across the components that produce, deliver, and retain it. A boundary change needs evidence from its producers and consumers together.
 
-| Area | Checks |
-| --- | --- |
-| Execution | FIFO budget admission, complete tool batches, fair dispatch, fork inheritance, role-based tool access, report reservations, direct messages, attention-only turns, callback waiting, and session completion |
-| Model-facing interfaces | Record/Turn shapes, observation delivery without duplication, native model/tool messages, summary generation and replacement, and complete-payload budgets |
-| Continuity | Durable admission and acknowledgement, cold restoration, startup observations, callbacks and wakeups across restart, and unknown interrupted effects without replay |
-| Storage | Record and checkpoint validation, failed publication, committed-chain selection, independent inherited histories, per-session replacement, retention, and preservation of selected records |
-| Capabilities and service | Explicit sending, addressing and body projection, independent intake streams, host cancellation and result delivery, content omissions, and health/reception state |
-| Failures | Ordinary tool outcomes allow continuation; infrastructure and execution errors close reception and join concurrent work |
+Exercise failure and interruption where they can separate an external effect from its recorded outcome. Confirm that the resulting observation supports a reliable next action. Where state or tasks survive a call, verify their restoration and cleanup through the owning component's contract. Scale these checks to the changed behavior and affected boundaries.
 
-Report the checks performed. Distinguish reconstruction of understanding from execution recovery.
+Report the checks performed and their limits. Distinguish reconstruction of understanding from execution recovery.

@@ -83,7 +83,7 @@ The core's `send_session_message` produces a `SessionMessage`:
 | `observed_at_unix_ms` | `i64` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
 
-Background host completions and scheduled wakeups arrive as `Callback` observations for the sessions that invoked the host tool or scheduled the wakeup:
+Completions from host commands that outlive a call and scheduled wakeups arrive as `Callback` observations for the sessions that started the command or scheduled the wakeup:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -92,7 +92,7 @@ Background host completions and scheduled wakeups arrive as `Callback` observati
 | `observed_at_unix_ms` | `i64` | Time the runtime observed the callback |
 | `text` | `Text` | Host outcome or the supplied wakeup text |
 
-A host callback ID matches its `activity_id`; a wakeup ID matches its `callback_id`. Destinations survive sleep, context unloading, and restart. A registered callback ID is admitted at most once. Host results can report interrupted activity with unknown effects; see [background commands](host.md#background-commands) and [session communication](communication.md#session-communication-and-wakeups).
+A host callback ID matches its `command_id`; a wakeup ID matches its `callback_id`. Pending host IDs in the current session snapshot also identify its command handles. Destinations survive sleep, context unloading, and restart, while host processes and handles survive only within one runtime. A registered callback ID is admitted at most once. Host results can report interrupted work with unknown effects; see [commands that outlive a call](host.md#commands-that-outlive-a-call) and [session communication](communication.md#session-communication-and-wakeups).
 
 ### Handovers
 

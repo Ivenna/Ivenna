@@ -99,9 +99,9 @@ See [configuration](running.md#configuration) for capacity limits and [session m
 
 ### Callback mail
 
-Background host commands and wakeups register an ID and receiving session before producing results. Callbacks keep that destination for their lifetime and arrive through durable JMAP mailbox delivery, independently of SMTP reception. The model relates each result to its initiating tool exchange by ID.
+Host commands that outlive a tool call and scheduled wakeups register an ID and receiving session before publishing a callback. Callbacks keep that destination for their lifetime and arrive through durable JMAP mailbox delivery, independently of SMTP reception. A host process's handle uses its callback ID, relating further interaction and eventual completion to the initiating tool exchange.
 
-Publication reuses the first identifiable result while its copy and metadata remain [retained in the account](running.md#communication-copies). Admission persists the observation once; later copies are retired without another observation. Unknown IDs fail explicitly. See [callback delivery and admission](architecture.md#event-sources-and-callback-admission) for these guarantees and [background commands](host.md#background-commands) for process interruption.
+Publication reuses the first identifiable result while its copy and metadata remain [retained in the account](running.md#communication-copies). Admission persists the observation once; later copies are retired without another observation. Unknown IDs fail explicitly. See [callback delivery and admission](architecture.md#event-sources-and-callback-admission) for these guarantees and [commands that outlive a call](host.md#commands-that-outlive-a-call) for process interruption.
 
 ### Activity completion
 

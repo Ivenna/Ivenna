@@ -1,50 +1,65 @@
 # Tool content
 
-Memory reads and synchronous host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#retained-records) defines observations received as events. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
+Memory reads and host tool results combine an operation description with text or image content. This guide defines shared classification, image references, omission diagnostics, and model-request limits. The [memory](memory.md) and [host](host.md) guides define each tool's arguments, source fields, and continuation rules; the [input contract](input.md#retained-records) covers observations delivered as events.
 
 ## Automatic classification
 
-`read_memory` and `run_host_shell` identify the content they return from entry or stdout bytes. The current implementation recognizes JPEG, PNG, GIF, and WebP by their signatures, with a limit of 32 MiB per image. Signature recognition does not validate a complete image or decode its pixels. Supplied text is valid UTF-8 without NUL bytes.
+Readers recognize JPEG, PNG, GIF, and WebP from their byte signatures, with a limit of 32 MiB per image. Recognition does not decode pixels or validate a complete image. Text must be valid UTF-8 without NUL bytes. A filename or URL suffix does not select a media type, and a URL remains text unless image-reference interpretation is requested.
 
-Each entry or stdout capture is treated as one source; classification does not split an arbitrary byte stream into multiple media parts. A URL remains text unless the caller explicitly asks to present it as an image reference. A filename or URL suffix does not select a media type.
+An image is classified from one complete source: a memory entry or final stdout. Text can be returned in bounded ranges or previews. For larger non-image sources, text detection checks the returned bytes; omitted bytes have not necessarily been classified.
 
-Memory reads return the full text of an entry. Shell text previews contain at most 16 KiB, retaining the beginning and end when truncated. For larger non-image shell output, text detection checks only the previewed bytes. Only stdout can supply an image; stderr returns a text preview or an `unavailable` diagnostic.
+Host stderr is text-only. Host [input modes](host.md#input-modes) determine whether the streams are separate and whether terminal processing can alter their bytes.
 
 ## Image URL references
 
-Set `interpretation: "image_url"` to present the complete nonempty text of a memory entry or stdout capture as one image URL reference. For shell output, this uses the full stdout rather than a preview. Ivenna passes the text unchanged, without fetching or validating the address or referenced media. Recognized image bytes still return as image data, and empty output remains text. The configured model service handles the reference.
+Set `interpretation: "image_url"` on a memory read or host command to present the source's complete nonempty text as one image URL reference. For host commands, interpretation waits for final stdout. A reference has a 16 KiB byte limit; a larger source returns `reference_too_large`. Recognized image bytes retain their image-data representation, and empty output remains text.
 
-For example, a shell command can return an image reference:
+Ivenna supplies the text unchanged, without fetching or validating the URL or referenced media. The configured model service handles the reference. For example:
 
 ```json
 {"command":"printf '%s' 'https://example.com/image.png'","interpretation":"image_url"}
 ```
 
-Omit `interpretation` when the entry or command already supplies image bytes, or when a URL should remain text.
+Omit `interpretation` when the source already contains image bytes or when a URL should remain text. A partial text range is never treated as an image reference.
 
 ## Content and results
 
-Each tool combines source content with its operation's result description. Image reads include the memory address; shell results include the command outcome and both stream descriptions, including on nonzero exits and timeouts. Memory reads and synchronous host results supply supported images as native content parts alongside these descriptions. [Background host completions](host.md#background-commands) provide callback text with result descriptions and log paths; they omit native image parts.
+A tool result contains text describing the operation and its source. Supported images add a native content part alongside that description. Memory results identify the entry address; host results preserve command state and log paths, including on nonzero exits and timeouts.
 
-An image description has either `data` with `format` and `byte_length`, or `url` with an empty object. The native content part carries the encoded image bytes or URL itself. The [memory](memory.md#results-and-errors) and [shell](host.md#results-and-interruption) guides describe their surrounding result fields.
+An image description has one branch:
 
-The current readers return an `unavailable` description for content they cannot supply, with `byte_length` and reason `unsupported_binary` or `image_too_large`. This diagnostic concerns the returned content; it leaves the command outcome and stored memory entry unchanged. Shell stdout and stderr remain in full in their log files.
+| Branch | Description | Native part |
+| --- | --- | --- |
+| `data` | `format` and `byte_length` | Encoded image bytes |
+| `url` | Empty object | The supplied URL |
+
+When a host callback describes an image, it marks `media_omission: "asynchronous_media_unavailable"` in place of a native part. See [host output](host.md#output-and-results) for collecting that media later.
+
+Content that cannot be supplied has an `unavailable` description with `byte_length` and one reason:
+
+| Reason | Meaning |
+| --- | --- |
+| `unsupported_binary` | The selected bytes cannot be supplied as text or as an image in this result |
+| `image_too_large` | Recognized image data exceeds 32 MiB |
+| `reference_too_large` | The source selected for image-reference interpretation exceeds 16 KiB |
+
+The surrounding result identifies whether the diagnostic concerns a complete source or a selected range. An unavailable-content diagnostic leaves the operation outcome and stored source intact. The [memory](memory.md#results-and-errors) and [host](host.md#output-and-results) guides define those source descriptions.
 
 ## Model request checks
 
-At the end of each tool batch, the Responses adapter limits newly returned images using the complete request:
+At the end of each tool batch, the Responses adapter limits newly returned images against the complete request:
 
-| Local check | Limit |
+| Check | Limit |
 | --- | --- |
 | Image count, including retained images and URL references | 600 |
-| Serialized model request body, including history, tool definitions, and base64 image data | 48 MiB |
+| Serialized request body, including history, tools, and base64 image data | 48 MiB |
 
-The adapter keeps new images in order up to the count limit. If the serialized request exceeds the byte limit, newly returned images are then omitted from the end until it fits or no new images remain. Each omitted image part becomes a text part containing an `error` with code `content_limit`. The tool's result description, command outcome, other diagnostics, and earlier context remain available alongside that omission error.
+The adapter keeps new images in order up to the count limit. If the serialized request exceeds the byte limit, it omits new images from the end until the request fits or no new images remain. Each omitted image part becomes a text part containing an `error` with code `content_limit`. The operation description, source, and other parts remain available.
 
-These checks only remove newly returned images. They can leave a request above the listed thresholds when retained content or text already exceeds them. The separate [whole-request budget](architecture.md#bounded-model-context) checks the remaining request before the next model round and may require a handover or end execution.
+These checks only remove new images. Retained content or text can still leave the request above these limits. The kernel's separate [whole-request budget](architecture.md#bounded-model-context) checks the remaining request before inference and can require a handover or end execution.
 
 ## Context and continuity
 
-Working history retains accepted image bytes, so subsequent requests can reuse them even if the source file changes or is removed. Saved histories preserve those bytes across restart. URL results retain the supplied address; their content can change or become unavailable.
+Working history retains accepted image bytes for later requests and restart, independently of changes to the source. URL references retain the supplied address; the referenced content can change or become unavailable.
 
-Unloading a sleeping context preserves its saved image bytes. Compaction can remove images from the current working history. An artifact or memory entry provides a source for reading an image again; keep its location in a handover when needed for continued work. See [startup and interruption](architecture.md#startup-and-interruption) for what a restart retains.
+Unloading a context preserves its retained content. Compaction can remove images from working history, so preserve an artifact or memory address in the handover when the image may need to be read again. See [startup and interruption](architecture.md#startup-and-interruption) for what restart retains.

@@ -152,7 +152,7 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 ## Stopping and restarting
 
-Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how background commands stop, and how Ivenna continues interrupted work.
+Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how running host commands stop, and how Ivenna continues interrupted work.
 
 To remove the local middleware containers while retaining mail, memory, and SSH keys:
 

@@ -14,6 +14,6 @@ During ordinary work, tool calls continue execution, and accompanying text remai
 
 At activation completion, an activity with pending callbacks waits with its identity and history retained; a message, callback, or wakeup can resume it. Otherwise its session ends and leaves the roster, and its working history is no longer kept for continuation. The core receives one completion report with the ending response's assistant text, or `null` if no text output was present. A report establishes session completion, not task success.
 
-`startup` marks a new runtime. Earlier exchanges are evidence, not replayed actions. The new runtime does not resume host commands; callbacks preserve stored results or report interrupted activities with unknown effects. Inspect uncertain effects before repeating work.
+`startup` marks a new runtime. Earlier exchanges are evidence, not replayed actions. The new runtime does not resume host commands; callbacks preserve stored results or report interrupted commands with unknown effects. Inspect uncertain effects before repeating work.
 
 For `purpose.summarize`, read the retained messages and return only the requested handover. Tools are unavailable, and waiting events remain pending. The handover replaces this history for a new ordinary turn.

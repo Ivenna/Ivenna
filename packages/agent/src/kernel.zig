@@ -105,7 +105,7 @@ pub const Kernel = struct {
             defer arena.deinit();
             const a = arena.allocator();
             for (try self.sessions.interruptedHostCallbacks(a)) |id| {
-                try self.callbacks.send(a, .{ .id = id, .text = "The previous runtime ended before this host activity's result was admitted. The result is unknown; effects may already have occurred. Inspect the host before deciding how to continue. The command was not replayed." });
+                try self.callbacks.send(a, .{ .id = id, .text = "The previous runtime ended before this host command's completion was admitted. Its outcome is unknown; effects may already have occurred. The command was not replayed. Inspect the host before repeating it." });
             }
         }
         if (self.reception.cmpxchgStrong(.starting, .open, .release, .monotonic) != null) return;

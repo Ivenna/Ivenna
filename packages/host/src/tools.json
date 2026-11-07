@@ -1,50 +1,220 @@
 [
   {
     "name": "get_host_shell",
-    "description": "Return the host shell executable and default working directory.",
+    "description": "Inspect shell defaults or retained commands on the shared host. Use command IDs to continue work after a handover. Finished handles have bounded retention; full logs remain independently available.",
     "parameters": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "command_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615,
+          "description": "Select a command, or omit to list retained commands."
+        }
+      },
       "required": [],
       "additionalProperties": false
     }
   },
   {
     "name": "run_host_shell",
-    "description": "Run a fresh noninteractive /bin/sh command on the shared host, without live stdin. Return its outcome, log paths, and stdout text or image. With background=true return an activity_id; its callback returns text to this session, with image descriptions but no native image. Shutdown cancels commands; remaining group processes stop when the command ends.",
+    "description": "Execute shell code on the shared host. Each start creates a fresh shell. The call waits for completion or yield_ms; a running command returns command_id for continue_host_shell and later completes by callback to its originating session. Returning from a call does not end execution. Results include bounded output and full log paths; final stdout can supply native images.",
     "parameters": {
       "type": "object",
       "properties": {
         "command": {
           "type": "string",
-          "description": "Shell command to execute.",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Code passed to the selected shell with -c. Keep the same command running to preserve shell state across calls."
         },
         "cwd": {
           "type": "string",
-          "description": "Working directory, absolute or relative to Ivenna's startup directory (the default).",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Literal working directory; relative paths and the default use the kernel's startup directory."
+        },
+        "shell": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell executable accepting -c; defaults to /bin/sh."
+        },
+        "login": {
+          "type": "boolean",
+          "description": "Use shell -lc to load the selected shell's login startup files; default false."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "batch",
+            "pipe",
+            "terminal"
+          ],
+          "description": "batch (default) has closed stdin; pipe accepts streamed input; terminal provides terminal behavior with merged stdout/stderr. Batch and pipe preserve output bytes; terminal processing can alter them."
+        },
+        "yield_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000,
+          "description": "Wait for completion up to this many milliseconds; default 1000. This yields attention without stopping execution."
         },
         "timeout_ms": {
           "type": "integer",
           "minimum": 1,
           "maximum": 4294967295,
-          "description": "Command timeout in milliseconds. Omit for 600000 (10 minutes)."
+          "description": "Execution deadline in milliseconds; omitted means no deadline."
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 16384,
+          "description": "Combined encoded stdout/stderr preview budget; default 16384 bytes. Metadata and native media are separate."
         },
         "interpretation": {
           "type": "string",
           "enum": [
             "image_url"
           ],
-          "description": "Present complete nonempty stdout text as an image URL. Omit for automatic byte detection."
-        },
-        "background": {
-          "type": "boolean",
-          "description": "Run independently of this activation and receive a completion observation. Omit or use false to wait for the result."
+          "description": "Present final stdout text, up to 16 KiB, as an image URL passed unchanged to the model service. Image bytes are recognized automatically."
         }
       },
       "required": [
         "command"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "continue_host_shell",
+    "description": "Continue a retained command without starting a new shell. Reads and completion callbacks share the output cursor, including across activities; completion always goes to the originating session. A finished handle can supply remaining output and its native image once, even when the callback supplied only a description. Handles have bounded retention and are not restored after restart.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615,
+          "description": "Handle returned by run_host_shell or listed by get_host_shell; also the command's completion callback ID."
+        },
+        "action": {
+          "type": "object",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "read": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "read"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "write": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "maxLength": 16384,
+                      "description": "Input to write, at most 16384 UTF-8 bytes. Only one write can be pending; stdin.pending and stdin.error report delivery."
+                    },
+                    "eof": {
+                      "type": "boolean",
+                      "description": "After this text, close pipe stdin or send terminal Ctrl-D. Terminal input remains writable."
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "write"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "signal": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "enum": [
+                        "interrupt",
+                        "terminate",
+                        "kill"
+                      ],
+                      "description": "Send SIGINT, SIGTERM, or SIGKILL, respectively. Interrupt targets the terminal foreground group; terminate and kill cover its original session. Without a terminal, signals target the command's process group."
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "signal"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resize": {
+                  "type": "object",
+                  "properties": {
+                    "rows": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535,
+                      "description": "Terminal rows."
+                    },
+                    "cols": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535,
+                      "description": "Terminal columns."
+                    }
+                  },
+                  "required": [
+                    "rows",
+                    "cols"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "resize"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Apply input or control before reading output; omit to read only. Controls remain available while another call waits. Resize requires terminal mode."
+        },
+        "yield_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000,
+          "description": "Wait for unread output or completion up to this many milliseconds; default 1000. Use 0 for an immediate snapshot."
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 16384,
+          "description": "Combined encoded stdout/stderr preview budget; default 16384 bytes. Metadata and native media are separate."
+        }
+      },
+      "required": [
+        "command_id"
       ],
       "additionalProperties": false
     }

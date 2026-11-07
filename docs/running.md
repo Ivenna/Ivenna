@@ -6,6 +6,8 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 Use a built `ivenna` executable, `/bin/sh`, and an OpenSSH client in the kernel's execution environment. See the [build instructions](development.md#repository-and-build) to build from source. Host commands run as the kernel's OS account and use the files and programs available in that environment.
 
+Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, readable `/proc`, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. These facilities establish the controlling terminal and allow cleanup of its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
+
 The application uses the Responses adapter with DeepSeek as the default model service. Supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`. The kernel also needs access to the [mail service](#mail-service) and [memory service](#memory-service). The mail receiving boundary needs access to the kernel's [reception status](#service-status-and-reception).
 
 ## Configuration
@@ -33,7 +35,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary events per session, including reserved activity reports in the core | `64` |
 | `MAX_PENDING_CALLBACKS` | Maximum callback registrations not yet durably admitted per session | `64` |
-| `MAX_BACKGROUND_COMMANDS` | Maximum concurrently executing background host commands | `8` |
+| `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions; the same count bounds retained finished command handles | `8` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
 | `HANDOVER_MAX_BYTES` | Maximum retained handover text | `8192` |
@@ -45,7 +47,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 
 Core and activity sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
 
-Session identities, event queues, callbacks, background commands, and execution slots have independent limits. Waiting sessions occupy no execution slot. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a registered-session slot; the core remains registered.
+Session identities, event queues, callbacks, host commands, and execution slots have independent limits. Waiting sessions occupy no execution slot. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a registered-session slot; the core remains registered. Host commands release their live slot when they exit; finished command handles have a separate bounded retention lifecycle described in the [host interface](host.md#commands-that-outlive-a-call).
 
 Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. Waiting activities retain their session slots but release report reservations until they resume. Startup observations are excluded from the allowance. Callback mail waits when its destination is full. Correspondence and callbacks have independent intake allowances, and eligible activity sessions rotate through available slots without preempting running activations. Capacity and polling can delay scheduled work.
 
@@ -83,9 +85,11 @@ Eligible correspondence without the private acknowledgement marker is pending, i
 
 Set `MEMORY_SSH_TARGET` to the memory service's SSH target. Set `MEMORY_SSH_CONFIG` to a dedicated file, or leave it unset to use standard OpenSSH configuration. The connection must work without interactive input.
 
+The adapter sets a 10-second connection timeout, sends keepalive checks every 15 seconds, and permits two unanswered checks. After preparing the request payload, it applies a fixed 60-second deadline to request writing, response reading, and SSH completion. A timeout stops and joins the local SSH process and ends the runtime; it does not establish whether a remote write took effect. Requests are not automatically retried.
+
 ### Handler and entry point
 
-The current memory adapter invokes `/usr/local/bin/memory-shell` over SSH and exchanges JSON requests and replies with [memory.nu](../apps/memory/src/memory.nu). The service needs Nushell, ripgrep, fd, `flock`, and GNU or BusyBox `stat`. Use the Nushell version selected by the [Containerfile](../apps/memory/Containerfile), and install the programs on the `PATH` used by the memory shell.
+The current memory adapter invokes `/usr/local/bin/memory-shell` over SSH and exchanges JSON requests and replies with [memory.nu](../apps/memory/src/memory.nu). The service needs Nushell, ripgrep, fd, and `flock`. Use the Nushell version selected by the [Containerfile](../apps/memory/Containerfile), and install the programs on the `PATH` used by the memory shell.
 
 Install the handler and prepare the SSH entry point using [memory-shell.sh](../apps/memory/memory-shell.sh) and [sshd_config](../apps/memory/sshd_config) as references. Choose the handler location for the service and set it in the shell wrapper. The supplied wrapper uses `/usr/local/lib/ivenna/memory.nu`.
 
@@ -94,6 +98,10 @@ Install the handler and prepare the SSH entry point using [memory-shell.sh](../a
 The shell wrapper selects the memory workspace through its working directory and holds a lock for each handler invocation. Choose the workspace and lock paths for the service. The supplied wrapper uses `/memory` for the workspace and `/run/ivenna/memory.lock` for the lock.
 
 The SSH account needs read and write access to the workspace and lock. Create the lock's parent directory and lock file at service startup with the permissions needed by that account; [entrypoint.sh](../apps/memory/entrypoint.sh) provides an example. All handler processes sharing the workspace must use the same lock.
+
+The selected Nushell backend treats names consisting only of three or more dots as parent-directory syntax. Choose a workspace path without such components. If an external program creates a directory with a name such as `...` inside the workspace, rename it before using the service; capacity accounting cannot safely traverse it.
+
+The handler owns `.ivenna-tmp` at the workspace entrance for unpublished writes. It verifies its ownership marker before cleaning this directory; an existing unowned entry at that address is a service-setup conflict and remains untouched. Keep deployment-managed files and memory entries at other addresses.
 
 ### Capacity
 
@@ -137,13 +145,13 @@ Readiness describes the kernel's reception state when queried. It reserves no pr
 
 ## Stopping and restarting
 
-Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work and background host commands, and wait for the runtime's tasks to end. Infrastructure and execution failures also stop the runtime. Diagnose the failure and restore any unavailable services before restarting.
+Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work and host commands, and wait for the runtime's tasks to end. Infrastructure and execution failures also stop the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
 Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
 
 The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other activity sessions remain asleep until an event arrives. Every session's pending wakeups survive restart, including deadlines that passed while the runtime was unavailable, and their callbacks return to the original session.
 
-Stored host callbacks remain available. A registered host activity without a stored completion instead produces an interrupted observation with an unknown outcome. Host processes are not restored and commands are not replayed. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
+Stored host callbacks remain available. A host command with a registered callback but no stored completion instead produces an interrupted observation with an unknown outcome. Host processes and command handles are not restored, and commands are not replayed. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
 
 ### Recovering from an admission failure
 
@@ -218,6 +226,8 @@ A mailbox backup preserves stored callbacks and wakeup arrangements, not running
 ### Host output and deployment files
 
 `DATA_DIR` selects the base directory for host output in the kernel's filesystem. Each host-shell invocation creates any missing output directories with private permissions. Changing it selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
+
+Use writable storage that supports ordinary files and subdirectories.
 
 Host output files remain available after the command and activity session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
 
