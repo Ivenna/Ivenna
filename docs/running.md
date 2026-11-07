@@ -21,7 +21,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `LLM_MODEL` | Model name | `deepseek-flash` |
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `8192` |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
-| `LLM_BRANCH_REASONING_EFFORT` | Reasoning effort for ordinary work-session requests | `high` |
+| `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | JMAP session URL | `http://127.0.0.1:8088/jmap/session` |
 | `MAIL_ADDRESS` | Kernel address and sending identity; its domain resolves correspondent IDs | Required |
@@ -29,9 +29,9 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
-| `MAX_PARALLEL_ATTENTION` | Maximum concurrently executing work sessions; core has a separate lane | `4` |
+| `MAX_PARALLEL_ATTENTION` | Maximum concurrently executing activity sessions; core has a separate lane | `4` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
-| `MAX_PENDING_EVENTS` | Maximum ordinary events and reserved reports per session | `64` |
+| `MAX_PENDING_EVENTS` | Maximum ordinary events per session, including reserved activity reports in the core | `64` |
 | `MAX_PENDING_CALLBACKS` | Maximum callback registrations not yet durably admitted per session | `64` |
 | `MAX_BACKGROUND_COMMANDS` | Maximum concurrently executing background host commands | `8` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
@@ -43,19 +43,19 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it. Numeric kernel settings must be positive.
 
-Core and work sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
+Core and activity sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
 
 Session identities, event queues, callbacks, background commands, and execution slots have independent limits. Sleeping sessions occupy no execution slot. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Identities are not automatically retired.
 
-Ordinary events and report reservations share each session's `MAX_PENDING_EVENTS` allowance; startup and nested creation notices are excluded. Callback mail waits when its destination is full. Correspondence and callbacks have independent intake allowances, and eligible work sessions rotate through available slots without preempting running activations. Capacity and polling can delay scheduled work.
+Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. Startup observations are excluded from the allowance. Callback mail waits when its destination is full. Correspondence and callbacks have independent intake allowances, and eligible activity sessions rotate through available slots without preempting running activations. Capacity and polling can delay scheduled work.
 
-Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. A larger roster or callback list leaves less room for history and observations. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
+Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. A larger roster or callback list leaves less room for history and observations. These budgets also apply to an activity's inherited history. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
 ## Mail service
 
-Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks`, `Ivenna History`, and `Ivenna Archive` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
+Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks` and `Ivenna History` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
@@ -71,7 +71,7 @@ The [intake rules](#mail-intake) also apply to existing correspondence in the ac
 
 ### Mail intake
 
-The kernel reads correspondence awaiting durable admission across the account's mail folders, including the mail client's ordinary Archive folder. `Ivenna Callbacks`, `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash are excluded from ordinary correspondence, along with drafts and records carrying private callback, outgoing, or history-state markers. The callback inbox has its own admission path; these records do not become correspondence.
+The kernel reads correspondence awaiting durable admission across the account's mail folders, including the mail client's ordinary Archive folder. `Ivenna Callbacks`, `Ivenna History`, Drafts, Junk, and Trash are excluded from ordinary correspondence, along with drafts and records carrying private callback, outgoing, or history-state markers. The callback inbox has its own admission path; these records do not become correspondence.
 
 Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. The adapter presents the corresponding IDs and complete supported text as an observation. Messages with missing, cross-domain, or unsupported From addresses are excluded from intake. Messages without a complete supported body produce a diagnostic and are skipped. These copies remain unchanged.
 
@@ -114,7 +114,7 @@ The kernel's startup directory becomes the default directory for host commands. 
 
 Use one kernel per mailbox. Startup discovers the account, checks memory availability, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
 
-Startup currently reads all selected history, including sleeping sessions, before unloading unused branch contexts. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for the implementation and its current limitation.
+Startup reads and validates all selected history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
 
 ## Service status and reception
 
@@ -141,7 +141,7 @@ Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception
 
 Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
 
-The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other branches remain asleep until an event arrives. Every session's pending wakeups survive restart, including deadlines that passed while the runtime was unavailable, and their callbacks return to the original session.
+The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other activity sessions remain asleep until an event arrives. Every session's pending wakeups survive restart, including deadlines that passed while the runtime was unavailable, and their callbacks return to the original session.
 
 Stored host callbacks remain available. A registered host activity without a stored completion instead produces an interrupted observation with an unknown outcome. Host processes are not restored and commands are not replayed. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
 
@@ -151,7 +151,7 @@ When an incoming message fails admission with `ContextBudgetExhausted`, it remai
 
 ### Updating the executable
 
-Restoration requires a history format understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; the account is not cleared automatically.
+Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
 
 ## Data and retention
 
@@ -190,25 +190,24 @@ The latest checkpoint selects the histories needed to continue all registered se
 
 | Location | Contents |
 | --- | --- |
-| `Ivenna History` | Latest checkpoint and selected records in the sessions' current history segments |
-| `Ivenna Archive` | Sealed history still selected for session continuation |
+| `Ivenna History` | Latest checkpoint and selected working histories of all registered sessions |
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
-`Ivenna Archive` has no age-based retention deadline. Its records remain available until the checkpoint stops selecting them. Sleeping or unloading a context does not retire its history. Compaction can make earlier records unnecessary; automatic retirement of session identities is not implemented. See [history retention](architecture.md#history-retention) for selection and sharing rules.
+Forks store independent copies of inherited history; include these copies when sizing the mailbox. Compaction replaces only that session's selection, allowing its previous records to move to Trash while other sessions keep their own copies. Sleeping or unloading a context does not retire its history; automatic retirement of session identities is not implemented. See [history retention](architecture.md#history-retention) for selection rules.
 
 ### Backups and transfers
 
-History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every record it selects from both history folders, and pending mail in `Ivenna Callbacks`:
+History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 
 | Applies to | Preserve |
 | --- | --- |
 | History bodies | Exact plain-text ZON content |
-| All selected history objects | Original membership in `Ivenna History` or `Ivenna Archive`, From and To addresses matching `MAIL_ADDRESS`, `ivenna-state`, and `X-Ivenna-History-Kind` (`record` or `checkpoint`) |
+| All selected history objects | Original membership in `Ivenna History`, From and To addresses matching `MAIL_ADDRESS`, `ivenna-state`, and `X-Ivenna-History-Kind` (`record` or `checkpoint`) |
 | Records | `ivenna-history-<token>`, `X-Ivenna-History-Key`, and `X-Ivenna-History-Previous` when present |
 | Current checkpoint candidates | Membership in `Ivenna History`, `ivenna-current`, and `X-Ivenna-History-Revision` |
 | Pending callback mail | Complete text, From and To matching `MAIL_ADDRESS`, membership in `Ivenna Callbacks`, `ivenna-callback`, exact `ivenna-callback-<id>` keyword, and matching `X-Ivenna-Callback-Id` header |
 
-If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration uses logical groups, record keys, and callback IDs. An import that preserves bodies alone is insufficient. The executable must understand the saved [history format](#stopping-and-restarting).
+If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration uses logical groups, record keys, and callback IDs. An import that preserves bodies alone is insufficient. See [updating the executable](#updating-the-executable) for storage-format compatibility.
 
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 
@@ -218,6 +217,6 @@ A mailbox backup preserves stored callbacks and wakeup arrangements, not running
 
 `DATA_DIR` selects the base directory for host output in the kernel's filesystem. Each host-shell invocation creates any missing output directories with private permissions. Changing it selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
 
-Host output files remain available after the command and work session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
+Host output files remain available after the command and activity session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
 
 Keep provisioning files, credentials, and SSH keys with the deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by the supplied setup.

@@ -10,7 +10,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | --- | --- |
 | [apps/ivenna](../apps/ivenna) | Configure and assemble the runtime, serve HTTP status, and own process startup and shutdown |
 | [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
-| [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activations, forks, and retained history; own model-input rendering, execution policy, and model-facing resources |
+| [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activity forks, activations, and retained history; own model-input rendering, execution policy, and model-facing resources |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
 | [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, decode Responses output, and apply model content limits |
@@ -44,7 +44,7 @@ flowchart TD
     Agent --> YAML[YAML]
 ```
 
-The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer. Session scheduling, owned deliveries, activations, and retained context remain internal to the agent. `Kernel.Config` and `Kernel.Limits` describe execution policy; `Engine.Reasoning` selects ordinary reasoning effort for core and branch roles. Connection settings and protocol encoding belong to their capability packages; the application loads environment values and owns HTTP listener settings.
+The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer. Session scheduling, owned deliveries, activations, and retained context remain internal to the agent. `Kernel.Config` and `Kernel.Limits` describe execution policy; `Engine.Reasoning` selects ordinary reasoning effort for core and activity roles. Connection settings and protocol encoding belong to their capability packages; the application loads environment values and owns HTTP listener settings.
 
 ### Shared contracts
 
@@ -84,28 +84,28 @@ Reception status belongs to the service boundary. Model reasoning and tools do n
 | Concept | Role and lifetime |
 | --- | --- |
 | Task | Work to be accomplished; it may continue across activations |
-| Core session | Coordinating session with no parent, saved history, and its own runtime queue and execution lane |
-| Work session | Session created by a fork, with an independent history, queue, parent, and any children |
+| Core session | Coordinating session with saved history and its own runtime queue and execution lane |
+| Activity session | Session forked by the core with inherited context, an assignment, and its own subsequent history and queue |
 | `input` event | Correspondence observation with `from` IDs, text, and observation time |
 | Delivery | An owned observation retained through durable admission and any transport receipt acknowledgement |
-| Activation | One session continuing work through model and tool rounds, including admitted events or a core state reconsideration, until completion or fork |
+| Activation | One session continuing work through model and tool rounds, including admitted events or a core state reconsideration, until completion |
 | Model round | One model response followed by all tools it invoked |
 
 The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
 
-The registry stores each session's `Input.Role`: the core has no parent, and a branch's `parent_session_id` identifies the session that forked it. The registry uses that relationship for reports and report-capacity reservations. Identity and parent relationships remain registered while a session sleeps or its context is unloaded. Current request state and checkpoint records preserve those identities.
+The registry stores each session's `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Identity and role remain registered while a session sleeps or its context is unloaded, and appear in current request state and checkpoint records.
 
 ### Scheduling and capacity
 
-`MAX_PARALLEL_ATTENTION` bounds executing work sessions; the core has an independent serial lane. Dispatch considers branches in session-ID order after the last successful claim, wrapping once. This cursor resets on restart. Report-capacity checks can defer a session; rotation does not preempt running activations.
+`MAX_PARALLEL_ATTENTION` bounds executing activity sessions; the core has an independent serial lane. Dispatch considers activity sessions in session-ID order after the last successful claim, wrapping once. This cursor resets on restart. Report-capacity checks can defer a session; rotation does not preempt running activations.
 
-Separate [limits](running.md#configuration) bound registered identities, ordinary events and reserved reports per session, pending callbacks per session, and background commands. Startup and nested creation notices are outside the ordinary event budget. Existing sessions remain addressable at the identity limit; automatic identity retirement is not implemented.
+Separate [limits](running.md#configuration) bound registered identities, pending events and callbacks per session, and background commands. Startup observations are outside the ordinary event budget. Existing sessions remain addressable at the identity limit; automatic identity retirement is not implemented.
 
-A work activation reserves report capacity in its direct parent and the core, counting the core once when they coincide. Reports consume those reservations, so later arrivals cannot take their place. Correspondence and callback mail stay stored when their destination cannot accept them.
+Each activity activation reserves one report slot within the core's event allowance; a fork reserves its first slot before publication. Reports consume those reservations, so later arrivals cannot take their place. Correspondence and callback mail stay stored when their destination cannot accept them.
 
 ### Coordination and current state
 
-Correspondence enters the core's FIFO queue independently of mail threads. Both roles expose the [agent tools](../packages/agent/src/tools.json) and shared memory; only branches expose host tools. Engine applies the same role policy to declarations and invocation.
+Correspondence enters the core's FIFO queue independently of mail threads. Both roles expose external communication, wakeups, and shared memory. Only the core exposes `fork_session` and `send_session_message`; only activity sessions expose host tools. See the [agent declarations](../packages/agent/src/tools.json). Engine applies the same role policy to declarations and invocation, independently of tools mentioned in inherited history.
 
 Each inference receives a fresh session roster; observations, reports, and handovers retain task understanding. Non-core changes advance an internal attention generation that can schedule the core without an event. Snapshotting, measurement, and summarization leave it pending. Immediately before ordinary inference, the registry observes only the captured generation, preserving later changes. Core-only transitions do not advance it.
 
@@ -117,23 +117,25 @@ The kernel selects the longest nonempty FIFO prefix fitting the complete ordinar
 
 The selected group and checkpoint are saved before receipts are acknowledged and deliveries released. Ordinary assembly presents the group with fresh state; a later budget check can instead carry it through a handover. Unadmitted events stay outside summary input. Further groups enter only between complete model/tool rounds. Acknowledgement transfers responsibility to working history independently of task completion.
 
-## Forks and work ownership
+## Activity forks
 
-`fork_session` transfers the activation's whole work to one new child. Invocation reserves its identity and report capacity and prepares any nested creation notice. Publication waits until the complete model output and one result per tool call are committed. At most one fork is allowed per round.
+Only the core can invoke `fork_session`. Each call reserves a new identity and report capacity and prepares an assignment. At round commit, the registry appends the complete model output and one reply per tool call to a candidate core context. It independently clones that context for each prepared activity, then publishes the completed core context and all new activities together. Publication leaves the core's activation running. A round can fork several activities, subject to capacity.
 
-The child inherits the caller's retained context, including handovers, and queues its assignment. Publication ends the caller's activation. Unadmitted events and existing callbacks keep their destinations, while the histories grow independently. A branch's fork also gives the core a `session_created` notice; the core's own forks already appear in its tool exchanges. See the [input contract](input.md#assignments-and-reports) for observation fields.
+Each copy includes retained observations, complete native model/tool exchanges, and any existing handover followed by later history. All replies from the calling round are included, even those produced after the fork call. Forking generates no extra summary. Original record session IDs remain intact as provenance; historical tool calls are not replayed.
+
+The assignment is the activity's first new queued observation. Temporary inference turns, queued observations, callback registrations, and wakeup schedules are not copied or transferred. The activity receives its own current-state snapshot and expresses results and further needs in its automatic final reports. See the [fork interface](communication.md#forking-an-activity-session) and [assignment fields](input.md#assignments-and-reports).
 
 ## Activation completion and sleep
 
-Sessions retains each complete model/tool exchange before its arena ends. Tool replies lead to another round. Without tool calls, finalization and the queue check share one registry lock: pending events or core attention continue the activation; a later arrival makes the sleeping session runnable. Superseded final text stays in history without a report.
+The registry retains each complete model/tool exchange before its arena ends. Tool replies lead to another round. Without tool calls, finalization and the queue check share one registry lock: pending events or core attention continue the activation; a later arrival makes the sleeping session runnable. Superseded final text stays in history without a report.
 
-On completion, a branch's final text, including empty text, joins its direct parent's and core's FIFO queues, once when they coincide. Core final text remains internal. External sending occurs only through `send_message`; completion does not certify task success.
+On completion, an activity's final text, including empty text, joins the core's FIFO queue. Core final text remains internal. External sending occurs only through `send_message`; completion does not certify task success.
 
-After saved history is confirmed and worker borrows end, a sleeping branch can unload its context and later restore its selected spans. Identity, history, and pending callbacks remain checkpointed. Reports own their text independently of the child context; background commands remain in the host runtime's scope.
+After saved history is confirmed and worker borrows end, a sleeping activity session can unload its context and later restore its selected history. Identity, history, and pending callbacks remain checkpointed. Reports own their text independently of the activity context; background commands remain in the host runtime's scope.
 
 ## Event sources and callback admission
 
-The registry persists monotonically increasing callback IDs with their source kind and destination before starting a source. Wakeups bind to their caller; background host commands bind to their invoking branch. Producers retain only the ID and publish terminal text through `Callback.Publisher`. Forks and context unloading do not retarget registrations.
+The registry persists monotonically increasing callback IDs with their source kind and destination before starting a source. Wakeups bind to their caller; background host commands bind to their invoking activity session. Producers retain only the ID and publish terminal text through `Callback.Publisher`. Forking and context unloading do not copy or retarget registrations.
 
 A wakeup also stores `History.Wakeup { id, at_unix_ms, text }`. The intake loop publishes due text before removing its deadline; registration remains until admission. After a crash, an unremoved deadline can publish again through the [first-result-preserving publisher](#callback-delivery). Polling, queue capacity, and scheduling can delay inference beyond the deadline.
 
@@ -141,23 +143,23 @@ Intake resolves the ID through its registration and defers a full destination. `
 
 ## Working history and user messages
 
-[Context](../packages/agent/src/context.zig) owns retained observations, complete native `Model.Item` exchanges, and handovers. It caches the LLM message view from those entries and the current system prompt. Model output remains opaque adapter continuation bytes, including reasoning; tool replies keep their typed content. Forked records preserve original receiving session IDs. The [history codec](#persistent-working-history) stores entries and selects them for restoration.
+[Context](../packages/agent/src/context.zig) owns retained observations, complete native `Model.Item` exchanges, and handovers. It caches the LLM message view from those entries and the current system prompt. Model output remains opaque adapter continuation bytes, including reasoning; tool replies keep their typed content. The [history codec](#persistent-working-history) stores entries and selects them for restoration.
 
 [Input](../packages/agent/src/input.zig) renders the runtime's user messages within that conversation. `Record` selects retained `events` or `handover`; `Turn` combines fresh `current` facts with one purpose, `work` or `summarize`. See the [field contract](input.md).
 
 For ordinary work, `Context.Delivery.latest` moves the newest event record from the request prefix into `purpose.work.events`, leaving retained Context unchanged. Afterward, `Context.Delivery.none` keeps the full prefix and supplies empty events, even after empty model output. Candidate assembly uses the same turn shape with the [projected admission state](#activation-admission). Summary assembly reads the full retained prefix; [compaction](#bounded-model-context) owns replacement.
 
-Appending clones and renders the new entry. Forks and inference snapshots copy retained contents for independent ownership; assembled requests borrow their snapshot until inference returns.
+Appending clones and renders the new entry. Inference snapshots and activity forks copy retained contents for independent ownership; workers retain request snapshots through the complete model/tool round. An activity's copy sets `Context.scope` to its own session ID and epoch zero, preserving the original session IDs inside inherited records.
 
 ### Runtime state snapshots
 
-Each turn repeats the complete finite runtime projection, including the roster and caller's pending callbacks, without a delta baseline. Its size grows with those counts and competes with history and tools for the request budget. The [design choice](design.md#events-and-waiting) keeps snapshots self-contained across forks, restart, and compaction; model messages and memory carry understanding.
+Each turn repeats the complete finite runtime projection, including the roster and caller's pending callbacks, without a delta baseline. Its size grows with those counts and competes with history and tools for the request budget. The [design choice](design.md#events-and-waiting) keeps snapshots self-contained across restart and compaction; model messages and memory carry understanding.
 
 ## Model requests and tools
 
-[Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). Agent declarations are joined by Memory through `shared_tools` and, for branches, Host through `work_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection.
+[Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). Role-filtered agent declarations are joined by Memory through `shared_tools` and, for activity sessions, Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection.
 
-Ordinary reasoning defaults to `low` for core and `high` for branches. All sessions share the configured model and output-token limit. The [Responses adapter](../packages/responses/src/provider.zig) encodes these settings and uses the same payload encoder for measurement and inference. It decodes and validates the complete response before any calls execute; incomplete output fails execution. Unknown tools and invalid arguments become ordinary tool errors.
+Ordinary reasoning defaults to `low` for core and `high` for activity sessions. All sessions share the configured model and output-token limit. The [Responses adapter](../packages/responses/src/provider.zig) encodes these settings and uses the same payload encoder for measurement and inference. It decodes and validates the complete response before any calls execute; incomplete output fails execution. Unknown tools and invalid arguments become ordinary tool errors.
 
 ### Tool results
 
@@ -173,46 +175,50 @@ The generated handover must be nonempty after trimming and fit `HANDOVER_MAX_BYT
 
 Requests or summaries that cannot meet their bounds fail explicitly. FIFO selection measures complete candidate requests with a reusable trial arena; byte counts are not token estimates.
 
+An activity's inherited history is included in its encoded requests under these same budgets. Forking itself generates no summary; ordinary budget checks can still require compaction before further inference.
+
 ## Persistent working history
 
-The agent's [history codec](../packages/agent/src/history.zig) stores immutable records and a current checkpoint selecting the working histories for continuation. A session's history consists of ordered prefixes of history segments. Forks inherit those prefixes and append in the child's own segment. Compaction begins a replacement segment with a handover while preserving the session's identity and parent relationships.
+The agent's [history codec](../packages/agent/src/history.zig) stores immutable records and a checkpoint selecting each session's current history segment. A fork persists its copied entries in the activity's own storage group. Compaction advances a session's epoch and replaces its selected history with a handover while preserving identity and role.
 
 | Term | Meaning |
 | --- | --- |
-| Session | A core or work session with its own identity and role |
-| Segment | An append-only sequence identified by `Scope { session_id, epoch }`; a fork starts its own segment, and compaction advances its session's epoch |
+| Session | A core or activity session with its own identity and role |
+| Segment | An append-only sequence identified by `Scope { session_id, epoch }`; a fork starts the activity's first segment and compaction starts a replacement |
 | Storage group | An opaque identifier used by `HistoryStore` to discover a segment's records |
-| Span | A checkpoint's selected prefix of a segment, identified by its group, head key, and entry count |
+| Committed chain | The checkpoint's selected records in one segment, identified by a head key and entry count |
 
-Each entry retains its segment identity and either a complete admitted `Input.Record` or a complete model-output and tool-result batch as `Model.Item[]`. Inherited event groups keep their original receiving session identifier and event order. Exchanges preserve opaque model output, including reasoning, and typed tool replies with text and media. Local image bytes remain in the records; remote images retain their URLs. Inference snapshots copy segment identities along with entries.
+Each entry contains either a complete admitted `Input.Record` or a complete model-output and tool-result batch as `Model.Item[]`. Exchanges preserve opaque model output, including reasoning, and typed tool replies with text and media. Local image bytes remain in the records; remote images retain their URLs. Inherited observation and handover records keep the core's original session ID.
 
-Records use compact UTF-8 ZON bodies. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. Segment identity and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal observations are stored together in a separate immutable observation-array record in the session's current group.
+Records use compact UTF-8 ZON bodies. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. The storage group and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal observations are stored together in a separate immutable observation-array record in the session's current group.
 
-The checkpoint contains the next session and callback identifiers, pending callback registrations and their bound destinations, wakeup deadlines, and each registered session's ID, role, last activity, interrupted-execution state, epoch, current group, and ordered spans. Assignments and results remain in history records rather than separate task or result caches. An optional key selects the unread observation array in the current group; its text stays outside the checkpoint. Appending advances a span's head and count without adding a per-entry reference. A sleeping session can retain confirmed spans without materialized context entries. The latest confirmed checkpoint selects the records kept by [history maintenance](#history-retention) and available for subsequent restoration.
+The checkpoint contains the next session and callback identifiers, pending callback registrations and their bound destinations, and wakeup deadlines. For each registered session it records the ID, role, last activity, interrupted-execution state, epoch, current group, committed head, and entry count. An optional key selects the unread observation array in that group. Assignments, results, and observation text remain in the selected records.
+
+Appending advances the head and count without adding a per-entry reference to the checkpoint. A sleeping session can retain this confirmed selection without materialized context entries. The latest confirmed checkpoint selects the records kept by [history maintenance](#history-retention) and available for subsequent restoration.
 
 ### Saving and restoration
 
 `HistoryStore` exposes checkpoint publication, grouped records, and retention maintenance. The codec owns keys, committed paths, and validation; adapters own native representation, locators, placement, and protocol limits.
 
-Saves follow admission, complete rounds, compaction, forks, completion, and unread-input or source changes. Materialized records are encoded and hashed against cached prefixes; cold sessions reuse confirmed spans. Required creates must succeed before checkpoint publication. Unconfirmed writes remain outside selected paths. Unchanged checkpoints skip publication; a publication error invalidates that comparison digest because storage may already have accepted it.
+Saves follow admission, complete rounds, compaction, forks, completion, and unread-input or source changes. Materialized records are encoded and hashed against the cached committed chain; cold sessions reuse their confirmed selection. Required creates must succeed before checkpoint publication. Unconfirmed writes remain outside selected paths. Unchanged checkpoints skip publication; a publication error invalidates that comparison digest because storage may already have accepted it.
 
-Restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, scopes, record kinds, counts, and predecessor metadata must agree. Matching physical duplicates can supply one logical occurrence. Missing or inconsistent committed records fail restoration.
+Restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Session IDs inside retained observation and handover records must identify either the restoring session or the core (`1`). Matching physical duplicates can supply one logical occurrence. Missing or inconsistent committed records fail restoration.
 
-Startup currently reads and validates all selected history, then discards temporary branch entries. A branch context is materialized only when needed; later cold restores read only that session's history. Delivery objects, receipts, worker ownership, and host process handles are not checkpointed. See [startup](#startup-and-interruption) for reconstruction.
+Startup reads and validates all selected history. It materializes the core context and discards temporary activity entries; activity contexts are materialized when scheduled. Later cold restores read only that session's history. Delivery objects, receipts, worker ownership, and host process handles are not checkpointed. See [startup](#startup-and-interruption) for reconstruction.
 
 ### History retention
 
-Compaction seals the current segment and starts a replacement; forked contexts can still reference sealed prefixes. Unloading preserves checkpoint spans, while compaction can remove earlier references. Previous checkpoints are not restoration roots.
+Compaction replaces the session's selected segment. Once the replacement checkpoint is confirmed, its earlier epoch is no longer needed for continuation. Context unloading preserves the current selection; previous checkpoints are not restoration roots.
 
-Maintenance runs before reception opens and then at intervals of at least 60 seconds between polls. The registry locks saving and reconciliation together. From the confirmed checkpoint, `HistoryStore.Retention` names current writable groups and every selected `(group, key)`, including inherited prefixes and unread observations.
+Maintenance runs before reception opens and then at intervals of at least 60 seconds between polls. The registry locks saving and reconciliation together. From the confirmed checkpoint, `HistoryStore.Retention` names every selected `(group, key)`, including unread observations.
 
-The [email adapter](#mail-retention) places writable, sealed, and unselected records in History, Archive, and Trash. The mail service owns Trash expiry and space reclamation.
+The [email adapter](#mail-retention) keeps selected records in History and retires unselected records to Trash. The mail service owns Trash expiry and space reclamation.
 
 ## Startup and interruption
 
-Startup discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, relationships, unread internal work, callbacks, and wakeups. Contexts use the current system prompt. Communication-copy and history maintenance complete before reception opens.
+Startup discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, callbacks, and wakeups. Contexts use the current system prompt. Communication-copy and history maintenance complete before reception opens.
 
-The core and sessions with interrupted activations or unread observations queue startup immediately. Other branches prepend startup when a real event first arrives; new forks begin with an assignment. Wakeups publish when due. Before dispatch, unfinished host registrations publish an unknown interrupted outcome through the first-result-preserving publisher, so stored completions win. Processes and historical tool calls are not replayed.
+The core and sessions with interrupted activations or unread observations queue startup immediately. Other activity sessions prepend startup when a real event first arrives; newly created sessions begin with an assignment. Wakeups publish when due. Before dispatch, unfinished host registrations publish an unknown interrupted outcome through the first-result-preserving publisher, so stored completions win. Processes and historical tool calls are not replayed.
 
 Fresh activations reserve report capacity normally. Unacknowledged correspondence remains eligible and can appear again after a crash between persistence and acknowledgement; callback IDs instead retain durable admission deduplication. Current state describes this runtime, while retained records describe prior evidence.
 
@@ -234,7 +240,7 @@ Publication searches the marker and exact keyword across the account, including 
 
 ### Mail intake and acknowledgement
 
-Ordinary intake finds unhandled correspondence outside `Ivenna Callbacks`, `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash. Drafts and private callback, outbound, or state records are excluded. Read and starred state do not select input. [EmailTransport](../packages/email/src/email_transport.zig) projects supported From IDs, complete text, and observation time according to [communication](communication.md#incoming-email-text).
+Ordinary intake finds unhandled correspondence outside `Ivenna Callbacks`, `Ivenna History`, Drafts, Junk, and Trash. Drafts and private callback, outbound, or state records are excluded. Read and starred state do not select input. [EmailTransport](../packages/email/src/email_transport.zig) projects supported From IDs, complete text, and observation time according to [communication](communication.md#incoming-email-text).
 
 `Inbox.Poll { messages, callbacks }` supplies independent allowances; zero disables a stream. The registry accounts for tracked receipts and pending callbacks and disables correspondence when the core is full. The adapter reads each oldest eligible prefix, paging past unsupported records, then merges by `receivedAt` without a combined cap. Correspondence backlog cannot consume callback allowance; FIFO applies within each selected stream and session queue, not account-wide across destinations. Rejected input stays stored.
 
@@ -242,17 +248,17 @@ After durable admission, acknowledgement sets `ivenna-handled` and moves the cop
 
 ### History storage
 
-The email integration creates history records and checkpoints as JMAP Email objects in the top-level `Ivenna History` folder through `Email/set`. Selected records from sealed segments move to the top-level `Ivenna Archive` folder. The adapter discovers both folders by name, a null `parentId`, and a null `role`, and creates them when missing. It also discovers or creates the mailbox with role `trash`. Each object has a plain-text ZON body carrying the agent's encoding and a self-addressed envelope supplying native identity metadata. Creating these records does not submit correspondence.
+The email integration creates history records and checkpoints as JMAP Email objects in the top-level `Ivenna History` folder through `Email/set`. The adapter discovers the folder by name, a null `parentId`, and a null `role`, and creates it when missing. It also discovers or creates the mailbox with role `trash`. Each object has a plain-text ZON body carrying the agent's encoding and a self-addressed envelope supplying native identity metadata. Creating these records does not submit correspondence.
 
 All history objects carry the private `ivenna-state` keyword and an `X-Ivenna-History-Kind` header of `record` or `checkpoint`. The adapter allocates a fresh opaque group token and maps it to an exact keyword of the form `ivenna-history-<token>`. Records carry that group keyword, their `X-Ivenna-History-Key`, and an optional `X-Ivenna-History-Previous`. These headers expose record keys and predecessor metadata for retrieval; searches use native keyword membership rather than header or full-text indexing.
 
-To discover records, the adapter queries `Ivenna History` and `Ivenna Archive` with the state marker and requested group keywords. It fetches record metadata in bulk, validates ownership and group membership, and returns opaque native locators to the agent. After the codec selects committed paths, the adapter reads those locators through bulk `Email/get`, validating group, key, predecessor, self-addressed identity, and complete text bodies. Trash is outside continuation reads. The agent then verifies hashes and decodes payloads. Native `Email.id` values serve as transient locators, not checkpoint identities.
+To discover records, the adapter queries `Ivenna History` with the state marker and requested group keywords. It fetches record metadata in bulk, validates ownership and group membership, and returns opaque native locators to the agent. After the codec selects committed paths, the adapter reads those locators through bulk `Email/get`, validating group, key, predecessor, self-addressed identity, and complete text bodies. Trash is outside continuation reads. The agent then verifies hashes and decodes payloads. Native `Email.id` values serve as transient locators, not checkpoint identities.
 
 Record creation uses bulk `Email/set` and confirms every requested create before returning success. Get and set batches obey the JMAP session's positive `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits, with at most 32 objects per batch. Native request sizes include encoded bodies and protocol fields. Group discovery requests pages of up to 512 IDs independently of get limits, then splits metadata and body reads into bounded native batches.
 
 Current checkpoint candidates carry both `ivenna-state` and `ivenna-current` and a numeric `X-Ivenna-History-Revision`. Discovery queries `Ivenna History` and those keywords, then validates returned metadata. Malformed kind or revision metadata on an owned current candidate fails loading. Loading selects the highest revision, independently of mail observation timestamps. Distinct candidates at the same highest revision are an error. Saving confirms creation of the complete new checkpoint; maintenance later removes the current marker from older checkpoints and moves them to Trash. Several candidates can remain between maintenance passes or after interruption, and the numeric revision identifies the current checkpoint.
 
-A failed batch returns an error even when some objects may already have been created. Native group membership identifies candidate records; the checkpoint's committed heads and predecessor keys select the effective history. Mail threads describe correspondence and do not supply Ivenna's segment, fork, or compaction relationships.
+A failed batch returns an error even when some objects may already have been created. Native group membership identifies candidate records; the checkpoint's committed heads and predecessor keys select the effective history. Mail threads describe correspondence and do not select session histories or compaction epochs.
 
 ### Mail retention
 
@@ -266,17 +272,16 @@ The integration holds its own lock through sending, intake, acknowledgement, and
 
 #### Working history
 
-The email adapter maps the codec's [retention selection](#history-retention) to native folder membership. It inventories state objects in `Ivenna History` and `Ivenna Archive` before moving any of them. Ownership requires the runtime's state marker and self-addressed identity metadata. Owned objects must belong to exactly one folder. Maintenance uses bounded requests and classifies each physical object as follows:
+The email adapter maps the codec's [retention selection](#history-retention) to native folder membership. It inventories state objects in `Ivenna History` before moving any of them. Ownership requires the runtime's state marker and self-addressed identity metadata. Maintenance uses bounded requests and classifies each physical object as follows:
 
 | Object | Location and use |
 | --- | --- |
-| Latest checkpoint, or selected record in a current writable group | `Ivenna History`; current groups can receive new records |
-| Selected record in a sealed group | `Ivenna Archive`; it remains available for inherited context and restoration |
+| Latest checkpoint or selected record | `Ivenna History`; available for continuation |
 | Unselected record or older checkpoint | Trash; further retention belongs to the mail service |
 
-The adapter retains every physical copy matching a selected `(group, key)`. Unselected records include obsolete observation arrays and uncommitted writes outside the selected paths. They may move directly from `Ivenna History` to Trash. An archived record moves to Trash when it loses its last continuation reference; Archive has no age or capacity policy. The folders organize records by their use in continuation, rather than collecting a complete transcript for each ended session. Record bodies retain session and epoch identities for manual inspection.
+The adapter retains every physical copy matching a selected `(group, key)`. Unselected records include replaced epochs, obsolete observation arrays, and uncommitted writes outside the selected paths. The folder holds the state needed for continuation rather than a complete transcript for each ended activation. The checkpoint records session and epoch ownership; retained observation records identify their receiving session.
 
-Missing selected records, selected records from current writable groups found in Archive, and invalid metadata on owned objects are storage errors detected before folder updates. Trash is excluded from both inventory and continuation reads.
+Missing selected records and invalid metadata on owned objects are storage errors detected before folder updates. Trash is excluded from both inventory and continuation reads.
 
 Restoration requires the latest checkpoint and all committed records with their bodies, group membership, keys, and validation metadata intact.
 
@@ -288,12 +293,8 @@ Transfers buffer complete payloads and copy results into the model-round arena b
 
 ## Host execution
 
-Host routes branch tools to [Shell](../packages/host/src/shell.zig); [process.zig](../packages/host/src/process.zig) owns process groups, timeout, cancellation, and reaping. Full output stays in log files, while [Reader](../packages/host/src/reader.zig) selects returned content. Sessions share the kernel's account, filesystem, and startup environment.
+Host routes activity tools to [Shell](../packages/host/src/shell.zig); [process.zig](../packages/host/src/process.zig) owns process groups, timeout, cancellation, and reaping. Full output stays in log files, while [Reader](../packages/host/src/reader.zig) selects returned content. Sessions share the kernel's account, filesystem, and startup environment.
 
 For background commands, Host reserves execution capacity and a callback registration. `Host.run` supervises tasks independently of session workers. Each task owns its arguments and callback ID, never the registrar or model-round arena. Shutdown cancels and joins tasks before releasing their publisher and dependencies.
 
 Completion publishes JSON descriptions and log paths, with an explicit native-image omission. Unavailable shell descriptions or command results become `host_unavailable`; cancellation and allocation errors propagate, and background publication failures end host supervision. [Host shell](host.md) defines results and interruption behavior; [startup](#startup-and-interruption) handles unfinished registrations.
-
-## Implementation references
-
-[OpenAI Agents SDK handoffs](https://developers.openai.com/api/docs/guides/agents/orchestration#use-handoffs-for-delegated-ownership), [Codex thread forks](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread), and [pi's sessions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md) and [agent interface](https://github.com/earendil-works/pi/blob/main/packages/agent/README.md) inform context inheritance, work transfer, and queued follow-up input.

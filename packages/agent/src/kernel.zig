@@ -163,10 +163,11 @@ pub const Kernel = struct {
     const RuntimeRound = struct {
         kernel: *Kernel,
         work: Work,
-        plan: ?Sessions.ForkPlan = null,
+        forks: std.ArrayList(Sessions.ForkPlan) = .empty,
 
         fn deinit(self: *RuntimeRound) void {
-            if (self.plan) |plan| self.kernel.sessions.abandonFork(plan);
+            for (self.forks.items) |plan| self.kernel.sessions.abandonFork(plan);
+            self.forks.deinit(self.kernel.allocator);
         }
 
         fn registerCallback(context: *anyopaque) anyerror!u64 {
@@ -198,16 +199,15 @@ pub const Kernel = struct {
             }
             if (!std.mem.eql(u8, name, "fork_session")) return null;
             const request = try parseArguments(Sessions.ForkRequest, a, arguments);
-            if (self.plan != null)
-                return try runtimeError(a, "invalid_fork_batch", "Only one fork is allowed in a model round.");
+            if (request.task.len == 0) return error.InvalidToolArguments;
+            try self.forks.ensureUnusedCapacity(self.kernel.allocator, 1);
             const plan = self.kernel.sessions.prepareFork(self.work, request) catch |err| switch (err) {
-                error.InvalidForkArguments => return try runtimeError(a, "fork_unavailable", "The task must not be empty."),
                 error.SessionCapacityUnavailable => return try runtimeError(a, "fork_unavailable", "The session limit has been reached. Existing sessions remain addressable."),
-                error.SessionQueueFull => return try runtimeError(a, "fork_unavailable", "No queue capacity is available for the child's report."),
+                error.SessionQueueFull => return try runtimeError(a, "fork_unavailable", "No queue capacity is available for the activity's report."),
                 else => return err,
             };
-            self.plan = plan;
-            return try runtimeResult(a, .{ .session_id = plan.child.session_id });
+            self.forks.appendAssumeCapacity(plan);
+            return try runtimeResult(a, .{ .session_id = plan.session.session_id });
         }
     };
 
@@ -230,10 +230,9 @@ pub const Kernel = struct {
             try self.sessions.observeAttention(work, view.attention_revision);
             const round = try self.engine.turn(a, session.session_id, view.input, .{ .context = &runtime, .invoke = RuntimeRound.invoke, .register_callback = RuntimeRound.registerCallback }, session.role);
             delivery = .none;
-            const committed = try self.sessions.commitRound(work, round.output, round.replies, runtime.plan);
-            runtime.plan = null;
+            try self.sessions.commitRound(work, round.output, round.replies, runtime.forks.items);
+            runtime.forks.clearRetainingCapacity();
             try self.sessions.save();
-            if (committed != .continuing) return;
             if (round.replies.len == 0 and try self.sessions.finish(work, round.text)) return;
             if (try self.sessions.collectPending(work)) {
                 try self.admitEvents(work);
@@ -263,7 +262,7 @@ pub const Kernel = struct {
             count = end;
         }
         if (count == 0) return null;
-        var selected = try history.fork(self.allocator);
+        var selected = try history.clone(self.allocator);
         errdefer selected.deinit();
         try selected.appendRecord(.{ .events = .{ .session_id = work.session.session_id, .items = events[0..count] } });
         return .{ .count = count, .context = selected };
@@ -321,7 +320,7 @@ pub const Kernel = struct {
         var candidate = try view.withHandover(self.allocator, summary);
         var installed = false;
         errdefer if (!installed) candidate.deinit();
-        var replacement = try candidate.fork(self.allocator);
+        var replacement = try candidate.clone(self.allocator);
         errdefer replacement.deinit();
         const replacement_snapshot = try self.sessions.runtimeSnapshot(a, session);
         const replacement_input = try replacement.request(a, replacement_snapshot.current, .none);

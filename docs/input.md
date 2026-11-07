@@ -1,6 +1,6 @@
 # Runtime user messages
 
-This contract defines runtime-generated `role=user` messages within the LLM conversation. Native model output and tool replies retain their roles and formats. Together with observations, handovers, and memory they carry understanding; Input supplies observations, current execution facts, and inference purpose. See [message assembly](architecture.md#working-history-and-user-messages).
+This contract defines runtime-generated `role=user` messages within the LLM conversation: retained observations and handovers, current execution facts, and inference purpose. Native model output and tool replies retain their own roles and formats. See [message assembly](architecture.md#working-history-and-user-messages).
 
 The [Input definitions](../packages/agent/src/input.zig) define fields and the [system prompt](../packages/agent/src/system.md) explains model interpretation.
 
@@ -15,13 +15,13 @@ The interfaces have two lifetimes:
 
 A turn's `purpose` selects either `work`, containing newly delivered `events`, or `summarize`, containing summary `instructions`. Current state accompanies either purpose. Admitted observations are stored as records, separately from the turn's temporary state and purpose.
 
-`Text` denotes a free-form string. Tagged unions, including events and session roles, serialize as a mapping containing one branch name and its payload. A branch with no payload uses an empty object (`{}`).
+`Text` denotes a free-form string. Tagged unions, including events, serialize as a mapping containing one branch name and its payload. Session roles serialize as enum values, `core` or `activity`.
 
-Session IDs remain registered across sleep, context unloading, and restart. Records identify the session that admitted observations or produced a handover. Forked history preserves those original session IDs; a turn's `current.session_id` identifies the session performing this inference.
+Session IDs remain registered across sleep, context unloading, and restart. Records identify the session that admitted observations or produced a handover; a turn's `current.session_id` identifies the session performing this inference. Inherited records keep their original session IDs, which can differ from the session now reading them.
 
 ## Retained records
 
-`Input.Record` selects `events` or `handover` and renders as a YAML user message. Native model output and tool replies retain their own roles and formats as complete exchanges. Together they form the working history that forks inherit, without past turns' temporary state or purpose. The [history codec](architecture.md#persistent-working-history) owns their storage encoding and checkpoints.
+`Input.Record` selects `events` or `handover` and renders as a YAML user message. These records and complete native model/tool exchanges form the session's working history. Past turns' temporary state and purpose are not retained. See [persistent working history](architecture.md#persistent-working-history) for storage encoding and checkpoints.
 
 ### Event groups
 
@@ -33,11 +33,10 @@ An `events` record has `session_id: u64` and `items: Event[]`. Each admission re
 | --- | --- | --- |
 | `startup` | `Startup` | Observation that a new runtime has begun |
 | `input` | `IncomingMessage` | Observation of what correspondents said |
-| `assignment` | `Assignment` | Initial work for a fork |
-| `report` | `Report` | A branch activation's final text, delivered to its direct parent and the core |
-| `session_message` | `SessionMessage` | Observation sent directly by another session |
+| `assignment` | `Assignment` | Initial work for a newly created activity session |
+| `report` | `Report` | An activity activation's final text, delivered to the core |
+| `session_message` | `SessionMessage` | Observation sent directly by the core |
 | `callback` | `Callback` | A registered host completion or self-scheduled wakeup |
-| `session_created` | `SessionCreated` | Core observation of a session created by a work session |
 
 #### Incoming messages
 
@@ -53,43 +52,26 @@ Correspondence enters the core as an `input` observation of who said what; it im
 
 #### Startup and restart
 
-`Startup` carries `observed_at_unix_ms: i64`, the beginning of this runtime. The core and sessions with interrupted activations or unread internal observations queue startup immediately; dormant branches prepend it when an event arrives. New forks start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
+`Startup` carries `observed_at_unix_ms: i64`, the beginning of this runtime. The core and sessions with interrupted activations or unread internal observations queue startup immediately; dormant activity sessions prepend it when an event arrives. New activity sessions start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
 
 #### Assignments and reports
 
-An `Assignment` contains:
+An `Assignment` has `task: Text`, specifying what the activity should pursue within its inherited understanding. It is the activity's first new queued observation after the [fork](communication.md#forking-an-activity-session).
+
+A `Report` delivers an activity activation's final text to the core automatically:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `task` | `Text` | Work for the receiving session to continue |
-| `from_session` | `u64` | Direct parent that created the fork |
-
-The child inherits retained history and queues this assignment first. See [fork ownership](architecture.md#forks-and-work-ownership).
-
-A `Report` carries a branch activation's combined result to its direct parent and the core, with one delivery when the parent is the core:
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `from_session` | `u64` | Work session that produced the result |
-| `text` | `Text` | Combined result text; may be empty |
-
-When a work session creates a child, the core receives a `SessionCreated` observation:
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `session_id` | `u64` | Newly registered work session |
-| `parent_session_id` | `u64` | Session that created it |
-| `task` | `Text` | Initial assignment |
-
-The core's own forks appear in its tool exchanges and produce no creation event.
+| `from_session` | `u64` | Activity session that produced the report |
+| `text` | `Text` | Final text; may be empty |
 
 #### Session messages and callbacks
 
-`send_session_message` produces a `SessionMessage`:
+The core's `send_session_message` produces a `SessionMessage`:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `from_session` | `u64` | Actual sending session, supplied by the runtime |
+| `from_session` | `u64` | Sending core session, supplied by the runtime |
 | `observed_at_unix_ms` | `i64` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
 
@@ -102,7 +84,7 @@ Background host completions and scheduled wakeups arrive as `Callback` observati
 | `observed_at_unix_ms` | `i64` | Time the runtime observed the callback |
 | `text` | `Text` | Host outcome or the supplied wakeup text |
 
-A host callback ID matches its `activity_id`; a wakeup ID matches its `callback_id`. Destinations survive forks and restart, and an admitted ID produces no duplicate event. Host results can report interrupted activity with unknown effects; see [background commands](host.md#background-commands) and [session communication](communication.md#session-communication-and-wakeups).
+A host callback ID matches its `activity_id`; a wakeup ID matches its `callback_id`. Destinations survive sleep, context unloading, and restart. A registered callback ID is admitted at most once. Host results can report interrupted activity with unknown effects; see [background commands](host.md#background-commands) and [session communication](communication.md#session-communication-and-wakeups).
 
 ### Handovers
 
@@ -114,7 +96,7 @@ handover:
   summary: Keep each practice session to 20 minutes, including ten minutes of listening.
 ```
 
-The session identity, role, and parent relationship remain unchanged. Retention of earlier storage records follows the separate [history lifecycle](architecture.md#history-retention).
+Compaction preserves the session's identity and role. A handover's `session_id` identifies its producing session, including when inherited by an activity. Retention of earlier storage records follows the separate [history lifecycle](architecture.md#history-retention).
 
 ## Inference turns
 
@@ -140,8 +122,7 @@ Each inference ends its input with a turn containing both fields:
 
 | Field | Meaning |
 | --- | --- |
-| `session.role` | Tagged union selecting the core or a branch with its parent |
-| `session.child_sessions` | Registered direct children of this session |
+| `session.role` | Enum value `core` or `activity` |
 | `session.callbacks` | Pending callback registrations for this session |
 | `runtime.observed_at_unix_ms` | Time of this snapshot in Unix milliseconds |
 | `runtime.registered_sessions` | Registered sessions, including dormant sessions and the core |
@@ -154,7 +135,7 @@ The snapshot is complete for these fields. Counts reflect admission: delivered c
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `session_id` | `u64` | Stable session ID |
-| `role` | `Role` | Core or branch with its parent |
+| `role` | `Role` | `core` or `activity` |
 | `status` | `running`, `ready`, or `dormant` | Executing, awaiting an activation, or sleeping |
 | `queued_inputs` | `usize` | Events waiting in this session's queue |
 | `pending_callbacks` | `usize` | Registrations awaiting admission to this session's history |
@@ -164,16 +145,14 @@ Each `session.callbacks` item is a `PendingCallback` with `id: u64`, `session_id
 
 `ready` means work is waiting, subject to scheduling and capacity. Core attention can produce this status with `queued_inputs: 0`.
 
-`Role` selects `core: {}` or `branch: {parent_session_id: u64}`. This relationship survives compaction and restart. For example, an ordinary core inference can receive a new observation with its current state:
+For example, an ordinary core inference can receive a new observation with its current state:
 
 ```yaml
 current:
   session_id: 1
   state:
     session:
-      role:
-        core: {}
-      child_sessions: 0
+      role: core
       callbacks: []
     runtime:
       observed_at_unix_ms: 1793966401000
@@ -182,8 +161,7 @@ current:
       queued_inputs: 0
       sessions:
         - session_id: 1
-          role:
-            core: {}
+          role: core
           status: running
           queued_inputs: 0
           pending_callbacks: 0
@@ -201,4 +179,4 @@ purpose:
 
 A maintenance inference receives the retained LLM messages—the system prompt, user records, native model output, and tool replies—plus a turn with `current` and `purpose.summarize.instructions`. Tools are disabled. Instructions come from [compaction.md](../packages/agent/src/compaction.md); events waiting for admission remain outside this request, and core attention stays pending.
 
-After the handover passes validation, it replaces the retained messages. The next ordinary request contains the system prompt, a `handover` record, and a fresh work turn. Session identity and relationships persist. See [bounded model context](architecture.md#bounded-model-context) for generation, replacement, and admission budgets.
+After the handover passes validation, it replaces the retained messages. The next ordinary request contains the system prompt, a `handover` record, and a fresh work turn. Session identity and role persist. See [bounded model context](architecture.md#bounded-model-context) for generation, replacement, and admission budgets.

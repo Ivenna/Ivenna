@@ -29,14 +29,14 @@
   },
   {
     "name": "fork_session",
-    "description": "Transfer this activation's whole work and retained context to a child, returning its stable session_id. The caller returns to its queue; unadmitted events and existing callbacks keep their destinations. Results reach the caller and core automatically. At most one fork per round.",
+    "description": "Fork an activity from your retained history and the supplied task, returning its stable session_id. The inherited history includes the complete calling model/tool round. Your activation continues, and the activity's final results reach the core automatically.",
     "parameters": {
       "type": "object",
       "properties": {
         "task": {
           "type": "string",
           "minLength": 1,
-          "description": "Task and continuation instructions for the activation's whole work."
+          "description": "Activity to pursue from the inherited understanding."
         }
       },
       "required": [
@@ -47,14 +47,14 @@
   },
   {
     "name": "send_session_message",
-    "description": "Durably queue an observation for an existing session, recording your session as its source. A dormant recipient wakes; a running recipient receives it before a later decision.",
+    "description": "Durably queue an observation for an existing session. A dormant recipient wakes; a running recipient receives it between model/tool rounds.",
     "parameters": {
       "type": "object",
       "properties": {
         "session_id": {
           "type": "integer",
           "minimum": 1,
-          "description": "Recipient session ID from current state, a fork, or retained history."
+          "description": "Recipient session ID from current state, a fork result, or retained history."
         },
         "text": {
           "type": "string",
@@ -71,7 +71,7 @@
   },
   {
     "name": "wakeup",
-    "description": "Schedule one observation for this session and return its callback_id. The arrangement survives restart. Past times are due immediately; inference can occur later. Return control when ready to sleep.",
+    "description": "Schedule one observation for this session and return its callback_id. The arrangement survives restart. Past times are due immediately; inference can occur later.",
     "parameters": {
       "type": "object",
       "properties": {

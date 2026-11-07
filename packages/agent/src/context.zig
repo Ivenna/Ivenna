@@ -15,7 +15,7 @@ pub const Context = struct {
 
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
-    /// Destination for new entries; inherited entries keep their own scopes.
+    /// This session's current history segment.
     scope: Scope,
     entries: std.ArrayList(Entry) = .empty,
     messages: std.ArrayList(Model.Item) = .empty,
@@ -49,14 +49,13 @@ pub const Context = struct {
         return self.entries.items;
     }
 
-    /// Copy entries and their scopes into an independently owned context,
-    /// preserving the current write scope.
-    pub fn fork(self: *const Context, allocator: Allocator) !Context {
+    /// Return an independently owned snapshot of this session's retained history.
+    pub fn clone(self: *const Context, allocator: Allocator) !Context {
         return restore(allocator, self.scope, self.entries.items, self.messages.items[0].message.text);
     }
 
     pub fn appendRecord(self: *Context, record: Input.Record) !void {
-        try self.append(.{ .scope = self.scope, .value = .{ .record = record } });
+        try self.append(.{ .record = record });
     }
 
     /// Retain one complete exchange, preserving the adapter's opaque output.
@@ -66,7 +65,7 @@ pub const Context = struct {
         defer self.allocator.free(batch);
         @memcpy(batch[0..output.len], output);
         @memcpy(batch[output.len..], replies);
-        try self.append(.{ .scope = self.scope, .value = .{ .exchange = batch } });
+        try self.append(.{ .exchange = batch });
     }
 
     /// The slice and rendered request belong to a; retained message payloads
@@ -74,7 +73,7 @@ pub const Context = struct {
     pub fn request(self: *const Context, a: Allocator, current: Input.Current, delivery: Delivery) ![]const Model.Item {
         const events = switch (delivery) {
             .none => &.{},
-            .latest => self.entries.items[self.entries.items.len - 1].value.record.events.items,
+            .latest => self.entries.items[self.entries.items.len - 1].record.events.items,
         };
         return self.buildRequest(a, self.messages.items.len - @intFromBool(delivery == .latest), .{
             .current = current,
@@ -109,13 +108,13 @@ pub const Context = struct {
     pub fn withHandover(self: *const Context, allocator: Allocator, summary: []const u8) !Context {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
         const record: Input.Record = .{ .handover = .{ .session_id = scope.session_id, .summary = summary } };
-        return restore(allocator, scope, &.{.{ .scope = scope, .value = .{ .record = record } }}, self.messages.items[0].message.text);
+        return restore(allocator, scope, &.{.{ .record = record }}, self.messages.items[0].message.text);
     }
 
     fn append(self: *Context, entry: Entry) !void {
         const a = self.arena.allocator();
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        switch (entry.value) {
+        switch (entry) {
             .record => |record| {
                 try self.messages.ensureUnusedCapacity(self.allocator, 1);
                 const copy: Input.Record = switch (record) {
@@ -123,14 +122,14 @@ pub const Context = struct {
                     .handover => |handover| .{ .handover = .{ .session_id = handover.session_id, .summary = try a.dupe(u8, handover.summary) } },
                 };
                 const text = try Input.renderRecord(a, copy);
-                self.entries.appendAssumeCapacity(.{ .scope = entry.scope, .value = .{ .record = copy } });
+                self.entries.appendAssumeCapacity(.{ .record = copy });
                 self.messages.appendAssumeCapacity(.{ .message = .{ .role = .user, .text = text } });
             },
             .exchange => |items| {
                 try self.messages.ensureUnusedCapacity(self.allocator, items.len);
                 const batch = try a.alloc(Model.Item, items.len);
                 for (items, batch) |item, *copy| copy.* = try cloneItem(a, item);
-                self.entries.appendAssumeCapacity(.{ .scope = entry.scope, .value = .{ .exchange = batch } });
+                self.entries.appendAssumeCapacity(.{ .exchange = batch });
                 self.messages.appendSliceAssumeCapacity(batch);
             },
         }
@@ -146,7 +145,7 @@ fn cloneEvents(a: Allocator, events: []const Input.Event) ![]const Input.Event {
             for (input.from, from) |id, *cloned| cloned.* = try a.dupe(u8, id);
             break :blk .{ .input = .{ .from = from, .text = try a.dupe(u8, input.text), .observed_at_unix_ms = input.observed_at_unix_ms } };
         },
-        .assignment => |assignment| .{ .assignment = .{ .task = try a.dupe(u8, assignment.task), .from_session = assignment.from_session } },
+        .assignment => |assignment| .{ .assignment = .{ .task = try a.dupe(u8, assignment.task) } },
         .report => |report| .{ .report = .{ .from_session = report.from_session, .text = try a.dupe(u8, report.text) } },
         .session_message => |message| .{ .session_message = .{
             .from_session = message.from_session,
@@ -158,11 +157,6 @@ fn cloneEvents(a: Allocator, events: []const Input.Event) ![]const Input.Event {
             .source = callback.source,
             .observed_at_unix_ms = callback.observed_at_unix_ms,
             .text = try a.dupe(u8, callback.text),
-        } },
-        .session_created => |created| .{ .session_created = .{
-            .session_id = created.session_id,
-            .parent_session_id = created.parent_session_id,
-            .task = try a.dupe(u8, created.task),
         } },
     };
     return owned;

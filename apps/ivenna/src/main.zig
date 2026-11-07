@@ -42,12 +42,12 @@ pub fn main(init: std.process.Init) !void {
         .max_output_tokens = config.llm_max_output_tokens,
     };
     const shared_tools = [_]contracts.Tools{try memory_client.tools(a)};
-    const work_tools = [_]contracts.Tools{try host_tools.tools(a)};
+    const activity_tools = [_]contracts.Tools{try host_tools.tools(a)};
     var engine: agent.Engine = .{
         .io = io,
         .model = provider.port(),
         .shared_tools = &shared_tools,
-        .work_tools = &work_tools,
+        .activity_tools = &activity_tools,
         .reasoning = config.llm_reasoning,
     };
     var kernel = try agent.Kernel.init(init.gpa, io, .{

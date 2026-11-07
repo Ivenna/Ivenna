@@ -64,7 +64,7 @@ pub const Config = struct {
             .llm_max_output_tokens = try number(u32, env, "LLM_MAX_OUTPUT_TOKENS", 8192),
             .llm_reasoning = .{
                 .core = try reasoningEffort(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
-                .branch = try reasoningEffort(env, "LLM_BRANCH_REASONING_EFFORT", default_reasoning.branch),
+                .activity = try reasoningEffort(env, "LLM_ACTIVITY_REASONING_EFFORT", default_reasoning.activity),
             },
         };
         if (config.memory_ssh_config) |path| if (path.len == 0) return error.MissingMemorySshConfig;

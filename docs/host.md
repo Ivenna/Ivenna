@@ -1,13 +1,11 @@
 # Host shell
 
-Work sessions execute commands through the kernel's OS account and share its filesystem. Commands from different sessions can run concurrently.
-
-The shell tools are defined in [tools.json](../packages/host/src/tools.json):
+The [shell tools](../packages/host/src/tools.json) are available only to activity sessions. Commands run through the kernel's OS account on its shared filesystem and can execute concurrently across sessions.
 
 | Tool | Purpose |
 | --- | --- |
 | `get_host_shell` | Inspect the shell and default directory |
-| `run_host_shell` | Execute synchronously, or start a background activity whose completion returns to this session |
+| `run_host_shell` | Execute synchronously, or start a background command whose completion returns to this session |
 
 ## Shell description
 
@@ -36,11 +34,11 @@ Call `run_host_shell` with a command string:
 | `cwd` | Working directory; absolute or relative to the kernel's startup directory, which is also the default |
 | `timeout_ms` | Integer from `1` through `4294967295` in milliseconds; defaults to `600000` (10 minutes) |
 | `interpretation` | Optional `"image_url"` to present complete stdout text as an [image reference](content.md#image-url-references) |
-| `background` | Optional boolean, default `false`; return an activity ID while the command runs independently of this activation |
+| `background` | Optional boolean, default `false`; return `activity_id` while the command runs independently of this activation |
 
 Each call starts a fresh noninteractive `/bin/sh` with no terminal or live input, inheriting the kernel's startup environment.
 
-The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled. Shell backgrounding with `&` does not create an independently managed activity; use the tool's `background` argument when its completion should arrive later.
+The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled. Use the tool's `background` argument to receive completion later; shell backgrounding with `&` remains subject to the invocation's process-group lifetime.
 
 ## Results and interruption
 
@@ -100,7 +98,7 @@ A synchronous timeout returns the captured output; a background timeout returns 
 
 ## Background commands
 
-Set `background: true` to receive an activity ID while the command runs independently of the activation:
+Set `background: true` to receive the command's callback ID in `activity_id` while it runs independently of the activation:
 
 ```json
 {"result":{"running":{"activity_id":1}}}

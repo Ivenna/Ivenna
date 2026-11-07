@@ -25,7 +25,7 @@ For a command to verify the supplied local environment, see [sending a developme
 
 ## Continuing correspondence
 
-Follow-up messages enter the core as new observations. Ivenna relates them through retained understanding and memory; mail thread grouping does not select an internal work session. Identify the earlier request and describe the changes that should inform ongoing work. For example:
+Follow-up messages enter the core as new observations, including replies within an email thread. Identify the earlier request and describe the changes that should guide ongoing work. For example:
 
 ```text
 To: <Ivenna's address>

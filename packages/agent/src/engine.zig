@@ -12,12 +12,12 @@ pub const Engine = struct {
     io: std.Io,
     model: Model.Port,
     shared_tools: []const Tools,
-    work_tools: []const Tools,
+    activity_tools: []const Tools,
     reasoning: Reasoning = .{},
 
     pub const Reasoning = struct {
         core: Model.ReasoningEffort = .low,
-        branch: Model.ReasoningEffort = .high,
+        activity: Model.ReasoningEffort = .high,
     };
 
     /// Kernel supplies attention operations without giving tool execution
@@ -65,6 +65,7 @@ pub const Engine = struct {
     }
 
     fn invoke(self: *Engine, a: Allocator, session_id: u64, name: []const u8, arguments: []const u8, runtime_tools: ?RuntimeTools, role: Input.Role) !Content {
+        if (!coordinationAvailable(role, name)) return error.UnknownTool;
         if (runtime_tools) |runtime| {
             if (try runtime.invoke(runtime.context, a, name, arguments)) |result| return result;
         }
@@ -89,13 +90,13 @@ pub const Engine = struct {
             .tools = try self.toolDeclarations(a, role),
             .reasoning_effort = switch (role) {
                 .core => self.reasoning.core,
-                .branch => self.reasoning.branch,
+                .activity => self.reasoning.activity,
             },
         };
     }
 
     fn capabilities(self: *const Engine, role: Input.Role) [2][]const Tools {
-        return .{ self.shared_tools, if (role == .branch) self.work_tools else &.{} };
+        return .{ self.shared_tools, if (role == .activity) self.activity_tools else &.{} };
     }
 
     /// The agent owns coordination policy; each registered body capability
@@ -103,10 +104,17 @@ pub const Engine = struct {
     fn toolDeclarations(self: *Engine, a: Allocator, role: Input.Role) ![]const Model.Tool {
         const coordination = try std.json.parseFromSliceLeaky([]const Model.Tool, a, @embedFile("tools.json"), .{});
         var selected: std.ArrayList(Model.Tool) = .empty;
-        try selected.appendSlice(a, coordination);
+        for (coordination) |tool| {
+            if (coordinationAvailable(role, tool.name)) try selected.append(a, tool);
+        }
         for (self.capabilities(role)) |group| {
             for (group) |capability| try selected.appendSlice(a, capability.declarations);
         }
         return selected.toOwnedSlice(a);
     }
 };
+
+fn coordinationAvailable(role: Input.Role, name: []const u8) bool {
+    return role == .core or
+        (!std.mem.eql(u8, name, "fork_session") and !std.mem.eql(u8, name, "send_session_message"));
+}

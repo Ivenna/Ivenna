@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// Grouped immutable records and the checkpoint identifying retained histories.
-/// The agent owns encoding, occurrence keys, ordering, committed paths, and
+/// The agent owns encoding, record keys, ordering, committed chains, and
 /// retention selection.
 /// Storage owns opaque group IDs and native record locators. Returned data
 /// belongs to a. The caller serializes writes and confirms records before
@@ -34,12 +34,10 @@ pub const HistoryStore = struct {
         key: Key,
     };
 
-    /// The confirmed checkpoint's complete record selection and writable groups.
-    /// Other selected groups are sealed archives; unselected material can be
-    /// retired. Storage owns native placement; disposal after retirement belongs
-    /// to the storage service and its deployment policy.
+    /// The confirmed checkpoint's complete record selection. Unselected material
+    /// can be retired. Storage owns native placement; disposal after retirement
+    /// belongs to the storage service and its deployment policy.
     pub const Retention = struct {
-        active_groups: []const []const u8,
         records: []const RecordId,
     };
 

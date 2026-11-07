@@ -1,6 +1,6 @@
 # Memory rooms
 
-Ivenna stores persistent memory in rooms shared across sessions. Core and work sessions use the same tools to browse, find, recall, record, and revise memories. Ivenna chooses what to retain and its own room hierarchy, entry names, formats, and cross-references.
+Ivenna stores persistent memory in rooms shared across sessions. Core and activity sessions use the same tools to browse, find, recall, record, and revise memories. Ivenna chooses what to retain and its own room hierarchy, entry names, formats, and cross-references.
 
 Memory is a required runtime capability. The [running guide](running.md#memory-service) covers its service requirements and SSH connection; the [architecture guide](architecture.md#autonomous-memory) explains its implementation responsibilities.
 
@@ -16,7 +16,7 @@ All addresses are relative to the shared entrance, including those returned by t
 
 ## Tools
 
-[tools.json](../packages/memory/src/tools.json) defines the memory tools available to core and work sessions. The table below lists their required arguments. Omit optional arguments to use their defaults.
+[tools.json](../packages/memory/src/tools.json) defines the memory tools. The table below lists their required arguments. Omit optional arguments to use their defaults.
 
 | Tool | Required arguments | Purpose |
 | --- | --- | --- |

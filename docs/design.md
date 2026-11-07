@@ -38,21 +38,23 @@ A final response ends the activation when no queued arrivals or core attention s
 
 ## Core and concurrent attention
 
-One core session coordinates Ivenna, relating correspondence to retained understanding and shared memory. Sustained work moves to separate sessions so the core can return to its queue. Core responsiveness depends on both an independent execution lane and short coordination turns.
+One core session coordinates Ivenna, relating correspondence to retained understanding and shared memory. The core and activity sessions are persistent focuses of the same Ivenna; each can develop understanding, preferences, and commitments through experience. Core responsiveness depends on both an independent execution lane and short coordination turns.
 
-Core and work sessions can explicitly fork an activation's whole work and retained context to a new child. The caller returns to its queue; their histories then grow independently. A work activation's final result reaches its direct parent and the core automatically, with one copy when they coincide. The core also learns the identity, parent, and assignment of nested forks.
+Only the core can [fork an activity session](communication.md#forking-an-activity-session). The activity inherits the core's retained understanding and receives a free-form assignment to pursue from it. Inheritance carries relationships, preferences, and unfinished thought into the new focus. The core continues its own activation, and their histories then grow independently. Existing sessions keep their histories and can receive follow-up messages.
 
-Execution limits separately bound registered sessions, pending events, pending callbacks, background commands, and concurrent work. Eligible work sessions receive rotating opportunities to start activations; running activations are not preempted. See [scheduling and capacity](architecture.md#scheduling-and-capacity).
+Only the core can send direct session messages. Activities use their available tools and describe results or further needs in their final text, which reaches the core automatically when the activation completes. Both roles can communicate externally and maintain autonomous memory; host tools belong to activities.
+
+Execution limits separately bound registered sessions, pending events, pending callbacks, background commands, and concurrent activities. Eligible activity sessions receive rotating opportunities to start activations; running activations are not preempted. See [scheduling and capacity](architecture.md#scheduling-and-capacity).
 
 Sessions share one body: files, memory, communication, and host processes. They can hold different understanding and must account for effects another session may already have produced. Ivenna chooses what to remember and how to organize shared autonomous memory wherever its attention is focused.
 
 ## Events and waiting
 
-Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a sleeping session. Direct session messages identify their sender; the receiver weighs their content against its own evidence and understanding.
+Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a sleeping session. Direct messages from the core identify their actual sender; the receiver weighs their content against its own evidence and understanding.
 
-Each inference receives a complete snapshot of the finite runtime state exposed by the interface. This remains self-contained after a fork, restart, or compaction, at the cost of repeated request bytes. A delta interface would also need a baseline, addition and removal semantics, and recovery when that baseline becomes invalid. Task meaning and prior effects remain in model messages, handovers, and memory. Concurrent attention can schedule the core to reconsider fresh state without adding a historical event.
+Each inference receives a complete snapshot of the finite runtime state exposed by the interface. This remains self-contained after restart or compaction, at the cost of repeated request bytes. A delta interface would also need a baseline, addition and removal semantics, and recovery when that baseline becomes invalid. Task meaning and prior effects remain in model messages, handovers, and memory. Concurrent attention can schedule the core to reconsider fresh state without adding a historical event.
 
-Every session can schedule a durable one-time `wakeup` for itself. Work sessions can run host commands in the background and receive completion callbacks. Sources bind to their receiving session before starting and retain that destination across forks. See [session communication](communication.md#session-communication-and-wakeups) and [background commands](host.md#background-commands).
+Every session can schedule a durable one-time `wakeup` for itself. Activity sessions can run host commands in the background and receive completion callbacks. Sources bind to their receiving session before starting and retain that destination for their lifetime. See [session communication](communication.md#session-communication-and-wakeups) and [background commands](host.md#background-commands).
 
 Sleeping sessions keep their identities and histories. At the registered-session limit, new forks fail while existing sessions remain addressable. Automatic identity retirement is not implemented.
 
@@ -60,9 +62,9 @@ Sleeping sessions keep their identities and histories. At the registered-session
 
 Working contexts retain observations, complete model output, and tool results across interruption. Limits cover complete model requests and generated responses, with byte counts and token allowances stated separately.
 
-Compaction first reads retained LLM messages to generate a handover without continuing tasks or admitting waiting observations. After successful generation and validation, the runtime replaces those messages with the system prompt and handover for the next ordinary inference. The free-form handover preserves commitments, uncertainty, effects, and the identities needed to continue; session relationships persist.
+Compaction first reads retained LLM messages to generate a handover without continuing tasks or admitting waiting observations. After successful generation and validation, the runtime replaces those messages with the system prompt and handover for the next ordinary inference. The free-form handover preserves self-understanding, preferences, commitments, uncertainty, effects, and the identities needed to continue; the session keeps its identity and role.
 
-Startup restores sessions, unread internal work, callback registrations, and wakeups. Interrupted work resumes with a startup observation; dormant branches wait for an event. Host processes and old tool calls are not replayed. A missing host completion becomes an interrupted observation with unknown effects, while a stored result remains available. Persistence does not establish exactly-once effects. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
+Startup restores sessions, unread internal work, callback registrations, and wakeups. Interrupted work resumes with a startup observation; dormant activity sessions wait for an event. Host processes and old tool calls are not replayed. A missing host completion becomes an interrupted observation with unknown effects, while a stored result remains available. Persistence does not establish exactly-once effects. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 
 ## Data ownership
 

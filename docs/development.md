@@ -58,7 +58,7 @@ Treat prompts and tool descriptions as editable interfaces:
 | Resource | Purpose |
 | --- | --- |
 | [system.md](../packages/agent/src/system.md) | Input interpretation and response scope needed by the model |
-| [Agent tools](../packages/agent/src/tools.json) | Correspondence, session coordination, forks, and wakeups |
+| [Agent tools](../packages/agent/src/tools.json) | Correspondence, activity forks, session coordination, and wakeups |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | What a handover must preserve |
@@ -69,9 +69,9 @@ Put task facts and observations in user input. Prompts and tool descriptions sho
 
 ### Session execution
 
-Keep queue, activation, context, and callback-registration changes under registry synchronization. The kernel coordinates adapter calls and worker lifetimes. Copy or transfer values that outlive a model-round arena, and admit events only between complete model/tool batches. Follow the [scheduling](architecture.md#scheduling-and-capacity), [completion](architecture.md#activation-completion-and-sleep), and [callback admission](architecture.md#event-sources-and-callback-admission) contracts.
+Keep queue, activation, context, and callback-registration changes under registry synchronization. The kernel coordinates adapter calls and worker lifetimes. Copy or transfer values that outlive a model-round arena, and admit events only between complete model/tool batches. Follow the [scheduling](architecture.md#scheduling-and-capacity), [fork](architecture.md#activity-forks), [completion](architecture.md#activation-completion-and-sleep), and [callback admission](architecture.md#event-sources-and-callback-admission) contracts.
 
-Keep attention scheduling separate from durable observations and consume its signal only for an ordinary inference. Keep session identity separate from context residency, source destinations fixed across forks, and execution limits separate from storage retention.
+Keep attention scheduling separate from durable observations and consume its signal only for an ordinary inference. Keep session identity separate from context residency, source destinations fixed for their lifetime, and execution limits separate from storage retention.
 
 A capability may retain a callback ID, never its invocation-scoped registrar. Background host tasks belong to the application runtime: shutdown cancels and joins them before releasing dependencies. Infrastructure and execution failures close reception and end concurrent work; ordinary tool outcomes remain observations.
 
@@ -108,10 +108,10 @@ Build the application and exercise the affected behavior through communication a
 
 | Area | Checks |
 | --- | --- |
-| Execution | FIFO budget admission, complete tool batches, fair dispatch, forks, report reservations, direct messages, attention-only turns, and sleeping-session resumption |
+| Execution | FIFO budget admission, complete tool batches, fair dispatch, fork inheritance, role-based tool access, report reservations, direct messages, attention-only turns, and sleeping-session resumption |
 | Model-facing interfaces | Record/Turn shapes, observation delivery without duplication, native model/tool messages, summary generation and replacement, and complete-payload budgets |
 | Continuity | Durable admission and acknowledgement, cold restoration, startup observations, callbacks and wakeups across restart, and unknown interrupted effects without replay |
-| Storage | Record and checkpoint validation, failed publication, committed-prefix selection, shared history, retention, and preservation of selected records |
+| Storage | Record and checkpoint validation, failed publication, committed-chain selection, independent inherited histories, per-session replacement, retention, and preservation of selected records |
 | Capabilities and service | Explicit sending, addressing and body projection, independent intake streams, host cancellation and result delivery, content omissions, and health/reception state |
 | Failures | Ordinary tool outcomes allow continuation; infrastructure and execution errors close reception and join concurrent work |
 

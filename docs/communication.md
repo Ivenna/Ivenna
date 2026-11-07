@@ -10,7 +10,7 @@ Retained observations, sending exchanges, and handovers preserve correspondent I
 
 ## Sending a message
 
-The [`send_message` declaration](../packages/agent/src/tools.json) defines two required arguments:
+Both core and activity sessions can call `send_message`. Its [declaration](../packages/agent/src/tools.json) defines two required arguments:
 
 | Argument | Meaning |
 | --- | --- |
@@ -52,16 +52,32 @@ An eligible correspondence email becomes one [`input` observation](input.md#inco
 
 The selected body must be complete and decoded without encoding errors. Unsupported or incomplete bodies are skipped, leaving the original mail copy unchanged. Eligible text enters the observation in full and is subject to [request-budget admission](architecture.md#activation-admission).
 
+## Forking an activity session
+
+Only the core can call `fork_session` with a nonempty `task`. The task specifies what the activity should pursue. Success returns its stable identity:
+
+```json
+{"result":{"session_id":2}}
+```
+
+The activity inherits the core's retained history through the complete calling model/tool round, including any existing handover, then receives the task as its first new observation. The core continues its activation; their histories then grow independently.
+
+Inherited records keep their original [session IDs](input.md#records-and-turns). The activity receives its own current-state snapshot and tools. Queued observations, callback registrations, and wakeup schedules keep their original destinations; historical tool calls are not replayed.
+
+Each activity activation's final text reaches the core automatically as a [report](input.md#assignments-and-reports). A sleeping activity retains its history and can continue through a session message from the core, a callback, or a wakeup.
+
+An empty task or malformed arguments return `invalid_arguments`. Exhausted session capacity or core report capacity returns `fork_unavailable`; existing sessions remain addressable. See [configuration](running.md#configuration) for capacity limits.
+
 ## Session communication and wakeups
 
-Core and work sessions can use both [agent tools](../packages/agent/src/tools.json):
+The [agent tools](../packages/agent/src/tools.json) distinguish core coordination from self-scheduled wakeups:
 
-| Tool | Arguments | Example success |
-| --- | --- | --- |
-| `send_session_message` | `session_id`, nonempty `text` | `{"result":{"session_id":2}}` identifies the recipient whose queue accepted the observation |
-| `wakeup` | `at_unix_ms`, nonempty `text` | `{"result":{"callback_id":5}}` identifies a scheduled observation for the calling session |
+| Tool | Available to | Arguments | Example success |
+| --- | --- | --- | --- |
+| `send_session_message` | Core | `session_id`, nonempty `text` | `{"result":{"session_id":2}}` identifies the recipient whose queue accepted the observation |
+| `wakeup` | Core and activity | `at_unix_ms`, nonempty `text` | `{"result":{"callback_id":5}}` identifies a scheduled observation for the calling session |
 
-Session IDs survive sleep, unloading, and restart. Sending confirms durable queue acceptance. The observation records the actual sending session; attribution to an earlier source belongs in the message text. A sleeping recipient wakes, while a running recipient admits the message between complete model/tool rounds. Reports and [nested creation notices](input.md#assignments-and-reports) reach their destinations automatically.
+`send_session_message` queues an observation for an existing session and confirms durable queue acceptance. The observation identifies the core as its sender; attribution to an earlier source belongs in the message text. A sleeping recipient wakes, while a running recipient admits the message between complete model/tool rounds. Session IDs survive sleep, context unloading, and restart.
 
 `wakeup` retains its text and deadline across restart and returns the text to the calling session. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The session can sleep while waiting. Cancellation is unavailable.
 
@@ -70,6 +86,7 @@ The tools report defined failures without ending the runtime:
 | Code | Operation and meaning |
 | --- | --- |
 | `invalid_arguments` | Either tool received arguments that do not match its parameters |
+| `unknown_tool` | The tool is unavailable to the calling session |
 | `unknown_session` | The message's recipient session does not exist |
 | `session_queue_full` | The message's recipient cannot currently accept another event |
 | `callback_unavailable` | The calling session has reached its pending-callback limit |
@@ -78,6 +95,6 @@ See [configuration](running.md#configuration) for capacity limits and [session m
 
 ## Callback mail
 
-Background host commands and wakeups register an ID and receiving session before producing results. Callbacks keep that destination across forks and arrive through durable JMAP mailbox delivery, independently of SMTP reception. The model relates each result to its initiating tool exchange by ID.
+Background host commands and wakeups register an ID and receiving session before producing results. Callbacks keep that destination for their lifetime and arrive through durable JMAP mailbox delivery, independently of SMTP reception. The model relates each result to its initiating tool exchange by ID.
 
 Publication reuses the first identifiable result while its copy and metadata remain [retained in the account](running.md#communication-copies). Admission persists the observation once; later copies are retired without another observation. Unknown IDs fail explicitly. See [callback delivery and admission](architecture.md#event-sources-and-callback-admission) for these guarantees and [background commands](host.md#background-commands) for process interruption.

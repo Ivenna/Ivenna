@@ -50,7 +50,6 @@ const callback_keyword = "ivenna-callback";
 const callback_keyword_prefix = "ivenna-callback-";
 const group_keyword_prefix = "ivenna-history-";
 const history_mailbox_name = "Ivenna History";
-const archive_mailbox_name = "Ivenna Archive";
 const callback_mailbox_name = "Ivenna Callbacks";
 const callback_property = "header:X-Ivenna-Callback-Id:asText";
 const kind_property = "header:X-Ivenna-History-Kind:asText";
@@ -86,7 +85,6 @@ pub const Mailbox = struct {
     identity_id: []const u8 = "",
     drafts_id: []const u8 = "",
     history_id: []const u8 = "",
-    archive_id: []const u8 = "",
     callback_id: []const u8 = "",
     trash_id: []const u8 = "",
     junk_id: []const u8 = "",
@@ -128,9 +126,6 @@ pub const Mailbox = struct {
                     std.mem.eql(u8, try textField(folder, "name"), history_mailbox_name))
                     self.history_id = id;
                 if (optionalText(folder, "parentId") == null and
-                    std.mem.eql(u8, try textField(folder, "name"), archive_mailbox_name))
-                    self.archive_id = id;
-                if (optionalText(folder, "parentId") == null and
                     std.mem.eql(u8, try textField(folder, "name"), callback_mailbox_name))
                     self.callback_id = id;
                 continue;
@@ -150,13 +145,6 @@ pub const Mailbox = struct {
             });
             self.history_id = try createdId(created, "history");
         }
-        if (self.archive_id.len == 0) {
-            const created = try self.call(a, "Mailbox/set", .{
-                .accountId = self.account_id,
-                .create = .{ .archive = .{ .name = archive_mailbox_name, .parentId = null, .role = null } },
-            });
-            self.archive_id = try createdId(created, "archive");
-        }
         if (self.callback_id.len == 0) {
             const created = try self.call(a, "Mailbox/set", .{
                 .accountId = self.account_id,
@@ -173,7 +161,6 @@ pub const Mailbox = struct {
             try excluded.append(a, self.trash_id);
         }
         try excluded.append(a, self.history_id);
-        try excluded.append(a, self.archive_id);
         self.excluded_ids = try excluded.toOwnedSlice(a);
     }
 
@@ -318,7 +305,7 @@ pub const Mailbox = struct {
             .operator = "OR",
             .conditions = .{ .{ .hasKeyword = handled_keyword }, .{ .hasKeyword = outbound_keyword } },
         }));
-        for ([_][]const u8{ self.history_id, self.archive_id, self.trash_id, self.junk_id }) |id| {
+        for ([_][]const u8{ self.history_id, self.trash_id, self.junk_id }) |id| {
             if (id.len == 0) continue;
             try conditions.append(a, try value(a, .{ .operator = "NOT", .conditions = &.{.{ .inMailbox = id }} }));
         }
@@ -506,24 +493,16 @@ pub const Mailbox = struct {
         return (try self.createHistory(a, &.{.{ .checkpoint = .{ .body = body, .revision = revision } }}))[0];
     }
 
-    const HistoryLocation = enum { history, archive, trash };
     const HistoryInventoryItem = struct {
         id: []const u8,
-        location: HistoryLocation,
         contents: union(HistoryKind) { record: HistoryStore.RecordId, checkpoint: u64 },
         current: bool,
     };
 
-    /// Inventory owned objects in History and Archive and check that the complete
+    /// Inventory owned objects in History and check that the complete
     /// retention selection is present before moving any objects. The mail service
     /// owns expiry after unselected material enters Trash.
     pub fn maintainHistory(self: Mailbox, a: Allocator, retention: HistoryStore.Retention, revision: u64) !void {
-        var active: std.StringHashMapUnmanaged(void) = .empty;
-        defer active.deinit(a);
-        for (retention.active_groups) |group| {
-            _ = try historyGroupKeyword(a, group);
-            try active.put(a, group, {});
-        }
         var retained: std.StringHashMapUnmanaged(bool) = .empty;
         defer retained.deinit(a);
         for (retention.records) |record| {
@@ -535,15 +514,12 @@ pub const Mailbox = struct {
         for (inventory) |item| switch (item.contents) {
             .record => |record| {
                 if (retained.getPtr(try historyRecordIdentity(a, record))) |found| {
-                    if (item.location == .archive and active.contains(record.group))
-                        return error.InvalidHistory;
                     found.* = true;
                 }
             },
             .checkpoint => |stored_revision| if (item.current) {
                 if (stored_revision > revision) return error.InvalidHistory;
                 if (stored_revision == revision) {
-                    if (item.location != .history) return error.InvalidHistory;
                     current_count += 1;
                 }
             },
@@ -554,26 +530,14 @@ pub const Mailbox = struct {
 
         var updates: std.ArrayList(EmailUpdate) = .empty;
         for (inventory) |item| {
-            const destination: HistoryLocation = switch (item.contents) {
-                .record => |record| if (retained.contains(try historyRecordIdentity(a, record)))
-                    if (active.contains(record.group)) .history else .archive
-                else
-                    .trash,
-                .checkpoint => |stored_revision| if (item.current and stored_revision == revision) .history else .trash,
+            const keep = switch (item.contents) {
+                .record => |record| retained.contains(try historyRecordIdentity(a, record)),
+                .checkpoint => |stored_revision| item.current and stored_revision == revision,
             };
-            var patch: std.json.ObjectMap = .empty;
-            if (item.location != destination) {
-                var folders: std.json.ObjectMap = .empty;
-                try folders.put(a, switch (destination) {
-                    .history => self.history_id,
-                    .archive => self.archive_id,
-                    .trash => self.trash_id,
-                }, .{ .bool = true });
-                try patch.put(a, "mailboxIds", .{ .object = folders });
-            }
-            if (destination == .trash and item.current)
-                try patch.put(a, "keywords/" ++ current_keyword, .null);
-            if (patch.count() != 0) try updates.append(a, .{ .id = item.id, .patch = .{ .object = patch } });
+            if (keep) continue;
+            var patch = (try self.trashPatch(a)).object;
+            if (item.current) try patch.put(a, "keywords/" ++ current_keyword, .null);
+            try updates.append(a, .{ .id = item.id, .patch = .{ .object = patch } });
         }
         try self.updateEmails(a, updates.items);
     }
@@ -581,7 +545,7 @@ pub const Mailbox = struct {
     fn historyInventory(self: Mailbox, a: Allocator) ![]const HistoryInventoryItem {
         const filter = try value(a, .{
             .operator = "AND",
-            .conditions = .{ try self.historyFoldersFilter(a), try value(a, .{ .hasKeyword = state_keyword }) },
+            .conditions = .{ try self.historyFolderFilter(a), try value(a, .{ .hasKeyword = state_keyword }) },
         });
         var inventory: std.ArrayList(HistoryInventoryItem) = .empty;
         var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -601,7 +565,6 @@ pub const Mailbox = struct {
                     const id = try a.dupe(u8, try textField(record, "id"));
                     if ((try seen.getOrPut(a, id)).found_existing) return error.InvalidHistory;
                     const folders = try field(record, "mailboxIds");
-                    const in_history = boolean(folders, self.history_id);
                     if (folders.object.count() != 1) return error.InvalidHistory;
                     const keywords = try field(record, "keywords");
                     const current = boolean(keywords, current_keyword);
@@ -622,7 +585,6 @@ pub const Mailbox = struct {
                     };
                     try inventory.append(a, .{
                         .id = id,
-                        .location = if (in_history) .history else .archive,
                         .contents = contents,
                         .current = current,
                     });
@@ -734,18 +696,18 @@ pub const Mailbox = struct {
         return value(a, .{
             .operator = "AND",
             .conditions = .{
-                try self.historyFoldersFilter(a),
+                try self.historyFolderFilter(a),
                 try value(a, .{ .hasKeyword = state_keyword }),
                 try value(a, .{ .operator = "OR", .conditions = alternatives }),
             },
         });
     }
 
-    fn historyFoldersFilter(self: Mailbox, a: Allocator) !Value {
+    fn historyFolderFilter(self: Mailbox, a: Allocator) !Value {
         return value(a, .{
             .operator = "AND",
             .conditions = .{
-                try value(a, .{ .operator = "OR", .conditions = .{ .{ .inMailbox = self.history_id }, .{ .inMailbox = self.archive_id } } }),
+                try value(a, .{ .inMailbox = self.history_id }),
                 try value(a, .{ .operator = "NOT", .conditions = &.{.{ .inMailbox = self.trash_id }} }),
             },
         });
@@ -855,7 +817,7 @@ pub const Mailbox = struct {
         if (folders != .object or keywords != .object) return error.InvalidMailReply;
         if (!boolean(keywords, state_keyword)) return false;
         if (boolean(folders, self.trash_id)) return false;
-        if (!boolean(folders, self.history_id) and !boolean(folders, self.archive_id)) return false;
+        if (!boolean(folders, self.history_id)) return false;
         const from = try addresses(a, record, "from");
         if (from.len != 1 or !self.addressing.isSelf(from[0].email)) return false;
         const addressed_to_self = for (try addresses(a, record, "to")) |recipient| {

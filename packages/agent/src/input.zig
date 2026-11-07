@@ -4,21 +4,10 @@ const contracts = @import("agent_contracts");
 const Allocator = std.mem.Allocator;
 const IncomingMessage = contracts.Communication.IncomingMessage;
 
-pub const Role = union(enum) {
-    core: void,
-    branch: struct { parent_session_id: u64 },
-
-    pub fn parentSessionId(self: Role) ?u64 {
-        return switch (self) {
-            .core => null,
-            .branch => |branch| branch.parent_session_id,
-        };
-    }
-};
+pub const Role = enum { core, activity };
 
 pub const Assignment = struct {
     task: []const u8,
-    from_session: u64,
 };
 
 pub const Report = struct {
@@ -56,12 +45,6 @@ pub const Callback = struct {
     text: []const u8,
 };
 
-pub const SessionCreated = struct {
-    session_id: u64,
-    parent_session_id: u64,
-    task: []const u8,
-};
-
 pub const SessionInfo = struct {
     session_id: u64,
     role: Role,
@@ -75,7 +58,6 @@ pub const SessionInfo = struct {
 pub const State = struct {
     session: struct {
         role: Role,
-        child_sessions: usize = 0,
         callbacks: []const PendingCallback,
     },
     runtime: struct {
@@ -87,7 +69,7 @@ pub const State = struct {
     },
 };
 
-/// Runtime facts sampled for one inference; never retained or inherited.
+/// Runtime facts sampled for one inference; never retained.
 pub const Current = struct {
     session_id: u64,
     state: State,
@@ -100,7 +82,6 @@ pub const Event = union(enum) {
     report: Report,
     session_message: SessionMessage,
     callback: Callback,
-    session_created: SessionCreated,
 };
 
 pub const EventGroup = struct {
