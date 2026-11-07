@@ -46,7 +46,7 @@ Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's star
 
 ## Mail service
 
-Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna History` and `Ivenna Archive` folders and a mailbox with role `trash` when missing; the history folders have no special mail role. The account must permit folder creation. The JMAP session must advertise positive integer `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits; the adapter uses these to bound native requests.
+Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna History` and `Ivenna Archive` folders and a mailbox with role `trash` when missing; the history folders have no special mail role. The account must permit folder creation. The JMAP session must advertise positive integer `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits; the adapter uses these to bound native requests.
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
@@ -60,11 +60,11 @@ The [intake rules](#mail-intake) also apply to existing correspondence in the ac
 
 ### Mail intake
 
-The kernel reads unprocessed correspondence across the account's mail folders, including the mail client's ordinary Archive folder. The `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying the runtime's private outgoing or history-state markers. The history-state marker keeps moved history records out of intake as well.
+The kernel reads correspondence awaiting durable admission across the account's mail folders, including the mail client's ordinary Archive folder. The `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying the runtime's private outgoing or history-state markers. The history-state marker keeps moved history records out of intake as well.
 
-Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. Missing, cross-domain, or unsupported From addresses exclude the whole message from intake, leaving its completion marker unchanged. The adapter presents the corresponding IDs and text as an observation.
+Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. The adapter presents the corresponding IDs and complete supported text as an observation. Messages with missing, cross-domain, or unsupported From addresses are excluded from intake. Messages without a complete supported body produce a diagnostic and are skipped. These copies remain unchanged.
 
-Ivenna tracks processing with a private completion marker. Eligible correspondence without that marker is pending, including existing messages that have been read or archived. Review the account's communication records before connecting it; reading, starring, or moving correspondence does not mark it as processed.
+Eligible correspondence without the private acknowledgement marker is pending, including existing messages that have been read or archived. Once its complete observation and checkpoint have been saved, Ivenna acknowledges the message and moves the original to Trash before reasoning about that input. Reading, starring, or moving correspondence does not acknowledge it. The [communication-copy lifecycle](#communication-copies) also applies to existing mail in this dedicated account.
 
 ## Memory service
 
@@ -101,7 +101,7 @@ cd /path/to/workspace
 
 The kernel's startup directory becomes the default directory for host commands. The executable embeds its model-facing resources and can run independently of the source checkout.
 
-Startup discovers the mail account, checks memory with a read-only space inspection, and loads saved working contexts or creates the core. It queues startup observations and classifies saved history before opening reception. These steps must succeed before Ivenna can run. Use one kernel per mailbox. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
+Startup discovers the mail account and retires leftover communication copies, then checks memory with a read-only space inspection and loads saved working contexts or creates the core. It queues startup observations and classifies saved history before opening reception. These steps must succeed before reception opens. Use one kernel per mailbox. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
 
 ## Service status and reception
 
@@ -112,7 +112,7 @@ Startup discovers the mail account, checks memory with a read-only space inspect
 | `GET /healthz` | `200 OK` for listener health |
 | `GET /readyz` | `200 OK` with `X-Ivenna-Ready: true` when reception is open; otherwise `503 Service Unavailable` |
 
-Reception opens after initialization and initial history classification. Startup model work runs with reception open. Reception closes when the runtime stops or fails. These endpoints report lifecycle state; they do not probe mail or memory on each request. Once the process has exited, its listener is also gone. For a listener reachable at `127.0.0.1:8090`, check the current state with:
+Reception opens after initialization and initial storage maintenance. Startup model work runs with reception open. Reception closes when the runtime stops or fails. These endpoints report lifecycle state; they do not probe mail or memory on each request. Once the process has exited, its listener is also gone. For a listener reachable at `127.0.0.1:8090`, check the current state with:
 
 ```sh
 curl --include http://127.0.0.1:8090/readyz
@@ -120,7 +120,7 @@ curl --include http://127.0.0.1:8090/readyz
 
 Configure the mail receiving boundary to check the readiness header at an address it can reach and reject incoming traffic when the header is absent, including when the endpoint cannot be reached. Apply the policy to every receiving address and delivery path used for correspondence. The [local Stalwart setup](../dev/README.md#configuring-mail) demonstrates an SMTP recipient check.
 
-Readiness describes the kernel's reception state when queried. It reserves no processing capacity, and the runtime can stop after a successful check or accepted delivery. The kernel continues to read [unprocessed correspondence](#mail-intake) already present in its account.
+Readiness describes the kernel's reception state when queried. It reserves no processing capacity, and the runtime can stop after a successful check or accepted delivery. The kernel continues to read [pending correspondence](#mail-intake) already present in its account.
 
 With SMTP, a recipient rejection reaches the sending server during that delivery attempt. A normal mail client may already have submitted to its own server, which handles the delivery result. Connection failures can also lead that server to queue and retry mail. See SMTP's [delivery responsibilities](https://www.rfc-editor.org/rfc/rfc5321.html#section-4.2.5) and [retry behavior](https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.4.1).
 
@@ -128,7 +128,7 @@ With SMTP, a recipient rejection reaches the sending server during that delivery
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception and wait for the kernel's workers to end. Communication or memory infrastructure failures and errors propagated by execution also stop the whole kernel. Diagnose the failure from its diagnostics and restore any unavailable services before restarting.
 
-When an incoming message fails admission with `ContextBudgetExhausted`, it remains unprocessed. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
+When an incoming message fails admission with `ContextBudgetExhausted`, it remains unacknowledged. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
 
 Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work. Each retained session receives a fresh startup activation with the current observation time. Ivenna chooses how to continue from its history and current state; old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail, so include any known external changes when corresponding about the interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means.
 
@@ -138,9 +138,27 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 
 | Location | Contents |
 | --- | --- |
-| Configured JMAP account | Correspondence, working-history records and checkpoints, and private processing markers |
+| Configured JMAP account | Pending and retired communication copies, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
+
+Ivenna moves communication copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
+
+Ivenna does not monitor quota or evict live records in response to account capacity. A failure in Ivenna's storage maintenance stops the runtime like other storage failures.
+
+### Communication copies
+
+Ivenna releases a communication copy when its observation has been durably admitted or submission no longer needs the copy:
+
+| Copy | Retirement |
+| --- | --- |
+| Incoming message | After its complete observation and checkpoint are saved, acknowledgement moves the original to Trash |
+| Outgoing message | Created in Drafts; confirmed submission moves the copy to Trash without cancelling delivery |
+| Interrupted outgoing copy | Initialization or the next poll moves the runtime's leftover outgoing copy to Trash |
+
+Acknowledgement confirms durable admission, not completion of the requested work. Pending supported input remains available for admission. Internal assignments and reports are saved as working history rather than separate communication copies.
+
+The mail account is not a permanent transcript: original copies expire under the Trash policy, while retained observations and tool exchanges can later be condensed or released. Preserve original correspondence separately when it needs a longer lifetime. A correspondent's own account and received copies remain outside Ivenna's copy management.
 
 ### Working history
 
@@ -153,8 +171,6 @@ The latest checkpoint selects the histories needed to continue the core and reta
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
 Archive has no retention deadline. Its records remain available to retained contexts until the checkpoint stops selecting them. A released work session's unique records may go directly to Trash. See [history retention](architecture.md#history-retention) for selection and sharing rules.
-
-After a move to Trash, retention and deletion follow the mail service's policy. Ivenna classifies only its working and archive folders, leaving correspondence and existing Trash alone. Moving records between folders leaves their contents on the service; expiry and physical storage reclamation follow its maintenance policy. Ivenna does not monitor quota or evict history in response to account capacity. A classification failure stops the runtime like other storage failures.
 
 ### Backups and transfers
 

@@ -28,7 +28,7 @@ For example:
 }
 ```
 
-Each successful invocation submits one message to the specified recipients.
+With the current email adapter, each successful invocation submits one standalone message to the specified recipients, with subject `Ivenna` and the supplied `text` as its body.
 
 Success returns a submission reference:
 
@@ -36,11 +36,13 @@ Success returns a submission reference:
 {"result":{"reference":"<submission-reference>"}}
 ```
 
-The result confirms submission through the adapter. It does not establish final recipient delivery. An unsupported recipient ID returns an `invalid_recipient` tool error; invalid argument structure returns `invalid_arguments`. Communication infrastructure or submission failures end the runtime under the [availability contract](design.md#runtime-availability).
+The email adapter returns this reference after confirming submission and moving its sending copy to Trash. The result does not establish final recipient delivery. See [communication-copy retention](running.md#communication-copies) for the copy's lifetime.
+
+An unsupported recipient ID returns an `invalid_recipient` tool error; invalid argument structure returns `invalid_arguments`. Communication infrastructure, submission, or retirement failures end the runtime under the [availability contract](design.md#runtime-availability).
 
 ## Current email addressing
 
-The current email adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. For `MAIL_ADDRESS=ivenna@ivenna.test`, `operator@ivenna.test` becomes `operator`, and sending to `operator` resolves to that address. ID case is preserved; domain matching ignores case. IDs remain usable across context release and restart with the same configured domain. The model-facing fields carry ID strings, while the adapter handles full addresses.
+The [current email adapter](architecture.md#email-boundary) uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. For `MAIL_ADDRESS=ivenna@ivenna.test`, `operator@ivenna.test` becomes `operator`, and sending to `operator` resolves to that address. ID case is preserved; domain matching ignores case. IDs remain usable across context release and restart with the same configured domain. The model-facing fields carry ID strings, while the adapter handles full addresses.
 
 IDs use ASCII dot-atom local parts: letters, digits, and the punctuation below, with dots separating nonempty atoms. Leading, trailing, or consecutive dots, quoted or escaped local parts, and non-ASCII local parts are unsupported.
 
@@ -49,5 +51,3 @@ IDs use ASCII dot-atom local parts: letters, digits, and the punctuation below, 
 ```
 
 Incoming mail must have at least one From address, and every address must map to a supported ID in this domain. Missing, unsupported, or cross-domain From addresses exclude the message from intake.
-
-Outgoing submissions create standalone messages with the supplied text as the body. See the [email boundary](architecture.md#email-boundary) for implementation details.

@@ -36,7 +36,7 @@ Ivenna explicitly chooses whether to send a message, to whom, and what it says t
 
 Work is defined by a task and the understanding needed to continue it. A session owns a working context and a queue. An activation handles a bounded group of already queued inputs, assignments, or reports together through model and tool rounds. It ends with a final response or a fork that passes the group's work to a child. Events arriving during an activation remain queued for later processing.
 
-Execution state coordinates ongoing work in process memory. Retained working contexts persist independently of execution, while communication records which correspondence has been processed. These forms have their own responsibilities and lifecycles.
+Execution state coordinates ongoing work in process memory. Retained working contexts persist independently of execution. Incoming correspondence is acknowledged once its complete observation is durably retained, independently of task completion. These forms have their own responsibilities and lifecycles.
 
 A final response completes the activation's event group and returns control; it does not certify task success, and a broader task can remain open. Context release follows the remaining work and session relationships. Storage retention follows the histories selected for continuation. These lifecycles are independent.
 
@@ -74,7 +74,7 @@ An interrupted action may already have affected the world before its result was 
 
 The deployment user owns Ivenna's correspondence, retained working histories, artifacts, and autonomous memory, and chooses where they live. Keep these forms open to inspection, retention, and management within the user's deployment. Storage implementations preserve their distinct ownership and retention needs.
 
-History needed for continuation remains available after it stops accepting new entries. Execution determines which history is still needed; storage implementations organize the records, and storage services apply the deployment's policy for disposal and space reclamation. Correspondence, working history, and host artifacts have separate retention lifecycles.
+Each stored object has a lifecycle defined by its remaining use. Execution confirms durable input admission and selects the histories needed for continuation. Communication implementations own submission and the retirement of transport copies. History remains available while a retained context references it, even after its segment stops accepting new entries. Storage services apply the deployment's policy for disposal and space reclamation. Host artifacts have their own retention lifecycle.
 
 Diagnostics support troubleshooting and analysis. Keep them separate from the source material and handovers used for continuity.
 

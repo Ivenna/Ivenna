@@ -192,18 +192,8 @@ pub const Kernel = struct {
             try self.sessions.save();
             if (committed != .continuing) return;
             if (round.replies.len != 0) continue;
-            return self.finishResult(work, round.text);
+            return self.sessions.finish(work, round.text);
         }
-    }
-
-    fn finishResult(self: *Kernel, work: Work, text: ?[]const u8) !void {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        for (work.activation.deliveries.items) |delivery|
-            for (delivery.receipts) |receipt|
-                try self.inbox.complete(a, receipt);
-        return self.sessions.finish(work, text);
     }
 
     const Selection = struct { count: usize, context: Context };
@@ -258,6 +248,12 @@ pub const Kernel = struct {
         try self.sessions.beginActivation(work, selected.count, selected.context);
         installed = true;
         try self.sessions.save();
+        for (work.activation.deliveries.items) |delivery| {
+            const receipt = delivery.receipt orelse continue;
+            try self.inbox.acknowledge(a, receipt);
+            try self.sessions.acknowledged(receipt);
+            delivery.receipt = null;
+        }
     }
 
     /// Owns the history snapshot borrowed by the request-arena input view.

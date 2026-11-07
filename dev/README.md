@@ -55,14 +55,14 @@ Set the account credentials in the plan and put the matching kernel and operator
 | Address | Role | Example password |
 | --- | --- | --- |
 | `ivenna@ivenna.test` | Dedicated kernel mailbox | `ivenna-local-password` |
-| `operator@ivenna.test` | Send messages and read Ivenna's mail | `operator-local-password` |
+| `operator@ivenna.test` | Send requests and receive Ivenna's messages | `operator-local-password` |
 | `admin@ivenna.test` | Stalwart administration | `admin-local-password` |
 
 The plan's `ivenna-ready` script runs during SMTP `RCPT` handling through its `MtaStageRcpt` rule. Set the script's recipient to Ivenna's address and its readiness URL to an endpoint reachable from the mail container. The example uses `ivenna@ivenna.test` and `http://host.containers.internal:8090/readyz`; Compose maps that host name to the host. Keep the address and URL aligned with `MAIL_ADDRESS` and `SERVICE_ADDRESS`.
 
 The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. JMAP imports and delivery between accounts through the same server's JMAP interface bypass this gate; use the SMTP path for correspondence. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
 
-For [history retention](../docs/running.md#working-history), Ivenna moves unreferenced records to Trash and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days). When updating an existing private plan, copy or update that operation from the example before provisioning.
+For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days). When updating an existing private plan, copy or update that operation from the example before provisioning.
 
 This [Stalwart policy](https://stalw.art/docs/email/settings/maintenance/) applies server-wide to Trash and Junk, including ordinary mail, and runs while the kernel is stopped. Auto-expunge follows the server's configured schedule, which is daily by default. Expunging credits account quota; blob cleanup and physical disk reclamation follow later, as described in [Stalwart storage maintenance](https://stalw.art/docs/storage/maintenance/).
 
@@ -146,7 +146,7 @@ EOF
 
 With the supplied readiness policy installed, this command receives a `550` rejection when reception is closed or unreachable. The [mail setup](#configuring-mail) describes the policy's scope.
 
-Read Ivenna's outgoing messages through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna chooses whether and when to send a message; SMTP acceptance alone does not require a reply. See the [usage guide](../docs/usage.md) for sending requests and continuing correspondence.
+Read messages delivered by Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna retires its own outgoing copies to Trash after submission; the delivered copies belong to the operator account. Ivenna chooses whether and when to send a message; SMTP acceptance alone does not require a reply. See the [usage guide](../docs/usage.md) for sending requests and continuing correspondence.
 
 ## Stopping and restarting
 
@@ -201,7 +201,7 @@ These settings configure the supplied local services in [dev/compose.yaml](compo
 
 If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Account and server policy changes belong in the private provisioning plan; apply them through [local mail setup](#configuring-mail).
 
-After changing service settings, reload `.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed. For mail transfers, follow the [history preservation requirements](../docs/running.md#data-and-retention).
+After changing service settings, reload `.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed. For mail transfers, follow the [history preservation requirements](../docs/running.md#backups-and-transfers).
 
 Source changes inside the memory image require a [rebuild](#updating-the-kernel-and-middleware). For another memory deployment, configure capacity at its [service entry point](../docs/running.md#memory-service).
 

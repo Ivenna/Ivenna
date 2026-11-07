@@ -19,12 +19,14 @@ pub const Integration = struct {
     mailbox: Mailbox,
     transport: EmailTransport,
     history_adapter: History,
+    correspondence_mutex: std.Io.Mutex,
 
     /// Initialize in the final storage location: components borrow each other.
     /// The client and configuration strings must outlive self.
     pub fn init(self: *Integration, allocator: Allocator, client: *std.http.Client, config: Config) !void {
         self.discovery = .init(allocator);
         errdefer self.discovery.deinit();
+        self.correspondence_mutex = .init;
         self.mailbox = .{
             .client = client,
             .session_url = config.session_url,
@@ -33,6 +35,9 @@ pub const Integration = struct {
             .addressing = try Addressing.init(config.address),
         };
         try self.mailbox.discover(self.discovery.allocator());
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        try self.mailbox.maintainCorrespondence(arena.allocator());
         self.transport = EmailTransport.init(&self.mailbox);
         self.history_adapter = History.init(allocator, &self.mailbox);
     }
@@ -57,7 +62,7 @@ pub const Integration = struct {
 
     const inbox_vtable: contracts.Inbox.VTable = .{
         .poll = poll,
-        .complete = complete,
+        .acknowledge = acknowledge,
     };
 
     fn fromContext(context: *anyopaque) *Integration {
@@ -66,6 +71,11 @@ pub const Integration = struct {
 
     fn poll(context: *anyopaque, a: Allocator, limit: usize) ![]const contracts.Inbox.Incoming {
         const self = fromContext(context);
+        try self.correspondence_mutex.lock(self.mailbox.client.io);
+        defer self.correspondence_mutex.unlock(self.mailbox.client.io);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        try self.mailbox.maintainCorrespondence(arena.allocator());
         const pending = try self.mailbox.pending(a, limit);
         const incoming = try a.alloc(contracts.Inbox.Incoming, pending.len);
         for (pending, incoming) |candidate, *item| item.* = .{
@@ -75,11 +85,17 @@ pub const Integration = struct {
         return incoming;
     }
 
-    fn complete(context: *anyopaque, a: Allocator, receipt: []const u8) !void {
-        return fromContext(context).mailbox.markHandled(a, receipt);
+    fn acknowledge(context: *anyopaque, a: Allocator, receipt: []const u8) !void {
+        const self = fromContext(context);
+        try self.correspondence_mutex.lock(self.mailbox.client.io);
+        defer self.correspondence_mutex.unlock(self.mailbox.client.io);
+        return self.mailbox.acknowledge(a, receipt);
     }
 
     fn submit(context: *anyopaque, a: Allocator, message: contracts.Communication.Message) !contracts.Communication.Submission {
-        return fromContext(context).transport.send(a, message);
+        const self = fromContext(context);
+        try self.correspondence_mutex.lock(self.mailbox.client.io);
+        defer self.correspondence_mutex.unlock(self.mailbox.client.io);
+        return self.transport.send(a, message);
     }
 };

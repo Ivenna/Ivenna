@@ -5,25 +5,25 @@ const Allocator = std.mem.Allocator;
 pub const Delivery = struct {
     arena: std.heap.ArenaAllocator,
     event: Input.Event,
-    receipts: []const []const u8,
+    receipt: ?[]const u8,
 
-    /// Copy the event and receipt IDs into the delivery arena.
-    pub fn create(allocator: Allocator, event: Input.Event, receipts: []const []const u8) !*Delivery {
+    /// Copy the event and optional transport receipt into the delivery arena.
+    pub fn create(allocator: Allocator, event: Input.Event, receipt: ?[]const u8) !*Delivery {
         const self = try allocator.create(Delivery);
         errdefer allocator.destroy(self);
         self.* = .{
             .arena = .init(allocator),
             .event = undefined,
-            .receipts = &.{},
+            .receipt = null,
         };
         errdefer self.arena.deinit();
         const a = self.arena.allocator();
-        const Data = struct { event: Input.Event, receipts: []const []const u8 };
-        const bytes = try std.json.Stringify.valueAlloc(allocator, Data{ .event = event, .receipts = receipts }, .{});
+        const Data = struct { event: Input.Event, receipt: ?[]const u8 };
+        const bytes = try std.json.Stringify.valueAlloc(allocator, Data{ .event = event, .receipt = receipt }, .{});
         defer allocator.free(bytes);
         const data = try std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always });
         self.event = data.event;
-        self.receipts = data.receipts;
+        self.receipt = data.receipt;
         return self;
     }
 

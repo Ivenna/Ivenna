@@ -22,11 +22,6 @@ pub const Outgoing = struct {
     body: []const u8,
 };
 
-pub const Submission = struct {
-    mail_id: []const u8,
-    sent_copy: enum { updated, unconfirmed },
-};
-
 pub const StateRecord = struct {
     id: []const u8,
     revision: u64,
@@ -57,8 +52,10 @@ const state_data_properties: []const []const u8 = &.{
 const message_properties: []const []const u8 = &.{
     "id", "from", "subject", "textBody", "htmlBody", "bodyValues",
 };
+const correspondence_properties: []const []const u8 = &.{ "id", "from", "keywords" };
 
 const HistoryKind = enum { record, checkpoint };
+const EmailUpdate = struct { id: []const u8, patch: Value };
 
 /// JMAP access for communication records, submissions, and working history.
 /// Discover once using an allocator that outlives every operation and worker.
@@ -71,11 +68,11 @@ pub const Mailbox = struct {
     api_url: []const u8 = "",
     account_id: []const u8 = "",
     identity_id: []const u8 = "",
-    sent_id: []const u8 = "",
     drafts_id: []const u8 = "",
     history_id: []const u8 = "",
     archive_id: []const u8 = "",
     trash_id: []const u8 = "",
+    junk_id: []const u8 = "",
     excluded_ids: []const []const u8 = &.{},
     max_get: usize = 32,
     max_set: usize = 32,
@@ -118,13 +115,13 @@ pub const Mailbox = struct {
                     self.archive_id = id;
                 continue;
             };
-            if (std.mem.eql(u8, role, "sent")) self.sent_id = id;
             if (std.mem.eql(u8, role, "drafts")) self.drafts_id = id;
             if (std.mem.eql(u8, role, "trash")) self.trash_id = id;
+            if (std.mem.eql(u8, role, "junk")) self.junk_id = id;
             if (std.mem.eql(u8, role, "drafts") or std.mem.eql(u8, role, "trash") or std.mem.eql(u8, role, "junk"))
                 try excluded.append(a, id);
         }
-        if (self.sent_id.len == 0 or self.drafts_id.len == 0)
+        if (self.drafts_id.len == 0)
             return error.MailFoldersNotFound;
         if (self.history_id.len == 0) {
             const created = try self.call(a, "Mailbox/set", .{
@@ -153,7 +150,7 @@ pub const Mailbox = struct {
         self.excluded_ids = try excluded.toOwnedSlice(a);
     }
 
-    /// Intake excludes history storage and uses private processing markers,
+    /// Intake excludes history storage and uses private acknowledgement markers,
     /// independently of read status, stars, or archiving.
     pub fn pending(self: Mailbox, a: Allocator, limit: usize) ![]const Letter {
         const filter = try self.pendingFilter(a);
@@ -162,7 +159,7 @@ pub const Mailbox = struct {
         while (letters.items.len < limit) {
             const ids = try self.queryIds(a, filter, true, position, limit - letters.items.len);
             if (ids.len == 0) break;
-            for (try self.getRecords(a, ids)) |record| {
+            for (try self.getRecords(a, ids, true)) |record| {
                 const letter = decode(a, record) catch |err| switch (err) {
                     error.MailBodyUnavailable => {
                         std.log.warn("mail {s} has no complete supported body", .{try textField(record, "id")});
@@ -178,16 +175,58 @@ pub const Mailbox = struct {
         return letters.toOwnedSlice(a);
     }
 
-    pub fn markHandled(self: Mailbox, a: Allocator, id: []const u8) !void {
-        var patch: std.json.ObjectMap = .empty;
+    /// The caller has durably admitted this input into working history.
+    pub fn acknowledge(self: Mailbox, a: Allocator, id: []const u8) !void {
+        var patch = (try self.trashPatch(a)).object;
         try patch.put(a, "keywords/" ++ handled_keyword, .{ .bool = true });
-        var updates: std.json.ObjectMap = .empty;
-        try updates.put(a, id, .{ .object = patch });
-        const result = try self.call(a, "Email/set", .{
-            .accountId = self.account_id,
-            .update = Value{ .object = updates },
-        });
-        if (!hasKey(result, "updated", id)) return error.InvalidMailReply;
+        try self.updateEmails(a, &.{.{ .id = id, .patch = .{ .object = patch } }});
+    }
+
+    /// Retire acknowledged input and abandoned outbound copies. The caller
+    /// serializes this pass with submission so live drafts cannot be selected.
+    pub fn maintainCorrespondence(self: Mailbox, a: Allocator) !void {
+        var conditions: std.ArrayList(Value) = .empty;
+        try conditions.append(a, try value(a, .{ .notKeyword = state_keyword }));
+        try conditions.append(a, try value(a, .{
+            .operator = "OR",
+            .conditions = .{ .{ .hasKeyword = handled_keyword }, .{ .hasKeyword = outbound_keyword } },
+        }));
+        for ([_][]const u8{ self.history_id, self.archive_id, self.trash_id, self.junk_id }) |id| {
+            if (id.len == 0) continue;
+            try conditions.append(a, try value(a, .{ .operator = "NOT", .conditions = &.{.{ .inMailbox = id }} }));
+        }
+        const filter = try value(a, .{ .operator = "AND", .conditions = conditions.items });
+        var position: usize = 0;
+        while (true) {
+            var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
+            defer scratch.deinit();
+            const temporary = scratch.allocator();
+            const ids = try self.queryIds(temporary, filter, true, position, self.max_get);
+            if (ids.len == 0) break;
+            var retired: std.ArrayList(EmailUpdate) = .empty;
+            for (try self.getRecords(temporary, ids, false)) |record| {
+                const keywords = try field(record, "keywords");
+                if (!boolean(keywords, handled_keyword)) {
+                    const from = try addresses(temporary, record, "from");
+                    if (from.len != 1 or !std.ascii.eqlIgnoreCase(from[0].email, self.address)) continue;
+                }
+                try retired.append(temporary, .{
+                    .id = try textField(record, "id"),
+                    .patch = try self.trashPatch(temporary),
+                });
+            }
+            try self.updateEmails(temporary, retired.items);
+            position += ids.len - retired.items.len;
+        }
+    }
+
+    fn trashPatch(self: Mailbox, a: Allocator) !Value {
+        var folders: std.json.ObjectMap = .empty;
+        try folders.put(a, self.trash_id, .{ .bool = true });
+        var patch: std.json.ObjectMap = .empty;
+        try patch.put(a, "mailboxIds", .{ .object = folders });
+        try patch.put(a, "keywords/$draft", .null);
+        return .{ .object = patch };
     }
 
     /// Discover checkpoint candidates carrying the current marker. The history
@@ -346,7 +385,6 @@ pub const Mailbox = struct {
         contents: union(HistoryKind) { record: HistoryStore.RecordId, checkpoint: u64 },
         current: bool,
     };
-    const HistoryUpdate = struct { id: []const u8, patch: Value };
 
     /// Inventory owned objects in History and Archive and check that the complete
     /// retention selection is present before moving any objects. The mail service
@@ -387,7 +425,7 @@ pub const Mailbox = struct {
         var found_records = retained.valueIterator();
         while (found_records.next()) |found| if (!found.*) return error.InvalidHistory;
 
-        var updates: std.ArrayList(HistoryUpdate) = .empty;
+        var updates: std.ArrayList(EmailUpdate) = .empty;
         for (inventory) |item| {
             const destination: HistoryLocation = switch (item.contents) {
                 .record => |record| if (retained.contains(try historyRecordIdentity(a, record)))
@@ -410,7 +448,7 @@ pub const Mailbox = struct {
                 try patch.put(a, "keywords/" ++ current_keyword, .null);
             if (patch.count() != 0) try updates.append(a, .{ .id = item.id, .patch = .{ .object = patch } });
         }
-        try self.updateHistory(a, updates.items);
+        try self.updateEmails(a, updates.items);
     }
 
     fn historyInventory(self: Mailbox, a: Allocator) ![]const HistoryInventoryItem {
@@ -469,7 +507,7 @@ pub const Mailbox = struct {
         return inventory.toOwnedSlice(a);
     }
 
-    fn updateHistory(self: Mailbox, a: Allocator, updates: []const HistoryUpdate) !void {
+    fn updateEmails(self: Mailbox, a: Allocator, updates: []const EmailUpdate) !void {
         var offset: usize = 0;
         while (offset < updates.len) {
             var batch: std.json.ObjectMap = .empty;
@@ -721,21 +759,19 @@ pub const Mailbox = struct {
         return true;
     }
 
-    /// Submission acceptance does not establish final recipient delivery.
-    pub fn send(self: Mailbox, a: Allocator, outgoing: Outgoing) !Submission {
+    /// Confirm submission and retirement of the outgoing copy, returning its
+    /// native Email ID. Submission does not confirm final recipient delivery.
+    pub fn send(self: Mailbox, a: Allocator, outgoing: Outgoing) ![]const u8 {
         const id = try self.create(a, outgoing);
-        var patch: std.json.ObjectMap = .empty;
-        try patch.put(a, "keywords/$draft", .null);
-        try patch.put(a, try std.fmt.allocPrint(a, "mailboxIds/{s}", .{self.drafts_id}), .null);
-        try patch.put(a, try std.fmt.allocPrint(a, "mailboxIds/{s}", .{self.sent_id}), .{ .bool = true });
         const submitted = try self.invoke(a, "EmailSubmission/set", .{
             .accountId = self.account_id,
             .create = .{ .submission = .{ .identityId = self.identity_id, .emailId = id } },
-            .onSuccessUpdateEmail = .{ .@"#submission" = Value{ .object = patch } },
+            .onSuccessUpdateEmail = .{ .@"#submission" = try self.trashPatch(a) },
         });
         _ = try createdId(submitted.result, "submission");
-        const updated = if (submitted.email_update) |update| hasKey(update, "updated", id) else false;
-        return .{ .mail_id = id, .sent_copy = if (updated) .updated else .unconfirmed };
+        const updated = submitted.email_update orelse return error.InvalidMailReply;
+        if (!hasKey(updated, "updated", id)) return error.InvalidMailReply;
+        return id;
     }
 
     fn create(self: Mailbox, a: Allocator, outgoing: Outgoing) ![]const u8 {
@@ -790,21 +826,45 @@ pub const Mailbox = struct {
     }
 
     /// Preserve the requested order: Email/get need not return query order.
-    fn getRecords(self: Mailbox, a: Allocator, ids: []const []const u8) ![]const Value {
-        const result = try self.call(a, "Email/get", .{
-            .accountId = self.account_id,
-            .ids = ids,
-            .properties = message_properties,
-            .fetchTextBodyValues = true,
-            .fetchHTMLBodyValues = true,
-        });
-        var records = try indexRecords(a, try arrayField(result, "list"));
+    fn getRecords(self: Mailbox, a: Allocator, ids: []const []const u8, body: bool) ![]const Value {
+        var records: std.StringHashMapUnmanaged(Value) = .empty;
         defer records.deinit(a);
+        var offset: usize = 0;
+        while (offset < ids.len) {
+            var count: usize = 0;
+            while (count < @min(self.max_get, ids.len - offset)) {
+                if (try requestSize("Email/get", self.correspondenceGet(ids[offset .. offset + count + 1], body)) > self.max_request) break;
+                count += 1;
+            }
+            if (count == 0) return error.MailRequestTooLarge;
+            const result = try self.call(a, "Email/get", self.correspondenceGet(ids[offset..][0..count], body));
+            for (try arrayField(result, "list")) |record|
+                try records.put(a, try textField(record, "id"), record);
+            offset += count;
+        }
         var ordered: std.ArrayList(Value) = .empty;
         for (ids) |id| {
             if (records.get(id)) |record| try ordered.append(a, record);
         }
         return ordered.toOwnedSlice(a);
+    }
+
+    const CorrespondenceGet = struct {
+        accountId: []const u8,
+        ids: []const []const u8,
+        properties: []const []const u8,
+        fetchTextBodyValues: bool,
+        fetchHTMLBodyValues: bool,
+    };
+
+    fn correspondenceGet(self: Mailbox, ids: []const []const u8, body: bool) CorrespondenceGet {
+        return .{
+            .accountId = self.account_id,
+            .ids = ids,
+            .properties = if (body) message_properties else correspondence_properties,
+            .fetchTextBodyValues = body,
+            .fetchHTMLBodyValues = body,
+        };
     }
 
     fn decode(a: Allocator, record: Value) !Letter {
@@ -823,7 +883,7 @@ pub const Mailbox = struct {
         return true;
     }
 
-    /// Submission acceptance is independent of its implicit sent-copy update.
+    /// Keep the submission and its implicit retirement response together.
     const Invocation = struct { result: Value, email_update: ?Value };
 
     fn call(self: Mailbox, a: Allocator, method: []const u8, arguments: anytype) !Value {
@@ -845,10 +905,6 @@ pub const Mailbox = struct {
             if (parts[0] != .string or parts[2] != .string or !std.mem.eql(u8, parts[2].string, "0"))
                 return error.InvalidMailReply;
             if (std.mem.eql(u8, parts[0].string, "error")) {
-                if (std.mem.eql(u8, method, "EmailSubmission/set") and matched != null and email_update == null) {
-                    email_update = parts[1];
-                    continue;
-                }
                 return error.MailMethodFailed;
             }
             if (std.mem.eql(u8, parts[0].string, method)) {
@@ -859,6 +915,7 @@ pub const Mailbox = struct {
                 std.mem.eql(u8, parts[0].string, "Email/set"))
             {
                 if (email_update != null) return error.InvalidMailReply;
+                try checkObjectErrors(parts[1]);
                 email_update = parts[1];
             } else return error.InvalidMailReply;
         }
@@ -897,16 +954,6 @@ pub const Mailbox = struct {
         };
     }
 };
-
-fn indexRecords(a: Allocator, records: []const Value) !std.StringHashMapUnmanaged(Value) {
-    var index: std.StringHashMapUnmanaged(Value) = .empty;
-    errdefer index.deinit(a);
-    for (records) |record| {
-        const entry = try index.getOrPut(a, try textField(record, "id"));
-        if (!entry.found_existing) entry.value_ptr.* = record;
-    }
-    return index;
-}
 
 fn objectLimit(record: Value, name: []const u8) !usize {
     const item = try field(record, name);

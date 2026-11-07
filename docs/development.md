@@ -30,7 +30,7 @@ Decode external protocols in their owning components and give execution code typ
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
-[Communication](../packages/agent_contracts/src/communication.zig) defines incoming observations with `from` IDs and outgoing messages addressed by recipient ID. [Inbox](../packages/agent_contracts/src/inbox.zig) owns the incoming-message and receipt envelope and records consumption. Construct these typed values at their producing boundary. The email adapter owns the internal domain and conversion between IDs and native addresses.
+[Communication](../packages/agent_contracts/src/communication.zig) defines incoming observations with `from` IDs and outgoing messages addressed by recipient ID. [Inbox](../packages/agent_contracts/src/inbox.zig) owns the incoming-message and receipt envelope and acknowledges durable admission. Construct these typed values at their producing boundary. The email adapter owns the internal domain and conversion between IDs and native addresses.
 
 [Input](../packages/agent/src/input.zig) owns event groups, startup observations, assignments, reports, handovers, execution state, and YAML rendering. Its records incorporate shared incoming messages; temporary requests add current state and instructions. [Work](../packages/agent/src/work.zig) owns delivery and activation lifetimes inside the core. The [input contract](input.md) documents the serialized fields.
 
@@ -64,9 +64,9 @@ Keep outgoing messages, internal reports, handovers, and diagnostics distinct. O
 
 The session registry synchronizes contexts, queues, and activation ownership. The kernel coordinates adapter operations and worker task scopes. Context retains typed event groups, complete model/tool exchanges, and handovers with their history-segment identities, deriving and caching their native model-message view as entries change. Append a fresh temporary request for each inference. Keep current state and summary instructions in that request.
 
-Persist the core and every still-retained work context, preserving complete model/tool exchanges and unread internal assignments and reports. Restore saved understanding and session relationships with fresh startup activations and the current system prompt. Execution ownership, external deliveries, receipts, and process handles belong to the running process. Loading history must not execute historical tool calls. Storage failures end the runtime through the normal execution failure path.
+Persist the core and every still-retained work context, preserving complete model/tool exchanges and unread internal assignments and reports. Confirm the selected incoming observations and their checkpoint before acknowledging their receipts; acknowledgement releases transport copies independently of task completion. Restore saved understanding and session relationships with fresh startup activations and the current system prompt. Execution ownership, external deliveries, receipts, and process handles belong to the running process. Loading history must not execute historical tool calls. Storage failures end the runtime through the normal execution failure path.
 
-Keep history encoding, segment identity, committed paths, and retention selection with the agent. Use `HistoryStore` for grouped records, checkpoint publication, and maintenance against that selection. Adapters own native identifiers, placement, protocol limits, and result correlation; storage services own expiry and space reclamation under deployment policy. Keep working-history retention separate from correspondence and host artifacts.
+Keep history encoding, segment identity, committed paths, and retention selection with the agent. Use `HistoryStore` for grouped records, checkpoint publication, and maintenance against that selection. Adapters own native identifiers, placement, protocol limits, and result correlation; storage services own expiry and space reclamation under deployment policy. Keep communication-copy retirement, working-history retention, and host-artifact lifecycles with their owning components.
 
 Confirm records before checkpoint publication. Serialize writes and maintenance through the session registry, and reconcile storage against a confirmed checkpoint before retiring records. Complete native inventory and selection checks before moving objects. The architecture guide defines [history representation and save boundaries](architecture.md#persistent-working-history), [retention selection](architecture.md#history-retention), and the [email storage lifecycle](architecture.md#mail-retention).
 
@@ -74,7 +74,7 @@ Infrastructure and execution failures propagate to the application's task scope,
 
 The application serves health and reception status. The mail server's receiving boundary uses that status before accepting incoming SMTP correspondence. Keep this gate separate from model reasoning and in-process work queues; its readiness check does not reserve an activation or establish an atomic delivery transaction.
 
-Follow the architecture contracts for [message projection and addressing](architecture.md#email-boundary), [mail processing markers](architecture.md#mail-processing-markers), and [context lifetime](architecture.md#activation-completion-and-context-release).
+Follow the architecture contracts for [message projection and addressing](architecture.md#email-boundary), [mail intake and acknowledgement](architecture.md#mail-intake-and-acknowledgement), and [context lifetime](architecture.md#activation-completion-and-context-release).
 
 ## Repository and build
 
@@ -101,14 +101,14 @@ Build the application and exercise the affected behavior through communication a
 
 | Area changed | Checks |
 | --- | --- |
-| Execution | Joint processing of queued events, budget-limited FIFO admission, tool-result continuation, whole-group handoff and receipt consumption, direct-parent reports, and context release |
+| Execution | Joint processing of queued events, budget-limited FIFO admission, durable acknowledgement of only the admitted prefix before model work, tool-result continuation, whole-group handoff, direct-parent reports, and context release |
 | Failure handling | Required-capability failures stop the runtime and join concurrent work; ordinary tool outcomes allow continuation |
 | Communication | Explicit zero, one, or multiple sends; correspondent ID lifetime; incoming `from` IDs and outgoing tool arguments retained in history; final text without implicit sending |
-| Email | Same-domain address conversion, From-address filtering across query pages, marked outbound messages, standalone submissions, and independent intake regardless of thread, read, starred, or archived state |
+| Email | Same-domain address conversion, From-address filtering and unsupported-body skips across query pages, confirmed standalone submission and copy retirement, and independent intake regardless of thread, read, starred, or archived state |
 | Service | Health and reception status during startup, operation, and shutdown; SMTP rejection when reception is closed |
 | History and restart | Complete event groups, model/tool exchanges, and unread internal observations survive restart; model output and media round-trip; forks share inherited segment prefixes; compaction starts a new segment with session relationships preserved; metadata queries discover groups and selected reads preserve order; body hashes, predecessor keys, scopes, and committed counts validate history; failed creates prevent checkpoint publication; uncommitted suffixes stay outside restored history; numeric revision selects the current checkpoint after interruption; unchanged saves reuse publication; startup uses current state; old activations, external deliveries, receipts, and tool calls are not replayed |
-| History maintenance | Current groups remain writable; sealed inherited prefixes restore from Archive; unreferenced records, obsolete observations, and old checkpoints enter Trash; selected records survive maintenance; Ivenna leaves communication mail and existing Trash alone; maintenance failures stop the runtime |
-| Mail processing | Private consumption and outbound markers, receipt ownership, and affected retention behavior |
+| History maintenance | Current groups remain writable; sealed inherited prefixes restore from Archive; unreferenced records, obsolete observations, and old checkpoints enter Trash; selected records survive maintenance; existing Trash remains with the mail service; maintenance failures stop the runtime |
+| Mail processing | Durable input acknowledgement, receipt release before forks and final responses, retirement of acknowledged copies and abandoned outgoing drafts, preservation of pending input and in-progress sends, and service-owned Trash expiry |
 | Model-facing interfaces | Record and request serialization, response variants, tool selection, and complete-payload budget accounting |
 
 Report the checks performed. Distinguish reconstruction of understanding from execution recovery.

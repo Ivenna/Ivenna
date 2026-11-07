@@ -9,6 +9,7 @@ Choose a guide for your task:
 | Follow development conventions, build from source, and validate changes | [Development guide](development.md) |
 | Prepare, run, and update the supplied local development environment | [Local development](../dev/README.md) |
 | Configure runtime services, choose storage, and start Ivenna | [Running guide](running.md) |
+| Understand communication-copy retirement | [Communication copies](running.md#communication-copies) |
 | Understand history retention and service cleanup | [Working history](running.md#working-history) |
 | Back up or transfer working history | [Backups and transfers](running.md#backups-and-transfers) |
 | Preserve host output and deployment files | [Host output and deployment files](running.md#host-output-and-deployment-files) |

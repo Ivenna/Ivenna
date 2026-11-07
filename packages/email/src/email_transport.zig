@@ -26,14 +26,12 @@ pub const EmailTransport = struct {
         const recipients = try scratch.alloc(Mail.Address, message.recipients.len);
         for (message.recipients, recipients) |id, *recipient|
             recipient.* = .{ .email = try self.mailbox.addressing.address(scratch, id) };
-        const submission = try self.mailbox.send(scratch, .{
+        const mail_id = try self.mailbox.send(scratch, .{
             .to = recipients,
             .subject = "Ivenna",
             .body = message.text,
         });
-        if (submission.sent_copy == .unconfirmed)
-            std.log.warn("mail {s} accepted for submission; sent-copy update unconfirmed", .{submission.mail_id});
-        return .{ .reference = try submissionReference(a, self.mailbox.*, submission.mail_id) };
+        return .{ .reference = try submissionReference(a, self.mailbox.*, mail_id) };
     }
 
     fn participantIds(self: *EmailTransport, a: Allocator, addresses: []const Mail.Address) ![]const []const u8 {

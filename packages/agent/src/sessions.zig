@@ -52,7 +52,7 @@ pub const Registry = struct {
     mutex: std.Io.Mutex = .init,
     core: *Session,
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
-    noticed: std.StringHashMapUnmanaged(enum { scheduled, handled }) = .empty,
+    noticed: std.StringHashMapUnmanaged(enum { scheduled, acknowledged }) = .empty,
     reserved: usize = 0,
     next_session_id: u64 = 2,
 
@@ -100,14 +100,14 @@ pub const Registry = struct {
             }
             const delivery = try Delivery.create(allocator, .{ .startup = .{
                 .observed_at_unix_ms = std.Io.Clock.real.now(io).toMilliseconds(),
-            } }, &.{});
+            } }, null);
             errdefer delivery.destroy(allocator);
             try session.pending.append(allocator, delivery);
         }
         if (saved) |retained| for (retained.sessions) |record| {
             const session = self.sessions.get(record.session_id).?;
             for (record.observations) |event| {
-                const delivery = try Delivery.create(allocator, event, &.{});
+                const delivery = try Delivery.create(allocator, event, null);
                 errdefer delivery.destroy(allocator);
                 try session.pending.append(allocator, delivery);
             }
@@ -147,7 +147,7 @@ pub const Registry = struct {
         if (receipt) |key| if (self.noticed.contains(key)) return false;
         const active_count = if (session.active) |activation| deliveryCount(activation.deliveries.items) else 0;
         if (deliveryCount(session.pending.items) + active_count + session.return_slots >= self.max_contexts) return false;
-        const delivery = try Delivery.create(self.allocator, .{ .input = incoming.input }, if (receipt) |key| &.{key} else &.{});
+        const delivery = try Delivery.create(self.allocator, .{ .input = incoming.input }, receipt);
         errdefer delivery.destroy(self.allocator);
         try session.pending.ensureUnusedCapacity(self.allocator, 1 + session.return_slots);
         const notice_key = if (receipt) |key| try self.allocator.dupe(u8, key) else null;
@@ -217,15 +217,10 @@ pub const Registry = struct {
         try work.session.pending.ensureUnusedCapacity(self.allocator, work.session.return_slots + 1);
         const child = try self.allocator.create(Session);
         errdefer self.allocator.destroy(child);
-        var receipts: std.ArrayList([]const u8) = .empty;
-        defer receipts.deinit(self.allocator);
-        for (work.activation.deliveries.items) |item| {
-            try receipts.appendSlice(self.allocator, item.receipts);
-        }
         const delivery = try Delivery.create(self.allocator, .{ .assignment = .{
             .task = request.task,
             .from_session = work.session.session_id,
-        } }, receipts.items);
+        } }, null);
         errdefer delivery.destroy(self.allocator);
         child.* = .{
             .session_id = self.next_session_id,
@@ -397,18 +392,14 @@ pub const Registry = struct {
         };
     }
 
-    /// Finishing an activation releases idle context independently of stored
-    /// correspondence and explicit communication effects.
+    /// Finish the activation and report to its parent when present.
+    /// Context release follows remaining work, children, and borrowed workers.
     pub fn finish(self: *Registry, work: Work, text: ?[]const u8) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
         try self.notifyParent(session, text orelse "");
-        for (work.activation.deliveries.items) |delivery|
-            for (delivery.receipts) |key| {
-                self.noticed.getPtr(key).?.* = .handled;
-            };
         session.active = null;
         work.activation.destroy(self.allocator);
         self.releaseIdle(session);
@@ -427,11 +418,19 @@ pub const Registry = struct {
     fn notifyParent(self: *Registry, session: *Session, text: []const u8) !void {
         const target = session.parent_session_id orelse return;
         const parent = self.sessions.get(target).?;
-        const report = try Delivery.create(self.allocator, .{ .report = .{ .from_session = session.session_id, .text = text } }, &.{});
+        const report = try Delivery.create(self.allocator, .{ .report = .{ .from_session = session.session_id, .text = text } }, null);
         std.debug.assert(session.return_reserved and parent.return_slots > 0);
         session.return_reserved = false;
         parent.return_slots -= 1;
         parent.pending.appendAssumeCapacity(report);
+    }
+
+    /// Keep acknowledged receipts tracked until polling confirms their absence:
+    /// an in-progress poll can still return its earlier snapshot.
+    pub fn acknowledged(self: *Registry, receipt: []const u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        self.noticed.getPtr(receipt).?.* = .acknowledged;
     }
 
     pub fn reconcile(self: *Registry, waiting: []const Incoming) !void {
@@ -446,7 +445,7 @@ pub const Registry = struct {
         defer absent.deinit(self.allocator);
         var notices = self.noticed.iterator();
         while (notices.next()) |entry| {
-            if (entry.value_ptr.* != .handled) continue;
+            if (entry.value_ptr.* != .acknowledged) continue;
             if (!present.contains(entry.key_ptr.*)) try absent.append(self.allocator, entry.key_ptr.*);
         }
         for (absent.items) |key| if (self.noticed.fetchRemove(key)) |entry| self.allocator.free(entry.key);
