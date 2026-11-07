@@ -41,7 +41,9 @@ You can use your client's reply action or compose a new message. Ivenna relates 
 
 Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. Its focuses share the host and memory; each work focus returns its result to the focus that created it. See [work ownership](architecture.md#forks-and-work-ownership) for details.
 
-The core and still-retained work contexts survive restart. Long histories can be condensed into handovers, and detailed work contexts can be released after the work no longer needs them. Autonomous memory, correspondence, and the remaining histories provide material for continued understanding. Processing leaves correspondence in its existing folders. See [data and retention](running.md#data-and-retention) for storage and cleanup.
+A work focus can return its result while the broader task remains open. The runtime releases its context once it has no pending work or child work. Long histories can be condensed into handovers, so continued work uses retained understanding and autonomous memory.
+
+Working history no longer needed for continuation moves to Trash, where the mail service controls deletion. Ivenna has no tool for looking up earlier working histories. Processing leaves correspondence in its existing folders. See [data and retention](running.md#data-and-retention) for storage and cleanup.
 
 ## After interruption
 

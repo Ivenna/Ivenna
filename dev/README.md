@@ -18,7 +18,7 @@ cp -n .env.example .env
 
 Set `LLM_API_KEY` and configure the mail and memory connections. The sample settings match the local services below. To use another [mail service](../docs/running.md#mail-service) or [memory workspace](../docs/running.md#memory-service), configure those connections and prepare only the services you run locally.
 
-The kernel authenticates with `MAIL_*`; the [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`. The adapter uses that domain to resolve correspondent IDs, presenting each address's local part to the model. Keep local account credentials aligned with the private [mail provisioning plan](#configuring-mail).
+The kernel authenticates with `MAIL_*`; the [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`. Keep local account credentials aligned with the private [mail provisioning plan](#configuring-mail).
 
 The kernel, Compose, and memory preparation script use the exported configuration. Load `.env` in each terminal used for these commands, and reload it after editing its values:
 
@@ -43,7 +43,7 @@ Create only the corresponding volume when using one local service. Existing setu
 
 ## Configuring mail
 
-Stalwart stores accounts and receiving policy in its data volume. Prepare a private provisioning plan before first use:
+Stalwart stores accounts, receiving rules, and retention settings in its data volume. Prepare a private provisioning plan from [provision.example.ndjson](mail/provision.example.ndjson) before first use:
 
 ```sh
 cp -n dev/mail/provision.example.ndjson dev/mail/provision.ndjson
@@ -58,7 +58,13 @@ Set the account credentials in the plan and put the matching kernel and operator
 | `operator@ivenna.test` | Send messages and read Ivenna's mail | `operator-local-password` |
 | `admin@ivenna.test` | Stalwart administration | `admin-local-password` |
 
-The plan also defines the `ivenna-ready` script and its `MtaStageRcpt` rule. Set the script's recipient to Ivenna's address and its readiness URL to an endpoint reachable from the mail container. The example uses `ivenna@ivenna.test` and `http://host.containers.internal:8090/readyz`; Compose maps that host name to the host. Keep the address and URL aligned with `MAIL_ADDRESS` and `SERVICE_ADDRESS`. See [reception readiness](../docs/running.md#service-status-and-reception) for the status interface.
+The plan's `ivenna-ready` script runs during SMTP `RCPT` handling through its `MtaStageRcpt` rule. Set the script's recipient to Ivenna's address and its readiness URL to an endpoint reachable from the mail container. The example uses `ivenna@ivenna.test` and `http://host.containers.internal:8090/readyz`; Compose maps that host name to the host. Keep the address and URL aligned with `MAIL_ADDRESS` and `SERVICE_ADDRESS`.
+
+The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. JMAP imports and delivery between accounts through the same server's JMAP interface bypass this gate; use the SMTP path for correspondence. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
+
+For [history retention](../docs/running.md#working-history), Ivenna moves unreferenced records to Trash and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days). When updating an existing private plan, copy or update that operation from the example before provisioning.
+
+This [Stalwart policy](https://stalw.art/docs/email/settings/maintenance/) applies server-wide to Trash and Junk, including ordinary mail, and runs while the kernel is stopped. Auto-expunge follows the server's configured schedule, which is daily by default. Expunging credits account quota; blob cleanup and physical disk reclamation follow later, as described in [Stalwart storage maintenance](https://stalw.art/docs/storage/maintenance/).
 
 To apply the initial plan or later edits, stop the kernel, load the updated `.env`, and run:
 
@@ -79,11 +85,7 @@ The default local endpoints are:
 | Authenticated SMTP submission | `127.0.0.1:2525` |
 | Stalwart administration | `http://127.0.0.1:8088/admin` |
 
-Published ports bind to loopback. The plan requires authenticated submission with a matching sender; its listener, spam, and rate policies are defined in the plan. Stalwart stores mail, accounts, and configuration in the external volume, which remains after the Compose containers are removed.
-
-The supplied readiness script rejects Ivenna's recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too.
-
-This gate runs during SMTP `RCPT` handling. JMAP imports and delivery between accounts through the same server's JMAP interface bypass it. Use the gated SMTP path for correspondence. Readiness is a precheck; the kernel can stop after a successful check or accepted delivery.
+Published ports bind to loopback. The SMTP plan requires authenticated submission with a matching sender. Mail, accounts, and configuration persist in the external volume after the Compose containers are removed.
 
 ## Configuring memory
 
@@ -207,7 +209,7 @@ Source changes inside the memory image require a [rebuild](#updating-the-kernel-
 
 | Location | Contents |
 | --- | --- |
-| Stalwart volume, `ivenna-mail` by default | Correspondence, grouped history records, checkpoints, accounts, and Stalwart configuration |
+| Stalwart volume, `ivenna-mail` by default | Correspondence, current and archived history records, checkpoints, Trash, accounts, and Stalwart configuration |
 | Memory volume, `ivenna-memory` by default | Shared memory rooms and entries |
 | `.env` | Kernel and local service settings and credentials |
 | `dev/mail/provision.ndjson` | Private mail configuration plan |

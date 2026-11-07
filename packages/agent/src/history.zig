@@ -94,10 +94,11 @@ const Checkpoint = struct {
 const CachedScope = struct {
     group: []const u8,
     keys: std.ArrayList(Key) = .empty,
+    active: bool = false,
 };
 const CachedObservation = struct { scope: Scope, key: Key };
 
-/// Groups and keys from the last successfully loaded or saved active graph.
+/// Groups and keys from the last successfully loaded or saved checkpoint.
 /// The arena owns the complete cache.
 const Cache = struct {
     arena: std.heap.ArenaAllocator,
@@ -144,6 +145,7 @@ pub const Persistence = struct {
         defer owners.deinit(a);
         for (checkpoint.sessions) |session| {
             try registerScope(&candidate, &owners, a, .{ .session_id = session.session_id, .epoch = session.epoch }, session.group);
+            candidate.scopes.getPtr(.{ .session_id = session.session_id, .epoch = session.epoch }).?.active = true;
             var seen: std.AutoHashMapUnmanaged(Scope, void) = .empty;
             defer seen.deinit(a);
             for (session.history) |span| {
@@ -292,6 +294,7 @@ pub const Persistence = struct {
         for (ordered, sessions) |session, *saved| {
             const current: Scope = .{ .session_id = session.session_id, .epoch = session.epoch };
             const group = try builder.group(current);
+            candidate.scopes.getPtr(current).?.active = true;
             var spans: std.ArrayList(Span) = .empty;
             var seen: std.AutoHashMapUnmanaged(Scope, void) = .empty;
             defer seen.deinit(a);
@@ -332,6 +335,28 @@ pub const Persistence = struct {
         try self.store.save(document);
         std.mem.swap(Cache, &self.cache, &candidate);
         self.published_checkpoint_digest = candidate_digest;
+    }
+
+    /// Pass the confirmed checkpoint's selected records and current writable
+    /// groups to storage.
+    pub fn maintain(self: *Persistence, a: Allocator) !void {
+        std.debug.assert(self.published_checkpoint_digest != null);
+        var active_groups: std.ArrayList([]const u8) = .empty;
+        defer active_groups.deinit(a);
+        var records: std.ArrayList(Store.RecordId) = .empty;
+        defer records.deinit(a);
+        var scopes = self.cache.scopes.iterator();
+        while (scopes.next()) |entry| {
+            const scope = entry.value_ptr;
+            if (scope.active) try active_groups.append(a, scope.group);
+            for (scope.keys.items) |key| try records.append(a, .{ .group = scope.group, .key = key });
+        }
+        var observations = self.cache.observations.valueIterator();
+        while (observations.next()) |observation| {
+            const scope = self.cache.scopes.get(observation.scope).?;
+            try records.append(a, .{ .group = scope.group, .key = observation.key });
+        }
+        try self.store.maintain(a, .{ .active_groups = active_groups.items, .records = records.items });
     }
 };
 

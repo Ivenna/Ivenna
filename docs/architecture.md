@@ -12,7 +12,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
 | [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activations, forks, and retained history; own model-input rendering, execution policy, and model-facing resources |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
-| [packages/email](../packages/email/src/root.zig) | Implement communication and working-history storage within the mail account, owning native records, correspondent addressing, message projection, checkpoint publication, and processing markers |
+| [packages/email](../packages/email/src/root.zig) | Implement communication and working-history storage within the mail account, owning native records, correspondent addressing, message projection, checkpoint publication, history folder placement, and processing markers |
 | [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, validate Responses output, and apply model content limits |
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own shell execution, process cleanup, logs, and returned output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
@@ -54,11 +54,11 @@ Shared [communication types](../packages/agent_contracts/src/communication.zig) 
 | --- | --- | --- |
 | [Inbox](../packages/agent_contracts/src/inbox.zig) | Poll `Inbox.Incoming` messages with opaque receipts and record consumption | Email integration |
 | [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Submit explicit outgoing messages using correspondent IDs | Email integration |
-| [HistoryStore](../packages/agent_contracts/src/history.zig) | Load and save the current checkpoint; allocate groups, discover record metadata, and read and create records in batches | Email integration |
+| [HistoryStore](../packages/agent_contracts/src/history.zig) | Load and save the current checkpoint; allocate groups, discover record metadata, read and create records in batches, and maintain the selected history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure the encoded request, and apply model content limits | Responses adapter |
 | [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host and Memory |
 
-The email integration uses the configured mail account as programmatic storage for communication records and working history over one shared mail client. A dedicated folder separates history from correspondence; private markers select history records, identify runtime-created outgoing messages, and track input consumption. The kernel uses these operations without inspecting mail headers, folders, or native delivery identifiers.
+The email integration uses the configured mail account as programmatic storage for communication records and working history over one shared mail client. Dedicated history folders separate working records and sealed segments from correspondence; private markers select history records, identify runtime-created outgoing messages, and track input consumption. The kernel uses these operations without inspecting mail headers, folders, or native delivery identifiers.
 
 The email adapter supplies `Inbox.Incoming` with a complete `Communication.IncomingMessage` and an opaque consumption receipt. The receipt identifies the native letter within the configured account and stays outside model input. Inside the core, [Work](../packages/agent/src/work.zig) owns the accepted delivery's event and receipts; Sessions tracks receipts to prevent duplicate intake while messages remain visible to polling. A fork's assignment can hold the receipts of several original inputs. The kernel records their consumption through `Inbox` when processing completes. Model-facing input and communication use the shared contracts independently of mail records or thread identifiers.
 
@@ -66,7 +66,7 @@ The application owns service, kernel, and shutdown tasks. The [kernel](../packag
 
 ## Service and reception
 
-The application discovers the mail account, checks memory, and initializes the kernel, including history loading and startup activation setup. It then binds `SERVICE_ADDRESS` and starts kernel tasks. The kernel opens reception before dispatching the startup activations; readiness does not wait for their model work to finish.
+The application discovers the mail account, checks memory, and initializes the kernel, including history loading and startup activation setup. It then binds `SERVICE_ADDRESS` and starts kernel tasks. The kernel completes initial history maintenance before opening reception and dispatching the startup activations; readiness does not wait for their model work to finish.
 
 While the listener is running, `GET /healthz` reports that the HTTP service is responding. `GET /readyz` returns success with `X-Ivenna-Ready: true` only while reception is open; otherwise it returns `503`. Closing is terminal for that kernel instance. The status endpoint reads this lifecycle state; it does not perform fresh dependency checks or reserve processing capacity.
 
@@ -118,9 +118,9 @@ Session identifiers and parent relationships persist with retained contexts. The
 
 Engine completes each tool batch with one result per call. Sessions copies accepted model output, including reasoning items, and tool results into retained history before the model-round arena ends. A published fork ends the caller's activation; otherwise, tool results feed another round. Intermediate assistant text and complete exchanges remain in history.
 
-An ordinary final response without tool calls completes the selected group. The kernel records consumption for every input receipt, then completes the deliveries in Sessions. Receipts follow successive forks and are consumed once at the final worker; returning reports do not consume them again. A work session's combined final text, including empty text, is copied into one report delivery for its direct parent. Core final text remains internal. Sending occurs only when a `send_message` tool call executes, so an activation can submit several messages or none.
+An ordinary final response without tool calls completes the selected group. This ends execution of that activation, without certifying that the broader task succeeded. The kernel records consumption for every input receipt, then completes the deliveries in Sessions. Receipts follow successive forks and are consumed once at the final worker; returning reports do not consume them again. A work session's combined final text, including empty text, is copied into one report delivery for its direct parent. Core final text remains internal. Sending occurs only when a `send_message` tool call executes, so an activation can submit several messages or none.
 
-Sessions checks active and queued deliveries, children, and worker ownership before releasing a work context. Children retain an idle parent without occupying a work slot; a worker's borrow keeps its session alive until the worker returns. A queued report owns its text independently of the child's context and model-round arena.
+Sessions releases a work context when it has no active or queued deliveries, children, or worker borrows. Children retain an idle parent without occupying a work slot; a worker's borrow keeps its session alive until the worker returns. A queued report owns its text independently of the child's context and model-round arena. Its `from_session` identifies the source without retaining that source's full working history. Releasing the context removes the session from subsequent checkpoints, so it is no longer scheduled or restored at startup.
 
 The permanent core stays available between activations. Its context is summarized when it needs compaction.
 
@@ -163,11 +163,11 @@ Each entry retains its segment identity and either a complete admitted `Input.Re
 
 Records use compact UTF-8 ZON bodies. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. Segment identity and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal assignments and reports are stored together in a separate immutable observation-array record in the session's current group.
 
-The checkpoint contains the next session identifier and each retained session's identity, parent relationship, generation, epoch, current group, and ordered spans. An optional key selects the unread observation array in the current group; its text stays outside the checkpoint. Appending advances a span's head and count without adding a per-entry reference. Releasing a context removes its session from the checkpoint. Earlier records and checkpoints have a separate [retention lifecycle](#mail-retention).
+The checkpoint contains the next session identifier and each retained session's identity, parent relationship, generation, epoch, current group, and ordered spans. An optional key selects the unread observation array in the current group; its text stays outside the checkpoint. Appending advances a span's head and count without adding a per-entry reference. The latest confirmed checkpoint selects both the contexts restored at startup and the records kept by [history maintenance](#history-retention).
 
 ### Saving and restoration
 
-`HistoryStore` allocates opaque groups, discovers record metadata for requested groups, reads selected records in order, creates records in batches, and loads and saves checkpoint bytes. The agent owns segment identity, record encoding, content keys, order, and committed paths. The adapter owns group representation, native locators, request limits, and result correlation. Native locators are used during retrieval and do not appear in the checkpoint.
+`HistoryStore` provides grouped record operations, checkpoint loading and publication, and maintenance against a retention selection. The agent owns segment identity, record encoding, content keys, order, committed paths, and retention selection. The adapter owns group representation, native locators, placement, request limits, and result correlation. Native locators do not appear in the checkpoint.
 
 The runtime saves after activation admission, accepted complete model/tool batches, compaction, fork publication, and context release. A save encodes and hashes records to compare each segment against its cached prefix, then creates new occurrences and changed unread-observation records in batches. Each batch holds up to 32 records and about 1 MiB of encoded bodies, allowing a single larger record. All required creates must be confirmed before publishing the checkpoint. An interrupted or unconfirmed create can leave records outside the selected paths; neither exactly-once creation nor archive-wide deduplication is guaranteed.
 
@@ -177,11 +177,21 @@ Restoration discovers metadata for every group named by the checkpoint. The code
 
 Delivery and activation objects, consumption receipts, worker ownership, and host process handles are outside the checkpoint. The [startup contract](#startup-and-interruption) describes reconstruction and interruption semantics. Storage and decoding failures end startup or execution rather than silently starting with empty history. History search and model tools for retrieving earlier records are unimplemented.
 
+### History retention
+
+A retained session appends to its current segment. Compaction seals that segment and starts another; forks can continue to reference a sealed segment's inherited prefix. Releasing a context removes its session from the next checkpoint, while records shared with another retained context remain selected. Earlier checkpoints are not restoration roots.
+
+The intake loop runs maintenance before opening reception. After that, it checks between polls whether at least 60 seconds have elapsed since the previous maintenance pass. The registry holds its lock while saving the current contexts and reconciling storage, so maintenance uses a confirmed checkpoint and cannot overlap record creation or publication.
+
+The codec derives `HistoryStore.Retention` from the last successfully loaded or saved checkpoint. `active_groups` names each retained session's current writable group. `records` names every selected `(group, key)`, including inherited prefixes and unread internal observations. The adapter uses this complete selection to place records and retire unselected material, without interpreting session identities or checkpoint bodies. Unchanged saves can skip checkpoint publication while still allowing maintenance.
+
+The [email integration](#mail-retention) maps writable, sealed, and unselected records to its history, archive, and Trash folders. The mail service controls how long retired objects remain in Trash and when their storage is reclaimed.
+
 ### Processing cost
 
 With expected hash-map lookup costs, local save work follows the entry bytes referenced across retained sessions plus checkpoint metadata, with an additional sort of the bounded retained-session list. Snapshot comparison still encodes and hashes retained entries, including shared inherited prefixes; unchanged saves skip native publication rather than this local work. Temporary record encoding space holds a bounded batch plus the largest record. The persistent group and key cache covers only the last active graph.
 
-Checkpoint size follows retained sessions and their segment spans rather than accumulated model rounds. A fork adds a segment while reusing its inherited spans; compaction replaces a session's spans with its new handover segment. Old segments can remain active through other forks. Earlier records and checkpoints accumulate separately; their [retention](#mail-retention) is independent of the active graph.
+Checkpoint size follows retained sessions and their segment spans rather than accumulated model rounds. A fork adds a segment while reusing its inherited spans; compaction replaces a session's spans with its new handover segment.
 
 Group discovery can return metadata for uncommitted records and for a parent's later suffix beyond a child's inherited prefix. The codec reads bodies only for the selected committed records. All group identities are available before retrieval, so predecessor traversal needs no storage request per link. Native filtering and pagination costs depend on the backend and accumulated records; the [email storage section](#history-storage) describes the current access path.
 
@@ -189,7 +199,7 @@ Group discovery can return metadata for uncommitted records and for a parent's l
 
 Startup discovers the mail account and checks memory through a read-only `inspect_memory_space` exchange. Both must succeed before the kernel starts. Memory is required throughout operation.
 
-The kernel loads the current checkpoint and its committed records through `HistoryStore`. If no history exists, it creates the core. It rebuilds session identities, parent relationships, and working contexts with the current system prompt. Each session receives a fresh activation containing `startup` with the current observation time. Unread internal assignments and reports are queued after that observation for normal FIFO request-budget admission. Startup activations can run without incoming mail; a newly forked session receives an assignment instead.
+The kernel loads the current checkpoint and its committed records through `HistoryStore`. If no history exists, it creates the core. It rebuilds session identities, parent relationships, and working contexts with the current system prompt. Each session receives a fresh activation containing `startup` with the current observation time. Unread internal assignments and reports are queued after that observation for normal FIFO request-budget admission. The kernel runs [history maintenance](#history-retention) before opening reception. Startup activations can run without incoming mail; a newly forked session receives an assignment instead.
 
 Startup creates fresh execution state without restoring prior activations, external input deliveries, receipts, or processes. Restored parent relationships route future reports to the direct parent. Current request state is authoritative about the new runtime; retained records describe earlier observations. Ivenna chooses how to continue from that evidence. Ordinary unhandled mail remains eligible for intake and can appear again even when an earlier observation survives in history. Correspondent IDs retain their destinations within the configured domain.
 
@@ -197,7 +207,7 @@ A host command, memory change, or submission may have taken effect before its co
 
 The runtime assumes one kernel per Ivenna account. Message submission, mail processing markers, host effects, memory writes, and history storage do not share a transaction.
 
-Communication, memory infrastructure, model execution, compaction, and history storage errors propagate through the kernel's intake and execution tasks. An error returned by either task ends the kernel and its task scope. Defined tool outcomes, including invalid arguments, command failures, and memory-handler domain errors, remain results for the model to interpret.
+Infrastructure failures in communication and memory, along with model execution, compaction, and history storage or maintenance errors, propagate through the kernel's tasks. A task error ends the kernel and its task scope. Defined tool outcomes, including invalid arguments, command failures, and memory-handler domain errors, remain results for the model to interpret.
 
 ## Content and provider boundary
 
@@ -225,31 +235,43 @@ The boundary prefers decoded plain text and falls back to UTF-8 HTML source. Uns
 
 ### History storage
 
-The email integration stores history records and checkpoints as JMAP Email objects in the top-level `Ivenna History` folder through `Email/set`. It discovers that folder by name, a null `parentId`, and a null `role`, and creates it when missing. Each object has a plain-text ZON body carrying the agent's encoding and a self-addressed envelope supplying native identity metadata. Creating these records does not submit correspondence.
+The email integration creates history records and checkpoints as JMAP Email objects in the top-level `Ivenna History` folder through `Email/set`. Selected records from sealed segments move to the top-level `Ivenna Archive` folder. The adapter discovers both folders by name, a null `parentId`, and a null `role`, and creates them when missing. It also discovers or creates the mailbox with role `trash`. Each object has a plain-text ZON body carrying the agent's encoding and a self-addressed envelope supplying native identity metadata. Creating these records does not submit correspondence.
 
 All history objects carry the private `ivenna-state` keyword and an `X-Ivenna-History-Kind` header of `record` or `checkpoint`. The adapter allocates a fresh opaque group token and maps it to an exact keyword of the form `ivenna-history-<token>`. Records carry that group keyword, their `X-Ivenna-History-Key`, and an optional `X-Ivenna-History-Previous`. These headers expose record keys and predecessor metadata for retrieval; searches use native keyword membership rather than header or full-text indexing.
 
-To discover records, the adapter queries the history folder and state marker with the requested group keywords. It fetches record metadata in bulk, validates ownership and group membership, and returns opaque native locators to the agent. After the codec selects committed paths, the adapter reads those locators through bulk `Email/get`, validating group, key, predecessor, self-addressed identity, and complete text bodies. The agent then verifies hashes and decodes payloads. Native `Email.id` values are used only during retrieval.
+To discover records, the adapter queries `Ivenna History` and `Ivenna Archive` with the state marker and requested group keywords. It fetches record metadata in bulk, validates ownership and group membership, and returns opaque native locators to the agent. After the codec selects committed paths, the adapter reads those locators through bulk `Email/get`, validating group, key, predecessor, self-addressed identity, and complete text bodies. Trash is outside continuation reads. The agent then verifies hashes and decodes payloads. Native `Email.id` values serve as transient locators, not checkpoint identities.
 
 Record creation uses bulk `Email/set` and confirms every requested create before returning success. Get and set batches obey the JMAP session's positive `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits, with at most 32 objects per batch. Native request sizes include encoded bodies and protocol fields. Group discovery requests pages of up to 512 IDs independently of get limits, then splits metadata and body reads into bounded native batches.
 
 In the supplied Stalwart 1.0.2, [folder and keyword matching](https://github.com/stalwartlabs/stalwart/blob/v1.0.2/crates/email/src/cache/email.rs) can scan the account's message cache. Grouping limits which metadata and bodies reach the agent; it does not guarantee lookup work proportional only to the selected history.
 
-Current checkpoint candidates carry both `ivenna-state` and `ivenna-current` and a numeric `X-Ivenna-History-Revision`. Discovery queries the history folder and those keywords, then validates returned metadata. Malformed kind or revision metadata on an owned current candidate fails loading. Loading selects the highest revision, independently of mail observation timestamps. Distinct candidates at the same highest revision are an error. Saving confirms creation of the complete new checkpoint before removing current markers from previous heads. An interruption between those steps can leave several heads; the numeric revision identifies the current checkpoint.
+Current checkpoint candidates carry both `ivenna-state` and `ivenna-current` and a numeric `X-Ivenna-History-Revision`. Discovery queries `Ivenna History` and those keywords, then validates returned metadata. Malformed kind or revision metadata on an owned current candidate fails loading. Loading selects the highest revision, independently of mail observation timestamps. Distinct candidates at the same highest revision are an error. Saving confirms creation of the complete new checkpoint; maintenance later moves older checkpoints to Trash. Several candidates can remain between maintenance passes or after interruption, and the numeric revision identifies the current checkpoint.
 
 A failed batch returns an error even when some objects may already have been created. Native group membership identifies candidate records; the checkpoint's committed heads and predecessor keys select the effective history. Mail threads describe correspondence and do not supply Ivenna's segment, fork, or compaction relationships.
 
 ### Mail processing markers
 
-The [email integration](../packages/email/src/root.zig) polls through the [mail client](../packages/email/src/mail.zig) for physical input messages without the private `ivenna-handled` keyword. Intake spans correspondence folders and is independent of read and starred state. The `Ivenna History`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying `ivenna-outbound` or `ivenna-state`. The state marker keeps history records out of intake even if they are moved from the history folder. The runtime marks its outgoing messages with `ivenna-outbound`; correspondents send from separate accounts.
+The [email integration](../packages/email/src/root.zig) polls through the [mail client](../packages/email/src/mail.zig) for physical input messages without the private `ivenna-handled` keyword. Intake spans correspondence folders and is independent of read and starred state. The `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying `ivenna-outbound` or `ivenna-state`. The state marker keeps history records out of intake even if they are moved from those folders. The runtime marks its outgoing messages with `ivenna-outbound`; correspondents send from separate accounts.
 
 Completion sets `ivenna-handled` on the input copy. This records consumption of that physical message; it does not store model or tool progress. Sessions keeps receipt bookkeeping in memory. The completion operation leaves read, answered, and folder state unchanged.
 
 ### Mail retention
 
-Correspondence, immutable history records, and checkpoints have their own retention lifecycles. Normal completion leaves correspondence in its existing folders. History saves retain superseded checkpoints and records after removing old current markers.
+The email adapter maps the codec's [retention selection](#history-retention) to native folder membership. It inventories state objects in `Ivenna History` and `Ivenna Archive` before moving any of them. Ownership requires the runtime's state marker and self-addressed identity metadata. Owned objects must belong to exactly one folder. Maintenance uses bounded requests and classifies each physical object as follows:
 
-The history folder separates working-history records from correspondence for retention decisions; both use the account's storage capacity. Automatic cleanup and quota management remain unimplemented. Operators manage stored records through the mail service. Restoration requires the current checkpoint and all committed records with their bodies, group membership, keys, and validation metadata intact. The [data and retention guide](running.md#data-and-retention) describes preservation requirements, backups, and host-artifact lifetimes.
+| Object | Location and use |
+| --- | --- |
+| Latest checkpoint, or selected record in a current epoch group | `Ivenna History`; current groups can receive new records |
+| Selected record in a sealed group | `Ivenna Archive`; it remains available for inherited context and restoration |
+| Unselected record or older checkpoint | Trash; further retention belongs to the mail service |
+
+The adapter retains every physical copy matching a selected `(group, key)`. Unselected records include obsolete observation arrays and uncommitted writes outside the selected paths. They may move directly from `Ivenna History` to Trash. An archived record moves to Trash when it loses its last continuation reference; Archive has no age or capacity policy. The folders organize records by their use in continuation, rather than collecting a complete transcript for each ended session. Record bodies retain session and epoch identities for manual inspection.
+
+Missing selected records, selected records from current writable groups found in Archive, and invalid metadata on owned objects are storage errors detected before folder updates. Trash is excluded from both inventory and continuation reads.
+
+Moving an older checkpoint to Trash also removes its current marker. The mail service then applies the deployment's expiry and storage-reclamation policy, independently of whether Ivenna is running. Ivenna's maintenance leaves correspondence, existing Trash, and host artifacts alone. Account quota monitoring and capacity-driven eviction are unimplemented. Classification failures follow the normal history-storage failure path and end the runtime.
+
+Restoration requires the latest checkpoint and all committed records with their bodies, group membership, keys, and validation metadata intact. The [data and retention guide](running.md#data-and-retention) describes preservation requirements and host-artifact lifetimes.
 
 ## Autonomous memory
 

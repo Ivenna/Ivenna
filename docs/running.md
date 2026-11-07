@@ -46,7 +46,7 @@ Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's star
 
 ## Mail service
 
-Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create messages and update private keywords. Ivenna stores history records and checkpoints in the top-level `Ivenna History` folder, which has no special mail role. It creates that folder when missing, so the account also needs permission to create it. The JMAP session must advertise positive integer `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits; the adapter uses these to bound native requests.
+Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs Sent and Drafts folders and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna History` and `Ivenna Archive` folders and a mailbox with role `trash` when missing; the history folders have no special mail role. The account must permit folder creation. The JMAP session must advertise positive integer `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest` limits; the adapter uses these to bound native requests.
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
@@ -54,11 +54,13 @@ Addresses must use the [supported ASCII dot-atom local parts](communication.md#c
 
 Install the [reception-readiness policy](#service-status-and-reception) on the service's receiving paths before using them for correspondence.
 
-The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working-history records and checkpoints use their own folder while sharing the account's storage capacity. See [data and retention](#data-and-retention) for the records and metadata needed to restore working contexts.
+Configure automatic Trash expiry and cleanup of unreferenced storage in the mail service. These processes must continue independently of the kernel. Choose retention with the provider's full policy scope in mind: Trash and Junk policies can also remove ordinary mail. The [local Stalwart setup](../dev/README.md#configuring-mail) provides a concrete configuration.
+
+The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working history shares the account's storage capacity; [data and retention](#data-and-retention) explains its folder lifecycle and backup requirements.
 
 ### Mail intake
 
-The kernel reads unprocessed correspondence across the account's mail folders, including Archive. The `Ivenna History`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying the runtime's private outgoing or history-state markers. The history-state marker keeps moved history records out of intake as well.
+The kernel reads unprocessed correspondence across the account's mail folders, including the mail client's ordinary Archive folder. The `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying the runtime's private outgoing or history-state markers. The history-state marker keeps moved history records out of intake as well.
 
 Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. Missing, cross-domain, or unsupported From addresses exclude the whole message from intake, leaving its completion marker unchanged. The adapter presents the corresponding IDs and text as an observation.
 
@@ -99,7 +101,7 @@ cd /path/to/workspace
 
 The kernel's startup directory becomes the default directory for host commands. The executable embeds its model-facing resources and can run independently of the source checkout.
 
-Startup discovers the mail account, checks memory with a read-only space inspection, and loads saved working contexts or creates the core. It prepares fresh startup activations before opening reception. These steps must succeed before Ivenna can run. Use one kernel per mailbox. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
+Startup discovers the mail account, checks memory with a read-only space inspection, and loads saved working contexts or creates the core. It queues startup observations and classifies saved history before opening reception. These steps must succeed before Ivenna can run. Use one kernel per mailbox. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
 
 ## Service status and reception
 
@@ -110,7 +112,7 @@ Startup discovers the mail account, checks memory with a read-only space inspect
 | `GET /healthz` | `200 OK` for listener health |
 | `GET /readyz` | `200 OK` with `X-Ivenna-Ready: true` when reception is open; otherwise `503 Service Unavailable` |
 
-Reception opens after startup checks, history loading, and startup activation setup. It closes when the runtime stops or fails. These endpoints report lifecycle state; they do not probe mail or memory on each request. Once the process has exited, its listener is also gone. For a listener reachable at `127.0.0.1:8090`, check the current state with:
+Reception opens after initialization and initial history classification. Startup model work runs with reception open. Reception closes when the runtime stops or fails. These endpoints report lifecycle state; they do not probe mail or memory on each request. Once the process has exited, its listener is also gone. For a listener reachable at `127.0.0.1:8090`, check the current state with:
 
 ```sh
 curl --include http://127.0.0.1:8090/readyz
@@ -140,26 +142,42 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
 
-`DATA_DIR` selects the base directory for host output in the kernel's filesystem. The kernel creates it with private permissions when missing. Changing it selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration. Provisioning files, credentials, and SSH keys belong to deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by that setup.
+### Working history
 
-Host output files remain available after the command and work session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
+The latest checkpoint selects the histories needed to continue the core and retained work sessions. Ivenna classifies its saved history at startup and periodically during operation, placing records according to that checkpoint:
 
-The latest checkpoint selects the saved histories and unread internal observations needed to restore the core and still-retained work sessions. Compaction replaces a session's active history with a handover, and context release removes the session from the checkpoint. Both leave earlier stored records in place. History search and model tools for retrieving earlier records are unimplemented.
+| Location | Contents |
+| --- | --- |
+| `Ivenna History` | Latest checkpoint and selected records in the sessions' current history segments |
+| `Ivenna Archive` | Sealed history still needed by retained contexts |
+| Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
-History records and checkpoints are JMAP Email objects in the top-level `Ivenna History` folder, which has no mail role. For a backup or transfer used for restoration, preserve the current checkpoint and all records it selects, including:
+Archive has no retention deadline. Its records remain available to retained contexts until the checkpoint stops selecting them. A released work session's unique records may go directly to Trash. See [history retention](architecture.md#history-retention) for selection and sharing rules.
+
+After a move to Trash, retention and deletion follow the mail service's policy. Ivenna classifies only its working and archive folders, leaving correspondence and existing Trash alone. Moving records between folders leaves their contents on the service; expiry and physical storage reclamation follow its maintenance policy. Ivenna does not monitor quota or evict history in response to account capacity. A classification failure stops the runtime like other storage failures.
+
+### Backups and transfers
+
+History records and checkpoints are JMAP Email objects. A backup or transfer used for restoration must preserve the latest checkpoint and every record it selects from both history folders, including:
 
 | Applies to | Preserve |
 | --- | --- |
 | Bodies | Exact plain-text ZON content |
-| All history objects | Membership in the top-level `Ivenna History` folder, From and To addresses matching `MAIL_ADDRESS`, `ivenna-state`, and `X-Ivenna-History-Kind` (`record` or `checkpoint`) |
+| All selected history objects | Original membership in `Ivenna History` or `Ivenna Archive`, From and To addresses matching `MAIL_ADDRESS`, `ivenna-state`, and `X-Ivenna-History-Kind` (`record` or `checkpoint`) |
 | Records | `ivenna-history-<token>`, `X-Ivenna-History-Key`, and `X-Ivenna-History-Previous` when present |
-| Current checkpoint candidates | `ivenna-current` and `X-Ivenna-History-Revision` |
+| Current checkpoint candidates | Membership in `Ivenna History`, `ivenna-current`, and `X-Ivenna-History-Revision` |
 
 If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration discovers records through logical groups and keys. An import that preserves bodies alone is insufficient. The prototype provides no storage-format compatibility or migration path.
 
-An interrupted or unconfirmed create can leave extra physical copies or uncommitted suffixes. Group membership does not make those records part of the current history: the checkpoint's committed heads and predecessor keys select it. Exactly-once creation and archive-wide deduplication are not guaranteed.
+Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 
-The history folder lets operators manage correspondence and working history separately while both use the account's storage capacity. Automatic cleanup and quota management are not implemented. See [persistent working history](architecture.md#persistent-working-history) for encoding and restoration, and [mail retention](architecture.md#mail-retention) for storage lifetimes.
+### Host output and deployment files
+
+`DATA_DIR` selects the base directory for host output in the kernel's filesystem. The kernel creates it with private permissions when missing. Changing it selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
+
+Host output files remain available after the command and work session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
+
+Keep provisioning files, credentials, and SSH keys with the deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by the supplied setup.
 
 ## Optional host tools
 

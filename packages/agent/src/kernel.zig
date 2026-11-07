@@ -94,8 +94,10 @@ pub const Kernel = struct {
     }
 
     fn receiveLoop(self: *Kernel, tasks: *Tasks) !void {
+        try self.sessions.maintain();
         if (self.reception.cmpxchgStrong(.starting, .open, .release, .monotonic) != null) return;
         try self.dispatch(tasks);
+        var maintained_at = std.Io.Clock.awake.now(self.io).toMilliseconds();
         while (true) {
             try self.io.checkCancel();
             var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -105,6 +107,11 @@ pub const Kernel = struct {
             try self.sessions.reconcile(waiting);
             for (waiting) |incoming| _ = try self.sessions.accept(incoming);
             try self.dispatch(tasks);
+            const now = std.Io.Clock.awake.now(self.io).toMilliseconds();
+            if (now - maintained_at >= 60_000) {
+                try self.sessions.maintain();
+                maintained_at = std.Io.Clock.awake.now(self.io).toMilliseconds();
+            }
             try self.io.sleep(.fromMilliseconds(self.poll_interval_ms), .awake);
         }
     }

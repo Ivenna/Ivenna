@@ -294,6 +294,22 @@ pub const Registry = struct {
     pub fn save(self: *Registry) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        try self.saveLocked();
+    }
+
+    /// Publish current understanding before reconciling storage. The same lock
+    /// excludes concurrent creates/publication and includes any history changes
+    /// made since a worker's last save.
+    pub fn maintain(self: *Registry) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.saveLocked();
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        try self.history.maintain(arena.allocator());
+    }
+
+    fn saveLocked(self: *Registry) !void {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();

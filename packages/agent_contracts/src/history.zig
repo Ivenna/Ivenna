@@ -2,7 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// Grouped immutable records and the checkpoint identifying retained histories.
-/// The agent owns encoding, occurrence keys, ordering, and committed paths.
+/// The agent owns encoding, occurrence keys, ordering, committed paths, and
+/// retention selection.
 /// Storage owns opaque group IDs and native record locators. Returned data
 /// belongs to a. The caller serializes writes and confirms records before
 /// publishing a checkpoint; errors do not imply that no native write occurred.
@@ -27,6 +28,20 @@ pub const HistoryStore = struct {
         locator: []const u8,
     };
 
+    pub const RecordId = struct {
+        group: []const u8,
+        key: Key,
+    };
+
+    /// The confirmed checkpoint's complete record selection and writable groups.
+    /// Other selected groups are sealed archives; unselected material can be
+    /// retired. Storage owns native placement; disposal after retirement belongs
+    /// to the storage service and its deployment policy.
+    pub const Retention = struct {
+        active_groups: []const []const u8,
+        records: []const RecordId,
+    };
+
     pub const VTable = struct {
         load: *const fn (*anyopaque, Allocator) anyerror!?[]const u8,
         allocateGroup: *const fn (*anyopaque, Allocator) anyerror![]const u8,
@@ -34,6 +49,7 @@ pub const HistoryStore = struct {
         read: *const fn (*anyopaque, Allocator, []const Reference) anyerror![]const []const u8,
         create: *const fn (*anyopaque, Allocator, []const Record) anyerror!void,
         save: *const fn (*anyopaque, []const u8) anyerror!void,
+        maintain: *const fn (*anyopaque, Allocator, Retention) anyerror!void,
     };
 
     pub fn load(self: HistoryStore, a: Allocator) !?[]const u8 {
@@ -66,5 +82,11 @@ pub const HistoryStore = struct {
     /// Publish the complete checkpoint. An error can follow publication.
     pub fn save(self: HistoryStore, document: []const u8) !void {
         return self.vtable.save(self.context, document);
+    }
+
+    /// Reconcile storage against a confirmed checkpoint's complete selection.
+    /// The caller serializes maintenance with record creation and publication.
+    pub fn maintain(self: HistoryStore, a: Allocator, retention: Retention) !void {
+        return self.vtable.maintain(self.context, a, retention);
     }
 };

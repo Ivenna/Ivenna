@@ -38,7 +38,7 @@ Work is defined by a task and the understanding needed to continue it. A session
 
 Execution state coordinates ongoing work in process memory. Retained working contexts persist independently of execution, while communication records which correspondence has been processed. These forms have their own responsibilities and lifecycles.
 
-Activation completion, task completion, context release, and data retention have separate lifecycles. A broader task can remain open after an activation ends.
+A final response completes the activation's event group and returns control; it does not certify task success, and a broader task can remain open. Context release follows the remaining work and session relationships. Storage retention follows the histories selected for continuation. These lifecycles are independent.
 
 ## Core and concurrent attention
 
@@ -73,6 +73,8 @@ An interrupted action may already have affected the world before its result was 
 ## Data ownership
 
 The deployment user owns Ivenna's correspondence, retained working histories, artifacts, and autonomous memory, and chooses where they live. Keep these forms open to inspection, retention, and management within the user's deployment. Storage implementations preserve their distinct ownership and retention needs.
+
+History needed for continuation remains available after it stops accepting new entries. Execution determines which history is still needed; storage implementations organize the records, and storage services apply the deployment's policy for disposal and space reclamation. Correspondence, working history, and host artifacts have separate retention lifecycles.
 
 Diagnostics support troubleshooting and analysis. Keep them separate from the source material and handovers used for continuity.
 
