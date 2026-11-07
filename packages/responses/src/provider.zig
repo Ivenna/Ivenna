@@ -89,6 +89,7 @@ pub const Provider = struct {
         tools: []const WireTool,
         tool_choice: []const u8,
         max_output_tokens: u32,
+        reasoning: struct { effort: Model.ReasoningEffort },
         stream: bool = false,
     };
 
@@ -107,6 +108,7 @@ pub const Provider = struct {
             .tools = tools,
             .tool_choice = if (tools.len == 0) "none" else "auto",
             .max_output_tokens = self.max_output_tokens,
+            .reasoning = .{ .effort = request.reasoning_effort },
         };
     }
 

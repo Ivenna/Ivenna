@@ -19,7 +19,9 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `LLM_API_KEY` | Model API key | Required |
 | `LLM_BASE_URL` | Model API base URL | `https://api.deepseek.com` |
 | `LLM_MODEL` | Model name | `deepseek-flash` |
-| `LLM_MAX_OUTPUT_TOKENS` | Maximum generated tokens per response | `8192` |
+| `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `8192` |
+| `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
+| `LLM_BRANCH_REASONING_EFFORT` | Reasoning effort for ordinary work-session requests | `high` |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | JMAP session URL | `http://127.0.0.1:8088/jmap/session` |
 | `MAIL_ADDRESS` | Kernel address and sending identity; its domain resolves correspondent IDs | Required |
@@ -37,6 +39,8 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it. Numeric kernel settings must be positive. `CONTEXT_COMPACTION_BYTES` must be at least `CONTEXT_REQUEST_BYTES`.
+
+Core and work sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
 
 `MAX_PARALLEL_ATTENTION` and `MAX_ATTENTION_CONTEXTS` are independent. Parents waiting for children retain contexts without occupying execution slots. With `MAX_ATTENTION_CONTEXTS=1`, only the core fits and forking is unavailable. The context limit must also accommodate the sessions already retained in the mailbox; reducing it below that count prevents startup. At capacity, pending mail remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for event limits and scheduling.
 

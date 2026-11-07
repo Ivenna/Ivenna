@@ -6,7 +6,7 @@ This guide sets the intended behavior and interface principles. See the [documen
 
 ## Capabilities and acquired knowledge
 
-Core interfaces expose the body's capabilities to a model with broad prior knowledge, like a knowledgeable person encountering the tools at hand. They should make available actions discoverable and their effects understandable.
+The runtime's interfaces expose the body's capabilities to a model with broad prior knowledge, like a knowledgeable person encountering the tools at hand. They should make available actions discoverable and their effects understandable.
 
 Program choices and general tool use draw on the model's prior knowledge and what it learns through interaction. Its identity, preferences, working methods, and memory organization can develop with that experience.
 
@@ -44,7 +44,7 @@ A final response completes the activation's event group and returns control; it 
 
 ## Core and concurrent attention
 
-One core session coordinates Ivenna throughout the kernel's lifetime. It handles a queue of observations and keeps its turns focused on reception and coordination. It can send a brief message directly; sustained work moves to separate sessions so the core can receive further input. Later messages still enter the core.
+One core session coordinates Ivenna throughout the kernel's lifetime. It relates incoming observations to its retained understanding and shared memory, and can maintain memory or send a brief message directly. Sustained work moves to separate sessions so the core can return to its queue. Later messages still enter the core.
 
 Forking is an explicit model decision available to core and work sessions alike. It passes the whole activation's work to another focus of Ivenna's attention with the complete retained working context, including any earlier handover. The caller's activation ends and it returns to its queue; the child starts an activation for its assignment.
 
@@ -52,9 +52,9 @@ A work session's final text returns one combined result for that activation to t
 
 After a fork, the histories grow independently. The core retains its reception and coordination history; execution detail accumulates in the session carrying out the work. This keeps the core's context useful for further coordination and forks.
 
-The runtime bounds retained contexts and concurrent work globally and preserves scheduling opportunities for the core. Forking returns the core to its queue without waiting for the work session. Core responsiveness depends on keeping coordination turns short as well as scheduling them promptly.
+Separate reasoning settings favor responsive coordination and deeper sustained work. The runtime bounds retained contexts and concurrent work globally and preserves scheduling opportunities for the core. Forking returns the core to its queue without waiting for the work session. Core responsiveness depends on keeping coordination turns short as well as scheduling them promptly.
 
-These contexts share a body: files, memory, communication, and host processes. Sessions account for effects another session may already have produced. Fork assignments and direct-parent reports organize work from the core through its descendants.
+These contexts share a body: files, memory, communication, and host processes. Core and work sessions can recall, record, and organize the same autonomous memory. Ivenna chooses what to remember and how to organize it wherever its attention is focused. Sessions account for effects another session may already have produced.
 
 A work session keeps its context while its work or descendants still need it. The context can be released after completion while the broader task awaits further input. The [architecture guide](architecture.md#activation-completion-and-context-release) describes these lifetimes and how child results are retained until processing.
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const contracts = @import("agent_contracts");
 const Model = contracts.Model;
 const Tools = contracts.Tools;
+const Input = @import("input.zig");
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
@@ -10,9 +11,14 @@ const Allocator = std.mem.Allocator;
 pub const Engine = struct {
     io: std.Io,
     model: Model.Port,
-    tools: []const Tools,
+    shared_tools: []const Tools,
+    work_tools: []const Tools,
+    reasoning: Reasoning = .{},
 
-    pub const Scope = enum { all, coordination };
+    pub const Reasoning = struct {
+        core: Model.ReasoningEffort = .low,
+        branch: Model.ReasoningEffort = .high,
+    };
 
     /// Kernel supplies attention operations without giving tool execution
     /// ownership of sessions or their retained histories.
@@ -28,16 +34,16 @@ pub const Engine = struct {
     };
 
     /// Returned data belongs to a, including model output and tool replies.
-    pub fn turn(self: *Engine, a: Allocator, session_id: u64, history: []const Model.Item, runtime_tools: ?RuntimeTools, coordination_only: bool) !Round {
+    pub fn turn(self: *Engine, a: Allocator, session_id: u64, history: []const Model.Item, runtime_tools: ?RuntimeTools, role: Input.Role) !Round {
         try self.io.checkCancel();
-        const declarations = try self.toolDeclarations(a, if (coordination_only) .coordination else .all);
-        const response = try self.model.next(a, .{ .history = history, .tools = declarations });
+        var request = try self.modelRequest(a, history, role);
+        const response = try self.model.next(a, request);
         var messages: std.ArrayList(Model.Item) = .empty;
         try messages.appendSlice(a, history);
         try messages.appendSlice(a, response.output);
         const reply_start = messages.items.len;
         for (response.calls) |call| {
-            const content = self.invoke(a, session_id, call.name, call.arguments, runtime_tools, coordination_only) catch |err| switch (err) {
+            const content = self.invoke(a, session_id, call.name, call.arguments, runtime_tools, role) catch |err| switch (err) {
                 error.InvalidToolArguments, error.UnknownTool => try Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
                     .@"error" = .{
                         .code = if (err == error.UnknownTool) "unknown_tool" else "invalid_arguments",
@@ -48,7 +54,8 @@ pub const Engine = struct {
             };
             try messages.append(a, .{ .tool_result = .{ .call_id = call.call_id, .content = content } });
         }
-        try self.model.limitToolReplies(a, .{ .history = messages.items, .tools = declarations }, messages.items[reply_start..]);
+        request.history = messages.items;
+        try self.model.limitToolReplies(a, request, messages.items[reply_start..]);
         return .{
             .output = response.output,
             .replies = messages.items[reply_start..],
@@ -56,29 +63,46 @@ pub const Engine = struct {
         };
     }
 
-    fn invoke(self: *Engine, a: Allocator, session_id: u64, name: []const u8, arguments: []const u8, runtime_tools: ?RuntimeTools, coordination_only: bool) !Content {
+    fn invoke(self: *Engine, a: Allocator, session_id: u64, name: []const u8, arguments: []const u8, runtime_tools: ?RuntimeTools, role: Input.Role) !Content {
         if (runtime_tools) |runtime| {
             if (try runtime.invoke(runtime.context, a, name, arguments)) |result| return result;
         }
-        if (coordination_only) return error.UnknownTool;
-        for (self.tools) |tools| {
-            if (try tools.invoke(tools.context, a, session_id, name, arguments)) |result| return result;
+        for (self.capabilities(role)) |group| {
+            for (group) |tools| {
+                if (try tools.invoke(tools.context, a, session_id, name, arguments)) |result| return result;
+            }
         }
         return error.UnknownTool;
     }
 
-    pub fn requestBytes(self: *Engine, a: Allocator, history: []const Model.Item, scope: Scope) !u64 {
-        return self.model.requestBytes(a, .{ .history = history, .tools = try self.toolDeclarations(a, scope) });
+    pub fn requestBytes(self: *Engine, a: Allocator, history: []const Model.Item, role: Input.Role) !u64 {
+        return self.model.requestBytes(a, try self.modelRequest(a, history, role));
+    }
+
+    fn modelRequest(self: *Engine, a: Allocator, history: []const Model.Item, role: Input.Role) !Model.Request {
+        return .{
+            .history = history,
+            .tools = try self.toolDeclarations(a, role),
+            .reasoning_effort = switch (role) {
+                .core => self.reasoning.core,
+                .branch => self.reasoning.branch,
+            },
+        };
+    }
+
+    fn capabilities(self: *const Engine, role: Input.Role) [2][]const Tools {
+        return .{ self.shared_tools, if (role == .branch) self.work_tools else &.{} };
     }
 
     /// The agent owns coordination policy; each registered body capability
     /// supplies its declarations together with its invocation entry point.
-    fn toolDeclarations(self: *Engine, a: Allocator, scope: Scope) ![]const Model.Tool {
+    fn toolDeclarations(self: *Engine, a: Allocator, role: Input.Role) ![]const Model.Tool {
         const coordination = try std.json.parseFromSliceLeaky([]const Model.Tool, a, @embedFile("tools.json"), .{});
-        if (scope == .coordination) return coordination;
         var selected: std.ArrayList(Model.Tool) = .empty;
         try selected.appendSlice(a, coordination);
-        for (self.tools) |capability| try selected.appendSlice(a, capability.declarations);
+        for (self.capabilities(role)) |group| {
+            for (group) |capability| try selected.appendSlice(a, capability.declarations);
+        }
         return selected.toOwnedSlice(a);
     }
 };

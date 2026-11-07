@@ -1,5 +1,6 @@
 const std = @import("std");
 const agent = @import("agent");
+const Model = @import("agent_contracts").Model;
 const responses = @import("responses");
 
 pub const Config = struct {
@@ -21,10 +22,12 @@ pub const Config = struct {
     llm_api_key: []const u8,
     llm_model: []const u8,
     llm_max_output_tokens: u32,
+    llm_reasoning: agent.Engine.Reasoning,
 
     /// Text borrows the process environment, which outlives the application.
     pub fn load(env: *const std.process.Environ.Map) !Config {
         const mail_auth = env.get("MAIL_AUTHORIZATION");
+        const default_reasoning: agent.Engine.Reasoning = .{};
         const config: Config = .{
             .service_address = try serviceAddress(env),
             .data_dir = try nonempty(env, "DATA_DIR", ".ivenna"),
@@ -53,6 +56,10 @@ pub const Config = struct {
             .llm_api_key = try nonempty(env, "LLM_API_KEY", ""),
             .llm_model = try nonempty(env, "LLM_MODEL", responses.Provider.default_model),
             .llm_max_output_tokens = try number(u32, env, "LLM_MAX_OUTPUT_TOKENS", 8192),
+            .llm_reasoning = .{
+                .core = try reasoningEffort(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
+                .branch = try reasoningEffort(env, "LLM_BRANCH_REASONING_EFFORT", default_reasoning.branch),
+            },
         };
         if (config.memory_ssh_config) |path| if (path.len == 0) return error.MissingMemorySshConfig;
         if (config.context_limits.compaction_bytes < config.context_limits.request_bytes)
@@ -74,6 +81,11 @@ pub const Config = struct {
         return value;
     }
 };
+
+fn reasoningEffort(env: *const std.process.Environ.Map, key: []const u8, fallback: Model.ReasoningEffort) !Model.ReasoningEffort {
+    const value = env.get(key) orelse return fallback;
+    return std.meta.stringToEnum(Model.ReasoningEffort, value) orelse error.InvalidReasoningEffort;
+}
 
 fn serviceAddress(env: *const std.process.Environ.Map) !std.Io.net.IpAddress {
     const value = try nonempty(env, "SERVICE_ADDRESS", "0.0.0.0:8090");

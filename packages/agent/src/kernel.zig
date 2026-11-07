@@ -186,7 +186,7 @@ pub const Kernel = struct {
             defer view.deinit();
             var runtime: RuntimeRound = .{ .kernel = self, .work = work };
             defer runtime.deinit();
-            const round = try self.engine.turn(a, session.session_id, view.input, .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role == .core);
+            const round = try self.engine.turn(a, session.session_id, view.input, .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role);
             const committed = try self.sessions.commitRound(work, round.output, round.replies, runtime.plan);
             runtime.committed = true;
             try self.sessions.save();
@@ -202,7 +202,6 @@ pub const Kernel = struct {
     /// stay queued; excluded deliveries return ahead of them when selected
     /// history is installed.
     fn selectActivation(self: *Kernel, a: Allocator, work: Work, history: *const Context, request: Input.Request) !?Selection {
-        const scope: Engine.Scope = if (work.session.role == .core) .coordination else .all;
         var count: usize = 0;
         const deliveries = work.activation.deliveries.items;
         const events = try a.alloc(Input.Event, deliveries.len);
@@ -214,7 +213,7 @@ pub const Kernel = struct {
             var current = request;
             current.state.runtime.queued_inputs += events.len - end;
             const input = try history.requestWithRecord(trial, .{ .session_id = work.session.session_id, .events = events[0..end] }, current);
-            const bytes = try self.engine.requestBytes(trial, input, scope);
+            const bytes = try self.engine.requestBytes(trial, input, work.session.role);
             _ = trial_arena.reset(.retain_capacity);
             if (bytes > self.limits.request_bytes) break;
             count = end;
@@ -268,13 +267,12 @@ pub const Kernel = struct {
     };
 
     fn requestContext(self: *Kernel, a: Allocator, session: *Session) !RequestView {
-        const scope: Engine.Scope = if (session.role == .core) .coordination else .all;
         var view = try self.sessions.snapshot(session);
         errdefer view.deinit();
         const snapshot = try self.sessions.runtimeSnapshot(session);
         const request: Input.Request = .{ .session_id = snapshot.session_id, .state = snapshot.state };
         const input = try view.request(a, request);
-        if (try self.engine.requestBytes(a, input, scope) <= self.limits.request_bytes) return .{ .context = view, .input = input };
+        if (try self.engine.requestBytes(a, input, session.role) <= self.limits.request_bytes) return .{ .context = view, .input = input };
         const summary = try Compaction.summarize(self.engine.model, a, &view, request, self.limits.compaction_bytes, self.limits.handover_bytes);
         var candidate = try view.withHandover(self.allocator, session.session_id, .{ .summary = summary });
         var installed = false;
@@ -284,7 +282,7 @@ pub const Kernel = struct {
         var replacement_request = request;
         replacement_request.state = (try self.sessions.runtimeSnapshot(session)).state;
         const replacement_input = try replacement.request(a, replacement_request);
-        if (try self.engine.requestBytes(a, replacement_input, scope) > self.limits.request_bytes) return error.ContextBudgetExhausted;
+        if (try self.engine.requestBytes(a, replacement_input, session.role) > self.limits.request_bytes) return error.ContextBudgetExhausted;
         try self.sessions.replaceContext(session, candidate);
         installed = true;
         try self.sessions.save();

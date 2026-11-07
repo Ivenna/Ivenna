@@ -12,7 +12,7 @@ pub fn summarize(model: Model.Port, arena: Allocator, context: *const Context, r
     summary_request.state.response = .{ .summary = .{} };
     summary_request.instructions = @embedFile("compaction.md");
     const messages = try context.request(arena, summary_request);
-    const inference: Model.Request = .{ .history = messages, .tools = &.{} };
+    const inference: Model.Request = .{ .history = messages, .tools = &.{}, .reasoning_effort = .high };
     if (try model.requestBytes(arena, inference) > max_request_bytes)
         return error.ContextBudgetExhausted;
     const response = try model.next(arena, inference);

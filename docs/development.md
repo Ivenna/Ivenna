@@ -41,7 +41,7 @@ Follow the [architecture guide's responsibilities and dependency graph](architec
 
 Keep execution policy, model-input rendering, prompts, and runtime tool declarations in `packages/agent`. The agent exposes `Kernel`, `Engine`, and its own `Input` schemas and renderer.
 
-Keep configuration with the behavior it controls. `Kernel.Config` and `Kernel.Limits` belong to execution; connection settings and protocol parameters belong to their capability packages. The application translates environment values into those configurations and owns HTTP listener settings.
+Keep configuration with the behavior it controls. `Kernel.Config` and `Kernel.Limits` belong to execution; `Engine.Reasoning` selects ordinary inference effort by session role. Connection settings and protocol encoding belong to their capability packages. The application translates environment values into those configurations and owns HTTP listener settings.
 
 ### Types and protocols
 
@@ -57,9 +57,9 @@ Model coexisting fields together and mutually exclusive alternatives as distinct
 
 [Content](../packages/content/src/root.zig) owns tool-result text and image types, byte-source classification, and explicit image reference interpretation. Observations carry complete text strings; tool results use Content's parts. Content is the sole package dependency of `agent_contracts`.
 
-[Model](../packages/agent_contracts/src/model.zig) defines native history items and model operations. Keep messages and tool results typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields. The model adapter measures requests with the same encoder it uses to send them, including declarations and content.
+[Model](../packages/agent_contracts/src/model.zig) defines native history items and model operations. Keep messages and tool results typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields.
 
-Keep input rendering separate from provider encoding: Input renders the temporary current-state message; the model adapter encodes and measures the complete request, including the selected tool declarations.
+Keep input rendering separate from provider encoding: Input renders the temporary current-state message; the agent selects tools and reasoning effort for each model request. The model adapter encodes and measures the complete request with those settings, including while applying tool-result limits. Use the same encoder for measurement and inference, and pass settings per request without mutating a shared provider.
 
 ### Model-facing resources
 
@@ -73,7 +73,7 @@ Treat prompts and tool descriptions as editable interfaces:
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | What a handover must preserve |
 
-Keep tool names, descriptions, and parameter schemas with their owning implementation. Host and Memory register their declarations through `Tools`. Keep tool availability policy in the agent: core coordination exposes the agent's communication and session declarations, work sessions also expose registered capabilities, and summarization exposes no tools. Model adapters add protocol-specific declaration fields when encoding the selected tools.
+Keep tool names, descriptions, and parameter schemas with their owning implementation. Capability providers register their declarations through `Tools`. Keep tool availability policy in the agent and use the same role selection for declarations and invocation. Model adapters add protocol-specific declaration fields when encoding the selected tools. The [architecture guide](architecture.md#model-requests-and-tools) describes the current assembly and selection.
 
 Put task facts and observations in user input. Keep model-facing descriptions concise; detailed field references belong in the [input contract](input.md). Update the owning resource, implementation, and interface documentation together when a contract changes.
 

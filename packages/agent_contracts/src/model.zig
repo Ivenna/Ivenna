@@ -30,10 +30,13 @@ pub const Tool = struct {
     parameters: std.json.Value,
 };
 
-/// History and selected tool declarations borrowed for one model operation.
+pub const ReasoningEffort = enum { none, minimal, low, medium, high, xhigh, max };
+
+/// History, tools, and reasoning effort selected for one model operation.
 pub const Request = struct {
     history: []const Item,
     tools: []const Tool,
+    reasoning_effort: ReasoningEffort,
 };
 
 /// The application keeps the implementation alive until every model request
