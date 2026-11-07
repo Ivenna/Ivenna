@@ -61,7 +61,7 @@ Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication setting
 
 Use the [supported email addresses](communication.md#current-email-addressing). Changing `MAIL_ADDRESS` to another domain changes how retained correspondent IDs resolve.
 
-Install the [reception-readiness policy](#service-status-and-reception) on the service's receiving paths before using them for correspondence.
+For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks when presenting correspondent IDs. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
 Internal callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped; host processes are not restored on restart. See [callback mail](communication.md#callback-mail) for the delivery contract.
 

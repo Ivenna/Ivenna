@@ -4,10 +4,11 @@ Send messages to Ivenna while [reception is open](running.md#service-status-and-
 
 ## Sending a request
 
-Use a correspondent account in the same domain as Ivenna's configured address. For example, `operator@ivenna.test` can correspond with `ivenna@ivenna.test`. The message body carries the task and its context:
+Use a correspondent account in the same domain as Ivenna's configured address. Send through your mail service's authenticated submission path, with From set to an address that account is allowed to use. For example:
 
 ```text
-To: <Ivenna's address>
+From: operator@ivenna.test
+To: ivenna@ivenna.test
 Subject: French practice
 
 Please remember that I am learning French and propose a practice plan.
@@ -28,7 +29,8 @@ For a command to verify the supplied local environment, see [sending a developme
 Follow-up messages enter the core as new observations, including replies within an email thread. Identify the earlier request and describe the changes that should guide ongoing work. For example:
 
 ```text
-To: <Ivenna's address>
+From: operator@ivenna.test
+To: ivenna@ivenna.test
 Subject: French practice schedule
 
 About the French practice plan: use Tuesday and Saturday, and keep each

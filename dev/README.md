@@ -58,15 +58,17 @@ Set the account credentials in the plan and put the matching kernel and operator
 | `operator@ivenna.test` | Send requests and receive Ivenna's messages | `operator-local-password` |
 | `admin@ivenna.test` | Stalwart administration | `admin-local-password` |
 
+The plan requires authenticated SMTP submission. `MtaStageAuth.mustMatchSender` checks that the account may use the SMTP envelope sender. At `DATA`, the `ivenna-sender` script selected by `MtaStageData` requires exactly one From address matching that sender, ignoring case. See Stalwart's [sender verification](https://stalw.art/docs/mta/inbound/auth/#sender-verification) and [From-header example](https://stalw.art/docs/sieve/examples/#require-the-from-header-to-match-the-sender-of-authenticated-mail).
+
 The plan's `ivenna-ready` script runs during SMTP `RCPT` handling through its `MtaStageRcpt` rule. Set the script's recipient to Ivenna's address and its readiness URL to an endpoint reachable from the mail container. The example uses `ivenna@ivenna.test` and `http://host.containers.internal:8090/readyz`; Compose maps that host name to the host. Keep the address and URL aligned with `MAIL_ADDRESS` and `SERVICE_ADDRESS`.
 
-The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. JMAP imports and delivery between accounts through the same server's JMAP interface bypass this gate; use the SMTP path for correspondence. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
+The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
 
-Internal callback delivery uses this account without changing the SMTP readiness policy; see the [mail-service requirements](../docs/running.md#mail-service).
+Use the SMTP submission path for correspondence. Direct JMAP imports into the kernel account bypass the receiving checks. Internal callbacks use direct JMAP writes to their dedicated folder; see the [mail-service requirements](../docs/running.md#mail-service).
 
 For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days), applying to Trash and Junk across all accounts. See Stalwart's [mail retention](https://stalw.art/docs/email/settings/maintenance/) and [storage maintenance](https://stalw.art/docs/storage/maintenance/) documentation for policy and space reclamation.
 
-To apply the initial plan or later edits, stop the kernel, load the updated `.env`, and run:
+For an existing service, incorporate changes from the example into its private plan, keeping the deployment's credentials, addresses, and readiness URL. To apply the initial plan or later edits, stop the kernel, load the updated `.env`, and run:
 
 ```sh
 podman compose -f dev/compose.yaml -f dev/mail/setup.yaml up -d --wait mail
@@ -85,7 +87,7 @@ The default local endpoints are:
 | Authenticated SMTP submission | `127.0.0.1:2525` |
 | Stalwart administration | `http://127.0.0.1:8088/admin` |
 
-Published ports bind to loopback. The SMTP plan requires authenticated submission with a matching sender. Mail, accounts, and configuration persist in the external volume after the Compose containers are removed.
+Published ports bind to loopback. Mail, accounts, and configuration persist in the external volume after the Compose containers are removed.
 
 ## Configuring memory
 
