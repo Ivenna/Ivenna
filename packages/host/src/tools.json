@@ -11,7 +11,7 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh noninteractive /bin/sh on the shared host, with no live stdin. Return its outcome, stdout/stderr descriptions, full log paths, and any stdout image. Remaining processes in its group are stopped when the invocation ends.",
+    "description": "Run a command in a fresh noninteractive /bin/sh on the shared host, with no live stdin. By default return its outcome, stream descriptions, full log paths, and supported stdout images. With background=true return an activity_id; a later text callback with the same ID reports completion or interruption to this session. Background image results include descriptions and paths without native images. Commands stop with this runtime; remaining processes in a command's group are stopped when that command ends.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -37,6 +37,10 @@
             "image_url"
           ],
           "description": "Present complete nonempty stdout text as an image URL. Omit for automatic byte detection."
+        },
+        "background": {
+          "type": "boolean",
+          "description": "Run independently of this activation and receive a completion observation. Omit or use false to wait for the result."
         }
       },
       "required": [

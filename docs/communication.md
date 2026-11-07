@@ -1,6 +1,6 @@
 # Communication
 
-`send_message` submits text to people and programs identified by readable IDs. Both core and work sessions can use it, sending zero, one, or several messages while handling their work. An activation's final text remains internal to the core or returns as a report to a work session's parent. For sending messages to Ivenna, see the [usage guide](usage.md).
+Ivenna communicates externally through `send_message` and internally through session messages, reports, and callbacks. Correspondent IDs identify people and programs; session IDs identify Ivenna's separate working contexts. External correspondence enters the core. For sending messages to Ivenna, see the [usage guide](usage.md).
 
 ## Correspondents and IDs
 
@@ -42,7 +42,7 @@ An unsupported recipient ID returns an `invalid_recipient` tool error; invalid a
 
 ## Current email addressing
 
-The [current email adapter](architecture.md#email-boundary) uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. For `MAIL_ADDRESS=ivenna@ivenna.test`, `operator@ivenna.test` becomes `operator`, and sending to `operator` resolves to that address. IDs remain usable across context release and restart with the same configured domain.
+The [current email adapter](architecture.md#email-boundary) uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. For `MAIL_ADDRESS=ivenna@ivenna.test`, `operator@ivenna.test` becomes `operator`, and sending to `operator` resolves to that address. IDs remain usable across context unloading and restart with the same configured domain.
 
 The adapter currently supports ASCII dot-atom local parts and ASCII hostname domains. It preserves ID case and ignores case only in the domain when comparing addresses.
 
@@ -50,6 +50,40 @@ Incoming mail must have at least one From address, and every address must map to
 
 ## Incoming email text
 
-An incoming email becomes one [`input` observation](input.md#incoming-messages). Its `text` contains the subject, a blank line, and the selected body; an empty subject leaves the body alone. The adapter uses decoded plain text when the message lists a plain-text body, otherwise HTML source. Multiple selected body parts are joined with a newline. Attachments do not enter the observation.
+An eligible correspondence email becomes one [`input` observation](input.md#incoming-messages). Its `text` contains the subject, a blank line, and the selected body; an empty subject leaves the body alone. The adapter uses decoded plain text when the message lists a plain-text body, otherwise HTML source. Multiple selected body parts are joined with a newline. Attachments do not enter the observation.
 
 The selected body must be complete and decoded without encoding errors. Unsupported or incomplete bodies are skipped, leaving the original mail copy unchanged. Eligible text enters the observation in full and is subject to [request-budget admission](architecture.md#activation-admission).
+
+## Session communication and wakeups
+
+Core and work sessions can use both [agent tools](../packages/agent/src/tools.json):
+
+| Tool | Arguments | Example success |
+| --- | --- | --- |
+| `send_session_message` | `session_id`, nonempty `text` | `{"result":{"session_id":2}}` identifies the recipient whose queue accepted the observation |
+| `wakeup` | `at_unix_ms`, nonempty `text` | `{"result":{"callback_id":5}}` identifies a scheduled observation for the calling session |
+
+Session IDs remain usable across activations, context unloading, and restart. A session message records the actual sending session in `from_session`. If session 2 relays session 3's report, the sender remains 2; its text carries the original attribution and uncertainty. The recipient interprets the message alongside its own evidence and understanding. Successful sending confirms durable queue acceptance rather than agreement or task completion.
+
+An accepted observation makes a sleeping session ready for an activation, subject to scheduling and capacity. A running session admits new observations between its complete model/tool batch and a later inference. Direct messages leave parent relationships and report destinations unchanged. The core receives [nested creation notices and work reports](input.md#assignments-and-reports) automatically; its own forks are already recorded in tool exchanges. Sessions can use direct messages for further coordination.
+
+`wakeup` binds its source to the calling session and retains the supplied text and deadline across restart. Past timestamps are immediately due. The eventual callback returns that text to the same session, which can sleep while waiting. Actual publication follows the intake polling cadence, and admission waits for queue capacity; the requested time does not guarantee an immediate inference. This interface has no cancellation operation.
+
+The tools report defined failures without ending the runtime:
+
+| Code | Operation and meaning |
+| --- | --- |
+| `invalid_arguments` | Either tool received arguments that do not match its parameters |
+| `unknown_session` | The message's recipient session does not exist |
+| `session_queue_full` | The message's recipient cannot currently accept another event |
+| `callback_unavailable` | The calling session has reached its pending-callback limit |
+
+See [configuration](running.md#configuration) for capacity limits and [session messages and callbacks](input.md#session-messages-and-callbacks) for observation fields. Infrastructure failures follow the [availability contract](design.md#runtime-availability).
+
+## Callback mail
+
+Background host commands and wakeups register their callback IDs and receiving sessions before producing observations. A host completion returns to the invoking work session; a wakeup returns to the session that scheduled it. Forking preserves those destinations. The callback ID identifies its source, and the callback text supplies the outcome or reminder for that session to interpret.
+
+Callbacks use internal durable mailbox delivery in the existing JMAP account, independently of the SMTP reception gate used for correspondence. Their stored text can survive kernel shutdown. While an identifiable stored copy remains, the publisher preserves the first result for its ID. After the observation is durably admitted, later deliveries of that ID are retired without another observation. Unknown callback IDs fail explicitly rather than becoming core correspondence.
+
+The [running guide](running.md#communication-copies) defines copy retention, and its [backup requirements](running.md#backups-and-transfers) describe what must be preserved for continuation. The [architecture guide](architecture.md#callback-delivery) describes callback storage and identification. See [background commands](host.md#background-commands) for host completion and interruption behavior; preserving a callback result does not preserve the process that produced it.

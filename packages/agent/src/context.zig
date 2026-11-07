@@ -7,8 +7,12 @@ const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
 /// Owned working history and the model-message view derived from it. Registry
-/// synchronizes mutation; current requests never become retained records.
+/// synchronizes mutation; current context and summary requests are temporary.
 pub const Context = struct {
+    /// Only a newly admitted group is presented as this turn's observations.
+    /// Older groups remain in the LLM conversation, even after empty output.
+    pub const Delivery = enum { none, latest };
+
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
     /// Destination for new entries; inherited entries keep their own scopes.
@@ -67,28 +71,44 @@ pub const Context = struct {
 
     /// The slice and rendered request belong to a; retained message payloads
     /// borrow self.
-    pub fn request(self: *const Context, a: Allocator, current: Input.Request) ![]const Model.Item {
-        return self.buildRequest(a, null, current);
+    pub fn request(self: *const Context, a: Allocator, current: Input.Current, delivery: Delivery) ![]const Model.Item {
+        const events = switch (delivery) {
+            .none => &.{},
+            .latest => self.entries.items[self.entries.items.len - 1].value.record.events.items,
+        };
+        return self.buildRequest(a, self.messages.items.len - @intFromBool(delivery == .latest), .{
+            .current = current,
+            .purpose = .{ .work = .{ .events = events } },
+        });
     }
 
     /// Assemble an admission candidate without changing retained history.
     /// As with request, retained message payloads borrow self.
-    pub fn requestWithRecord(self: *const Context, a: Allocator, record: Input.Record, current: Input.Request) ![]const Model.Item {
-        return self.buildRequest(a, record, current);
+    pub fn requestWithEvents(self: *const Context, a: Allocator, events: []const Input.Event, current: Input.Current) ![]const Model.Item {
+        return self.buildRequest(a, self.messages.items.len, .{
+            .current = current,
+            .purpose = .{ .work = .{ .events = events } },
+        });
     }
 
-    fn buildRequest(self: *const Context, a: Allocator, record: ?Input.Record, current: Input.Request) ![]const Model.Item {
-        const history_len = self.messages.items.len;
-        const messages = try a.alloc(Model.Item, history_len + @as(usize, if (record != null) 2 else 1));
-        @memcpy(messages[0..history_len], self.messages.items);
-        if (record) |value| messages[history_len] = .{ .message = .{ .role = .user, .text = try Input.renderRecord(a, value) } };
-        messages[messages.len - 1] = .{ .message = .{ .role = .user, .text = try Input.renderRequest(a, current) } };
+    /// Summarization reads retained history without admitting pending events.
+    pub fn summaryRequest(self: *const Context, a: Allocator, current: Input.Current, instructions: []const u8) ![]const Model.Item {
+        return self.buildRequest(a, self.messages.items.len, .{
+            .current = current,
+            .purpose = .{ .summarize = .{ .instructions = instructions } },
+        });
+    }
+
+    fn buildRequest(self: *const Context, a: Allocator, prefix_len: usize, turn: Input.Turn) ![]const Model.Item {
+        const messages = try a.alloc(Model.Item, prefix_len + 1);
+        @memcpy(messages[0..prefix_len], self.messages.items[0..prefix_len]);
+        messages[prefix_len] = .{ .message = .{ .role = .user, .text = try Input.renderTurn(a, turn) } };
         return messages;
     }
 
-    pub fn withHandover(self: *const Context, allocator: Allocator, handover: Input.Handover) !Context {
+    pub fn withHandover(self: *const Context, allocator: Allocator, summary: []const u8) !Context {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
-        const record: Input.Record = .{ .session_id = scope.session_id, .content = .{ .handover = handover } };
+        const record: Input.Record = .{ .handover = .{ .session_id = scope.session_id, .summary = summary } };
         return restore(allocator, scope, &.{.{ .scope = scope, .value = .{ .record = record } }}, self.messages.items[0].message.text);
     }
 
@@ -98,12 +118,9 @@ pub const Context = struct {
         switch (entry.value) {
             .record => |record| {
                 try self.messages.ensureUnusedCapacity(self.allocator, 1);
-                const copy: Input.Record = .{
-                    .session_id = record.session_id,
-                    .content = switch (record.content) {
-                        .events => |events| .{ .events = try cloneEvents(a, events) },
-                        .handover => |handover| .{ .handover = .{ .summary = try a.dupe(u8, handover.summary) } },
-                    },
+                const copy: Input.Record = switch (record) {
+                    .events => |group| .{ .events = .{ .session_id = group.session_id, .items = try cloneEvents(a, group.items) } },
+                    .handover => |handover| .{ .handover = .{ .session_id = handover.session_id, .summary = try a.dupe(u8, handover.summary) } },
                 };
                 const text = try Input.renderRecord(a, copy);
                 self.entries.appendAssumeCapacity(.{ .scope = entry.scope, .value = .{ .record = copy } });
@@ -131,6 +148,22 @@ fn cloneEvents(a: Allocator, events: []const Input.Event) ![]const Input.Event {
         },
         .assignment => |assignment| .{ .assignment = .{ .task = try a.dupe(u8, assignment.task), .from_session = assignment.from_session } },
         .report => |report| .{ .report = .{ .from_session = report.from_session, .text = try a.dupe(u8, report.text) } },
+        .session_message => |message| .{ .session_message = .{
+            .from_session = message.from_session,
+            .observed_at_unix_ms = message.observed_at_unix_ms,
+            .text = try a.dupe(u8, message.text),
+        } },
+        .callback => |callback| .{ .callback = .{
+            .id = callback.id,
+            .source = callback.source,
+            .observed_at_unix_ms = callback.observed_at_unix_ms,
+            .text = try a.dupe(u8, callback.text),
+        } },
+        .session_created => |created| .{ .session_created = .{
+            .session_id = created.session_id,
+            .parent_session_id = created.parent_session_id,
+            .task = try a.dupe(u8, created.task),
+        } },
     };
     return owned;
 }

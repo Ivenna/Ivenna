@@ -30,7 +30,10 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
 | `MAX_PARALLEL_ATTENTION` | Maximum concurrently executing work sessions; core has a separate lane | `4` |
-| `MAX_ATTENTION_CONTEXTS` | Maximum retained contexts, including the core; also bounds each session's events and child reports | `32` |
+| `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
+| `MAX_PENDING_EVENTS` | Maximum ordinary events and reserved reports per session | `64` |
+| `MAX_PENDING_CALLBACKS` | Maximum callback registrations not yet durably admitted per session | `64` |
+| `MAX_BACKGROUND_COMMANDS` | Maximum concurrently executing background host commands | `8` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
 | `HANDOVER_MAX_BYTES` | Maximum retained handover text | `8192` |
@@ -42,15 +45,19 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 
 Core and work sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
 
-`MAX_PARALLEL_ATTENTION` and `MAX_ATTENTION_CONTEXTS` are independent. Parents waiting for children retain contexts without occupying execution slots. With `MAX_ATTENTION_CONTEXTS=1`, only the core fits and forking is unavailable. The context limit must also accommodate the sessions already retained in the mailbox; reducing it below that count prevents startup. At capacity, pending mail remains available for later polling. See [session capacity](architecture.md#sessions-work-and-communication) for event limits and scheduling.
+Session identities, pending events, and execution slots have independent limits. Sleeping sessions can unload their contexts without occupying execution slots or losing their IDs. With `MAX_SESSIONS=1`, only the core fits and forking is unavailable. The session limit must accommodate the identities already registered in the mailbox; reducing it below that count prevents startup. At the session limit, creating a new fork returns a capacity outcome and existing sessions can still receive work. Automatic retirement of old identities is not implemented.
 
-Request byte limits cover the whole serialized body, including instructions, tool definitions, history, complete incoming text, and encoded images. They do not estimate model tokens. If a single input cannot fit after context compaction, admission fails with `ContextBudgetExhausted` and the runtime stops. `HANDOVER_MAX_BYTES` bounds the retained handover text. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
+`MAX_PENDING_EVENTS` bounds ordinary events and reserved reports separately for each session. Internal control observations do not consume this allowance. When capacity is unavailable, correspondence and callback mail remain stored for later admission. `MAX_PENDING_CALLBACKS` bounds registrations awaiting durable admission, including future wakeups and completed host results not yet admitted. `MAX_BACKGROUND_COMMANDS` separately limits host commands still running. See [session capacity](architecture.md#sessions-work-and-communication) for scheduling and report reservations.
+
+Correspondence and callback intake have independent allowances, so an older correspondence backlog cannot consume the callback allowance. Processing can wait for a poll, destination queue capacity, and an execution slot. Fairness gives waiting work sessions opportunities to start activations; running model and tool work is not preempted. Scheduled times and accepted delivery do not guarantee an immediate inference or response.
+
+Request byte limits cover the whole serialized body, including instructions, tool definitions, history, the fresh runtime-state snapshot, complete incoming text, and encoded images. They do not estimate model tokens. A larger session roster or pending-callback list increases the snapshot repeated in each request, leaving less space for history and new observations. If a single input cannot fit after context compaction, admission fails with `ContextBudgetExhausted` and the runtime stops. `HANDOVER_MAX_BYTES` bounds the retained handover text. See [bounded model context](architecture.md#bounded-model-context) for compaction and budget failures.
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
 ## Mail service
 
-Use a dedicated account as programmatic storage for Ivenna's communication records and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna History` and `Ivenna Archive` folders and a mailbox with role `trash` when missing; the history folders have no special mail role. The account must permit folder creation.
+Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks`, `Ivenna History`, and `Ivenna Archive` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
@@ -58,13 +65,15 @@ Use the [supported email addresses](communication.md#current-email-addressing). 
 
 Install the [reception-readiness policy](#service-status-and-reception) on the service's receiving paths before using them for correspondence.
 
+Internal callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped; their producer processes do not survive a restart. See [callback mail](communication.md#callback-mail) for the delivery contract.
+
 Configure automatic Trash expiry and cleanup of unreferenced storage in the mail service. These processes must continue independently of the kernel. Choose retention with the provider's full policy scope in mind: Trash and Junk policies can also remove ordinary mail. The [local Stalwart setup](../dev/README.md#configuring-mail) provides a concrete configuration.
 
 The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working history shares the account's storage capacity; [data and retention](#data-and-retention) explains its folder lifecycle and backup requirements.
 
 ### Mail intake
 
-The kernel reads correspondence awaiting durable admission across the account's mail folders, including the mail client's ordinary Archive folder. The `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying the runtime's private outgoing or history-state markers. The history-state marker keeps moved history records out of intake as well.
+The kernel reads correspondence awaiting durable admission across the account's mail folders, including the mail client's ordinary Archive folder. `Ivenna Callbacks`, `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash are excluded from ordinary correspondence, along with drafts and records carrying private callback, outgoing, or history-state markers. The callback inbox has its own admission path; these records do not become correspondence.
 
 Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. The adapter presents the corresponding IDs and complete supported text as an observation. Messages with missing, cross-domain, or unsupported From addresses are excluded from intake. Messages without a complete supported body produce a diagnostic and are skipped. These copies remain unchanged.
 
@@ -105,7 +114,9 @@ cd /path/to/workspace
 
 The kernel's startup directory becomes the default directory for host commands. The executable embeds its model-facing resources and can run independently of the source checkout.
 
-Startup discovers the mail account, checks memory availability, restores saved working contexts or creates the core, and completes initial storage maintenance before opening reception. Use one kernel per mailbox. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
+Use one kernel per mailbox. Startup discovers the account, checks memory availability, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
+
+Startup currently reads all selected history, including sleeping sessions, before unloading unused branch contexts. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for the implementation and its current limitation.
 
 ## Service status and reception
 
@@ -128,15 +139,17 @@ Readiness describes the kernel's reception state when queried. It reserves no pr
 
 ## Stopping and restarting
 
-Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception and wait for the kernel's workers to end. Communication or memory infrastructure failures and failures during model or session execution also stop the whole kernel. Diagnose the failure from its diagnostics and restore any unavailable services before restarting.
+Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work and background host commands, and wait for the runtime's tasks to end. Infrastructure and execution failures also stop the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
 When an incoming message fails admission with `ContextBudgetExhausted`, it remains unacknowledged. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
 
-Restoration requires saved history in the executable's current format. The prototype provides no storage-format compatibility or migration path, so a source update that changes that format can prevent existing history from loading.
+Restoration requires a history format understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; the account is not cleared automatically.
 
 Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
 
-Each retained session receives a fresh startup activation with the current observation time. Ivenna chooses how to continue from its history and current state; old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail, so include any known external changes when corresponding about the interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means.
+The core, interrupted work, and unread internal input receive fresh startup observations. Other branches remain asleep until an event arrives. Every session's pending wakeups survive restart, including deadlines that passed while the runtime was unavailable, and their callbacks return to the original session.
+
+Stored host callbacks remain available. A registered host activity without a stored completion instead produces an interrupted observation with an unknown outcome. Host processes are not restored and commands are not replayed. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
 
 ## Data and retention
 
@@ -144,11 +157,11 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 
 | Location | Contents |
 | --- | --- |
-| Configured JMAP account | Pending and retired communication copies, working-history records and checkpoints, and private markers |
+| Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
 
-Ivenna moves communication copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
+Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
 
 Ivenna does not monitor quota or evict live records in response to account capacity. A failure in Ivenna's storage maintenance stops the runtime like other storage failures.
 
@@ -159,39 +172,45 @@ Ivenna releases a communication copy when its observation has been durably admit
 | Copy | Retirement |
 | --- | --- |
 | Incoming message | After its complete observation and checkpoint are saved, acknowledgement moves Ivenna's incoming copy to Trash |
+| Internal callback | After durable admission of the registered observation, acknowledgement moves its mail copy to Trash |
 | Outgoing message | Created in Drafts; confirmed submission moves the copy to Trash without cancelling delivery |
 | Interrupted outgoing copy | Initialization or the next poll moves the runtime's leftover outgoing copy to Trash |
 
 Acknowledgement confirms durable admission, not completion of the requested work. Pending supported input remains available for admission. Internal assignments and reports are saved as working history rather than separate communication copies.
 
-The mail account is not a permanent transcript: original copies expire under the Trash policy, while retained observations and tool exchanges can later be condensed or released. Preserve original correspondence separately when it needs a longer lifetime. A correspondent's own account and received copies remain outside Ivenna's copy management.
+Duplicate callback publication reuses an identifiable stored copy, including one in Trash. Once no identifiable copy remains, the publisher cannot recognize the original stored result and may create a new copy. This storage limit does not cause another model observation for an already admitted callback ID; [admission deduplication](architecture.md#event-sources-and-callback-admission) remains in the saved runtime state.
+
+The mail account is not a permanent transcript: original copies expire under the Trash policy, and compaction can replace detailed observations and tool exchanges with a handover. Preserve original correspondence separately when it needs a longer lifetime. A correspondent's own account and received copies remain outside Ivenna's copy management.
 
 ### Working history
 
-The latest checkpoint selects the histories needed to continue the core and retained work sessions. Ivenna classifies its saved history at startup and periodically during operation, placing records according to that checkpoint:
+The latest checkpoint selects the histories needed to continue all registered sessions, including sleeping sessions whose contexts are unloaded, and retains callback registrations and wakeup deadlines. Ivenna classifies its saved history at startup and periodically during operation, placing records according to that checkpoint:
 
 | Location | Contents |
 | --- | --- |
 | `Ivenna History` | Latest checkpoint and selected records in the sessions' current history segments |
-| `Ivenna Archive` | Sealed history still needed by retained contexts |
+| `Ivenna Archive` | Sealed history still selected for session continuation |
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
-`Ivenna Archive` has no age-based retention deadline. Its records remain available to retained contexts until the checkpoint stops selecting them. A released work session's unique records may go directly to Trash. See [history retention](architecture.md#history-retention) for selection and sharing rules.
+`Ivenna Archive` has no age-based retention deadline. Its records remain available until the checkpoint stops selecting them. Sleeping or unloading a context does not retire its history. Compaction can make earlier records unnecessary; automatic retirement of session identities is not implemented. See [history retention](architecture.md#history-retention) for selection and sharing rules.
 
 ### Backups and transfers
 
-History records and checkpoints are JMAP Email objects. A backup or transfer used for restoration must preserve the latest checkpoint and every record it selects from both history folders, including:
+History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every record it selects from both history folders, and pending mail in `Ivenna Callbacks`:
 
 | Applies to | Preserve |
 | --- | --- |
-| Bodies | Exact plain-text ZON content |
+| History bodies | Exact plain-text ZON content |
 | All selected history objects | Original membership in `Ivenna History` or `Ivenna Archive`, From and To addresses matching `MAIL_ADDRESS`, `ivenna-state`, and `X-Ivenna-History-Kind` (`record` or `checkpoint`) |
 | Records | `ivenna-history-<token>`, `X-Ivenna-History-Key`, and `X-Ivenna-History-Previous` when present |
 | Current checkpoint candidates | Membership in `Ivenna History`, `ivenna-current`, and `X-Ivenna-History-Revision` |
+| Pending callback mail | Complete text, From and To matching `MAIL_ADDRESS`, membership in `Ivenna Callbacks`, `ivenna-callback`, exact `ivenna-callback-<id>` keyword, and matching `X-Ivenna-Callback-Id` header |
 
-If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration discovers records through logical groups and keys. An import that preserves bodies alone is insufficient. The executable must understand the saved [history format](#stopping-and-restarting).
+If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration uses logical groups, record keys, and callback IDs. An import that preserves bodies alone is insufficient. The executable must understand the saved [history format](#stopping-and-restarting).
 
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
+
+A mailbox backup preserves stored callbacks and wakeup arrangements, not running host processes or their output files. Preserve [host artifacts](#host-output-and-deployment-files) and memory data separately when continued work needs them.
 
 ### Host output and deployment files
 

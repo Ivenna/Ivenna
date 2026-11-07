@@ -1,6 +1,6 @@
 # Tool content
 
-Memory reads and host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#incoming-messages) defines incoming observations. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
+Memory reads and synchronous host commands can supply text and images together to the model. This guide covers their result parts; the [input contract](input.md#retained-records) defines observations received as events. See [memory rooms](memory.md) and [host shell](host.md) for tool arguments and result fields.
 
 ## Automatic classification
 
@@ -24,7 +24,7 @@ Omit `interpretation` when the entry or command already supplies image bytes, or
 
 ## Content and results
 
-Each tool combines source content with its operation's result description. Image reads include the memory address; shell results include the command outcome and both stream descriptions, including on nonzero exits and timeouts. Supported images are supplied as native content parts alongside these descriptions.
+Each tool combines source content with its operation's result description. Image reads include the memory address; shell results include the command outcome and both stream descriptions, including on nonzero exits and timeouts. Memory reads and synchronous host results supply supported images as native content parts alongside these descriptions. [Background host completions](host.md#background-commands) provide callback text with result descriptions and log paths; they omit native image parts.
 
 An image description has either `data` with `format` and `byte_length`, or `url` with an empty object. The native content part carries the encoded image bytes or URL itself. The [memory](memory.md#results-and-errors) and [shell](host.md#results-and-interruption) guides describe their surrounding result fields.
 
@@ -47,4 +47,4 @@ These checks only remove newly returned images. They can leave a request above t
 
 Working history retains accepted image bytes, so subsequent requests can reuse them even if the source file changes or is removed. Saved histories preserve those bytes across restart. URL results retain the supplied address; their content can change or become unavailable.
 
-Compaction or session release can discard retained image bytes. An artifact or memory entry provides a source for reading the image again; keep its location in a handover when needed for continued work. See [startup and interruption](architecture.md#startup-and-interruption) for what a restart retains.
+Unloading a sleeping context preserves its saved image bytes. Compaction can remove images from the current working history. An artifact or memory entry provides a source for reading an image again; keep its location in a handover when needed for continued work. See [startup and interruption](architecture.md#startup-and-interruption) for what a restart retains.

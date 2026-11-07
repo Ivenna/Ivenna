@@ -7,7 +7,7 @@ Choose a guide for your task:
 | Task | Guide |
 | --- | --- |
 | Understand the project's goals and interface principles | [Design intent](design.md) |
-| Trace execution, history retention, package dependencies, and component ownership | [Architecture guide](architecture.md) |
+| Trace execution, callback delivery, history retention, package dependencies, and component ownership | [Architecture guide](architecture.md) |
 | Decide where design, interface, and implementation changes belong | [Design and implementation](development.md#design-and-implementation) |
 | Follow development conventions, build from source, and validate changes | [Development guide](development.md) |
 
@@ -27,8 +27,8 @@ Choose a guide for your task:
 
 | Task | Guide |
 | --- | --- |
-| Interpret model-facing records, session roles, and inference operations | [Input contract](input.md) |
-| Use correspondent IDs and explicitly send messages | [Communication](communication.md) |
+| Interpret history records, inference turns, and runtime state | [Input contract](input.md) |
+| Use correspondent IDs, coordinate sessions, and receive callbacks | [Communication](communication.md) |
 | Use memory rooms and understand their shared capacity | [Memory rooms](memory.md) |
-| Run host commands and interpret their results | [Host shell](host.md) |
+| Run synchronous or background host commands and interpret results | [Host shell](host.md) |
 | Understand automatic content classification and image URL references | [Tool content](content.md) |

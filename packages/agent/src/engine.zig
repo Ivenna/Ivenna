@@ -25,6 +25,7 @@ pub const Engine = struct {
     pub const RuntimeTools = struct {
         context: *anyopaque,
         invoke: *const fn (*anyopaque, Allocator, []const u8, []const u8) anyerror!?Content,
+        register_callback: *const fn (*anyopaque) anyerror!u64,
     };
 
     pub const Round = struct {
@@ -69,7 +70,10 @@ pub const Engine = struct {
         }
         for (self.capabilities(role)) |group| {
             for (group) |tools| {
-                if (try tools.invoke(tools.context, a, session_id, name, arguments)) |result| return result;
+                if (try tools.invoke(tools.context, a, .{
+                    .session_id = session_id,
+                    .callback = if (runtime_tools) |runtime| .{ .context = runtime.context, .register = runtime.register_callback } else null,
+                }, name, arguments)) |result| return result;
             }
         }
         return error.UnknownTool;

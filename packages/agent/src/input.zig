@@ -27,6 +27,7 @@ pub const Report = struct {
 };
 
 pub const Handover = struct {
+    session_id: u64,
     summary: []const u8,
 };
 
@@ -34,20 +35,60 @@ pub const Startup = struct {
     observed_at_unix_ms: i64,
 };
 
+pub const SessionMessage = struct {
+    from_session: u64,
+    observed_at_unix_ms: i64,
+    text: []const u8,
+};
+
+pub const CallbackSource = enum { host, wakeup };
+
+pub const PendingCallback = struct {
+    id: u64,
+    session_id: u64,
+    source: CallbackSource,
+};
+
+pub const Callback = struct {
+    id: u64,
+    source: CallbackSource,
+    observed_at_unix_ms: i64,
+    text: []const u8,
+};
+
+pub const SessionCreated = struct {
+    session_id: u64,
+    parent_session_id: u64,
+    task: []const u8,
+};
+
+pub const SessionInfo = struct {
+    session_id: u64,
+    role: Role,
+    status: enum { running, ready, dormant },
+    queued_inputs: usize,
+    pending_callbacks: usize,
+    last_active_unix_ms: i64,
+};
+
+/// A complete projection of program state, not the model's working memory.
 pub const State = struct {
     session: struct {
         role: Role,
-        active_children: usize = 0,
+        child_sessions: usize = 0,
+        callbacks: []const PendingCallback,
     },
     runtime: struct {
-        active_sessions: usize,
+        observed_at_unix_ms: i64,
+        registered_sessions: usize,
         running_sessions: usize,
         queued_inputs: usize,
+        sessions: []const SessionInfo,
     },
 };
 
-/// Current session state supplied by the registry.
-pub const Snapshot = struct {
+/// Runtime facts sampled for one inference; never retained or inherited.
+pub const Current = struct {
     session_id: u64,
     state: State,
 };
@@ -57,27 +98,30 @@ pub const Event = union(enum) {
     input: IncomingMessage,
     assignment: Assignment,
     report: Report,
+    session_message: SessionMessage,
+    callback: Callback,
+    session_created: SessionCreated,
 };
 
-/// An event group or compacted understanding retained in session history.
-pub const Record = struct {
+pub const EventGroup = struct {
     session_id: u64,
-    content: union(enum) {
-        events: []const Event,
-        handover: Handover,
+    items: []const Event,
+};
+
+/// Delivered observations or compacted understanding retained in history.
+pub const Record = union(enum) {
+    events: EventGroup,
+    handover: Handover,
+};
+
+/// Each turn supplies current runtime facts alongside exactly one purpose.
+/// Working understanding remains in the preceding LLM messages.
+pub const Turn = struct {
+    current: Current,
+    purpose: union(enum) {
+        work: struct { events: []const Event },
+        summarize: struct { instructions: []const u8 },
     },
-};
-
-pub const Operation = union(enum) {
-    execute: void,
-    summarize: struct { instructions: []const u8 },
-};
-
-/// Temporary state and operation supplied for one inference.
-pub const Request = struct {
-    session_id: u64,
-    state: State,
-    operation: Operation,
 };
 
 /// Render declared fields as YAML values. Returned bytes belong to arena.
@@ -85,8 +129,8 @@ pub fn renderRecord(arena: Allocator, record: Record) ![]const u8 {
     return render(arena, record);
 }
 
-pub fn renderRequest(arena: Allocator, request: Request) ![]const u8 {
-    return render(arena, request);
+pub fn renderTurn(arena: Allocator, turn: Turn) ![]const u8 {
+    return render(arena, turn);
 }
 
 fn render(arena: Allocator, value: anytype) ![]const u8 {

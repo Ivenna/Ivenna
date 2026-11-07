@@ -7,7 +7,7 @@ The shell tools are defined in [tools.json](../packages/host/src/tools.json):
 | Tool | Purpose |
 | --- | --- |
 | `get_host_shell` | Inspect the shell and default directory |
-| `run_host_shell` | Execute a command and return its outcome, output descriptions, and any stdout image |
+| `run_host_shell` | Execute synchronously, or start a background activity whose completion returns to this session |
 
 ## Shell description
 
@@ -36,14 +36,15 @@ Call `run_host_shell` with a command string:
 | `cwd` | Working directory; absolute or relative to the kernel's startup directory, which is also the default |
 | `timeout_ms` | Integer from `1` through `4294967295` in milliseconds; defaults to `600000` (10 minutes) |
 | `interpretation` | Optional `"image_url"` to present complete stdout text as an [image reference](content.md#image-url-references) |
+| `background` | Optional boolean, default `false`; return an activity ID while the command runs independently of this activation |
 
 Each call starts a fresh noninteractive `/bin/sh` with no terminal or live input, inheriting the kernel's startup environment.
 
-The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled. Background processes in that group end with the invocation; no later job-completion observation is supplied.
+The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`, and `GH_PAGER` to `cat` for readable batch output. Processes remaining in the invocation's process group are stopped when the shell exits, times out, or is canceled. Shell backgrounding with `&` does not create an independently managed activity; use the tool's `background` argument when its completion should arrive later.
 
 ## Results and interruption
 
-A command result is supplied as a text part containing JSON `result` with its outcome and both stream descriptions. Nonzero exits and timeouts are command outcomes. Image stdout adds a native image part alongside the description.
+A synchronous command result is supplied as a text part containing JSON `result` with its outcome and both stream descriptions. Nonzero exits and timeouts are command outcomes. Image stdout adds a native image part alongside the description.
 
 For session `2` with the default data directory, the `pwd` command above returns a text summary such as:
 
@@ -78,20 +79,35 @@ In the result description, both `stdout` and `stderr` contain an absolute `path`
 | Content branch | Meaning |
 | --- | --- |
 | `text` | A UTF-8 preview in `text`, with `truncated` indicating omitted content |
-| `image` | An image description, with native content supplied separately |
+| `image` | An image description; synchronous results supply the native image separately |
 | `unavailable` | `byte_length` and `reason` describing content that could not be supplied |
 
 Stderr's `content` contains either a `text` preview or an `unavailable` diagnostic. See [tool content](content.md) for classification, image descriptions, preview bounds, and model-input limits. Content diagnostics leave the command outcome and stream descriptions available.
 
-`run_host_shell` stores output in distinct log files under `<DATA_DIR>/host/<session_id>/`, creating missing directories when invoked. The files contain the full streams, including output omitted from the reply, and outlive the working session. Later shell calls can read or remove them. See [host output and deployment files](running.md#host-output-and-deployment-files) for `DATA_DIR` configuration and retention.
+`run_host_shell` stores output in distinct log files under `<DATA_DIR>/host/<session_id>/`, creating missing directories when invoked. The files contain the full streams, including output omitted from the reply, and remain available while the session sleeps or its context is unloaded. Later shell calls can read or remove them. See [host output and deployment files](running.md#host-output-and-deployment-files) for `DATA_DIR` configuration and retention.
 
 An invocation error returns JSON `error` with `code` and `message`:
 
 | Code | Meaning |
 | --- | --- |
 | `invalid_arguments` | Arguments do not match the tool parameters; the command was not started |
+| `background_unavailable` | No background execution slot or callback registration is available; the command was not started |
 | `host_unavailable` | The invocation could not supply a complete result; the host may already have changed |
 
 The [architecture guide](architecture.md#host-execution) describes the current failure boundary.
 
-A timeout returns the captured output. Runtime cancellation stops the invocation without returning an ordinary tool result. Effects already produced remain in place in either case. See [startup and interruption](architecture.md#startup-and-interruption) for continuation after a runtime failure or restart.
+A synchronous timeout returns the captured output; a background timeout returns through its completion callback. Runtime cancellation stops and joins the invocation. Effects already produced remain in place in either case. See [startup and interruption](architecture.md#startup-and-interruption) for continuation after a runtime failure or restart.
+
+## Background commands
+
+Set `background: true` to receive an activity ID while the command runs independently of the activation:
+
+```json
+{"result":{"running":{"activity_id":1}}}
+```
+
+The runtime binds completion to the invoking session. Its later `callback` observation has `source: host` and an `id` matching this `activity_id`. The session can continue other work or return control and sleep. A sleeping session becomes ready when the result arrives; a running session admits it before a later inference, after retaining its current complete model/tool batch. Scheduling and capacity can delay that inference. See [callback mail](communication.md#callback-mail) for delivery and duplicate handling.
+
+On completion, the callback's `text` contains the JSON `result` described [above](#results-and-interruption), including outcome, both stream descriptions, and full log paths. For image stdout, the text also includes `"media_omission":"asynchronous_media_unavailable"`; no native image accompanies the callback. Use synchronous execution when the model needs the image itself. A failure to obtain a complete command result can instead produce a JSON `host_unavailable` error description.
+
+`MAX_BACKGROUND_COMMANDS` bounds concurrently running background tasks, and each registration uses the session's `MAX_PENDING_CALLBACKS` allowance. Returning control leaves the task running; runtime shutdown cancels and joins it. After restart, an existing stored completion is preserved. If no result was stored, the callback instead carries a plain-text notice of an interrupted activity with an unknown outcome. The command is not replayed, so inspect its possible effects before deciding how to continue. Intermediate script-emitted events, asynchronous media return, and processes that survive kernel restart are not implemented.

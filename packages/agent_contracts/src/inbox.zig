@@ -1,5 +1,6 @@
 const std = @import("std");
 const IncomingMessage = @import("communication.zig").IncomingMessage;
+const Callback = @import("callback.zig");
 const Allocator = std.mem.Allocator;
 
 /// Incoming messages and opaque receipts for durable admission.
@@ -11,17 +12,20 @@ pub const Inbox = struct {
 
     /// An arrival with an optional opaque transport receipt.
     pub const Incoming = struct {
-        input: IncomingMessage,
+        content: union(enum) { message: IncomingMessage, callback: Callback.Observation },
         receipt: ?[]const u8 = null,
     };
 
+    /// Independent eligible-prefix limits. Zero disables that input stream.
+    pub const Poll = struct { messages: usize, callbacks: usize };
+
     pub const VTable = struct {
-        poll: *const fn (*anyopaque, Allocator, usize) anyerror![]const Incoming,
+        poll: *const fn (*anyopaque, Allocator, Poll) anyerror![]const Incoming,
         acknowledge: *const fn (*anyopaque, Allocator, []const u8) anyerror!void,
     };
 
-    pub fn poll(self: Inbox, a: Allocator, limit: usize) ![]const Incoming {
-        return self.vtable.poll(self.context, a, limit);
+    pub fn poll(self: Inbox, a: Allocator, request: Poll) ![]const Incoming {
+        return self.vtable.poll(self.context, a, request);
     }
 
     /// Call after storage has confirmed the complete observation and checkpoint.

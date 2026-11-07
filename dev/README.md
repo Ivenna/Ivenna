@@ -62,6 +62,8 @@ The plan's `ivenna-ready` script runs during SMTP `RCPT` handling through its `M
 
 The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. JMAP imports and delivery between accounts through the same server's JMAP interface bypass this gate; use the SMTP path for correspondence. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
 
+Internal callback delivery uses this account without changing the SMTP readiness policy; see the [mail-service requirements](../docs/running.md#mail-service).
+
 For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days), applying to Trash and Junk across all accounts. See Stalwart's [mail retention](https://stalw.art/docs/email/settings/maintenance/) and [storage maintenance](https://stalw.art/docs/storage/maintenance/) documentation for policy and space reclamation.
 
 To apply the initial plan or later edits, stop the kernel, load the updated `.env`, and run:
@@ -148,7 +150,7 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 ## Stopping and restarting
 
-Press `Ctrl+C` to stop the kernel and wait for its workers. With the services running and configuration loaded, start the kernel again with `zig build run`. The configured mailbox retains the working contexts independently of `DATA_DIR`; the [restart guidance](../docs/running.md#stopping-and-restarting) explains fresh startup activations and interrupted effects.
+Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how background commands stop, and how Ivenna continues interrupted work.
 
 To remove the local middleware containers while retaining mail, memory, and SSH keys:
 
@@ -162,7 +164,7 @@ Use the [startup steps](#starting-the-kernel) to recreate the services and run t
 
 ### Kernel
 
-The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. After editing code or these resources, stop the kernel and run `zig build run` to rebuild and restart it. The [restart requirements](../docs/running.md#stopping-and-restarting) cover saved-history format changes and continuation after interruption.
+The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Before running an updated executable against an existing mailbox, check the [history-format requirements](../docs/running.md#stopping-and-restarting). After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild and restart it.
 
 ### Memory
 
@@ -207,7 +209,7 @@ Source changes inside the memory image require a [rebuild](#updating-the-kernel-
 
 | Location | Contents |
 | --- | --- |
-| Stalwart volume, `ivenna-mail` by default | Correspondence, current and archived history records, checkpoints, Trash, accounts, and Stalwart configuration |
+| Stalwart volume, `ivenna-mail` by default | Correspondence, callback inbox, current and archived history records, checkpoints, Trash, accounts, and Stalwart configuration |
 | Memory volume, `ivenna-memory` by default | Shared memory rooms and entries |
 | `.env` | Kernel and local service settings and credentials |
 | `dev/mail/provision.ndjson` | Private mail configuration plan |

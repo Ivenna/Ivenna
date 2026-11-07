@@ -56,6 +56,10 @@ pub const Integration = struct {
         return .{ .context = self, .submit = submit };
     }
 
+    pub fn callbackPublisher(self: *Integration) contracts.Callback.Publisher {
+        return .{ .context = self, .publish = publishCallback };
+    }
+
     pub fn history(self: *Integration) contracts.HistoryStore {
         return self.history_adapter.port();
     }
@@ -69,17 +73,24 @@ pub const Integration = struct {
         return @ptrCast(@alignCast(context));
     }
 
-    fn poll(context: *anyopaque, a: Allocator, limit: usize) ![]const contracts.Inbox.Incoming {
+    fn poll(context: *anyopaque, a: Allocator, request: contracts.Inbox.Poll) ![]const contracts.Inbox.Incoming {
         const self = fromContext(context);
         try self.correspondence_mutex.lock(self.mailbox.client.io);
         defer self.correspondence_mutex.unlock(self.mailbox.client.io);
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         try self.mailbox.maintainCorrespondence(arena.allocator());
-        const pending = try self.mailbox.pending(a, limit);
+        const pending = try self.mailbox.pending(a, request);
         const incoming = try a.alloc(contracts.Inbox.Incoming, pending.len);
         for (pending, incoming) |candidate, *item| item.* = .{
-            .input = try self.transport.receive(a, candidate),
+            .content = switch (candidate.content) {
+                .message => |letter| .{ .message = try self.transport.receive(a, letter) },
+                .callback => |callback| .{ .callback = .{
+                    .id = callback.id,
+                    .text = callback.text,
+                    .observed_at_unix_ms = std.Io.Clock.real.now(self.mailbox.client.io).toMilliseconds(),
+                } },
+            },
             .receipt = candidate.id,
         };
         return incoming;
@@ -97,5 +108,12 @@ pub const Integration = struct {
         try self.correspondence_mutex.lock(self.mailbox.client.io);
         defer self.correspondence_mutex.unlock(self.mailbox.client.io);
         return self.transport.send(a, message);
+    }
+
+    fn publishCallback(context: *anyopaque, a: Allocator, message: contracts.Callback.Message) !void {
+        const self = fromContext(context);
+        try self.correspondence_mutex.lock(self.mailbox.client.io);
+        defer self.correspondence_mutex.unlock(self.mailbox.client.io);
+        try self.mailbox.publishCallback(a, message);
     }
 };

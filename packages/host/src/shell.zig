@@ -24,6 +24,7 @@ pub const Shell = struct {
         cwd: ?[]const u8 = null,
         timeout_ms: ?u32 = null,
         interpretation: ?Interpretation = null,
+        background: bool = false,
     };
 
     pub const Stream = struct {
@@ -91,11 +92,8 @@ pub const Shell = struct {
         return .{ .cwd = self.directory };
     }
 
-    // TODO(process_sessions): design process state that outlives model-turn
-    // arenas, including how process handles relate to session identity.
     // TODO(stdin, pty, process_control): design incremental output, input/EOF,
     // terminal transport, interruption, and cleanup for that runtime.
-    // TODO(background_jobs): design completion delivery through Kernel scheduling.
 
     pub fn run(self: Shell, a: Allocator, context: Context, args: Command) !Result {
         const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromMilliseconds(args.timeout_ms orelse default_timeout_ms), .clock = .awake });

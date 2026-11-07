@@ -32,7 +32,8 @@ pub fn main(init: std.process.Init) !void {
     defer mail.deinit();
     var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
     try memory_client.checkAvailable(a);
-    var host_tools = host.Host.init(io, host_directory, data_directory, init.environ_map);
+    var host_tools = host.Host.init(init.gpa, io, host_directory, data_directory, init.environ_map, mail.callbackPublisher(), config.max_background_commands);
+    defer host_tools.deinit();
     var provider: responses.Provider = .{
         .client = &client,
         .base_url = config.llm_base_url,
@@ -54,11 +55,14 @@ pub fn main(init: std.process.Init) !void {
         .inbox = mail.inbox(),
         .sender = mail.sender(),
         .history = mail.history(),
+        .callbacks = mail.callbackPublisher(),
     }, .{
         .limits = config.context_limits,
         .poll_interval_ms = config.mail_poll_interval_ms,
         .max_parallel = config.max_parallel_attention,
-        .max_contexts = config.max_attention_contexts,
+        .max_sessions = config.max_sessions,
+        .max_pending_events = config.max_pending_events,
+        .max_pending_callbacks = config.max_pending_callbacks,
     });
     defer kernel.deinit();
     var service = try Service.listen(io, config.service_address, &kernel);
@@ -76,20 +80,22 @@ pub fn main(init: std.process.Init) !void {
     std.posix.sigaction(.TERM, &action, &previous_term);
     defer std.posix.sigaction(.TERM, &previous_term, null);
 
-    const Result = union(enum) { service: anyerror!void, kernel: anyerror!void, shutdown: std.Io.Cancelable!void };
-    var result_buffer: [3]Result = undefined;
+    const Result = union(enum) { service: anyerror!void, kernel: anyerror!void, host: anyerror!void, shutdown: std.Io.Cancelable!void };
+    var result_buffer: [4]Result = undefined;
     var select = std.Io.Select(Result).init(io, &result_buffer);
     defer {
         kernel.closeReception();
         select.cancelDiscard();
     }
     try select.concurrent(.service, Service.run, .{&service});
+    try select.concurrent(.host, host.Host.run, .{&host_tools});
     try select.concurrent(.kernel, agent.Kernel.run, .{&kernel});
     try select.concurrent(.shutdown, waitForStop, .{io});
     std.log.info("Ivenna listening on {f} as {s} (model: {s})", .{ service.listener.socket.address, config.mail_address, config.llm_model });
     switch (try select.await()) {
         .service => |result| try result,
         .kernel => |result| try result,
+        .host => |result| try result,
         .shutdown => |result| {
             try result;
             std.log.info("stopping Ivenna and waiting for active work", .{});

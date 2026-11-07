@@ -24,19 +24,27 @@ const Source = union(enum) {
 };
 
 pub const History = struct {
+    pub const Wakeup = struct { id: u64, at_unix_ms: i64, text: []const u8 };
+
     next_session_id: u64,
+    next_callback_id: u64,
     sessions: []const Session,
+    wakeups: []const Wakeup,
+    callbacks: []const Input.PendingCallback,
 
     pub const Session = struct {
         session_id: u64,
         role: Input.Role,
+        last_active_unix_ms: i64,
+        was_running: bool,
         epoch: u64,
-        entries: []const Entry,
+        /// A cold context keeps the spans from its confirmed checkpoint.
+        entries: ?[]const Entry,
         observations: []const Input.Event,
     };
 
     fn validate(self: History, a: Allocator) !void {
-        if (self.sessions.len == 0) return error.InvalidHistory;
+        if (self.sessions.len == 0 or self.next_callback_id == 0) return error.InvalidHistory;
         var epochs: std.AutoHashMapUnmanaged(u64, u64) = .empty;
         defer epochs.deinit(a);
         for (self.sessions) |session| {
@@ -48,10 +56,10 @@ pub const History = struct {
         var cores: usize = 0;
         for (self.sessions) |session| {
             for (session.observations) |event| switch (event) {
-                .assignment, .report => {},
+                .assignment, .report, .session_message, .session_created => {},
                 else => return error.InvalidHistory,
             };
-            for (session.entries) |entry| {
+            for (session.entries orelse &.{}) |entry| {
                 const owner_epoch = epochs.get(entry.scope.session_id) orelse return error.InvalidHistory;
                 if (entry.scope.epoch > owner_epoch) return error.InvalidHistory;
             }
@@ -66,6 +74,20 @@ pub const History = struct {
             }
         }
         if (cores != 1) return error.InvalidHistory;
+        var callbacks: std.AutoHashMapUnmanaged(u64, Input.PendingCallback) = .empty;
+        defer callbacks.deinit(a);
+        for (self.callbacks) |callback| {
+            if (callback.id == 0 or callback.id >= self.next_callback_id or !epochs.contains(callback.session_id)) return error.InvalidHistory;
+            const entry = try callbacks.getOrPut(a, callback.id);
+            if (entry.found_existing) return error.InvalidHistory;
+            entry.value_ptr.* = callback;
+        }
+        var wakeup_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer wakeup_ids.deinit(a);
+        for (self.wakeups) |wakeup| {
+            const callback = callbacks.get(wakeup.id) orelse return error.InvalidHistory;
+            if (callback.source != .wakeup or (try wakeup_ids.getOrPut(a, wakeup.id)).found_existing) return error.InvalidHistory;
+        }
     }
 };
 
@@ -75,11 +97,16 @@ const Span = struct { scope: Scope, group: []const u8, head: Key, count: usize }
 /// so all required groups are known before record discovery.
 const Checkpoint = struct {
     next_session_id: u64,
+    next_callback_id: u64,
     sessions: []const Session,
+    wakeups: []const History.Wakeup,
+    callbacks: []const Input.PendingCallback,
 
     const Session = struct {
         session_id: u64,
         role: Input.Role,
+        last_active_unix_ms: i64,
+        was_running: bool,
         epoch: u64,
         group: []const u8,
         history: []const Span,
@@ -94,12 +121,13 @@ const CachedScope = struct {
 };
 const CachedObservation = struct { scope: Scope, key: Key };
 
-/// Groups and keys from the last successfully loaded or saved checkpoint.
-/// The arena owns the complete cache.
+/// Session metadata, groups, and keys from the last confirmed checkpoint.
+/// The arena owns the complete cache, including cold contexts' spans.
 const Cache = struct {
     arena: std.heap.ArenaAllocator,
     scopes: std.AutoHashMapUnmanaged(Scope, CachedScope) = .empty,
     observations: std.AutoHashMapUnmanaged(u64, CachedObservation) = .empty,
+    sessions: std.AutoHashMapUnmanaged(u64, Checkpoint.Session) = .empty,
 
     fn init(a: Allocator) Cache {
         return .{ .arena = .init(a) };
@@ -126,7 +154,7 @@ pub const Persistence = struct {
         self.* = undefined;
     }
 
-    pub fn load(self: *Persistence, a: Allocator, max_contexts: usize) !?History {
+    pub fn load(self: *Persistence, a: Allocator, max_sessions: usize) !?History {
         const document = try self.store.load(a) orelse {
             self.cache.deinit();
             self.cache = .init(self.allocator);
@@ -134,7 +162,7 @@ pub const Persistence = struct {
             return null;
         };
         const checkpoint = try decode(Checkpoint, a, document);
-        if (checkpoint.sessions.len > max_contexts) return error.AttentionCapacityUnavailable;
+        if (checkpoint.sessions.len > max_sessions) return error.SessionCapacityUnavailable;
         var candidate: Cache = .init(self.allocator);
         defer candidate.deinit();
         var owners: std.StringHashMapUnmanaged(Scope) = .empty;
@@ -216,31 +244,7 @@ pub const Persistence = struct {
             _ = scratch.reset(.retain_capacity);
             offset += count;
         }
-        offset = 0;
-        while (offset < selections.items.items.len) {
-            const count = @min(source_batch_count, selections.items.items.len - offset);
-            const batch = selections.items.items[offset..][0..count];
-            var references: [source_batch_count]Store.Reference = undefined;
-            for (batch, references[0..count]) |selected, *reference| reference.* = selected.reference;
-            const bodies = try self.store.read(scratch.allocator(), references[0..count]);
-            for (batch, bodies) |*selected, body| {
-                if (!equalKey(digest(body), selected.reference.key)) return error.InvalidHistory;
-                const source = try decode(Source, a, body);
-                switch (source) {
-                    .entry => |entry| {
-                        if (selected.kind != .entry or !equalScope(entry.value.scope, selected.scope) or
-                            !equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
-                    },
-                    .observations => |events| {
-                        if (selected.kind != .observations or events.len == 0)
-                            return error.InvalidHistory;
-                    },
-                }
-                selected.source = source;
-            }
-            _ = scratch.reset(.retain_capacity);
-            offset += count;
-        }
+        try self.readSelections(a, &selections);
         const sessions = try a.alloc(History.Session, checkpoint.sessions.len);
         for (checkpoint.sessions, sessions) |session, *restored| {
             var entry_count: usize = 0;
@@ -258,19 +262,117 @@ pub const Persistence = struct {
             restored.* = .{
                 .session_id = session.session_id,
                 .role = session.role,
+                .last_active_unix_ms = session.last_active_unix_ms,
+                .was_running = session.was_running,
                 .epoch = session.epoch,
                 .entries = entries,
                 .observations = if (session.observations) |key| selections.source(scope, key).observations else &.{},
             };
+            try cacheSession(&candidate, session);
         }
-        const history: History = .{ .next_session_id = checkpoint.next_session_id, .sessions = sessions };
+        const history: History = .{
+            .next_session_id = checkpoint.next_session_id,
+            .next_callback_id = checkpoint.next_callback_id,
+            .sessions = sessions,
+            .wakeups = checkpoint.wakeups,
+            .callbacks = checkpoint.callbacks,
+        };
         try history.validate(a);
         std.mem.swap(Cache, &self.cache, &candidate);
         self.published_checkpoint_digest = digest(document);
         return history;
     }
 
+    /// Restore only this session's selected history without replacing the
+    /// confirmed checkpoint or materializing any other working context.
+    pub fn restoreEntries(self: *Persistence, a: Allocator, session_id: u64) ![]const Entry {
+        const session = self.cache.sessions.get(session_id) orelse return error.InvalidHistory;
+        var selections: Selections = .{ .allocator = a };
+        defer selections.deinit();
+        var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+        defer scratch.deinit();
+        var offset: usize = 0;
+        while (offset < session.history.len) {
+            const count = @min(source_batch_count, session.history.len - offset);
+            const spans = session.history[offset..][0..count];
+            var groups: [source_batch_count][]const u8 = undefined;
+            var owners: std.StringHashMapUnmanaged(Scope) = .empty;
+            const temporary = scratch.allocator();
+            for (spans, groups[0..count]) |span, *group| {
+                group.* = span.group;
+                try owners.put(temporary, span.group, span.scope);
+            }
+            const references = try self.store.query(temporary, groups[0..count]);
+            const Metadata = std.AutoHashMapUnmanaged(Key, Store.Reference);
+            var metadata: std.AutoHashMapUnmanaged(Scope, Metadata) = .empty;
+            for (spans) |span| try metadata.put(temporary, span.scope, .empty);
+            for (references) |reference| {
+                const scope = owners.get(reference.group).?;
+                const records = metadata.getPtr(scope).?;
+                const result = try records.getOrPut(temporary, reference.key);
+                if (result.found_existing) {
+                    if (!equalPrevious(result.value_ptr.previous, reference.previous)) return error.InvalidHistory;
+                } else result.value_ptr.* = reference;
+            }
+            for (spans) |span| {
+                const cached = self.cache.scopes.get(span.scope).?;
+                const records = metadata.getPtr(span.scope).?;
+                for (cached.keys.items[0..span.count], 0..) |key, index| {
+                    const reference = records.get(key) orelse return error.InvalidHistory;
+                    const previous = if (index == 0) null else cached.keys.items[index - 1];
+                    if (!equalPrevious(reference.previous, previous)) return error.InvalidHistory;
+                    try selections.add(span.scope, reference, .entry);
+                }
+            }
+            _ = scratch.reset(.retain_capacity);
+            offset += count;
+        }
+        try self.readSelections(a, &selections);
+        var entry_count: usize = 0;
+        for (session.history) |span| entry_count = std.math.add(usize, entry_count, span.count) catch return error.InvalidHistory;
+        const entries = try a.alloc(Entry, entry_count);
+        var position: usize = 0;
+        for (session.history) |span| {
+            const cached = self.cache.scopes.get(span.scope).?;
+            for (cached.keys.items[0..span.count]) |key| {
+                entries[position] = selections.source(span.scope, key).entry.value;
+                position += 1;
+            }
+        }
+        return entries;
+    }
+
+    fn readSelections(self: *Persistence, a: Allocator, selections: *Selections) !void {
+        var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+        defer scratch.deinit();
+        var offset: usize = 0;
+        while (offset < selections.items.items.len) {
+            const count = @min(source_batch_count, selections.items.items.len - offset);
+            const batch = selections.items.items[offset..][0..count];
+            var references: [source_batch_count]Store.Reference = undefined;
+            for (batch, references[0..count]) |selected, *reference| reference.* = selected.reference;
+            const bodies = try self.store.read(scratch.allocator(), references[0..count]);
+            for (batch, bodies) |*selected, body| {
+                if (!equalKey(digest(body), selected.reference.key)) return error.InvalidHistory;
+                const source = try decode(Source, a, body);
+                switch (source) {
+                    .entry => |entry| {
+                        if (selected.kind != .entry or !equalScope(entry.value.scope, selected.scope) or
+                            !equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
+                    },
+                    .observations => |events| {
+                        if (selected.kind != .observations or events.len == 0) return error.InvalidHistory;
+                    },
+                }
+                selected.source = source;
+            }
+            _ = scratch.reset(.retain_capacity);
+            offset += count;
+        }
+    }
+
     pub fn save(self: *Persistence, a: Allocator, history: History) !void {
+        try history.validate(a);
         var candidate: Cache = .init(self.allocator);
         defer candidate.deinit();
         var builder: Builder = .init(self, &candidate, a);
@@ -287,34 +389,50 @@ pub const Persistence = struct {
             const group = try builder.group(current);
             candidate.scopes.getPtr(current).?.active = true;
             var spans: std.ArrayList(Span) = .empty;
-            var seen: std.AutoHashMapUnmanaged(Scope, void) = .empty;
-            defer seen.deinit(a);
-            var offset: usize = 0;
-            while (offset < session.entries.len) {
-                const scope = session.entries[offset].scope;
-                if ((try seen.getOrPut(a, scope)).found_existing) return error.InvalidHistory;
-                const source_group = try builder.group(scope);
-                var count: usize = 0;
-                var head: Key = undefined;
-                while (offset < session.entries.len and equalScope(session.entries[offset].scope, scope)) {
-                    head = try builder.entry(session.entries[offset], count);
-                    count += 1;
-                    offset += 1;
+            if (session.entries) |entries| {
+                var seen: std.AutoHashMapUnmanaged(Scope, void) = .empty;
+                defer seen.deinit(a);
+                var offset: usize = 0;
+                while (offset < entries.len) {
+                    const scope = entries[offset].scope;
+                    if ((try seen.getOrPut(a, scope)).found_existing) return error.InvalidHistory;
+                    const source_group = try builder.group(scope);
+                    var count: usize = 0;
+                    var head: Key = undefined;
+                    while (offset < entries.len and equalScope(entries[offset].scope, scope)) {
+                        head = try builder.entry(entries[offset], count);
+                        count += 1;
+                        offset += 1;
+                    }
+                    try spans.append(a, .{ .scope = scope, .group = source_group, .head = head, .count = count });
                 }
-                try spans.append(a, .{ .scope = scope, .group = source_group, .head = head, .count = count });
+            } else {
+                const stored = self.cache.sessions.get(session.session_id) orelse return error.InvalidHistory;
+                if (stored.epoch != session.epoch) return error.InvalidHistory;
+                for (stored.history) |span| try builder.retainSpan(span);
+                try spans.appendSlice(a, stored.history);
             }
             const observations = if (session.observations.len == 0) null else try builder.observations(current, session.observations);
             saved.* = .{
                 .session_id = session.session_id,
                 .role = session.role,
+                .last_active_unix_ms = session.last_active_unix_ms,
+                .was_running = session.was_running,
                 .epoch = session.epoch,
                 .group = group,
                 .history = spans.items,
                 .observations = observations,
             };
+            try cacheSession(&candidate, saved.*);
         }
         try builder.flush();
-        const document = try encode(a, Checkpoint{ .next_session_id = history.next_session_id, .sessions = sessions });
+        const document = try encode(a, Checkpoint{
+            .next_session_id = history.next_session_id,
+            .next_callback_id = history.next_callback_id,
+            .sessions = sessions,
+            .wakeups = history.wakeups,
+            .callbacks = history.callbacks,
+        });
         const candidate_digest = digest(document);
         if (self.published_checkpoint_digest) |published| {
             if (equalKey(published, candidate_digest)) return;
@@ -348,6 +466,19 @@ pub const Persistence = struct {
         try self.store.maintain(a, .{ .active_groups = active_groups.items, .records = records.items });
     }
 };
+
+fn cacheSession(cache: *Cache, session: Checkpoint.Session) !void {
+    const a = cache.arena.allocator();
+    const spans = try a.alloc(Span, session.history.len);
+    for (session.history, spans) |span, *owned| {
+        owned.* = span;
+        owned.group = cache.scopes.get(span.scope).?.group;
+    }
+    var owned = session;
+    owned.group = cache.scopes.get(.{ .session_id = session.session_id, .epoch = session.epoch }).?.group;
+    owned.history = spans;
+    try cache.sessions.put(a, session.session_id, owned);
+}
 
 fn registerScope(cache: *Cache, owners: *std.StringHashMapUnmanaged(Scope), a: Allocator, scope: Scope, group: []const u8) !void {
     if (scope.session_id == 0 or group.len == 0) return error.InvalidHistory;
@@ -463,6 +594,19 @@ const Builder = struct {
         try cached.keys.append(self.cache.arena.allocator(), key);
         if (!known) try self.add(cached.group, key, previous, body);
         return key;
+    }
+
+    fn retainSpan(self: *Builder, span: Span) !void {
+        _ = try self.group(span.scope);
+        const stored = self.persistence.cache.scopes.get(span.scope).?;
+        const cached = self.cache.scopes.getPtr(span.scope).?;
+        const keys = stored.keys.items[0..span.count];
+        const common = @min(cached.keys.items.len, keys.len);
+        for (cached.keys.items[0..common], keys[0..common]) |left, right| {
+            if (!equalKey(left, right)) return error.InvalidHistory;
+        }
+        if (keys.len > cached.keys.items.len)
+            try cached.keys.appendSlice(self.cache.arena.allocator(), keys[cached.keys.items.len..]);
     }
 
     fn observations(self: *Builder, scope: Scope, events: []const Input.Event) !Key {

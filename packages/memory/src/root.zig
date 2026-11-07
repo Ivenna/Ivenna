@@ -22,7 +22,7 @@ pub const Memory = struct {
         };
     }
 
-    fn invokeTool(context: *anyopaque, a: Allocator, _: u64, name: []const u8, arguments: []const u8) anyerror!?Content {
+    fn invokeTool(context: *anyopaque, a: Allocator, _: Tools.Invocation, name: []const u8, arguments: []const u8) anyerror!?Content {
         const self: *Memory = @ptrCast(@alignCast(context));
         const request = try Request.parse(a, name, arguments) orelse return null;
         return try self.invoke(a, request);

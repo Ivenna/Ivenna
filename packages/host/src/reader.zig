@@ -15,7 +15,7 @@ pub const Reader = struct {
         unavailable: content.Unavailable,
     };
 
-    /// Returned content uses the current turn's allocator.
+    /// Returned content belongs to the supplied allocator.
     pub fn readFile(self: Reader, a: Allocator, file: std.Io.File, interpretation: ?Interpretation) !FileContent {
         const length = try file.length(self.io);
         var header: [16]u8 = undefined;

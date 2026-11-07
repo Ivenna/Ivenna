@@ -1,5 +1,7 @@
 const std = @import("std");
 const HistoryStore = @import("agent_contracts").HistoryStore;
+const Callback = @import("agent_contracts").Callback;
+const Inbox = @import("agent_contracts").Inbox;
 const Addressing = @import("addressing.zig").Addressing;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
@@ -14,6 +16,16 @@ pub const Letter = struct {
     from: []const Address,
     subject: []const u8,
     body: []const u8,
+};
+
+/// The mail boundary distinguishes private callback records from correspondence
+/// before either reaches execution. Receipts remain native to this adapter.
+pub const Arrival = struct {
+    id: []const u8,
+    content: union(enum) {
+        message: Letter,
+        callback: Callback.Message,
+    },
 };
 
 pub const Outgoing = struct {
@@ -34,9 +46,13 @@ const handled_keyword = "ivenna-handled";
 const outbound_keyword = "ivenna-outbound";
 const state_keyword = "ivenna-state";
 const current_keyword = "ivenna-current";
+const callback_keyword = "ivenna-callback";
+const callback_keyword_prefix = "ivenna-callback-";
 const group_keyword_prefix = "ivenna-history-";
 const history_mailbox_name = "Ivenna History";
 const archive_mailbox_name = "Ivenna Archive";
+const callback_mailbox_name = "Ivenna Callbacks";
+const callback_property = "header:X-Ivenna-Callback-Id:asText";
 const kind_property = "header:X-Ivenna-History-Kind:asText";
 const revision_property = "header:X-Ivenna-History-Revision:asText";
 const key_property = "header:X-Ivenna-History-Key:asText";
@@ -50,9 +66,9 @@ const state_data_properties: []const []const u8 = &.{
     "id", "mailboxIds", "keywords", "from", "to", kind_property, revision_property, key_property, previous_property, "textBody", "bodyValues",
 };
 const message_properties: []const []const u8 = &.{
-    "id", "from", "subject", "textBody", "htmlBody", "bodyValues",
+    "id", "mailboxIds", "keywords", "receivedAt", "from", "to", "subject", callback_property, "textBody", "htmlBody", "bodyValues",
 };
-const correspondence_properties: []const []const u8 = &.{ "id", "from", "keywords" };
+const correspondence_properties: []const []const u8 = &.{ "id", "mailboxIds", "from", "to", "keywords", callback_property };
 
 const HistoryKind = enum { record, checkpoint };
 const EmailUpdate = struct { id: []const u8, patch: Value };
@@ -71,6 +87,7 @@ pub const Mailbox = struct {
     drafts_id: []const u8 = "",
     history_id: []const u8 = "",
     archive_id: []const u8 = "",
+    callback_id: []const u8 = "",
     trash_id: []const u8 = "",
     junk_id: []const u8 = "",
     excluded_ids: []const []const u8 = &.{},
@@ -113,6 +130,9 @@ pub const Mailbox = struct {
                 if (optionalText(folder, "parentId") == null and
                     std.mem.eql(u8, try textField(folder, "name"), archive_mailbox_name))
                     self.archive_id = id;
+                if (optionalText(folder, "parentId") == null and
+                    std.mem.eql(u8, try textField(folder, "name"), callback_mailbox_name))
+                    self.callback_id = id;
                 continue;
             };
             if (std.mem.eql(u8, role, "drafts")) self.drafts_id = id;
@@ -137,6 +157,13 @@ pub const Mailbox = struct {
             });
             self.archive_id = try createdId(created, "archive");
         }
+        if (self.callback_id.len == 0) {
+            const created = try self.call(a, "Mailbox/set", .{
+                .accountId = self.account_id,
+                .create = .{ .callbacks = .{ .name = callback_mailbox_name, .parentId = null, .role = null } },
+            });
+            self.callback_id = try createdId(created, "callbacks");
+        }
         if (self.trash_id.len == 0) {
             const created = try self.call(a, "Mailbox/set", .{
                 .accountId = self.account_id,
@@ -150,29 +177,135 @@ pub const Mailbox = struct {
         self.excluded_ids = try excluded.toOwnedSlice(a);
     }
 
-    /// Intake excludes history storage and uses private acknowledgement markers,
-    /// independently of read status, stars, or archiving.
-    pub fn pending(self: Mailbox, a: Allocator, limit: usize) ![]const Letter {
-        const filter = try self.pendingFilter(a);
-        var letters: std.ArrayList(Letter) = .empty;
+    const IntakeKind = enum { message, callback };
+
+    const OrderedArrival = struct {
+        arrival: Arrival,
+        received_at: []const u8,
+        ordinal: usize,
+
+        fn lessThan(_: void, left: OrderedArrival, right: OrderedArrival) bool {
+            return switch (std.mem.order(u8, left.received_at, right.received_at)) {
+                .lt => true,
+                .gt => false,
+                .eq => left.ordinal < right.ordinal,
+            };
+        }
+    };
+
+    /// Each stream contributes its own eligible prefix. Merge the selected
+    /// records by native reception time without discarding either allocation.
+    pub fn pending(self: Mailbox, a: Allocator, request: Inbox.Poll) ![]const Arrival {
+        var selected: std.ArrayList(OrderedArrival) = .empty;
+        defer selected.deinit(a);
+        try self.collectPending(a, .message, request.messages, &selected);
+        try self.collectPending(a, .callback, request.callbacks, &selected);
+        std.mem.sort(OrderedArrival, selected.items, {}, OrderedArrival.lessThan);
+        const arrivals = try a.alloc(Arrival, selected.items.len);
+        for (selected.items, arrivals) |item, *arrival| arrival.* = item.arrival;
+        return arrivals;
+    }
+
+    fn collectPending(self: Mailbox, a: Allocator, kind: IntakeKind, limit: usize, arrivals: *std.ArrayList(OrderedArrival)) !void {
+        if (limit == 0) return;
+        const filter = try self.pendingFilter(a, kind);
+        var accepted: usize = 0;
         var position: usize = 0;
-        while (letters.items.len < limit) {
-            const ids = try self.queryIds(a, filter, true, position, limit - letters.items.len);
+        while (accepted < limit) {
+            const ids = try self.queryIds(a, filter, true, position, limit - accepted);
             if (ids.len == 0) break;
             for (try self.getRecords(a, ids, true)) |record| {
-                const letter = decode(a, record) catch |err| switch (err) {
-                    error.MailBodyUnavailable => {
-                        std.log.warn("mail {s} has no complete supported body", .{try textField(record, "id")});
-                        continue;
-                    },
-                    else => return err,
-                };
-                if (!self.isCorrespondence(letter)) continue;
-                try letters.append(a, letter);
+                const arrival = try self.decodePending(a, kind, record) orelse continue;
+                try arrivals.append(a, .{
+                    .arrival = arrival,
+                    .received_at = try receptionKey(record),
+                    .ordinal = arrivals.items.len,
+                });
+                accepted += 1;
             }
             position += ids.len;
         }
-        return letters.toOwnedSlice(a);
+    }
+
+    fn decodePending(self: Mailbox, a: Allocator, kind: IntakeKind, record: Value) !?Arrival {
+        return switch (kind) {
+            .callback => blk: {
+                const callback = self.decodeCallback(a, record) catch |err| switch (err) {
+                    error.InvalidCallback => {
+                        std.log.warn("mail {s} has no valid complete callback", .{try textField(record, "id")});
+                        return null;
+                    },
+                    else => return err,
+                };
+                break :blk .{ .id = try textField(record, "id"), .content = .{ .callback = callback } };
+            },
+            .message => blk: {
+                const keywords = try field(record, "keywords");
+                const folders = try field(record, "mailboxIds");
+                if (boolean(keywords, callback_keyword) or boolean(folders, self.callback_id)) return null;
+                const letter = decode(a, record) catch |err| switch (err) {
+                    error.MailBodyUnavailable => {
+                        std.log.warn("mail {s} has no complete supported body", .{try textField(record, "id")});
+                        return null;
+                    },
+                    else => return err,
+                };
+                if (!self.isCorrespondence(letter)) return null;
+                break :blk .{ .id = letter.id, .content = .{ .message = letter } };
+            },
+        };
+    }
+
+    /// Publish a private delivery record through JMAP, without SMTP submission.
+    /// The caller serializes lookup and creation. A retry preserves the first
+    /// stored result, including a copy already acknowledged into Trash. Body
+    /// availability cannot justify replacing a result that already exists.
+    pub fn publishCallback(self: Mailbox, a: Allocator, message: Callback.Message) !void {
+        if (message.id == 0) return error.InvalidCallback;
+        const id_text = try std.fmt.allocPrint(a, "{d}", .{message.id});
+        const index_keyword = try callbackKeyword(a, message.id);
+        const filter = try value(a, .{
+            .operator = "AND",
+            .conditions = .{
+                .{ .hasKeyword = callback_keyword },
+                .{ .hasKeyword = index_keyword },
+            },
+        });
+        var position: usize = 0;
+        while (true) {
+            const ids = try self.queryIds(a, filter, true, position, self.max_get);
+            if (ids.len == 0) break;
+            for (try self.getRecords(a, ids, false)) |record| {
+                const previous = self.callbackId(a, record) catch |err| switch (err) {
+                    error.InvalidCallback => continue,
+                    else => return err,
+                };
+                // The keyword locates candidates; the native header and its
+                // matching index establish callback identity.
+                if (previous == message.id) return;
+            }
+            position += ids.len;
+        }
+        var folders: std.json.ObjectMap = .empty;
+        try folders.put(a, self.callback_id, .{ .bool = true });
+        var keywords: std.json.ObjectMap = .empty;
+        try keywords.put(a, callback_keyword, .{ .bool = true });
+        try keywords.put(a, index_keyword, .{ .bool = true });
+        var record = try value(a, .{
+            .mailboxIds = Value{ .object = folders },
+            .keywords = Value{ .object = keywords },
+            .from = &[_]Address{.{ .email = self.address }},
+            .to = &[_]Address{.{ .email = self.address }},
+            .subject = "Ivenna callback",
+            .textBody = &.{.{ .partId = "text", .type = "text/plain" }},
+            .bodyValues = .{ .text = .{ .value = message.text } },
+        });
+        try record.object.put(a, callback_property, .{ .string = id_text });
+        const created = try self.call(a, "Email/set", .{
+            .accountId = self.account_id,
+            .create = .{ .callback = record },
+        });
+        _ = try createdId(created, "callback");
     }
 
     /// The caller has durably admitted this input into working history.
@@ -207,6 +340,10 @@ pub const Mailbox = struct {
             for (try self.getRecords(temporary, ids, false)) |record| {
                 const keywords = try field(record, "keywords");
                 if (!boolean(keywords, handled_keyword)) {
+                    // An unfinished callback is a pending input, even if a
+                    // malformed record also carries the outgoing marker.
+                    const folders = try field(record, "mailboxIds");
+                    if (boolean(keywords, callback_keyword) or boolean(folders, self.callback_id)) continue;
                     const from = try addresses(temporary, record, "from");
                     if (from.len != 1 or !self.addressing.isSelf(from[0].email)) continue;
                 }
@@ -785,12 +922,22 @@ pub const Mailbox = struct {
         return strings(a, try field(query, "ids"));
     }
 
-    fn pendingFilter(self: Mailbox, a: Allocator) !Value {
+    fn pendingFilter(self: Mailbox, a: Allocator, kind: IntakeKind) !Value {
         var conditions: std.ArrayList(Value) = .empty;
         try conditions.append(a, try value(a, .{ .notKeyword = "$draft" }));
         try conditions.append(a, try value(a, .{ .notKeyword = handled_keyword }));
         try conditions.append(a, try value(a, .{ .notKeyword = outbound_keyword }));
         try conditions.append(a, try value(a, .{ .notKeyword = state_keyword }));
+        switch (kind) {
+            .callback => {
+                try conditions.append(a, try value(a, .{ .hasKeyword = callback_keyword }));
+                try conditions.append(a, try value(a, .{ .inMailbox = self.callback_id }));
+            },
+            .message => {
+                try conditions.append(a, try value(a, .{ .notKeyword = callback_keyword }));
+                try conditions.append(a, try value(a, .{ .operator = "NOT", .conditions = &.{.{ .inMailbox = self.callback_id }} }));
+            },
+        }
         for (self.excluded_ids) |id| {
             try conditions.append(a, try value(a, .{
                 .operator = "NOT",
@@ -849,6 +996,45 @@ pub const Mailbox = struct {
             .subject = optionalText(record, "subject") orelse "",
             .body = try bodyText(a, record),
         };
+    }
+
+    fn decodeCallback(self: Mailbox, a: Allocator, record: Value) !Callback.Message {
+        if (!boolean(try field(record, "mailboxIds"), self.callback_id)) return error.InvalidCallback;
+        const id = try self.callbackId(a, record);
+        // Private deliveries use the same complete plain-text storage format as
+        // history records; an HTML fallback or malformed body flags cannot turn
+        // an incomplete delivery into an accepted callback.
+        return .{ .id = id, .text = historyBody(record) catch return error.InvalidCallback };
+    }
+
+    fn callbackId(self: Mailbox, a: Allocator, record: Value) !u64 {
+        const keywords = try field(record, "keywords");
+        if (!boolean(keywords, callback_keyword) or boolean(keywords, state_keyword) or
+            boolean(keywords, outbound_keyword) or boolean(keywords, "$draft"))
+            return error.InvalidCallback;
+        const from = addresses(a, record, "from") catch |err| switch (err) {
+            error.InvalidMailReply => return error.InvalidCallback,
+            else => return err,
+        };
+        if (from.len != 1 or !self.addressing.isSelf(from[0].email)) return error.InvalidCallback;
+        const to = addresses(a, record, "to") catch |err| switch (err) {
+            error.InvalidMailReply => return error.InvalidCallback,
+            else => return err,
+        };
+        if (to.len != 1 or !self.addressing.isSelf(to[0].email)) return error.InvalidCallback;
+        const id_text = optionalText(record, callback_property) orelse return error.InvalidCallback;
+        const id = std.fmt.parseInt(u64, id_text, 10) catch return error.InvalidCallback;
+        if (id == 0) return error.InvalidCallback;
+        const index_keyword = try callbackKeyword(a, id);
+        var indexed = false;
+        for (keywords.object.keys(), keywords.object.values()) |keyword, enabled| {
+            if (!std.mem.startsWith(u8, keyword, callback_keyword_prefix)) continue;
+            if (indexed or enabled != .bool or !enabled.bool or !std.mem.eql(u8, keyword, index_keyword))
+                return error.InvalidCallback;
+            indexed = true;
+        }
+        if (!indexed) return error.InvalidCallback;
+        return id;
     }
 
     fn isCorrespondence(self: Mailbox, letter: Letter) bool {
@@ -965,6 +1151,32 @@ fn isLowerHex(text: []const u8) bool {
 fn historyGroupKeyword(a: Allocator, group: []const u8) ![]const u8 {
     if (group.len != 32 or !isLowerHex(group)) return error.InvalidHistory;
     return std.fmt.allocPrint(a, group_keyword_prefix ++ "{s}", .{group});
+}
+
+fn callbackKeyword(a: Allocator, id: u64) ![]const u8 {
+    return std.fmt.allocPrint(a, callback_keyword_prefix ++ "{d}", .{id});
+}
+
+/// UTCDate has a fixed UTC prefix and optional decimal seconds. Removing Z
+/// keeps whole seconds before fractional values in a lexical comparison.
+fn receptionKey(record: Value) ![]const u8 {
+    const timestamp = try textField(record, "receivedAt");
+    if (timestamp.len < 20 or timestamp[timestamp.len - 1] != 'Z') return error.InvalidMailReply;
+    const key = timestamp[0 .. timestamp.len - 1];
+    for (key[0..19], 0..) |byte, index| {
+        const valid = switch (index) {
+            4, 7 => byte == '-',
+            10 => byte == 'T',
+            13, 16 => byte == ':',
+            else => std.ascii.isDigit(byte),
+        };
+        if (!valid) return error.InvalidMailReply;
+    }
+    if (key.len > 19) {
+        if (key[19] != '.' or key.len == 20) return error.InvalidMailReply;
+        for (key[20..]) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidMailReply;
+    }
+    return key;
 }
 
 fn historyKey(text: []const u8) !HistoryStore.Key {

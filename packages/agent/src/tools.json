@@ -29,7 +29,7 @@
   },
   {
     "name": "fork_session",
-    "description": "Transfer this activation's whole work to a new child that inherits the complete retained working context, and return its session_id. On success, this activation ends and the caller returns to its queue. The child's final text joins this session's queue as one combined report. At most one fork per model round.",
+    "description": "Transfer this activation's work to a new child with the retained working context, and return its stable session_id. The caller returns to its queue; unadmitted events and existing callbacks keep their destinations. Child results are reported automatically to the caller and core. At most one fork per model round.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -41,6 +41,53 @@
       },
       "required": [
         "task"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "send_session_message",
+    "description": "Queue an observation or coordination message for an existing session, with your session recorded as its source. A dormant recipient becomes ready; a running recipient admits it between complete model/tool rounds. Success confirms durable queue acceptance.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Recipient session ID from current state, a fork, or retained history."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Observation or coordination intent."
+        }
+      },
+      "required": [
+        "session_id",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "wakeup",
+    "description": "Schedule one observation for this session at a Unix time in milliseconds, and return its callback_id. The arrangement survives restart. Past times are immediately due; delivery and inference may occur later than the requested time. Return control when ready to let this session sleep.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "at_unix_ms": {
+          "type": "integer",
+          "description": "Unix time in milliseconds. Current runtime time is supplied in state."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What to reconsider when this observation arrives."
+        }
+      },
+      "required": [
+        "at_unix_ms",
+        "text"
       ],
       "additionalProperties": false
     }
