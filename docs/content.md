@@ -39,7 +39,7 @@ At the end of each tool batch, the Responses adapter limits newly returned image
 | Image count, including retained images and URL references | 600 |
 | Serialized model request body, including history, tool definitions, and base64 image data | 48 MiB |
 
-The adapter keeps new images in order up to the count limit, replacing later images with text `content_limit` errors. If the serialized request exceeds the byte limit, newly returned images are then omitted from the end until it fits or no new images remain. Text descriptions, command outcomes, diagnostics, and earlier context remain available.
+The adapter keeps new images in order up to the count limit. If the serialized request exceeds the byte limit, newly returned images are then omitted from the end until it fits or no new images remain. Each omitted image part becomes a text part containing an `error` with code `content_limit`. The tool's result description, command outcome, other diagnostics, and earlier context remain available alongside that omission error.
 
 These checks only remove newly returned images. They can leave a request above the listed thresholds when retained content or text already exceeds them. The separate [whole-request budget](architecture.md#bounded-model-context) checks the remaining request before the next model round and may require a handover or end execution.
 

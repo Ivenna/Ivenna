@@ -30,7 +30,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
 | `MAX_PARALLEL_ATTENTION` | Maximum concurrently executing work sessions; core has a separate lane | `4` |
-| `MAX_ATTENTION_CONTEXTS` | Maximum retained contexts, including the core; also sets each session's capacity | `32` |
+| `MAX_ATTENTION_CONTEXTS` | Maximum retained contexts, including the core; also bounds each session's events and child reports | `32` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
 | `HANDOVER_MAX_BYTES` | Maximum retained handover text | `8192` |
@@ -54,7 +54,7 @@ Use a dedicated account as programmatic storage for Ivenna's communication recor
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
 
-Addresses must use the [supported ASCII dot-atom local parts](communication.md#current-email-addressing) and an ASCII domain made of letters, digits, and hyphens in dot-separated labels. Labels begin and end with a letter or digit; a single-label domain is also supported. Domain matching ignores case, while correspondent IDs preserve case. Changing `MAIL_ADDRESS` to another domain changes how retained IDs resolve.
+Use the [supported email addresses](communication.md#current-email-addressing). Changing `MAIL_ADDRESS` to another domain changes how retained correspondent IDs resolve.
 
 Install the [reception-readiness policy](#service-status-and-reception) on the service's receiving paths before using them for correspondence.
 
@@ -105,11 +105,11 @@ cd /path/to/workspace
 
 The kernel's startup directory becomes the default directory for host commands. The executable embeds its model-facing resources and can run independently of the source checkout.
 
-Startup discovers the mail account and retires leftover communication copies, then checks memory with a read-only space inspection and loads saved working contexts or creates the core. It queues startup observations and classifies saved history before opening reception. These steps must succeed before reception opens. Use one kernel per mailbox. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
+Startup discovers the mail account, checks memory availability, restores saved working contexts or creates the core, and completes initial storage maintenance before opening reception. Use one kernel per mailbox. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
 
 ## Service status and reception
 
-`SERVICE_ADDRESS` selects the kernel's HTTP listener and defaults to `0.0.0.0:8090`. While the listener is running, it exposes:
+The HTTP listener at `SERVICE_ADDRESS` exposes:
 
 | Endpoint | Response |
 | --- | --- |

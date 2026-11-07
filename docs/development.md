@@ -37,11 +37,9 @@ Design can name an operation or concept when it expresses a behavioral choice, s
 
 Organize packages around cohesive capabilities, keeping their types, rules, resources, and implementation together. Public interfaces should let callers use a capability without coordinating its internal components. Keep supporting mechanisms with their owning capability. Applications select implementations, load deployment settings, and own program startup and shutdown.
 
-Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities). Shared communication and model types and the `Inbox`, `Communication.Sender`, `HistoryStore`, `Model.Port`, and `Tools` contracts belong to `packages/agent_contracts`. The execution core and capability implementations depend on that package; `apps/ivenna` selects and assembles the implementations. Update producers and consumers together when changing a shared type or operation.
+Use `packages/agent_contracts` for shared communication and capability contracts. Keep execution policy, model-input types and rendering, prompts, and runtime tool declarations in `packages/agent`. Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities), and update producers and consumers together when changing a shared type or operation.
 
-Keep execution policy, model-input rendering, prompts, and runtime tool declarations in `packages/agent`. The agent exposes `Kernel`, `Engine`, and its own `Input` schemas and renderer.
-
-Keep configuration with the behavior it controls. `Kernel.Config` and `Kernel.Limits` belong to execution; `Engine.Reasoning` selects ordinary inference effort by session role. Connection settings and protocol encoding belong to their capability packages. The application translates environment values into those configurations and owns HTTP listener settings.
+Keep configuration with the behavior it controls. Execution owns scheduling, context limits, and reasoning selection; capability packages own connection settings and protocol encoding. The application translates environment values into those configurations and owns HTTP listener settings.
 
 ### Types and protocols
 
@@ -51,15 +49,11 @@ Work, session scheduling, and model observations must not depend on mail records
 
 Model coexisting fields together and mutually exclusive alternatives as distinct variants in language types and structured data. Keep variant-specific fields tied to their discriminator.
 
-[Communication](../packages/agent_contracts/src/communication.zig) defines incoming observations with `from` IDs and outgoing messages addressed by recipient ID. [Inbox](../packages/agent_contracts/src/inbox.zig) owns the incoming-message and receipt envelope and acknowledges durable admission. Construct these typed values at their producing boundary. The email adapter owns the internal domain and conversion between IDs and native addresses.
+Construct typed [Communication](../packages/agent_contracts/src/communication.zig) messages and [Inbox](../packages/agent_contracts/src/inbox.zig) envelopes at their producing boundary. The email adapter owns the internal domain, address conversion, and [message projection](architecture.md#email-boundary).
 
-[Input](../packages/agent/src/input.zig) owns model-facing events, records, session roles, execution state, inference operations, and YAML rendering. Update the input types and their execution and persistence consumers together when changing this interface. [Work](../packages/agent/src/work.zig) owns delivery and activation lifetimes inside the agent. The [input contract](input.md) defines the serialized fields.
+Observations carry complete text strings; tool results use [Content](../packages/content/src/root.zig) parts. Keep [model messages and tool results](../packages/agent_contracts/src/model.zig) typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields.
 
-[Content](../packages/content/src/root.zig) owns tool-result text and image types, byte-source classification, and explicit image reference interpretation. Observations carry complete text strings; tool results use Content's parts. Content is the sole package dependency of `agent_contracts`.
-
-[Model](../packages/agent_contracts/src/model.zig) defines native history items and model operations. Keep messages and tool results typed. Preserve model output as opaque continuation bytes owned by the producing adapter's format; execution copies and retains them without reading protocol fields.
-
-Keep input rendering separate from provider encoding: Input renders retained records and temporary current requests; the agent selects tools and reasoning effort for each model request. The model adapter encodes and measures the complete request with those settings, including while applying tool-result limits. Use the same encoder for measurement and inference, and pass settings per request without mutating a shared provider.
+Keep input rendering separate from provider encoding: [Input](../packages/agent/src/input.zig) renders retained records and temporary current requests; the agent selects tools and reasoning effort for each model request. The model adapter encodes and measures the complete request with those settings, including while applying tool-result limits. Use the same encoder for measurement and inference, and pass settings per request without mutating a shared provider.
 
 ### Model-facing resources
 
@@ -75,27 +69,27 @@ Treat prompts and tool descriptions as editable interfaces:
 
 Keep tool names, descriptions, and parameter schemas with their owning implementation. Capability providers register their declarations through `Tools`. Keep tool availability policy in the agent and use the same role selection for declarations and invocation. Model adapters add protocol-specific declaration fields when encoding the selected tools. The [architecture guide](architecture.md#model-requests-and-tools) describes the current assembly and selection.
 
-Put task facts and observations in user input. Keep model-facing descriptions concise; detailed field references belong in the [input contract](input.md). Update the owning resource, implementation, and interface documentation together when a contract changes.
-
-Include runtime rules in these resources when they affect a model decision or the meaning of input, actions, or results. Explain how scheduling and storage are implemented, and how to operate the system, in the architecture and running guides.
+Put task facts and observations in user input. Include runtime rules in these resources when they affect a model decision or the meaning of input, actions, or results. Keep descriptions concise, with detailed field references in the [input contract](input.md), scheduling and storage mechanisms in the architecture guide, and service procedures in the running guides. Update the owning resource, implementation, and interface documentation together when a contract changes.
 
 Keep outgoing messages, internal reports, handovers, and diagnostics distinct. Outgoing communication occurs through `send_message`. For ordinary work, final model text completes the activation and supplies a core result or parent report; summary text supplies a handover for continued execution. Preserve text, media, and source descriptions together when handling [tool content](content.md).
 
-### Execution and storage
+### Session execution
 
-Keep context, queue, and activation changes under the session registry's synchronization; the kernel coordinates adapter operations and worker task scopes. Retain typed event groups, complete model/tool exchanges, and handovers in Context. Derive model input from those entries and append a fresh temporary request for each inference. Keep current state and the inference operation outside retained history. The [architecture guide](architecture.md#records-context-and-current-requests) describes history ownership and request assembly.
+Keep context, queue, and activation changes under the session registry's synchronization; the kernel coordinates adapter operations and worker task scopes. Copy or transfer values that must outlive a model-round arena. Follow the architecture contract for [activation completion and context release](architecture.md#activation-completion-and-context-release).
 
-Persist the core and every still-retained work context, preserving complete model/tool exchanges and unread internal assignments and reports. Confirm the selected incoming observations and their checkpoint before acknowledging their receipts; acknowledgement releases transport copies independently of task completion. Restore saved understanding and session relationships with fresh startup activations and the current system prompt. Execution ownership, external deliveries, receipts, and process handles belong to the running process. Loading history must not execute historical tool calls. Storage failures end the runtime through the normal execution failure path.
+Infrastructure and execution failures propagate to the application's task scope, which closes reception, cancels, and joins all work before shared dependencies are released. Ordinary tool outcomes remain model observations.
+
+The application serves health and reception status. The mail server's receiving boundary uses that status before accepting incoming SMTP correspondence. Keep this gate separate from model reasoning and in-process work queues; its readiness check does not reserve an activation or establish an atomic delivery transaction.
+
+### Working history
+
+Retain typed event groups, complete model/tool exchanges, and handovers in Context. Derive model input from those entries and append a fresh temporary request for each inference. Keep current state and the inference operation outside retained history. The [architecture guide](architecture.md#records-context-and-current-requests) describes history ownership and request assembly.
+
+Persist the core and every still-retained work context, preserving complete model/tool exchanges and unread internal assignments and reports. Confirm the selected incoming observations and their checkpoint before [acknowledging their receipts](architecture.md#mail-intake-and-acknowledgement); acknowledgement releases transport copies independently of task completion. Restore saved understanding and session relationships with fresh startup activations and the current system prompt. Execution ownership, external deliveries, receipts, and process handles belong to the running process. Loading history must not execute historical tool calls. Storage failures end the runtime through the normal execution failure path.
 
 Keep history encoding, segment identity, committed paths, and retention selection with the agent. Use `HistoryStore` for grouped records, checkpoint publication, and maintenance against that selection. Adapters own native identifiers, placement, protocol limits, and result correlation; storage services own expiry and space reclamation under deployment policy. Keep communication-copy retirement, working-history retention, and host-artifact lifecycles with their owning components.
 
 Confirm records before checkpoint publication. Serialize writes and maintenance through the session registry, and reconcile storage against a confirmed checkpoint before retiring records. Complete native inventory and selection checks before moving objects. The architecture guide defines [history representation and save boundaries](architecture.md#persistent-working-history), [retention selection](architecture.md#history-retention), and the [email storage lifecycle](architecture.md#mail-retention).
-
-Infrastructure and execution failures propagate to the application's task scope, which closes reception, cancels, and joins all work before shared dependencies are released. Copy or transfer values that must outlive a model-round arena. Ordinary tool outcomes remain model observations.
-
-The application serves health and reception status. The mail server's receiving boundary uses that status before accepting incoming SMTP correspondence. Keep this gate separate from model reasoning and in-process work queues; its readiness check does not reserve an activation or establish an atomic delivery transaction.
-
-Follow the architecture contracts for [message projection and addressing](architecture.md#email-boundary), [mail intake and acknowledgement](architecture.md#mail-intake-and-acknowledgement), and [context lifetime](architecture.md#activation-completion-and-context-release).
 
 ## Repository and build
 

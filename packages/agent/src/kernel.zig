@@ -132,12 +132,12 @@ pub const Kernel = struct {
         const session_id = work.session.session_id;
         const result = self.respond(work);
         self.sessions.endWorker(session_id);
-        try self.sessions.save();
         result catch |err| {
             if (err == error.Canceled) return error.Canceled;
             std.log.err("session {d} stopped: {s}", .{ session_id, @errorName(err) });
             return err;
         };
+        try self.sessions.save();
     }
 
     const RuntimeRound = struct {

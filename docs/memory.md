@@ -20,16 +20,16 @@ All addresses are relative to the shared entrance, including those returned by t
 
 | Tool | Required arguments | Purpose |
 | --- | --- | --- |
-| `browse_memory` | None | List a room's entries or inspect an entry or room's metadata |
-| `inspect_memory_space` | None | Inspect occupied space and remaining shared capacity across all rooms |
-| `find_memory` | `query` | Find entries and rooms by name |
-| `recall_memory` | `clue` | Search entry text for matching lines |
-| `read_memory` | `address` | Read an entry as text or an image |
-| `remember` | `address`, `content` | Write text or copy a host file into an entry |
-| `revise_memory` | `address`, `old_text`, `new_text` | Revise matching text in an entry |
-| `create_memory_room` | `address` | Create a room and any missing parent rooms |
-| `move_memory` | `address`, `destination` | Move or rename entries and rooms |
-| `forget_memory` | `address` | Remove an entry or room |
+| [`browse_memory`](#browsing-and-metadata) | None | List a room's entries or inspect an entry or room's metadata |
+| [`inspect_memory_space`](#memory-space) | None | Inspect occupied space and remaining shared capacity across all rooms |
+| [`find_memory`](#searching) | `query` | Find entries and rooms by name |
+| [`recall_memory`](#searching) | `clue` | Search entry text for matching lines |
+| [`read_memory`](#reading) | `address` | Read an entry as text or an image |
+| [`remember`](#recording-and-revising) | `address`, `content` | Write text or copy a host file into an entry |
+| [`revise_memory`](#recording-and-revising) | `address`, `old_text`, `new_text` | Revise matching text in an entry |
+| [`create_memory_room`](#recording-and-revising) | `address` | Create a room and any missing parent rooms |
+| [`move_memory`](#moving-and-removing) | `address`, `destination` | Move or rename entries and rooms |
+| [`forget_memory`](#moving-and-removing) | `address` | Remove an entry or room |
 
 ## Browsing and metadata
 
@@ -70,13 +70,11 @@ Set `entry_only: true` to return one record for the selected entry or room. The 
 | `{"address":"languages","entry_only":true,"recursive_size":true}` | One room record with the combined size of all its memories |
 | `{"address":"languages","recursive_size":true}` | Immediate entries and child rooms, with each child room's combined size |
 
-## Searching and reading
+## Searching
 
 `find_memory` and `recall_memory` search a `room` and its descendants. The room defaults to `.`; returned addresses remain relative to the shared entrance.
 
 `find_memory` searches names with `literal`, `glob`, or `regex` matching. `recall_memory` searches entry text with `literal` or `regex` matching. Both default to literal, case-insensitive matching; literal name searches match any part of a name. Set `case_sensitive: true` to make a search case-sensitive.
-
-`read_memory` uses the shared [content handling](content.md) rules. Its optional `interpretation: "image_url"` presents the entry's complete nonempty text as an [image reference](content.md#image-url-references).
 
 For example, call `find_memory` with a glob to find Markdown entries under `languages`:
 
@@ -89,6 +87,22 @@ Call `recall_memory` to search text throughout the room:
 ```json
 {"clue":"French","room":"languages"}
 ```
+
+## Reading
+
+Call `read_memory` with an entry address:
+
+```json
+{"address":"languages/progress.md"}
+```
+
+For a text entry, `result.content` is the complete string:
+
+```json
+{"result":{"address":"languages/progress.md","content":"French: practice twice a week."}}
+```
+
+Image entries return an image description and native image content. The shared [content handling](content.md) rules define detection, supported formats, and unavailable-content diagnostics. The optional `interpretation: "image_url"` presents an entry's complete nonempty text as an [image reference](content.md#image-url-references).
 
 ## Recording and revising
 
@@ -133,7 +147,7 @@ A later `revise_memory` call can update both labels using capture expansion:
 
 ## Moving and removing
 
-For `move_memory`, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists. References stored in memory content are not rewritten when an address changes.
+For `move_memory`, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists.
 
 By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance cannot be moved or removed.
 

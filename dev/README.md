@@ -144,7 +144,7 @@ EOF
 
 With the supplied readiness policy installed, this command receives a `550` rejection when reception is closed or unreachable. The [mail setup](#configuring-mail) describes the policy's scope.
 
-Read messages delivered by Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna retires its own outgoing copies to Trash after submission; the delivered copies belong to the operator account. Ivenna chooses whether and when to send a message; SMTP acceptance alone does not require a reply. See the [usage guide](../docs/usage.md) for sending requests and continuing correspondence.
+Read messages from Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna chooses whether and when to reply. See the [usage guide](../docs/usage.md) for continuing correspondence and interpreting responses.
 
 ## Stopping and restarting
 

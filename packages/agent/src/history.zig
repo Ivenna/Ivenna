@@ -232,7 +232,7 @@ pub const Persistence = struct {
                             !equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
                     },
                     .observations => |events| {
-                        if (selected.kind != .observations or selected.reference.previous != null or events.len == 0)
+                        if (selected.kind != .observations or events.len == 0)
                             return error.InvalidHistory;
                     },
                 }

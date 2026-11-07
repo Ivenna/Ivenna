@@ -430,13 +430,11 @@ pub const Registry = struct {
 
     fn releaseIdle(self: *Registry, session: *Session) void {
         if (session == self.core or session.active != null or session.pending.items.len != 0 or session.children != 0 or session.borrowed_workers != 0) return;
-        const parent_id = session.role.parentSessionId();
+        const parent = self.sessions.get(session.role.branch.parent_session_id).?;
         _ = self.sessions.remove(session.session_id);
         self.destroySession(session);
-        if (parent_id) |id| if (self.sessions.get(id)) |parent| {
-            parent.children -= 1;
-            self.releaseIdle(parent);
-        };
+        parent.children -= 1;
+        self.releaseIdle(parent);
     }
 
     fn runningWorkers(self: *Registry) usize {

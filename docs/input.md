@@ -169,7 +169,12 @@ The role and parent relationship survive compaction and restart.
 | `execute` | Empty object | Continue ordinary work using the retained history and current state |
 | `summarize` | `instructions: Text` | Condense retained history into a handover according to these instructions |
 
-During `execute`, a response without tool calls completes the whole selected group. Its text stays internal for the core or becomes one combined report to the branch's direct parent; a report may be empty. The broader task may remain open. Text accompanying tool calls is retained with the model output and does not itself complete the activation or create a report. Outgoing communication uses the independent `send_message` tool and its explicit recipients.
+During `execute`, an activation ends in either of two ways:
+
+- A response without tool calls completes the selected group. Its text stays internal for the core or becomes one combined report to the branch's direct parent; a report may be empty. The broader task may remain open.
+- A successful `fork_session` transfers the group's whole work to a child, and the caller returns to its queue. The [assignment and inherited history](#assignments-and-reports) let the child continue that work.
+
+Text accompanying tool calls is retained with the model output and does not itself complete the activation or create a report. Outgoing communication uses the independent `send_message` tool and its explicit recipients.
 
 For example, an ordinary core request can be:
 

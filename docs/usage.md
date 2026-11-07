@@ -25,7 +25,7 @@ For a command to verify the supplied local environment, see [sending a developme
 
 ## Continuing correspondence
 
-Follow-up messages enter the core as new observations. Ivenna relates them through retained understanding and memory; mail thread grouping does not select an internal work session. A message cannot directly update a work focus that is already running. For example:
+Follow-up messages enter the core as new observations. Ivenna relates them through retained understanding and memory; mail thread grouping does not select an internal work session. A message cannot directly update a work session that is already running. For example:
 
 ```text
 To: <Ivenna's address>
@@ -37,14 +37,14 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 ## Ongoing work and memory
 
-Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. A work focus can return a result while the broader task remains open; see [work ownership](architecture.md#forks-and-work-ownership) for details.
+Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. A work session can return a result while the broader task remains open.
 
-Continued work uses retained understanding and autonomous memory. Histories can be condensed or released, and there is no dedicated history lookup tool. Include relevant context in follow-up messages when it may no longer be available.
+Continued work uses retained understanding and autonomous memory. Histories can be condensed or released, so include relevant context in follow-up messages when it may no longer be available.
 
 Ivenna moves its incoming copy to Trash after saving the complete observation, before working on that input. This does not indicate that the task is finished. Its outgoing copies enter Trash after confirmed submission. The mail service controls their eventual deletion; your received copies stay in your own account. See [data and retention](running.md#data-and-retention) for storage and cleanup.
 
 ## After interruption
 
-After a [restart](running.md#stopping-and-restarting), Ivenna loads its saved core and retained work histories. Each session receives a fresh startup observation with the current time and can choose what to inspect or continue without waiting for new correspondence. Unread internal assignments and reports remain available for processing.
+After a [restart](running.md#stopping-and-restarting), Ivenna loads its saved working histories and can choose what to inspect or continue without waiting for new correspondence.
 
-Earlier activations and host processes are not restored, and old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail before its result was saved. If interruption happens after saving an observation but before acknowledging its original, that [pending message](running.md#mail-intake) can appear again. Include what is known about external changes when corresponding about interrupted work. See [startup and interruption](architecture.md#startup-and-interruption) for how retained history relates to the new runtime.
+Host processes are not restored, and old tool calls are not replayed. An interrupted operation may already have changed files, memory, or mail before its result was saved. If interruption happens after saving an observation but before acknowledging its original, that [pending message](running.md#mail-intake) can appear again. Include what is known about external changes when corresponding about interrupted work. See [startup and interruption](architecture.md#startup-and-interruption) for how retained history relates to the new runtime.

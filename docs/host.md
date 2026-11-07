@@ -44,7 +44,7 @@ Call `run_host_shell` with a command string:
 | --- | --- |
 | `command` | Required command in `/bin/sh` syntax |
 | `cwd` | Working directory; absolute or relative to the kernel's startup directory, which is also the default |
-| `timeout_ms` | Positive integer in milliseconds; defaults to `600000` (10 minutes) |
+| `timeout_ms` | Integer from `1` through `4294967295` in milliseconds; defaults to `600000` (10 minutes) |
 | `interpretation` | Optional `"image_url"` to present complete stdout text as an [image reference](content.md#image-url-references) |
 
 Each call starts a fresh noninteractive `/bin/sh` with no terminal or live input, inheriting the kernel's startup environment.
@@ -53,7 +53,7 @@ The command environment sets `NO_COLOR=1`, `TERM=dumb`, and `PAGER`, `GIT_PAGER`
 
 ## Results and interruption
 
-A command result is supplied as a text part containing JSON `result` with its outcome and both stream descriptions. Nonzero exits and timeouts are command outcomes. Image stdout adds a native image part alongside the description. An `error` with code `host_unavailable` means the invocation could not supply a complete command result. The [architecture guide](architecture.md#host-execution) describes the current failure boundary.
+A command result is supplied as a text part containing JSON `result` with its outcome and both stream descriptions. Nonzero exits and timeouts are command outcomes. Image stdout adds a native image part alongside the description.
 
 For session `2` with the default data directory, the `pwd` command above returns a text summary such as:
 
@@ -94,5 +94,14 @@ In the result description, both `stdout` and `stderr` contain an absolute `path`
 Stderr's `content` contains either a `text` preview or an `unavailable` diagnostic. See [tool content](content.md) for classification, image descriptions, preview bounds, and model-input limits. Content diagnostics leave the command outcome and stream descriptions available.
 
 Each invocation creates distinct log files under `<DATA_DIR>/host/<session_id>/`. They contain the full streams, including output omitted from the reply, and outlive the working session. Later shell calls can read or remove them. See [data and retention](running.md#data-and-retention) for `DATA_DIR` configuration.
+
+An invocation error returns JSON `error` with `code` and `message`:
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_arguments` | Arguments do not match the tool parameters; the command was not started |
+| `host_unavailable` | The invocation could not supply a complete result; the host may already have changed |
+
+The [architecture guide](architecture.md#host-execution) describes the current failure boundary.
 
 A timeout returns the captured output. Runtime cancellation stops the invocation without returning an ordinary tool result. Effects already produced remain in place in either case. See [startup and interruption](architecture.md#startup-and-interruption) for continuation after a runtime failure or restart.

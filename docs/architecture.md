@@ -2,7 +2,7 @@
 
 This guide describes Ivenna's current implementation: package responsibilities, execution, and service and storage protocols. The kernel retains working histories across restarts and constructs fresh execution state on startup. The application assembles the runtime and exposes health and reception status.
 
-The [design intent](design.md) sets the behavioral goals and interface principles. The [input contract](input.md) defines model-facing records and current requests, [communication](communication.md) defines outgoing messages, and the [usage guide](usage.md) explains correspondence with Ivenna.
+The [design intent](design.md) sets the behavioral goals and interface principles. The [input contract](input.md) defines model-facing records and current requests, [communication](communication.md) defines message observations and explicit sending, and the [usage guide](usage.md) explains correspondence with Ivenna.
 
 ## Responsibilities
 
@@ -46,11 +46,11 @@ flowchart TD
 
 ### Shared contracts
 
-At runtime, the application supplies concrete capability implementations to the core through shared contracts. Kernel calls the input, sending, and history storage operations; Engine calls the model and registered tools. These calls dispatch to the supplied implementations, whose code runs in the same process.
+At runtime, the application supplies concrete capability implementations to the core through shared contracts. Kernel calls the input, sending, and history storage operations; Engine calls the model and registered tools.
 
 The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer. Session scheduling, owned deliveries, activations, and retained context remain core implementation details. `Kernel.Config` and `Kernel.Limits` describe execution policy; `Engine.Reasoning` selects ordinary reasoning effort for core and branch roles. Connection settings and protocol encoding belong to their capability packages; the application loads environment values and owns HTTP listener settings.
 
-Shared [communication types](../packages/agent_contracts/src/communication.zig) describe incoming observations and explicit outgoing messages. The shared capability contracts define calls and data exchanged within the process. The agent owns model-input rendering, handovers, history-record encoding, and the active-session checkpoint; each adapter owns its service protocol encoding:
+Shared [communication types](../packages/agent_contracts/src/communication.zig) describe incoming observations and explicit outgoing messages. The shared capability contracts define calls and data exchanged within the process. The agent owns model-input rendering, handovers, history-record encoding, and the checkpoint selecting retained working histories; each adapter owns its service protocol encoding:
 
 | Contract | Operations | Implementation |
 | --- | --- | --- |
@@ -64,11 +64,9 @@ Shared [communication types](../packages/agent_contracts/src/communication.zig) 
 
 The email integration uses the configured mail account for communication copies and working history. It owns native addressing, folders, markers, and record lifecycles behind the shared contracts. The [email boundary](#email-boundary) describes its storage protocols and operation ownership.
 
-The email adapter supplies `Inbox.Incoming` with a complete `Communication.IncomingMessage` and an optional opaque receipt. [Work](../packages/agent/src/work.zig) owns the accepted event and its receipt until admission is acknowledged. The receipt stays outside model input; [activation admission](#activation-admission) defines when it can be released.
-
-The application owns service, kernel, and shutdown tasks. The [kernel](../packages/agent/src/kernel.zig) owns intake and execution tasks within that scope. Task failures close reception and cancel and join concurrent work before shared dependencies are released. The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
-
 ## Service and reception
+
+The application owns service, kernel, and shutdown tasks. The [kernel](../packages/agent/src/kernel.zig) owns intake and execution tasks within that scope. Task failures close reception and cancel and join concurrent work before shared dependencies are released.
 
 The application initializes the mail integration, checks memory, and [restores sessions](#startup-and-interruption) before binding `SERVICE_ADDRESS` and starting kernel tasks. The kernel completes initial history maintenance before opening reception and dispatching startup activations. Readiness does not wait for their model work to finish.
 
@@ -90,17 +88,23 @@ Reception status belongs to the service boundary. Model reasoning and tools do n
 | Activation | One session processing a selected group of deliveries through model and tool rounds, until a final response or a fork |
 | Model round | One model response followed by all tools it invoked |
 
+The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
+
 The registry stores each session's `Input.Role`: the core has no parent, and a branch's `parent_session_id` identifies the session that forked it. The registry uses that relationship for reports, capacity reservations, and context release. Current request state and the history codec's session and checkpoint records use the same role type.
 
 Every incoming message enters the core independently, including messages a mail client groups into one thread. Receiving an observation does not imply that Ivenna was addressed or must respond. All correspondents share its FIFO queue; scheduling distinctions by correspondent ID remain undecided. Ivenna interprets each message alongside retained understanding, while Sessions owns execution histories and queues.
 
 Core and work sessions expose `send_message`, `fork_session`, and the full shared memory interface. Work sessions also expose host tools. Engine assembles each [model request](#model-requests-and-tools) using the current session's role. `send_message` is available independently of the activation's incoming messages or result destination. For ordinary work, a response without tool calls ends the current activation: its final text is an internal result in the core or a report to a work session's direct parent. The broader task can remain open.
 
-`MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. `MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core. It also bounds each session's active and queued ordinary deliveries plus reserved child reports. Startup adds one control observation per session outside that ordinary delivery budget. Input that cannot be admitted stays with its producer; the mail integration leaves it available for later polling. Idle parents retain context while their children work without consuming a work slot. The core still processes its requests serially, so responsiveness also depends on short coordination turns and service latency.
+`MAX_PARALLEL_ATTENTION` bounds concurrent work-session execution; the core has a separate serial lane. Idle parents retain context while their children work without consuming a work slot. Core responsiveness also depends on short coordination turns and service latency.
+
+`MAX_ATTENTION_CONTEXTS` bounds retained contexts, including the core. It also bounds each session's active and queued ordinary deliveries plus reserved child reports. Startup adds one control observation per session outside that ordinary delivery budget. Input that cannot be admitted stays with its producer; the mail integration leaves it available for later polling.
 
 A work activation reserves space for its report in its direct parent's admission budget. The initial reservation is made when preparing a fork; a later activation, including a fresh startup activation, reserves a new slot before it starts and waits if the parent has no capacity. A completed report consumes that slot and joins the parent's queue, so later input cannot take its place. Runtime `queued_inputs` counts actual queued deliveries, excluding these reservations.
 
 ## Activation admission
+
+The email adapter supplies `Inbox.Incoming` with a complete `Communication.IncomingMessage` and an optional opaque receipt. [Work](../packages/agent/src/work.zig) owns the accepted event and its receipt until admission is acknowledged. The receipt stays outside model input. Internal assignments and reports have no input receipts.
 
 When a session is ready, Sessions claims the events already in its queue. The kernel selects the longest nonempty FIFO prefix that fits the complete ordinary request, including retained history, the record for the new event group, current state, and tool definitions. Selection starts from the available queue without waiting for more arrivals. The selected group enters retained history as one record and shares one inference. Events arriving during admission or later tool rounds stay queued for a later activation.
 
@@ -118,8 +122,6 @@ A fork copies the caller's complete retained context, including any compaction h
 
 Publishing a fork ends the caller's activation. The child handles its assignment in a new activation, using the complete inherited history. Queued deliveries remain with the caller, which returns to its own queue without another inference to conclude the transfer. Later messages still arrive at the core.
 
-A work session's final text returns one combined result for that activation to the session that created it. The report enters the tail of that parent's FIFO queue and can join other events in a later activation. It does not modify history during an ongoing model round. Nested forks return through their direct parents; a child does not inherit an ancestor's reporting destination. Internal assignments and reports have no input receipts.
-
 Session identifiers and parent relationships persist with retained contexts. The [startup contract](#startup-and-interruption) describes how those relationships and unread internal work are restored.
 
 ## Activation completion and context release
@@ -127,6 +129,8 @@ Session identifiers and parent relationships persist with retained contexts. The
 Engine completes each tool batch with one result per call. Sessions copies accepted model output, including reasoning items, and tool results into retained history before the model-round arena ends. A published fork ends the caller's activation; otherwise, tool results feed another round. Intermediate assistant text and complete exchanges remain in history.
 
 An ordinary final response without tool calls completes the selected group. This ends execution of that activation, without certifying that the broader task succeeded. A work session's combined final text, including empty text, is copied into one report delivery for its direct parent. Core final text remains internal. Sending occurs only when a `send_message` tool call executes, so an activation can submit several messages or none.
+
+The report enters the tail of the parent's FIFO queue for processing in a later activation, potentially with other queued events. Nested forks report through their direct parents; a child does not inherit an ancestor's reporting destination.
 
 Sessions releases a work context when it has no active or queued deliveries, children, or worker borrows. Children retain an idle parent without occupying a work slot; a worker's borrow keeps its session alive until the worker returns. A queued report owns its text independently of the child's context and model-round arena. Its `from_session` identifies the source without retaining that source's full working history. Releasing the context removes the session from subsequent checkpoints, so it is no longer scheduled or restored at startup.
 
@@ -136,7 +140,7 @@ The permanent core stays available between activations. Its context is summarize
 
 [Input](../packages/agent/src/input.zig) defines the typed records and requests used for model input and renders them as YAML. The [input contract](input.md) defines their fields; the [system prompt](../packages/agent/src/system.md) explains input interpretation and response scope.
 
-Sessions fixes the selected delivery group, returns the unselected suffix, and installs the selected history under the registry lock. [Context](../packages/agent/src/context.zig) owns typed admitted event groups, complete model/tool exchanges, and handovers. Model exchanges retain native `Model.Item` values, including opaque adapter continuation bytes and typed tool results. Continuations preserve complete model output, including reasoning, in the producing adapter's format. The agent copies and persists those bytes without interpreting them; they remain specific to the producing adapter. Forks inherit the same earlier history entries with their original receiving session identifiers.
+[Context](../packages/agent/src/context.zig) owns typed admitted event groups, complete model/tool exchanges, and handovers. Model exchanges retain native `Model.Item` values, including opaque adapter continuation bytes and typed tool results. Continuations preserve complete model output, including reasoning, in the producing adapter's format. The agent copies and persists those bytes without interpreting them; they remain specific to the producing adapter. Forks inherit the same earlier history entries with their original receiving session identifiers.
 
 Context derives and caches native model messages from the current system prompt, rendered event groups and handovers, and stored model/tool exchanges when restoring or changing its source entries. For each inference, the kernel takes an owned history snapshot and obtains current state from Sessions. `Context.request` appends one temporary request to that cached model-message view without changing the snapshot. The kernel keeps the snapshot alive until the model/tool round returns. Request state and operation stay outside retained history; later rounds use that history or its replacement handover.
 
@@ -237,17 +241,21 @@ Infrastructure failures in communication and memory, along with model execution,
 
 ## Email boundary
 
-[Addressing](../packages/email/src/addressing.zig) derives the correspondent domain from `MAIL_ADDRESS`. It projects a same-domain address's local part into a readable ID and resolves an outgoing ID back into that domain. Domain comparisons ignore case; IDs preserve case. The supported ASCII ID and domain forms are described in [communication](communication.md#current-email-addressing) and [mail setup](running.md#mail-service).
-
-[EmailTransport](../packages/email/src/email_transport.zig) projects received From addresses into the correspondent ID strings in `IncomingMessage.from`. It renders a nonempty subject, a blank line, and the body as complete received text; with an empty subject it uses the body alone. The observation also records the runtime's observation time. Received mail must have at least one From address, and every address must map to a supported same-domain ID.
-
-Messages whose From addresses cannot map to supported correspondent IDs are excluded from intake. The mail client continues through native query pages to fill the requested result limit, so excluded records do not hide later eligible messages. Filtering leaves the original copies unchanged.
+[Addressing](../packages/email/src/addressing.zig) derives the correspondent domain from `MAIL_ADDRESS`. It projects a same-domain address's local part into a readable ID and resolves an outgoing ID back into that domain. Domain comparisons ignore case; IDs preserve case. The supported ASCII ID and domain forms are described in [communication](communication.md#current-email-addressing).
 
 Each send resolves recipient IDs in the configured domain and submits a standalone email with subject `Ivenna` and the supplied text as its body. Unsupported IDs return the ordinary `invalid_recipient` tool result. IDs retain their destinations across context release and restart with the same domain configuration. Native addresses, delivery records, headers, folders, and private markers remain within the email integration.
 
 The adapter creates each outgoing copy in Drafts with `ivenna-outbound`. Confirmed submission uses `onSuccessUpdateEmail` to remove draft state and move the copy to Trash. Both submission and that implicit update must be confirmed before the adapter returns its opaque submission reference. Under [RFC 8621 §7.5](https://www.rfc-editor.org/rfc/rfc8621.html#section-7.5), retiring the Email after successful submission does not cancel delivery. Service acceptance does not establish final recipient delivery.
 
-The boundary prefers decoded plain text and falls back to UTF-8 HTML source. Unsupported or incomplete bodies produce a diagnostic and are skipped without changing the original copies. Supported text enters the message in full and is subject to [whole-request admission](#activation-admission). Intake uses polling; mail attachment intake is unimplemented.
+### Mail intake and acknowledgement
+
+The [email integration](../packages/email/src/root.zig) polls through the [mail client](../packages/email/src/mail.zig) for physical input messages without the private `ivenna-handled` acknowledgement keyword. Intake spans correspondence folders and is independent of read and starred state. The `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying `ivenna-outbound` or `ivenna-state`. The state marker keeps history records out of intake even if they are moved from those folders. The runtime marks its outgoing messages with `ivenna-outbound`; correspondents send from separate accounts.
+
+The mail client checks From addresses and retrieves complete supported bodies. It logs and skips records without a complete supported body. It continues through native query pages to fill the requested result limit, so excluded records do not hide later eligible messages. Filtering leaves the original copies unchanged.
+
+[EmailTransport](../packages/email/src/email_transport.zig) projects From addresses into correspondent IDs and constructs each `IncomingMessage` from the subject, body, and runtime observation time. The [communication guide](communication.md#incoming-email-text) defines the text projection and supported bodies. The resulting observation is subject to [whole-request admission](#activation-admission).
+
+Acknowledgement sets `ivenna-handled` and moves the input copy to Trash after the kernel confirms durable admission. Read and answered state are unchanged. The marker describes transfer into retained history, independently of the task's remaining work. Sessions keeps receipt bookkeeping only in memory.
 
 ### History storage
 
@@ -264,12 +272,6 @@ In the supplied Stalwart 1.0.2, [folder and keyword matching](https://github.com
 Current checkpoint candidates carry both `ivenna-state` and `ivenna-current` and a numeric `X-Ivenna-History-Revision`. Discovery queries `Ivenna History` and those keywords, then validates returned metadata. Malformed kind or revision metadata on an owned current candidate fails loading. Loading selects the highest revision, independently of mail observation timestamps. Distinct candidates at the same highest revision are an error. Saving confirms creation of the complete new checkpoint; maintenance later removes the current marker from older checkpoints and moves them to Trash. Several candidates can remain between maintenance passes or after interruption, and the numeric revision identifies the current checkpoint.
 
 A failed batch returns an error even when some objects may already have been created. Native group membership identifies candidate records; the checkpoint's committed heads and predecessor keys select the effective history. Mail threads describe correspondence and do not supply Ivenna's segment, fork, or compaction relationships.
-
-### Mail intake and acknowledgement
-
-The [email integration](../packages/email/src/root.zig) polls through the [mail client](../packages/email/src/mail.zig) for physical input messages without the private `ivenna-handled` acknowledgement keyword. Intake spans correspondence folders and is independent of read and starred state. The `Ivenna History`, `Ivenna Archive`, Drafts, Junk, and Trash folders are excluded, along with drafts and messages carrying `ivenna-outbound` or `ivenna-state`. The state marker keeps history records out of intake even if they are moved from those folders. The runtime marks its outgoing messages with `ivenna-outbound`; correspondents send from separate accounts.
-
-Acknowledgement sets `ivenna-handled` and moves the input copy to Trash after the kernel confirms durable admission. Read and answered state are unchanged. The marker describes transfer into retained history, independently of the task's remaining work. Sessions keeps receipt bookkeeping only in memory.
 
 ### Mail retention
 

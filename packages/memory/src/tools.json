@@ -25,7 +25,7 @@
         },
         "recursive_size": {
           "type": "boolean",
-          "description": "Measure sizes of returned rooms, including descendants. Defaults to false, leaving room size_bytes null."
+          "description": "Measure the combined size of memories in each returned room and its descendants. Defaults to false, leaving room size_bytes null."
         }
       },
       "required": [],
@@ -101,7 +101,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Read an entry's full text or image with its address. Image metadata accompanies native image content; unavailable content is reported with a diagnostic.",
+    "description": "Read an entry's full text or image, along with its address.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -177,7 +177,7 @@
         },
         "mode": {
           "type": "string",
-          "description": "create (default) requires a new entry; append adds bytes without a separator and creates a missing entry. Both require existing parent rooms. replace overwrites or creates the entry and missing parent rooms.",
+          "description": "create (default) requires a new entry; append adds bytes without a separator and creates a missing entry. Both require existing parent rooms. replace overwrites or creates the entry, creating any missing parent rooms.",
           "enum": [
             "create",
             "append",
@@ -250,7 +250,7 @@
   },
   {
     "name": "move_memory",
-    "description": "Move or rename a memory entry or a room and its contents. An occupied target is reported as an error. References in memory content are not rewritten automatically.",
+    "description": "Move or rename a memory entry or a room and its contents. An occupied target is reported as an error.",
     "parameters": {
       "type": "object",
       "properties": {
