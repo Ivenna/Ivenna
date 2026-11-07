@@ -45,9 +45,9 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 
 Core and activity sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
 
-Session identities, event queues, callbacks, background commands, and execution slots have independent limits. Sleeping sessions occupy no execution slot. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Identities are not automatically retired.
+Session identities, event queues, callbacks, background commands, and execution slots have independent limits. Waiting sessions occupy no execution slot. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a registered-session slot; the core remains registered.
 
-Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. Startup observations are excluded from the allowance. Callback mail waits when its destination is full. Correspondence and callbacks have independent intake allowances, and eligible activity sessions rotate through available slots without preempting running activations. Capacity and polling can delay scheduled work.
+Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. Waiting activities retain their session slots but release report reservations until they resume. Startup observations are excluded from the allowance. Callback mail waits when its destination is full. Correspondence and callbacks have independent intake allowances, and eligible activity sessions rotate through available slots without preempting running activations. Capacity and polling can delay scheduled work.
 
 Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. A larger roster or callback list leaves less room for history and observations. These budgets also apply to an activity's inherited history. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
 
@@ -193,7 +193,9 @@ The latest checkpoint selects the histories needed to continue all registered se
 | `Ivenna History` | Latest checkpoint and selected working histories of all registered sessions |
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
-Forks store independent copies of inherited history; include these copies when sizing the mailbox. Compaction replaces only that session's selection, allowing its previous records to move to Trash while other sessions keep their own copies. Sleeping or unloading a context does not retire its history; automatic retirement of session identities is not implemented. See [history retention](architecture.md#history-retention) for selection rules.
+Forks store independent copies of inherited history; include these copies when sizing the mailbox. Compaction replaces only that session's selection, allowing its previous records to move to Trash while other sessions keep their own copies.
+
+A waiting activity retains its history even when its context is unloaded. When the session ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. Its report remains part of the core's work, and shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
 ### Backups and transfers
 

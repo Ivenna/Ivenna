@@ -69,7 +69,7 @@ Put task facts and observations in user input. Prompts and tool descriptions sho
 
 ### Session execution
 
-Keep queue, activation, context, and callback-registration changes under registry synchronization. The kernel coordinates adapter calls and worker lifetimes. Copy or transfer values that outlive a model-round arena, and admit events only between complete model/tool batches. Follow the [scheduling](architecture.md#scheduling-and-capacity), [fork](architecture.md#activity-forks), [completion](architecture.md#activation-completion-and-sleep), and [callback admission](architecture.md#event-sources-and-callback-admission) contracts.
+Keep queue, activation, context, and callback-registration changes under registry synchronization. The kernel coordinates adapter calls and worker lifetimes. Copy or transfer values that outlive a model-round arena, and admit events only between complete model/tool batches. Follow the [scheduling](architecture.md#scheduling-and-capacity), [fork](architecture.md#activity-forks), [completion](architecture.md#activation-and-session-completion), and [callback admission](architecture.md#event-sources-and-callback-admission) contracts.
 
 Keep attention scheduling separate from durable observations and consume its signal only for an ordinary inference. Keep session identity separate from context residency, source destinations fixed for their lifetime, and execution limits separate from storage retention.
 
@@ -108,7 +108,7 @@ Build the application and exercise the affected behavior through communication a
 
 | Area | Checks |
 | --- | --- |
-| Execution | FIFO budget admission, complete tool batches, fair dispatch, fork inheritance, role-based tool access, report reservations, direct messages, attention-only turns, and sleeping-session resumption |
+| Execution | FIFO budget admission, complete tool batches, fair dispatch, fork inheritance, role-based tool access, report reservations, direct messages, attention-only turns, callback waiting, and session completion |
 | Model-facing interfaces | Record/Turn shapes, observation delivery without duplication, native model/tool messages, summary generation and replacement, and complete-payload budgets |
 | Continuity | Durable admission and acknowledgement, cold restoration, startup observations, callbacks and wakeups across restart, and unknown interrupted effects without replay |
 | Storage | Record and checkpoint validation, failed publication, committed-chain selection, independent inherited histories, per-session replacement, retention, and preservation of selected records |

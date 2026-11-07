@@ -21,6 +21,8 @@ pub const Call = struct {
 pub const Response = struct {
     output: []const Item,
     calls: []const Call,
+    /// Null when output contains no assistant text items; otherwise their
+    /// combined text, which may be empty.
     text: ?[]const u8,
 };
 

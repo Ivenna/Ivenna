@@ -141,7 +141,7 @@ pub const Kernel = struct {
         defer arena.deinit();
         const ready = try self.sessions.takeReadyBatch(arena.allocator(), self.max_parallel);
         var started: usize = 0;
-        defer for (ready[started..]) |work| self.sessions.endWorker(work.session.session_id);
+        defer for (ready[started..]) |work| self.sessions.endWorker(work.session);
         for (ready) |work| {
             try tasks.concurrent(.work, execute, .{ self, work });
             started += 1;
@@ -151,10 +151,10 @@ pub const Kernel = struct {
     fn execute(self: *Kernel, work: Work) !void {
         const session_id = work.session.session_id;
         const result = self.respond(work);
-        defer self.sessions.endWorker(session_id);
+        defer self.sessions.endWorker(work.session);
         result catch |err| {
             if (err == error.Canceled) return error.Canceled;
-            std.log.err("session {d} stopped: {s}", .{ session_id, @errorName(err) });
+            std.log.err("session {d} execution failed: {s}", .{ session_id, @errorName(err) });
             return err;
         };
         try self.sessions.save();

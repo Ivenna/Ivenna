@@ -93,15 +93,15 @@ Reception status belongs to the service boundary. Model reasoning and tools do n
 
 The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
 
-The registry stores each session's `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Identity and role remain registered while a session sleeps or its context is unloaded, and appear in current request state and checkpoint records.
+The registry stores each session's `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Waiting sessions retain their identities and roles through context unloading and restart. Completed activities leave the registry; session IDs increase monotonically and are not reused. The core remains registered.
 
 ### Scheduling and capacity
 
 `MAX_PARALLEL_ATTENTION` bounds executing activity sessions; the core has an independent serial lane. Dispatch considers activity sessions in session-ID order after the last successful claim, wrapping once. This cursor resets on restart. Report-capacity checks can defer a session; rotation does not preempt running activations.
 
-Separate [limits](running.md#configuration) bound registered identities, pending events and callbacks per session, and background commands. Startup observations are outside the ordinary event budget. Existing sessions remain addressable at the identity limit; automatic identity retirement is not implemented.
+Separate [limits](running.md#configuration) bound registered identities, pending events and callbacks per session, and background commands. Startup observations are outside the ordinary event budget. Existing sessions remain addressable at the identity limit; activity completion releases a registered-session slot.
 
-Each activity activation reserves one report slot within the core's event allowance; a fork reserves its first slot before publication. Reports consume those reservations, so later arrivals cannot take their place. Correspondence and callback mail stay stored when their destination cannot accept them.
+Each activity activation reserves one report slot within the core's event allowance; a fork reserves its first slot before publication. When an activity waits for callbacks, it releases the activation's reservation; its next activation reserves capacity again. Session completion consumes the reservation for its report, so later arrivals cannot take its place. Correspondence and callback mail stay stored when their destination cannot accept them.
 
 ### Coordination and current state
 
@@ -123,15 +123,15 @@ Only the core can invoke `fork_session`. Each call reserves a new identity and r
 
 Each copy includes retained observations, complete native model/tool exchanges, and any existing handover followed by later history. All replies from the calling round are included, even those produced after the fork call. Forking generates no extra summary. Original record session IDs remain intact as provenance; historical tool calls are not replayed.
 
-The assignment is the activity's first new queued observation. Temporary inference turns, queued observations, callback registrations, and wakeup schedules are not copied or transferred. The activity receives its own current-state snapshot and expresses results and further needs in its automatic final reports. See the [fork interface](communication.md#forking-an-activity-session) and [assignment fields](input.md#assignments-and-reports).
+The assignment is the activity's first new queued observation. Temporary inference turns, queued observations, callback registrations, and wakeup schedules are not copied or transferred. The activity receives its own current-state snapshot; when its session ends, its final response text is reported to the core. See the [fork interface](communication.md#forking-an-activity-session) and [assignment fields](input.md#assignments-and-reports).
 
-## Activation completion and sleep
+## Activation and session completion
 
-The registry retains each complete model/tool exchange before its arena ends. Tool replies lead to another round. Without tool calls, finalization and the queue check share one registry lock: pending events or core attention continue the activation; a later arrival makes the sleeping session runnable. Superseded final text stays in history without a report.
+The registry retains each complete model/tool exchange before its arena ends. Tool replies lead to another round. Without tool calls, the registry checks queued events, core attention, and callback registrations under the same lock used for finalization. Queued events or core attention continue the activation; superseded final text stays in history without a report.
 
-On completion, an activity's final text, including empty text, joins the core's FIFO queue. Core final text remains internal. External sending occurs only through `send_message`; completion does not certify task success.
+When an activity activation completes, pending callback registrations keep the activity dormant and available for resumption. With none remaining, the registry queues a report containing that round's nullable assistant text in the core's FIFO queue and removes the activity. The kernel then saves a checkpoint covering both the report and the activity's removal. The core sleeps between activations without being removed, and its final text remains internal. External sending occurs only through `send_message`; completion does not certify task success.
 
-After saved history is confirmed and worker borrows end, a sleeping activity session can unload its context and later restore its selected history. Identity, history, and pending callbacks remain checkpointed. Reports own their text independently of the activity context; background commands remain in the host runtime's scope.
+After the checkpoint is confirmed and worker borrows end, a waiting activity can unload its context and later restore its selected history. A completed activity's in-memory state can instead be released. Reports own their text independently of the activity context; background commands remain in the host runtime's scope.
 
 ## Event sources and callback admission
 
@@ -160,6 +160,8 @@ Each turn repeats the complete finite runtime projection, including the roster a
 [Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). Role-filtered agent declarations are joined by Memory through `shared_tools` and, for activity sessions, Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection.
 
 Ordinary reasoning defaults to `low` for core and `high` for activity sessions. All sessions share the configured model and output-token limit. The [Responses adapter](../packages/responses/src/provider.zig) encodes these settings and uses the same payload encoder for measurement and inference. It decodes and validates the complete response before any calls execute; incomplete output fails execution. Unknown tools and invalid arguments become ordinary tool errors.
+
+The adapter distinguishes absent assistant text from empty text by whether message content contains an `output_text` part. A completion report preserves the resulting nullable value.
 
 ### Tool results
 
@@ -208,7 +210,7 @@ Startup reads and validates all selected history. It materializes the core conte
 
 ### History retention
 
-Compaction replaces the session's selected segment. Once the replacement checkpoint is confirmed, its earlier epoch is no longer needed for continuation. Context unloading preserves the current selection; previous checkpoints are not restoration roots.
+Compaction replaces the session's selected segment. Once the replacement checkpoint is confirmed, its earlier epoch is no longer needed for continuation. A completed activity's history becomes unselected when its removal is confirmed in a checkpoint. Its report remains in the core's retained work, and shared autonomous memory follows its own lifecycle. Context unloading preserves the current selection; previous checkpoints are not restoration roots.
 
 Maintenance runs before reception opens and then at intervals of at least 60 seconds between polls. The registry locks saving and reconciliation together. From the confirmed checkpoint, `HistoryStore.Retention` names every selected `(group, key)`, including unread observations.
 

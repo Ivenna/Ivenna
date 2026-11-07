@@ -17,7 +17,7 @@ A turn's `purpose` selects either `work`, containing newly delivered `events`, o
 
 `Text` denotes a free-form string. Tagged unions, including events, serialize as a mapping containing one branch name and its payload. Session roles serialize as enum values, `core` or `activity`.
 
-Session IDs remain registered across sleep, context unloading, and restart. Records identify the session that admitted observations or produced a handover; a turn's `current.session_id` identifies the session performing this inference. Inherited records keep their original session IDs, which can differ from the session now reading them.
+Session IDs remain stable across waiting, context unloading, and restart. Finished activities leave the registry, and their IDs are not reused. Records identify the session that admitted observations or produced a handover; a turn's `current.session_id` identifies the session performing this inference. Inherited records keep their original session IDs, which can differ from the session now reading them.
 
 ## Retained records
 
@@ -34,7 +34,7 @@ An `events` record has `session_id: u64` and `items: Event[]`. Each admission re
 | `startup` | `Startup` | Observation that a new runtime has begun |
 | `input` | `IncomingMessage` | Observation of what correspondents said |
 | `assignment` | `Assignment` | Initial work for a newly created activity session |
-| `report` | `Report` | An activity activation's final text, delivered to the core |
+| `report` | `Report` | Activity session completion, with assistant text when present |
 | `session_message` | `SessionMessage` | Observation sent directly by the core |
 | `callback` | `Callback` | A registered host completion or self-scheduled wakeup |
 
@@ -58,12 +58,20 @@ Correspondence enters the core as an `input` observation of who said what; it im
 
 An `Assignment` has `task: Text`, specifying what the activity should pursue within its inherited understanding. It is the activity's first new queued observation after the [fork](communication.md#forking-an-activity-session).
 
-A `Report` delivers an activity activation's final text to the core automatically:
+A `Report` notifies the core of [activity completion](communication.md#activity-completion) and preserves the ending response's assistant text as a nullable field:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `from_session` | `u64` | Activity session that produced the report |
-| `text` | `Text` | Final text; may be empty |
+| `from_session` | `u64` | Activity session that ended |
+| `text` | `Text` or `null` | Assistant text from the ending response |
+
+The `text` field is always present:
+
+| Example value | Meaning |
+| --- | --- |
+| `null` | The ending response contains no assistant text output items |
+| `""` | Text output items are present, but their combined text is empty |
+| `"Example text"` | Assistant text returned by the ending response |
 
 #### Session messages and callbacks
 

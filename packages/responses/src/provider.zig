@@ -167,6 +167,7 @@ pub const Provider = struct {
         defer calls.deinit(arena);
         var text = std.Io.Writer.Allocating.init(arena);
         defer text.deinit();
+        var has_text = false;
         for (decoded.output) |item| {
             const kind = try textField(item, "type");
             if (std.mem.eql(u8, kind, "reasoning")) continue;
@@ -176,6 +177,7 @@ pub const Provider = struct {
                 for (parts.array.items) |part| {
                     if (!std.mem.eql(u8, try textField(part, "type"), "output_text")) return error.InvalidModelResponse;
                     const value = try textField(part, "text");
+                    has_text = true;
                     if (value.len == 0) continue;
                     if (text.written().len != 0) try text.writer.writeAll("\n\n");
                     try text.writer.writeAll(value);
@@ -200,7 +202,7 @@ pub const Provider = struct {
         return .{
             .output = output,
             .calls = try calls.toOwnedSlice(arena),
-            .text = if (text.written().len == 0) null else try text.toOwnedSlice(),
+            .text = if (has_text) try text.toOwnedSlice() else null,
         };
     }
 };

@@ -29,7 +29,7 @@
   },
   {
     "name": "fork_session",
-    "description": "Fork an activity from your retained history and the supplied task, returning its stable session_id. The inherited history includes the complete calling model/tool round. Your activation continues, and the activity's final results reach the core automatically.",
+    "description": "Fork an activity from your retained history and the supplied task, returning its stable session_id. The inherited history includes the complete calling model/tool round. Your activation continues, and the core receives a completion report when the activity session ends.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -54,7 +54,7 @@
         "session_id": {
           "type": "integer",
           "minimum": 1,
-          "description": "Recipient session ID from current state, a fork result, or retained history."
+          "description": "Recipient session ID; the current roster lists existing sessions."
         },
         "text": {
           "type": "string",
@@ -71,7 +71,7 @@
   },
   {
     "name": "wakeup",
-    "description": "Schedule one observation for this session and return its callback_id. The arrangement survives restart. Past times are due immediately; inference can occur later.",
+    "description": "Schedule one observation for this session and return its callback_id. The arrangement survives restart and keeps an activity available while it waits. Past times are due immediately; inference can occur later.",
     "parameters": {
       "type": "object",
       "properties": {

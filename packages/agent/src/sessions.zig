@@ -11,8 +11,7 @@ const contracts = @import("agent_contracts");
 const Model = contracts.Model;
 const Incoming = contracts.Inbox.Incoming;
 
-/// Identity and saved understanding outlive execution. Dormant contexts can be
-/// unloaded after publication and restored when another observation arrives.
+/// Identity, working context, and pending observations for one session.
 pub const Session = struct {
     session_id: u64,
     role: Input.Role,
@@ -462,30 +461,41 @@ pub const Registry = struct {
         self.observed_revision = @max(self.observed_revision, revision);
     }
 
-    /// Finalization and the queue check share one lock: an arrival is either
-    /// included in this activation or makes the now-dormant session runnable.
+    /// Finalize a response without tool calls when no queued events or core attention
+    /// remain. Callback checks, reporting, and session retirement share the same lock.
     pub fn finish(self: *Registry, work: Work, text: ?[]const u8) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
         if (session.pending.items.len != 0 or (session == self.core and self.attentionPending())) return false;
+        const completed_activity = session != self.core and self.callbackCount(session.session_id) == 0;
         self.changedLocked(session);
-        try self.notifyReport(session, text orelse "");
+        if (completed_activity) {
+            try self.reportCompletionLocked(session, text);
+        } else {
+            self.releaseReportLocked(session);
+        }
         session.last_active_unix_ms = self.now();
         session.active = null;
         work.activation.destroy(self.allocator);
+        if (completed_activity) {
+            const removed = self.sessions.remove(session.session_id);
+            std.debug.assert(removed);
+        }
         return true;
     }
 
-    /// The kernel saves before releasing its borrow. Only then can these
-    /// in-memory records be discarded and recovered from the published spans.
-    pub fn endWorker(self: *Registry, session_id: u64) void {
+    /// Release a worker borrow after saving. Waiting contexts can be unloaded;
+    /// completed sessions can be destroyed once no worker retains them.
+    pub fn endWorker(self: *Registry, session: *Session) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const session = self.sessions.get(session_id).?;
         session.borrowed_workers -= 1;
-        if (session != self.core and session.active == null and session.borrowed_workers == 0) {
+        if (session.borrowed_workers != 0) return;
+        if (!self.sessions.contains(session.session_id)) {
+            self.destroySession(session);
+        } else if (session != self.core and session.active == null) {
             if (session.context) |*context| context.deinit();
             session.context = null;
         }
@@ -560,9 +570,7 @@ pub const Registry = struct {
     }
 
     fn registerCallbackLocked(self: *Registry, session: *Session, source: Input.CallbackSource) !u64 {
-        var count: usize = 0;
-        for (self.callbacks.items) |callback| count += @intFromBool(callback.session_id == session.session_id);
-        if (count >= self.max_callbacks) return error.CallbackCapacityUnavailable;
+        if (self.callbackCount(session.session_id) >= self.max_callbacks) return error.CallbackCapacityUnavailable;
         try self.callbacks.ensureUnusedCapacity(self.allocator, 1);
         self.changedLocked(session);
         const id = self.next_callback_id;
@@ -615,8 +623,7 @@ pub const Registry = struct {
         for (absent.items) |key| if (self.noticed.fetchRemove(key)) |entry| self.allocator.free(entry.key);
     }
 
-    fn notifyReport(self: *Registry, session: *Session, text: []const u8) !void {
-        if (session == self.core) return;
+    fn reportCompletionLocked(self: *Registry, session: *Session, text: ?[]const u8) !void {
         const report = try Delivery.create(self.allocator, .{ .report = .{ .from_session = session.session_id, .text = text } }, null);
         errdefer report.destroy(self.allocator);
         std.debug.assert(session.report_reserved and self.report_slots > 0);
@@ -693,15 +700,19 @@ pub const Registry = struct {
         return session.pending.items.len != 0 or (session == self.core and self.attentionPending());
     }
 
+    fn callbackCount(self: *const Registry, session_id: u64) usize {
+        var count: usize = 0;
+        for (self.callbacks.items) |callback| count += @intFromBool(callback.session_id == session_id);
+        return count;
+    }
+
     fn sessionInfoLocked(self: *Registry, session: *Session) Input.SessionInfo {
-        var pending: usize = 0;
-        for (self.callbacks.items) |callback| pending += @intFromBool(callback.session_id == session.session_id);
         return .{
             .session_id = session.session_id,
             .role = session.role,
             .status = if (session.active != null) .running else if (self.hasWork(session)) .ready else .dormant,
             .queued_inputs = session.pending.items.len,
-            .pending_callbacks = pending,
+            .pending_callbacks = self.callbackCount(session.session_id),
             .last_active_unix_ms = session.last_active_unix_ms,
         };
     }

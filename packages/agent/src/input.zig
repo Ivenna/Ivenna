@@ -12,7 +12,7 @@ pub const Assignment = struct {
 
 pub const Report = struct {
     from_session: u64,
-    text: []const u8,
+    text: ?[]const u8,
 };
 
 pub const Handover = struct {

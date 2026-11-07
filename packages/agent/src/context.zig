@@ -146,7 +146,10 @@ fn cloneEvents(a: Allocator, events: []const Input.Event) ![]const Input.Event {
             break :blk .{ .input = .{ .from = from, .text = try a.dupe(u8, input.text), .observed_at_unix_ms = input.observed_at_unix_ms } };
         },
         .assignment => |assignment| .{ .assignment = .{ .task = try a.dupe(u8, assignment.task) } },
-        .report => |report| .{ .report = .{ .from_session = report.from_session, .text = try a.dupe(u8, report.text) } },
+        .report => |report| .{ .report = .{
+            .from_session = report.from_session,
+            .text = if (report.text) |text| try a.dupe(u8, text) else null,
+        } },
         .session_message => |message| .{ .session_message = .{
             .from_session = message.from_session,
             .observed_at_unix_ms = message.observed_at_unix_ms,
