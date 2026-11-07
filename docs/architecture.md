@@ -168,9 +168,11 @@ Memory and Host return content in the model-round arena. Engine creates a native
 
 After admission, each tool continuation checks the complete request budget again and can compact the activation's retained history when needed.
 
-Compaction presents retained history followed by a temporary `Input.Request` whose `operation.summarize` carries instructions from [compaction.md](../packages/agent/src/compaction.md). Its `Model.Request` has no tools and uses `high` reasoning effort, independently of the ordinary session settings. The Responses adapter encodes the absence of tools as `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request; `HANDOVER_MAX_BYTES` bounds its nonempty text result.
+Compaction presents retained history followed by a temporary `Input.Request` whose `operation.summarize` carries instructions from [compaction.md](../packages/agent/src/compaction.md). Its `Model.Request` has no tools and uses `high` reasoning effort, independently of the ordinary session settings. The Responses adapter encodes the absence of tools as `tool_choice: none`. `CONTEXT_COMPACTION_BYTES` bounds that complete request.
 
-The kernel builds the replacement's ordinary request with a fresh state snapshot and checks its complete budget before installing the handover record. Compaction starts a new active working history from that handover, preserving the session identity and parent relationships. It replaces the entire earlier working view, including its raw transcript tail. Retention of earlier history records is a separate storage lifecycle. Summary instructions preserve relevant session and correspondent IDs, relationships, ongoing work, commitments, and completed effects.
+Compaction trims surrounding whitespace from the generated text and requires a nonempty handover within `HANDOVER_MAX_BYTES`. The kernel builds the replacement's ordinary request with a fresh state snapshot and checks its complete budget before installing the handover record.
+
+Compaction starts a new active working history from that handover, preserving the session identity and parent relationships. It replaces the entire earlier working view, including its raw transcript tail. Retention of earlier history records is a separate storage lifecycle. Summary instructions preserve relevant session and correspondent IDs, relationships, ongoing work, commitments, and completed effects.
 
 Byte counts are local measurements, not model-token estimates. If a request or summary cannot meet its bound, execution fails explicitly rather than cutting an unfinished exchange.
 
@@ -317,7 +319,7 @@ Host validates and routes requests. [Shell](../packages/host/src/shell.zig) exec
 
 Host propagates cancellation and allocation failure. Other invocation failures currently return `host_unavailable`, including failure to obtain a command result. Finer classification of these failures remains undefined.
 
-The shell entry reports capabilities that remain planned alongside command execution. Their operations are unimplemented. See [host shell](host.md) for available tools, output, and interruption behavior.
+See [host shell](host.md) for available tools, output, and interruption behavior.
 
 ## Implementation references
 

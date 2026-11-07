@@ -92,7 +92,7 @@ pub const Mailbox = struct {
         self.max_request = try objectLimit(core, "maxSizeRequest");
         const identities = try self.call(a, "Identity/get", .{ .accountId = self.account_id });
         for (try arrayField(identities, "list")) |identity| {
-            if (std.ascii.eqlIgnoreCase(try textField(identity, "email"), self.address)) {
+            if (self.addressing.isSelf(try textField(identity, "email"))) {
                 self.identity_id = try textField(identity, "id");
                 break;
             }
@@ -208,7 +208,7 @@ pub const Mailbox = struct {
                 const keywords = try field(record, "keywords");
                 if (!boolean(keywords, handled_keyword)) {
                     const from = try addresses(temporary, record, "from");
-                    if (from.len != 1 or !std.ascii.eqlIgnoreCase(from[0].email, self.address)) continue;
+                    if (from.len != 1 or !self.addressing.isSelf(from[0].email)) continue;
                 }
                 try retired.append(temporary, .{
                     .id = try textField(record, "id"),
@@ -726,9 +726,9 @@ pub const Mailbox = struct {
         if (boolean(folders, self.trash_id)) return false;
         if (!boolean(folders, self.history_id) and !boolean(folders, self.archive_id)) return false;
         const from = try addresses(a, record, "from");
-        if (from.len != 1 or !std.ascii.eqlIgnoreCase(from[0].email, self.address)) return false;
+        if (from.len != 1 or !self.addressing.isSelf(from[0].email)) return false;
         const addressed_to_self = for (try addresses(a, record, "to")) |recipient| {
-            if (std.ascii.eqlIgnoreCase(recipient.email, self.address)) break true;
+            if (self.addressing.isSelf(recipient.email)) break true;
         } else false;
         if (!addressed_to_self) return false;
         return true;

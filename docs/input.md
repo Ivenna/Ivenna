@@ -195,8 +195,10 @@ operation:
 
 ### Compaction and budgets
 
-Compaction selects `operation.summarize` with instructions from the dedicated [summary resource](../packages/agent/src/compaction.md) and disables tools. This inference summarizes retained history without continuing its tasks. Its handover starts a replacement working history in a `content.handover` record. The session identity, role, and parent relationship remain the same. Ordinary work then continues with an `execute` request and fresh state. The [architecture guide](architecture.md#bounded-model-context) explains when compaction occurs and how its request is bounded.
+Compaction selects `operation.summarize` with instructions from the dedicated [summary resource](../packages/agent/src/compaction.md) and disables tools. This inference summarizes retained history without continuing its tasks.
 
-Records, current state, operation, tools, and encoded content all contribute to the complete request budget, including summary instructions when present. Budget measurement uses the same assembled payload sent to the provider. The runtime admits whole observations; a single input that cannot fit after compaction fails with `ContextBudgetExhausted`.
+The nonempty handover starts a replacement working history in a `content.handover` record. The session identity, role, and parent relationship remain the same. Ordinary work then continues with an `execute` request and fresh state. The [architecture guide](architecture.md#bounded-model-context) explains when compaction occurs and how the returned handover is prepared.
+
+Ordinary and summary requests each use their configured [complete-request byte budget](running.md#configuration). Records, current state, operation, tools, and encoded content all contribute, including summary instructions when present. Measurement uses the same assembled payload sent to the provider. The runtime admits whole observations; a single input that cannot fit after compaction fails with `ContextBudgetExhausted`.
 
 See [tool content](content.md) for text and media returned by tools, and [persistent working history](architecture.md#persistent-working-history) for the stored records underlying this model-facing view.

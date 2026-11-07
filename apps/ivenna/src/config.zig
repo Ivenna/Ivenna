@@ -62,8 +62,6 @@ pub const Config = struct {
             },
         };
         if (config.memory_ssh_config) |path| if (path.len == 0) return error.MissingMemorySshConfig;
-        if (config.context_limits.compaction_bytes < config.context_limits.request_bytes)
-            return error.InvalidContextBudget;
         return config;
     }
 

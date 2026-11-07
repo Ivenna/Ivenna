@@ -3,15 +3,16 @@ const Allocator = std.mem.Allocator;
 
 /// Maps readable IDs to addresses in the configured mailbox's domain.
 pub const Addressing = struct {
+    local_part: []const u8,
     domain: []const u8,
 
-    /// Borrows the domain from a dot-atom address with an ASCII hostname domain.
+    /// Borrows a dot-atom local part and ASCII hostname domain.
     pub fn init(self_address: []const u8) !Addressing {
         const separator = std.mem.indexOfScalar(u8, self_address, '@') orelse return error.InvalidMailAddress;
         const local = self_address[0..separator];
         const domain = self_address[separator + 1 ..];
         if (!validId(local) or !validDomain(domain)) return error.InvalidMailAddress;
-        return .{ .domain = domain };
+        return .{ .local_part = local, .domain = domain };
     }
 
     /// Borrows the local part of a same-domain address, preserving its case.
@@ -20,6 +21,11 @@ pub const Addressing = struct {
         const local = full_address[0..separator];
         if (!validId(local) or !std.ascii.eqlIgnoreCase(full_address[separator + 1 ..], self.domain)) return null;
         return local;
+    }
+
+    pub fn isSelf(self: Addressing, full_address: []const u8) bool {
+        const local = self.id(full_address) orelse return false;
+        return std.mem.eql(u8, local, self.local_part);
     }
 
     /// Allocates a native address for an ID in this domain.

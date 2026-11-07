@@ -7,4 +7,8 @@ mkdir -p /run/ivenna
 touch /run/ivenna/memory.lock
 chown memory:memory /run/ivenna/memory.lock
 chmod 600 /run/ivenna/memory.lock
-exec /usr/sbin/sshd -D -e -o "SetEnv=MEMORY_CAPACITY_BYTES=${MEMORY_CAPACITY_BYTES:-1073741824}"
+set -- /usr/sbin/sshd -D -e
+if [ -n "${MEMORY_CAPACITY_BYTES:-}" ]; then
+    set -- "$@" -o "SetEnv=MEMORY_CAPACITY_BYTES=$MEMORY_CAPACITY_BYTES"
+fi
+exec "$@"

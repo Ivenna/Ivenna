@@ -6,7 +6,7 @@ The shell tools are defined in [tools.json](../packages/host/src/tools.json):
 
 | Tool | Purpose |
 | --- | --- |
-| `get_host_shell` | Inspect the shell, default directory, and capability status |
+| `get_host_shell` | Inspect the shell and default directory |
 | `run_host_shell` | Execute a command and return its outcome, output descriptions, and any stdout image |
 
 ## Shell description
@@ -17,20 +17,10 @@ Call `get_host_shell` with `{}` to inspect the shell and default working directo
 {
   "result": {
     "shell": "/bin/sh",
-    "cwd": "/path/to/deployment",
-    "capabilities": {
-      "command_execution": "available",
-      "process_sessions": "planned",
-      "stdin": "planned",
-      "pty": "planned",
-      "process_control": "planned",
-      "background_jobs": "planned"
-    }
+    "cwd": "/path/to/deployment"
   }
 }
 ```
-
-Command execution is available. The entries marked `planned` have no callable operations.
 
 ## Running commands
 
@@ -93,7 +83,7 @@ In the result description, both `stdout` and `stderr` contain an absolute `path`
 
 Stderr's `content` contains either a `text` preview or an `unavailable` diagnostic. See [tool content](content.md) for classification, image descriptions, preview bounds, and model-input limits. Content diagnostics leave the command outcome and stream descriptions available.
 
-Each invocation creates distinct log files under `<DATA_DIR>/host/<session_id>/`. They contain the full streams, including output omitted from the reply, and outlive the working session. Later shell calls can read or remove them. See [data and retention](running.md#data-and-retention) for `DATA_DIR` configuration.
+`run_host_shell` stores output in distinct log files under `<DATA_DIR>/host/<session_id>/`, creating missing directories when invoked. The files contain the full streams, including output omitted from the reply, and outlive the working session. Later shell calls can read or remove them. See [host output and deployment files](running.md#host-output-and-deployment-files) for `DATA_DIR` configuration and retention.
 
 An invocation error returns JSON `error` with `code` and `message`:
 

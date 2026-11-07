@@ -20,8 +20,8 @@ pub fn summarize(model: Model.Port, arena: Allocator, context: *const Context, s
     const response = try model.next(arena, inference);
     if (response.calls.len != 0) return error.UnexpectedSummaryToolCall;
     const summary = response.text orelse return error.EmptyHandover;
-    if (summary.len > max_summary_bytes) return error.HandoverTooLarge;
     const text = std.mem.trim(u8, summary, " \t\r\n");
     if (text.len == 0) return error.EmptyHandover;
+    if (text.len > max_summary_bytes) return error.HandoverTooLarge;
     return text;
 }

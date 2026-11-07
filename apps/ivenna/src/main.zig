@@ -21,7 +21,6 @@ pub fn main(init: std.process.Init) !void {
     const a = arena.allocator();
     const host_directory = try std.process.currentPathAlloc(io, a);
     const data_directory = try std.fs.path.resolve(a, &.{ host_directory, config.data_dir });
-    _ = try std.Io.Dir.cwd().createDirPathStatus(io, data_directory, .fromMode(0o700));
     var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
     defer client.deinit();
     var mail: email.Integration = undefined;

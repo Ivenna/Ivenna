@@ -1,7 +1,7 @@
 [
   {
     "name": "get_host_shell",
-    "description": "Return the host shell executable, default working directory, and capability status.",
+    "description": "Return the host shell executable and default working directory.",
     "parameters": {
       "type": "object",
       "properties": {},

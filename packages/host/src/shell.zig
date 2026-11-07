@@ -7,8 +7,7 @@ const ImageContent = @import("content").ImageContent;
 
 const Allocator = std.mem.Allocator;
 
-/// Owns host shell command execution. Process sessions and terminal control
-/// are planned capabilities.
+/// Owns host shell command execution.
 pub const Shell = struct {
     io: std.Io,
     directory: []const u8,
@@ -83,21 +82,9 @@ pub const Shell = struct {
         }
     };
 
-    pub const CapabilityStatus = enum { available, planned };
-
-    pub const Capabilities = struct {
-        command_execution: CapabilityStatus = .available,
-        process_sessions: CapabilityStatus = .planned,
-        stdin: CapabilityStatus = .planned,
-        pty: CapabilityStatus = .planned,
-        process_control: CapabilityStatus = .planned,
-        background_jobs: CapabilityStatus = .planned,
-    };
-
     pub const Description = struct {
         shell: []const u8 = "/bin/sh",
         cwd: []const u8,
-        capabilities: Capabilities = .{},
     };
 
     pub fn describe(self: Shell) Description {
