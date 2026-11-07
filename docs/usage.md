@@ -39,7 +39,7 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 ## Ongoing work and memory
 
-Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. It can schedule one-time observations or let host commands continue between tool calls, observing progress and supplying further input as needed. Completion can resume its work without a new message from you. Processing depends on runtime availability and capacity; a scheduled time does not guarantee a reply at that time.
+Ivenna can continue sustained work while receiving other messages and may consider several waiting messages together. Activities can wait for tools while the core and other activities continue, or interact with host commands across several calls. Scheduled observations can resume sleeping sessions without a new message from you. Processing depends on runtime availability and capacity; a scheduled time does not guarantee a reply at that time.
 
 Continued work uses retained understanding and autonomous memory. Working histories can be condensed, so include relevant context in follow-up messages when detail may no longer be available.
 
@@ -47,6 +47,6 @@ Ivenna moves its incoming copy to Trash after saving the complete observation, b
 
 ## After interruption
 
-After a [restart](running.md#stopping-and-restarting), Ivenna restores saved understanding and can continue interrupted work without new correspondence. Scheduled observations and stored host results remain available for continued work.
+After a [restart](running.md#stopping-and-restarting), Ivenna restores saved understanding and can continue interrupted work without new correspondence. Scheduled observations and saved tool results remain available for continued work.
 
-Host processes and command handles are not restored, and old tool calls are not replayed. A command with a registered completion but no stored result is reported as interrupted with an unknown outcome; it may already have changed files or other external state. Include any known changes when corresponding about interrupted work. A message can also appear again if interruption occurred between saving its observation and acknowledging the original. The [restart guide](running.md#stopping-and-restarting) explains these limits.
+Host processes and command handles are not restored, and old tool calls are not replayed. An interrupted operation may already have changed files or other external state without a saved result. Include any known changes when corresponding about interrupted work. A message can also appear again if interruption occurred between saving its observation and acknowledging the original. The [restart guide](running.md#stopping-and-restarting) explains these limits.

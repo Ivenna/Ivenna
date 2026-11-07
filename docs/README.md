@@ -23,7 +23,7 @@ Choose a guide for your task:
 | Task | Guide |
 | --- | --- |
 | Interpret history records, inference turns, and runtime state | [Input contract](input.md) |
-| Use correspondent IDs, coordinate sessions, and receive callbacks | [Communication](communication.md) |
+| Use correspondent IDs, coordinate sessions, and schedule wakeups | [Communication](communication.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |
 | Run commands and interact with host processes | [Host shell](host.md) |
 | Interpret text, media, and omitted content | [Tool content](content.md) |

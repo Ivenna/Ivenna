@@ -31,10 +31,9 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
-| `MAX_PARALLEL_ATTENTION` | Maximum concurrently executing activity sessions; core has a separate lane | `4` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary events per session, including reserved activity reports in the core | `64` |
-| `MAX_PENDING_CALLBACKS` | Maximum callback registrations not yet durably admitted per session | `64` |
+| `MAX_PENDING_CALLBACKS` | Maximum wakeup registrations not yet durably admitted per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions; the same count bounds retained finished command handles | `8` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
@@ -47,9 +46,9 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 
 Core and activity sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
 
-Session identities, event queues, callbacks, host commands, and execution slots have independent limits. Waiting sessions occupy no execution slot. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a registered-session slot; the core remains registered. Host commands release their live slot when they exit; finished command handles have a separate bounded retention lifecycle described in the [host interface](host.md#commands-that-outlive-a-call).
+Each ready session can advance through its own serial worker while other sessions continue. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a registered-session slot; the core remains registered. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes).
 
-Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. Waiting activities retain their session slots but release report reservations until they resume. Startup observations are excluded from the allowance. Callback mail waits when its destination is full. Correspondence and callbacks have independent intake allowances, and eligible activity sessions rotate through available slots without preempting running activations. Capacity and polling can delay scheduled work.
+Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. An activity waiting for tools retains its activation, context, and report reservation. An activity whose activation ends with a wakeup pending sleeps with its identity retained and releases the report reservation until it resumes. Startup observations are excluded from the allowance. Correspondence and callback mail have independent intake allowances and stay stored when their destination is full. Capacity and polling can delay scheduled work.
 
 Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. A larger roster or callback list leaves less room for history and observations. These budgets also apply to an activity's inherited history. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
 
@@ -65,7 +64,7 @@ Use the [supported email addresses](communication.md#current-email-addressing). 
 
 For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks when presenting correspondent IDs. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
-Internal callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped; host processes are not restored on restart. See [callback mail](communication.md#callback-mail) for the delivery contract.
+Wakeup callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped. See [callback mail](communication.md#callback-mail) for the delivery contract.
 
 Configure automatic Trash expiry and cleanup of unreferenced storage in the mail service. These processes must continue independently of the kernel. Choose retention with the provider's full policy scope in mind: Trash and Junk policies can also remove ordinary mail. The [local Stalwart setup](../dev/README.md#configuring-mail) provides a concrete configuration.
 
@@ -151,7 +150,7 @@ Start the executable again with the same mail account and `MAIL_ADDRESS` to load
 
 The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other activity sessions remain asleep until an event arrives. Every session's pending wakeups survive restart, including deadlines that passed while the runtime was unavailable, and their callbacks return to the original session.
 
-Stored host callbacks remain available. A host command with a registered callback but no stored completion instead produces an interrupted observation with an unknown outcome. Host processes and command handles are not restored, and commands are not replayed. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
+Host processes and command handles are not restored, and commands are not replayed. Working history preserves confirmed model/tool exchanges; an interrupted operation may have produced effects without a saved result. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
 
 ### Recovering from an admission failure
 
@@ -203,7 +202,7 @@ The latest checkpoint selects the histories needed to continue all registered se
 
 Forks store independent copies of inherited history; include these copies when sizing the mailbox. Compaction replaces only that session's selection, allowing its previous records to move to Trash while other sessions keep their own copies.
 
-A waiting activity retains its history even when its context is unloaded. When the session ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. Its report remains part of the core's work, and shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
+A sleeping activity retains its history even when its context is unloaded. When the session ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. Its report remains part of the core's work, and shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
 ### Backups and transfers
 
@@ -225,7 +224,7 @@ A mailbox backup preserves stored callbacks and wakeup arrangements, not running
 
 ### Host output and deployment files
 
-`DATA_DIR` selects the base directory for host output in the kernel's filesystem. Each host-shell invocation creates any missing output directories with private permissions. Changing it selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
+`DATA_DIR` selects the base directory for host output in the kernel's filesystem. Launching a command creates any missing output directories with private permissions. Changing it selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
 
 Use writable storage that supports ordinary files and subdirectories.
 

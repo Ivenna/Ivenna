@@ -30,17 +30,13 @@ pub const SessionMessage = struct {
     text: []const u8,
 };
 
-pub const CallbackSource = enum { host, wakeup };
-
 pub const PendingCallback = struct {
     id: u64,
     session_id: u64,
-    source: CallbackSource,
 };
 
 pub const Callback = struct {
     id: u64,
-    source: CallbackSource,
     observed_at_unix_ms: i64,
     text: []const u8,
 };
@@ -48,7 +44,7 @@ pub const Callback = struct {
 pub const SessionInfo = struct {
     session_id: u64,
     role: Role,
-    status: enum { running, ready, dormant },
+    status: enum { running, waiting_for_tools, ready, dormant },
     queued_inputs: usize,
     pending_callbacks: usize,
     last_active_unix_ms: i64,
@@ -63,7 +59,7 @@ pub const State = struct {
     runtime: struct {
         observed_at_unix_ms: i64,
         registered_sessions: usize,
-        running_sessions: usize,
+        active_sessions: usize,
         queued_inputs: usize,
         sessions: []const SessionInfo,
     },

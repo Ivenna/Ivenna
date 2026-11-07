@@ -32,15 +32,15 @@ Ivenna chooses whether to communicate, to whom, and what to say through `send_me
 
 A task describes work to accomplish. A session has a stable identity, retained understanding, and an event queue. Each activation continues a session's work through model/tool rounds, admitting further events between complete rounds so new information can guide the next decision without interrupting an inference or tool.
 
-A response without tool calls ends the activation when no queued arrivals or core attention signal require more reasoning. At that boundary, an activity with pending callbacks waits with its identity and understanding retained; otherwise its session ends and the core receives a [completion report](communication.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
+A response without tool calls ends the activation when no queued arrivals or core attention signal require more reasoning. At that boundary, an activity with a pending wakeup sleeps with its identity and understanding retained; otherwise its session ends and the core receives a [completion report](communication.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
 
 ### Events and waiting
 
 Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a waiting session. Messages preserve their actual sources for the receiver to weigh against its own evidence and understanding.
 
-Sessions can schedule wakeups, and activities can receive results from host commands that outlive a tool call. Sources bind to their receiving session before starting and retain that destination for their lifetime. This lets work continue without new correspondence. See [session communication](communication.md#session-communication-and-wakeups) and [commands that outlive a call](host.md#commands-that-outlive-a-call).
+Sessions can schedule wakeups that retain their receiving session across sleep and restart. This lets work resume without new correspondence. See [session communication](communication.md#session-communication-and-wakeups).
 
-Host commands remain observable and controllable while they run. Returning from a tool call frees attention to continue reasoning; it does not end the process. Further calls can inspect progress, supply input, or interrupt work whose purpose has changed. Another activity can interact with the command while its completion still returns to the originating session.
+Activities choose how long to wait for host commands and can inspect or control them through shared handles. Waiting for a tool retains the activity's work while the core and other activities continue. See [host shell](host.md).
 
 Each inference receives a self-contained snapshot of the runtime facts exposed by the interface, including after restart or compaction. These facts place retained understanding in its current circumstances; task meaning remains in model messages, handovers, and memory.
 
@@ -48,7 +48,7 @@ Each inference receives a self-contained snapshot of the runtime facts exposed b
 
 Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) condenses retained exchanges into a handover that preserves self-understanding, preferences, commitments, uncertainty, effects, and the identities needed to continue. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
 
-Restart restores saved understanding and pending work. Earlier actions remain evidence rather than instructions to replay: host processes are not restored and old tool calls are not repeated. Missing host outcomes become observations of interruption and uncertainty for Ivenna to interpret. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
+Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. An interrupted operation may have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 
 ## Runtime availability
 

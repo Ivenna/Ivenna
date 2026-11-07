@@ -20,7 +20,7 @@ pub const Shell = struct {
         login: bool = false,
         mode: Mode = .batch,
         timeout_ms: ?u32 = null,
-        yield_ms: u32 = 1000,
+        yield_ms: ?u32 = null,
         max_output_bytes: u32 = 16384,
         interpretation: ?content.Interpretation = null,
     };
@@ -40,13 +40,12 @@ pub const Shell = struct {
             return .{ .path = self.path, .byte_length = self.byte_length, .range = self.range, .content = switch (self.content) {
                 .text => |text| .{ .text = text },
                 .image => |image| .{ .image = image.describe() },
-                .image_description => |description| .{ .image = description },
                 .unavailable => |diagnostic| .{ .unavailable = diagnostic },
             } };
         }
     };
     pub const Streams = struct { stdout: Stream, stderr: Stream };
-    pub const Collection = enum { complete, incremental, callback };
+    pub const Collection = enum { complete, incremental };
     pub const Start = union(enum) { ready: Invocation, unavailable: anyerror };
     pub const Invocation = struct {
         io: std.Io,
@@ -89,19 +88,17 @@ pub const Shell = struct {
             return try output.readable(self.io, self.stdout, cursors[0]) or try output.readable(self.io, self.stderr, cursors[1]);
         }
 
-        /// One source policy serves direct results, subsequent reads and text
-        /// callbacks. A callback description does not consume native delivery.
-        pub fn collect(self: Invocation, a: Allocator, cursors: *[2]u64, media_collected: *bool, kind: Collection, finished: bool, interpretation: ?content.Interpretation, budget: usize) !Streams {
-            if (kind == .complete) return self.complete(a, interpretation, budget);
+        /// The first terminal observation classifies complete stdout even if
+        /// earlier incremental reads have already consumed its bytes.
+        pub fn collect(self: Invocation, a: Allocator, cursors: *[2]u64, final_stdout_collected: *bool, finished: bool, interpretation: ?content.Interpretation, budget: usize) !Streams {
             var streams = try self.incremental(a, cursors, finished, budget);
-            if (finished and !media_collected.*) {
+            if (finished and !final_stdout_collected.*) {
                 const reader: Reader = .{ .io = self.io };
-                const delivery: Reader.Delivery = if (kind == .callback) .description else .native;
-                if (try reader.readMedia(a, self.stdout, interpretation, delivery)) |media| {
+                if (try reader.readMedia(a, self.stdout, interpretation)) |media| {
                     streams.stdout = .{ .path = self.stdout_path, .byte_length = try self.stdout.length(self.io), .content = media };
                     cursors[0] = streams.stdout.byte_length;
                 }
-                if (kind != .callback) media_collected.* = true;
+                final_stdout_collected.* = true;
             }
             return streams;
         }

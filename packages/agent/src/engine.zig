@@ -25,22 +25,28 @@ pub const Engine = struct {
     pub const RuntimeTools = struct {
         context: *anyopaque,
         invoke: *const fn (*anyopaque, Allocator, []const u8, []const u8) anyerror!?Content,
-        register_callback: *const fn (*anyopaque) anyerror!u64,
     };
 
-    pub const Round = struct {
-        output: []const Model.Item,
-        replies: []const Model.Item,
-        text: ?[]const u8,
+    pub const Inference = struct {
+        request: Model.Request,
+        response: Model.Response,
     };
 
-    /// Returned data belongs to a, including model output and tool replies.
-    pub fn turn(self: *Engine, a: Allocator, session_id: u64, history: []const Model.Item, runtime_tools: ?RuntimeTools, role: Input.Role) !Round {
+    /// Declarations and response data belong to a. Request history borrows the
+    /// caller's slice through tool execution.
+    pub fn infer(self: *Engine, a: Allocator, history: []const Model.Item, role: Input.Role) !Inference {
         try self.io.checkCancel();
-        var request = try self.modelRequest(a, history, role);
-        const response = try self.model.next(a, request);
+        const request = try self.modelRequest(a, history, role);
+        return .{ .request = request, .response = try self.model.next(a, request) };
+    }
+
+    /// Execute the decoded batch in order, retaining its complete request for
+    /// the provider's tool-content limits. Replies belong to a.
+    pub fn executeTools(self: *Engine, a: Allocator, session_id: u64, inference: Inference, runtime_tools: ?RuntimeTools, role: Input.Role) ![]const Model.Item {
+        var request = inference.request;
+        const response = inference.response;
         var messages: std.ArrayList(Model.Item) = .empty;
-        try messages.appendSlice(a, history);
+        try messages.appendSlice(a, request.history);
         try messages.appendSlice(a, response.output);
         const reply_start = messages.items.len;
         for (response.calls) |call| {
@@ -57,11 +63,7 @@ pub const Engine = struct {
         }
         request.history = messages.items;
         try self.model.limitToolReplies(a, request, messages.items[reply_start..]);
-        return .{
-            .output = response.output,
-            .replies = messages.items[reply_start..],
-            .text = response.text,
-        };
+        return messages.items[reply_start..];
     }
 
     fn invoke(self: *Engine, a: Allocator, session_id: u64, name: []const u8, arguments: []const u8, runtime_tools: ?RuntimeTools, role: Input.Role) !Content {
@@ -73,7 +75,6 @@ pub const Engine = struct {
             for (group) |tools| {
                 if (try tools.invoke(tools.context, a, .{
                     .session_id = session_id,
-                    .callback = if (runtime_tools) |runtime| .{ .context = runtime.context, .register = runtime.register_callback } else null,
                 }, name, arguments)) |result| return result;
             }
         }

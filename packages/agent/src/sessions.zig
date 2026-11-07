@@ -82,7 +82,6 @@ pub const Registry = struct {
     report_slots: usize = 0,
     next_session_id: u64 = 2,
     next_callback_id: u64 = 1,
-    last_dispatched_id: u64 = 0,
     attention_revision: u64 = 0,
     observed_revision: u64 = 0,
     started_at_unix_ms: i64,
@@ -195,7 +194,6 @@ pub const Registry = struct {
                 };
                 break :blk .{ self.sessions.get(registration.session_id).?, Input.Event{ .callback = .{
                     .id = callback.id,
-                    .source = registration.source,
                     .observed_at_unix_ms = callback.observed_at_unix_ms,
                     .text = callback.text,
                 } } };
@@ -216,7 +214,7 @@ pub const Registry = struct {
         return .accepted;
     }
 
-    pub fn takeReadyBatch(self: *Registry, a: Allocator, max_parallel: usize) ![]const Work {
+    pub fn takeReadyBatch(self: *Registry, a: Allocator) ![]const Work {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         var ready: std.ArrayList(Work) = .empty;
@@ -224,29 +222,14 @@ pub const Registry = struct {
         errdefer for (ready.items) |work| {
             work.session.borrowed_workers -= 1;
         };
-        var available = max_parallel -| self.runningWorkers();
-        try ready.ensureTotalCapacity(a, 1 + @min(available, self.sessions.count() - 1));
-        if (try self.takeReady(self.core)) |work| ready.appendAssumeCapacity(work);
-        const activities = try a.alloc(*Session, self.sessions.count() - 1);
-        defer a.free(activities);
-        var sessions = self.sessions.valueIterator();
-        var count: usize = 0;
-        while (sessions.next()) |entry| if (entry.* != self.core) {
-            activities[count] = entry.*;
-            count += 1;
-        };
-        std.mem.sort(*Session, activities, {}, lessSessionId);
-        var start: usize = 0;
-        while (start < activities.len and activities[start].session_id <= self.last_dispatched_id) start += 1;
-        if (start == activities.len) start = 0;
-        for (0..activities.len) |offset| {
-            if (available == 0) break;
-            const session = activities[(start + offset) % activities.len];
-            if (try self.takeReady(session)) |work| {
-                ready.appendAssumeCapacity(work);
-                available -= 1;
-                self.last_dispatched_id = session.session_id;
-            }
+        try ready.ensureTotalCapacity(a, self.sessions.count());
+        const sessions = try a.alloc(*Session, self.sessions.count());
+        defer a.free(sessions);
+        var iterator = self.sessions.valueIterator();
+        for (sessions) |*session| session.* = iterator.next().?.*;
+        std.mem.sort(*Session, sessions, {}, lessSessionId);
+        for (sessions) |session| {
+            if (try self.takeReady(session)) |work| ready.appendAssumeCapacity(work);
         }
         return ready.toOwnedSlice(a);
     }
@@ -420,14 +403,14 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         var queued: usize = 0;
-        var running: usize = 0;
+        var active: usize = 0;
         const directory = try a.alloc(Input.SessionInfo, self.sessions.count());
         var sessions = self.sessions.valueIterator();
         for (directory) |*info| {
             const item = sessions.next().?.*;
             info.* = self.sessionInfoLocked(item);
             queued += item.pending.items.len;
-            running += @intFromBool(item.active != null);
+            active += @intFromBool(item.active != null);
         }
         std.mem.sort(Input.SessionInfo, directory, {}, lessSession);
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
@@ -440,7 +423,7 @@ pub const Registry = struct {
                     .runtime = .{
                         .observed_at_unix_ms = self.now(),
                         .registered_sessions = self.sessions.count(),
-                        .running_sessions = running,
+                        .active_sessions = active,
                         .queued_inputs = queued,
                         .sessions = directory,
                     },
@@ -515,17 +498,6 @@ pub const Registry = struct {
         try self.saveLocked();
     }
 
-    /// The invocation binds this source to the calling activity before any host
-    /// work is published. The registration survives uncertain execution.
-    pub fn registerHostCallback(self: *Registry, work: Work) !u64 {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        assertWork(work);
-        const id = try self.registerCallbackLocked(work.session, .host);
-        try self.saveLocked();
-        return id;
-    }
-
     pub fn scheduleWakeup(self: *Registry, work: Work, at: i64, text: []const u8) !u64 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -534,7 +506,7 @@ pub const Registry = struct {
         var transferred = false;
         errdefer if (!transferred) self.allocator.free(owned);
         try self.wakeups.ensureUnusedCapacity(self.allocator, 1);
-        const id = try self.registerCallbackLocked(work.session, .wakeup);
+        const id = try self.registerCallbackLocked(work.session);
         self.wakeups.appendAssumeCapacity(.{ .id = id, .at_unix_ms = at, .text = owned });
         transferred = true;
         try self.saveLocked();
@@ -559,22 +531,12 @@ pub const Registry = struct {
         try self.saveLocked();
     }
 
-    /// Called before starting this runtime's work. Old host processes are not
-    /// replayed; the mailbox preserves a completion already published first.
-    pub fn interruptedHostCallbacks(self: *Registry, a: Allocator) ![]const u64 {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        var ids: std.ArrayList(u64) = .empty;
-        for (self.callbacks.items) |callback| if (callback.source == .host) try ids.append(a, callback.id);
-        return ids.toOwnedSlice(a);
-    }
-
-    fn registerCallbackLocked(self: *Registry, session: *Session, source: Input.CallbackSource) !u64 {
+    fn registerCallbackLocked(self: *Registry, session: *Session) !u64 {
         if (self.callbackCount(session.session_id) >= self.max_callbacks) return error.CallbackCapacityUnavailable;
         try self.callbacks.ensureUnusedCapacity(self.allocator, 1);
         self.changedLocked(session);
         const id = self.next_callback_id;
-        self.callbacks.appendAssumeCapacity(.{ .id = id, .session_id = session.session_id, .source = source });
+        self.callbacks.appendAssumeCapacity(.{ .id = id, .session_id = session.session_id });
         self.next_callback_id += 1;
         return id;
     }
@@ -706,11 +668,20 @@ pub const Registry = struct {
         return count;
     }
 
+    pub fn setToolWait(self: *Registry, work: Work, waiting: bool) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        if (work.activation.waiting_for_tools == waiting) return;
+        work.activation.waiting_for_tools = waiting;
+        self.changedLocked(work.session);
+    }
+
     fn sessionInfoLocked(self: *Registry, session: *Session) Input.SessionInfo {
         return .{
             .session_id = session.session_id,
             .role = session.role,
-            .status = if (session.active != null) .running else if (self.hasWork(session)) .ready else .dormant,
+            .status = if (session.active) |activation| (if (activation.waiting_for_tools) .waiting_for_tools else .running) else if (self.hasWork(session)) .ready else .dormant,
             .queued_inputs = session.pending.items.len,
             .pending_callbacks = self.callbackCount(session.session_id),
             .last_active_unix_ms = session.last_active_unix_ms,
@@ -720,15 +691,6 @@ pub const Registry = struct {
     fn hasCapacity(self: *Registry, session: *Session) bool {
         const active_count = if (session.active) |activation| deliveryCount(activation.deliveries.items) else 0;
         return deliveryCount(session.pending.items) + active_count + (if (session == self.core) self.report_slots else 0) < self.max_pending;
-    }
-
-    fn runningWorkers(self: *Registry) usize {
-        var running: usize = 0;
-        var sessions = self.sessions.valueIterator();
-        while (sessions.next()) |entry| if (entry.* != self.core and entry.*.active != null) {
-            running += 1;
-        };
-        return running;
     }
 
     fn destroySession(self: *Registry, session: *Session) void {

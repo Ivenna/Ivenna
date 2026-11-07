@@ -64,7 +64,7 @@ The plan's `ivenna-ready` script runs during SMTP `RCPT` handling through its `M
 
 The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
 
-Use the SMTP submission path for correspondence. Direct JMAP imports into the kernel account bypass the receiving checks. Internal callbacks use direct JMAP writes to their dedicated folder; see the [mail-service requirements](../docs/running.md#mail-service).
+Use the SMTP submission path for correspondence. Direct JMAP imports into the kernel account bypass the receiving checks. Wakeup callbacks use direct JMAP writes to their dedicated folder; see the [mail-service requirements](../docs/running.md#mail-service).
 
 For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days), applying to Trash and Junk across all accounts. See Stalwart's [mail retention](https://stalw.art/docs/email/settings/maintenance/) and [storage maintenance](https://stalw.art/docs/storage/maintenance/) documentation for policy and space reclamation.
 
@@ -211,7 +211,7 @@ Source changes inside the memory image require a [rebuild](#updating-the-kernel-
 
 | Location | Contents |
 | --- | --- |
-| Stalwart volume, `ivenna-mail` by default | Correspondence, callback inbox, current and archived history records, checkpoints, Trash, accounts, and Stalwart configuration |
+| Stalwart volume, `ivenna-mail` by default | Correspondence, callback inbox, working-history records, checkpoints, Trash, accounts, and Stalwart configuration |
 | Memory volume, `ivenna-memory` by default | Shared memory rooms and entries |
 | `.env` | Kernel and local service settings and credentials |
 | `dev/mail/provision.ndjson` | Private mail configuration plan |

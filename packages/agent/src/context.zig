@@ -157,7 +157,6 @@ fn cloneEvents(a: Allocator, events: []const Input.Event) ![]const Input.Event {
         } },
         .callback => |callback| .{ .callback = .{
             .id = callback.id,
-            .source = callback.source,
             .observed_at_unix_ms = callback.observed_at_unix_ms,
             .text = try a.dupe(u8, callback.text),
         } },

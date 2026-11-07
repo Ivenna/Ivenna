@@ -62,19 +62,17 @@ pub const History = struct {
             try validateEntries(session.session_id, session.entries orelse &.{});
         }
         if (cores != 1) return error.InvalidHistory;
-        var callbacks: std.AutoHashMapUnmanaged(u64, Input.PendingCallback) = .empty;
+        var callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
             if (callback.id == 0 or callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
             const entry = try callbacks.getOrPut(a, callback.id);
             if (entry.found_existing) return error.InvalidHistory;
-            entry.value_ptr.* = callback;
         }
         var wakeup_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer wakeup_ids.deinit(a);
         for (self.wakeups) |wakeup| {
-            const callback = callbacks.get(wakeup.id) orelse return error.InvalidHistory;
-            if (callback.source != .wakeup or (try wakeup_ids.getOrPut(a, wakeup.id)).found_existing) return error.InvalidHistory;
+            if (!callbacks.contains(wakeup.id) or (try wakeup_ids.getOrPut(a, wakeup.id)).found_existing) return error.InvalidHistory;
         }
     }
 };

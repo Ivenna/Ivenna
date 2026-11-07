@@ -33,8 +33,6 @@ An image description has one branch:
 | `data` | `format` and `byte_length` | Encoded image bytes |
 | `url` | Empty object | The supplied URL |
 
-When a host callback describes an image, it marks `media_omission: "asynchronous_media_unavailable"` in place of a native part. See [host output](host.md#output-and-results) for collecting that media later.
-
 Content that cannot be supplied has an `unavailable` description with `byte_length` and one reason:
 
 | Reason | Meaning |

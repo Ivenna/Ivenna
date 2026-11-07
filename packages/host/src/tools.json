@@ -1,7 +1,7 @@
 [
   {
     "name": "get_host_shell",
-    "description": "Inspect shell defaults or retained commands on the shared host. Use command IDs to continue work after a handover. Finished handles have bounded retention; full logs remain independently available.",
+    "description": "Inspect shell defaults and discover commands across activities, including ones whose run_host_shell call is still waiting. Command IDs belong to this runtime. Finished handles have bounded retention; full logs remain independently available.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -9,7 +9,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 18446744073709551615,
-          "description": "Select a command, or omit to list retained commands."
+          "description": "Select a command, or omit to list commands."
         }
       },
       "required": [],
@@ -18,14 +18,14 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Execute shell code on the shared host. Each start creates a fresh shell. The call waits for completion or yield_ms; a running command returns command_id for continue_host_shell and later completes by callback to its originating session. Returning from a call does not end execution. Results include bounded output and full log paths; final stdout can supply native images.",
+    "description": "Execute shell code on the shared host. Each call starts a fresh shell and waits for completion by default. Set yield_ms to return earlier with a command_id for continue_host_shell if still running. Completion produces no event. Results include bounded output and full log paths; final stdout can supply native images.",
     "parameters": {
       "type": "object",
       "properties": {
         "command": {
           "type": "string",
           "minLength": 1,
-          "description": "Code passed to the selected shell with -c. Keep the same command running to preserve shell state across calls."
+          "description": "Code passed to the selected shell with -c. Keep the same command running to preserve shell or REPL state across calls."
         },
         "cwd": {
           "type": "string",
@@ -50,12 +50,6 @@
           ],
           "description": "batch (default) has closed stdin; pipe accepts streamed input; terminal provides terminal behavior with merged stdout/stderr. Batch and pipe preserve output bytes; terminal processing can alter them."
         },
-        "yield_ms": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 30000,
-          "description": "Wait for completion up to this many milliseconds; default 1000. This yields attention without stopping execution."
-        },
         "timeout_ms": {
           "type": "integer",
           "minimum": 1,
@@ -74,6 +68,12 @@
             "image_url"
           ],
           "description": "Present final stdout text, up to 16 KiB, as an image URL passed unchanged to the model service. Image bytes are recognized automatically."
+        },
+        "yield_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Optional wait limit for this call in milliseconds. Omit to wait for completion; 0 takes an immediate snapshot. Returning a running command leaves it owned by the host runtime, without keeping the originating activity alive."
         }
       },
       "required": [
@@ -84,7 +84,7 @@
   },
   {
     "name": "continue_host_shell",
-    "description": "Continue a retained command without starting a new shell. Reads and completion callbacks share the output cursor, including across activities; completion always goes to the originating session. A finished handle can supply remaining output and its native image once, even when the callback supplied only a description. Handles have bounded retention and are not restored after restart.",
+    "description": "Read output or act on an existing command. Incremental reads share per-stream cursors across activities; a waiting run_host_shell call keeps an independent complete-source final result. Final media can be collected once through the handle, independently of earlier text reads. A finished yielded handle retires when its output is drained.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -92,7 +92,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 18446744073709551615,
-          "description": "Handle returned by run_host_shell or listed by get_host_shell; also the command's completion callback ID."
+          "description": "Runtime command handle returned by run_host_shell or listed by get_host_shell."
         },
         "action": {
           "type": "object",
@@ -203,7 +203,7 @@
         "yield_ms": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 30000,
+          "maximum": 4294967295,
           "description": "Wait for unread output or completion up to this many milliseconds; default 1000. Use 0 for an immediate snapshot."
         },
         "max_output_bytes": {

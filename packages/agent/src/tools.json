@@ -47,7 +47,7 @@
   },
   {
     "name": "send_session_message",
-    "description": "Durably queue an observation for an existing session. A dormant recipient wakes; a running recipient receives it between model/tool rounds.",
+    "description": "Durably queue an observation for an existing session. A dormant recipient becomes ready; an active recipient receives it between complete model/tool rounds.",
     "parameters": {
       "type": "object",
       "properties": {

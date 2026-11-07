@@ -48,14 +48,14 @@ The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer
 
 ### Shared contracts
 
-At runtime, the application supplies concrete capability implementations through shared contracts. Kernel calls input, sending, and history storage operations and publishes wakeup or interrupted-host observations. Host publishes command completions through the same callback contract. Engine calls the model and registered tools.
+At runtime, the application supplies concrete capability implementations through shared contracts. Kernel calls input, sending, and history storage operations and publishes scheduled wakeups. Engine calls the model and registered tools. Host owns command lifetimes and returns observations through those tool calls.
 
 Shared [communication types](../packages/agent_contracts/src/communication.zig) describe incoming observations and explicit outgoing messages. The shared capability contracts define calls and data exchanged within the process. The agent owns model-input rendering, handovers, history-record encoding, and the checkpoint selecting retained working histories; each adapter owns its service protocol encoding:
 
 | Contract | Operations | Implementation |
 | --- | --- | --- |
 | [Inbox](../packages/agent_contracts/src/inbox.zig) | Poll typed correspondence and callback envelopes with opaque receipts and acknowledge durable admission | Email integration |
-| [Callback.Publisher](../packages/agent_contracts/src/callback.zig) | Store a terminal observation under a registered callback ID | Email integration |
+| [Callback.Publisher](../packages/agent_contracts/src/callback.zig) | Store a wakeup observation under a registered callback ID | Email integration |
 | [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Submit explicit outgoing messages using correspondent IDs | Email integration |
 | [HistoryStore](../packages/agent_contracts/src/history.zig) | Load and save the current checkpoint; allocate groups, discover record metadata, read and create records in batches, and maintain the selected history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure the encoded request, and apply model content limits | Responses adapter |
@@ -63,7 +63,7 @@ Shared [communication types](../packages/agent_contracts/src/communication.zig) 
 
 `Communication.SendResult` distinguishes a submitted message from an unsupported recipient. The sending adapter classifies recipient support before submission; execution renders the corresponding tool result. Infrastructure failures propagate through the error channel.
 
-`Tools.Invocation` supplies a session ID and an optional callback registrar valid only during that invocation. The agent's registrar binds source and destination in durable execution state. A capability can retain the returned callback ID for later publication, but cannot retain the registrar or choose an arbitrary receiving session through it. `Callback.Publisher` accepts only the registered ID and result text.
+`Tools.Invocation` identifies the calling session for capability operations. Host assigns runtime-scoped command IDs and retains the originating session as provenance; the host runtime owns those resources beyond an individual call.
 
 The email integration uses the configured mail account for correspondence, callbacks, and working history. It owns native addressing, folders, markers, and record lifecycles behind the shared contracts. The [email boundary](#email-boundary) describes its storage protocols and operation ownership.
 
@@ -84,24 +84,24 @@ Reception status belongs to the service boundary. Model reasoning and tools do n
 | Concept | Role and lifetime |
 | --- | --- |
 | Task | Work to be accomplished; it may continue across activations |
-| Core session | Coordinating session with saved history and its own runtime queue and execution lane |
+| Core session | Coordinating session with saved history, its own runtime queue, and a serial worker |
 | Activity session | Session forked by the core with inherited context, an assignment, and its own subsequent history and queue |
 | `input` event | Correspondence observation with `from` IDs, text, and observation time |
 | Delivery | An owned observation retained through durable admission and any transport receipt acknowledgement |
 | Activation | One session continuing work through model and tool rounds, including admitted events or a core state reconsideration, until completion |
 | Model round | One model response followed by all tools it invoked |
 
-The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes; workers infer from owned snapshots and commit complete rounds before their model-round arenas end.
+The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes. A worker retains its inference output and context while the tool batch executes, then commits the complete round before its model-round arena ends.
 
-The registry stores each session's `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Waiting sessions retain their identities and roles through context unloading and restart. Completed activities leave the registry; session IDs increase monotonically and are not reused. The core remains registered.
+The registry stores each session's `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Sleeping sessions retain their identities and roles through context unloading and restart. Completed activities leave the registry; session IDs increase monotonically and are not reused. The core remains registered.
 
 ### Scheduling and capacity
 
-`MAX_PARALLEL_ATTENTION` bounds executing activity sessions; the core has an independent serial lane. Dispatch considers activity sessions in session-ID order after the last successful claim, wrapping once. This cursor resets on restart. Report-capacity checks can defer a session; rotation does not preempt running activations.
+Each ready session can claim its own worker. A session has at most one worker, preserving its model/tool order, while workers for other ready sessions advance concurrently. A tool batch keeps its activation and context alive and exposes `waiting_for_tools` in the roster. New observations enter that session only after its complete round. Report-capacity checks can defer an activity's next activation.
 
 Separate [limits](running.md#configuration) bound registered identities, pending events and callbacks per session, and live host commands. Startup observations are outside the ordinary event budget. Existing sessions remain addressable at the identity limit; activity completion releases a registered-session slot.
 
-Each activity activation reserves one report slot within the core's event allowance; a fork reserves its first slot before publication. When an activity waits for callbacks, it releases the activation's reservation; its next activation reserves capacity again. Session completion consumes the reservation for its report, so later arrivals cannot take its place. Correspondence and callback mail stay stored when their destination cannot accept them.
+Each activity activation reserves one report slot within the core's event allowance; a fork reserves its first slot before publication. The reservation remains held during tool execution. When the activation ends with wakeups pending, it releases the reservation and sleeps; its next activation reserves capacity again. Session completion consumes the reservation for its report, so later arrivals cannot take its place. Correspondence and callback mail stay stored when their destination cannot accept them.
 
 ### Coordination and current state
 
@@ -131,15 +131,15 @@ The registry retains each complete model/tool exchange before its arena ends. To
 
 When an activity activation completes, pending callback registrations keep the activity dormant and available for resumption. With none remaining, the registry queues a report containing that round's nullable assistant text in the core's FIFO queue and removes the activity. The kernel then saves a checkpoint covering both the report and the activity's removal. The core sleeps between activations without being removed, and its final text remains internal. External sending occurs only through `send_message`; completion does not certify task success.
 
-After the checkpoint is confirmed and worker borrows end, a waiting activity can unload its context and later restore its selected history. A completed activity's in-memory state can instead be released. Reports own their text independently of the activity context; retained host commands remain in the host runtime's scope.
+After the checkpoint is confirmed and worker borrows end, a sleeping activity can unload its context and later restore its selected history. A completed activity's in-memory state can instead be released. Reports own their text independently of the activity context; retained host commands remain in the host runtime's scope.
 
 ## Event sources and callback admission
 
-The registry persists monotonically increasing callback IDs with their source kind and destination. Wakeups register before starting. Host commands bind to their invoking activity session before launch; a command that outlives its tool call registers before the host detaches it and permits completion publication. A short command that finishes within the call returns directly without a callback. Producers retain only the ID and publish terminal text through `Callback.Publisher`. Forking and context unloading do not copy or retarget registrations.
+The registry persists monotonically increasing callback IDs with their receiving sessions. A wakeup saves its registration and deadline together, then publishes its text through `Callback.Publisher` when due. Forking and context unloading do not copy or retarget registrations.
 
 A wakeup also stores `History.Wakeup { id, at_unix_ms, text }`. The intake loop publishes due text before removing its deadline; registration remains until admission. After a crash, an unremoved deadline can publish again through the [first-result-preserving publisher](#callback-delivery). Polling, queue capacity, and scheduling can delay inference beyond the deadline.
 
-Intake resolves the ID through its registration and defers a full destination. `queued_callbacks` blocks duplicate acceptance and acknowledgement until the accepted delivery is durably saved and any receipt acknowledged. Admission saves the observation and registration removal in one checkpoint. Later copies of a consumed positive ID below the saved next-ID counter are acknowledged without another observation. Other unknown IDs fail execution; payloads cannot select a destination or callback method.
+Intake resolves the ID through its registration and defers a full destination. `queued_callbacks` blocks duplicate acceptance and acknowledgement until the accepted delivery is durably saved and any receipt acknowledged. Admission saves the observation and registration removal in one checkpoint. Later copies of a consumed positive ID below the saved next-ID counter are acknowledged without another observation. Other unknown IDs fail execution.
 
 ## Working history and user messages
 
@@ -158,6 +158,8 @@ Each turn repeats the complete finite runtime projection, including the roster a
 ## Model requests and tools
 
 [Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). Role-filtered agent declarations are joined by Memory through `shared_tools` and, for activity sessions, Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection.
+
+Kernel calls inference and tool execution separately, marking the session as `waiting_for_tools` while Engine executes a returned batch. The activation remains owned by the same worker. Engine retains the prepared request through tool execution so the provider can apply content limits to the complete result batch.
 
 Ordinary reasoning defaults to `low` for core and `high` for activity sessions. All sessions share the configured model and output-token limit. The [Responses adapter](../packages/responses/src/provider.zig) encodes these settings and uses the same payload encoder for measurement and inference. It decodes and validates the complete response before any calls execute; incomplete output fails execution. Engine invokes the returned calls in order, while other sessions can run their own tool batches concurrently. Unknown tools and invalid arguments become ordinary tool errors.
 
@@ -220,11 +222,11 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 Startup discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, callbacks, and wakeups. Contexts use the current system prompt. Communication-copy and history maintenance complete before reception opens.
 
-The core and sessions with interrupted activations or unread observations queue startup immediately. Other activity sessions prepend startup when a real event first arrives; newly created sessions begin with an assignment. Wakeups publish when due. Before dispatch, unfinished host registrations publish an unknown interrupted outcome through the first-result-preserving publisher, so stored completions win. Processes and historical tool calls are not replayed.
+The core and sessions with interrupted activations or unread observations queue startup immediately. Other activity sessions prepend startup when a real event first arrives; newly created sessions begin with an assignment. Wakeups publish when due. Processes and historical tool calls are not replayed.
 
 Fresh activations reserve report capacity normally. Unacknowledged correspondence remains eligible and can appear again after a crash between persistence and acknowledgement; callback IDs instead retain durable admission deduplication. Current state describes this runtime, while retained records describe prior evidence.
 
-Use one kernel per account. Host effects, memory writes, mail submission, acknowledgement, and history publication share no transaction: effects may precede their saved results, and repeating uncertain actions can duplicate them. Infrastructure, execution, compaction, and storage failures end the runtime and join concurrent work; defined tool outcomes remain observations.
+Use one kernel per account. Host effects, memory writes, mail submission, acknowledgement, and history publication share no transaction: effects may precede their saved results, and repeating uncertain actions can duplicate them. An incomplete model/tool round is outside confirmed working history. Infrastructure, execution, compaction, and storage failures end the runtime and join concurrent work; defined tool outcomes remain observations.
 
 ## Email boundary
 
@@ -315,21 +317,21 @@ The handler translates selected-entry filesystem and pattern failures into tool 
 
 ## Host execution
 
-[Host](../packages/host/src/root.zig) owns a shared command registry, tool operations, and completion delivery. Each command retains its arguments and startup configuration independently of the model-round arena. [Shell](../packages/host/src/shell.zig) prepares the environment and log files, resolves the working directory, and launches a fresh shell. See the [host interface](host.md) for modes, arguments, and results.
+[Host](../packages/host/src/root.zig) owns a shared command registry and the operations that launch, observe, and control its processes. Each command retains its arguments and startup configuration independently of the model-round arena. [Shell](../packages/host/src/shell.zig) prepares the environment and log files, resolves the working directory, and launches a fresh shell. See the [host interface](host.md) for modes, arguments, and results.
 
 ### Command lifecycle
 
-Host reserves live capacity before launch and binds the command to its originating session. The initial call waits on `std.Io.Condition` for completion or its yield deadline. A command that finishes during that interval returns directly. Otherwise its operation lock holds completion publication until the session registry has saved a callback registration. The returned callback ID becomes the command handle. A failed handoff stops and joins the command before returning its captured observation.
+Host reserves live capacity and assigns a runtime-scoped command ID before launch. `run_host_shell` waits on `std.Io.Condition` for completion or an explicitly supplied wait duration. Completion observed at that boundary returns a complete-source result and retires the handle; otherwise Host retains it for later calls. Other activities can discover and control a command while its caller waits.
 
-`Host.run` supervises commands independently of session workers. Jobs are reference-counted so returning from a call does not release state still in use by a task or another caller. Completion releases live capacity; a bounded cache can retain finished state and source handles for later collection. Full logs have independent [deployment retention](running.md#host-output-and-deployment-files).
+`Host.run` supervises commands independently of session workers. Jobs are reference-counted so returning from a call does not release state still in use by a task or another caller. Completion releases live capacity; a bounded cache can retain finished commands for later collection. Full logs have independent [deployment retention](running.md#host-output-and-deployment-files).
 
-Shutdown cancels and joins command tasks before releasing their publisher, logs, terminals, or other dependencies. Startup reconstructs callback registrations and interrupted observations through the agent's [restoration contract](#startup-and-interruption); it does not reconstruct host processes or command handles.
+Retained commands belong to the host runtime. Activity completion does not retire them, and their state does not keep the starting session alive. Shutdown cancels and joins command tasks before releasing their logs, terminals, or other dependencies. Startup restores [saved working history](#startup-and-interruption), not host processes or command handles.
 
 ### Interaction and synchronization
 
-The Host mutex protects registry state, references, capacity, and input admission. Each command has an operation lock for handoff and consumption of its stdout/stderr cursors. Input, signal, and resize actions apply before taking that lock so an observation wait does not delay interaction. One input write can be in flight per command. It runs separately from the observation call; completion cancels and joins it before releasing the live slot.
+The Host mutex protects registry state, references, capacity, and input admission. Each command has an operation lock for consumption of its stdout/stderr cursors. Input, signal, and resize actions apply before taking that lock so an observation wait does not delay interaction. One input write can be in flight per command. It runs separately from the observation call; completion cancels and joins it before releasing the live slot.
 
-Explicit reads and completion callbacks consume the same text positions. Publication selects and renders its content under the operation lock, then sends the owned text after releasing the lock. Command lookup is shared across activities; interaction does not change the command's completion destination.
+Retained command observations consume the same text positions. Run waits without the operation lock and reads the complete source when finished, independently of those cursors. Command lookup is shared across activities; inspection records retain the originating session as provenance.
 
 ### Processes and terminals
 
@@ -343,10 +345,10 @@ Normal completion and timeout report cleanup failures as unavailable outcomes. E
 
 ### Output and delivery
 
-Commands write to private log files. [Reader](../packages/host/src/reader.zig) owns complete-source classification and native versus callback media; stderr uses text-only reading. [output.zig](../packages/host/src/output.zig) selects byte ranges and previews. The tool decoder validates the combined encoded budget, and internal readers use its stream allocations. Both host and memory readers use the text-prefix classifier in Content.
+Commands write to private log files. [Reader](../packages/host/src/reader.zig) owns complete-source classification and native media; stderr uses text-only reading. [output.zig](../packages/host/src/output.zig) selects byte ranges and previews. The tool decoder validates the combined encoded budget, and internal readers use its stream allocations. Both host and memory readers use the text-prefix classifier in Content.
 
-Continued observations periodically check regular log-file growth and wait on the condition so completion can wake them immediately. The same typed observation is rendered for tool results and callbacks, using the source selection described in the [host output contract](host.md#output-and-results).
+Continued observations periodically check regular log-file growth and wait on the condition so completion can wake them immediately. Host renders typed observations using the source selection described in the [host output contract](host.md#output-and-results).
 
-Final media is classified from complete stdout. A callback can describe an image or URL and mark its native-part omission while consuming stdout to its end. The first completed tool read can still supply that native media once, independently of the text cursor. The shared [content contract](content.md) defines formats, descriptions, and media limits.
+Final media is classified from complete stdout. The first final observation of a retained handle can supply its native image or URL independently of the text cursor; subsequent observations continue through any remaining output. A run that waits through completion returns complete-source content. The shared [content contract](content.md) defines formats, descriptions, and media limits.
 
-Shell preparation, source reading, and command controls translate their operation failures into tool outcomes. Callback registration, task scheduling, and publication failures propagate to runtime supervision, as do cancellation and allocation errors.
+Shell preparation, source reading, and command controls translate their operation failures into tool outcomes. Task scheduling and runtime supervision failures propagate to the application, as do cancellation and allocation errors.

@@ -13,7 +13,7 @@ const Session = Sessions.Session;
 const Work = Sessions.Work;
 
 /// Coordinate sessions, model/tool rounds, communication, and retained history within
-/// worker scopes. Core coordination has an independent execution lane.
+/// worker scopes. Each ready session owns one worker through its activation.
 pub const Kernel = struct {
     allocator: Allocator,
     io: std.Io,
@@ -23,7 +23,6 @@ pub const Kernel = struct {
     callbacks: contracts.Callback.Publisher,
     limits: Limits,
     poll_interval_ms: u32,
-    max_parallel: usize,
     sessions: Sessions.Registry,
     reception: std.atomic.Value(enum(u8) { starting, open, closed }) = .init(.starting),
 
@@ -44,7 +43,6 @@ pub const Kernel = struct {
     pub const Config = struct {
         limits: Limits,
         poll_interval_ms: u32,
-        max_parallel: usize,
         max_sessions: usize,
         max_pending_events: usize,
         max_pending_callbacks: usize,
@@ -60,7 +58,6 @@ pub const Kernel = struct {
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
             .poll_interval_ms = config.poll_interval_ms,
-            .max_parallel = config.max_parallel,
             .sessions = try Sessions.Registry.init(allocator, io, config.max_sessions, config.max_pending_events, config.max_pending_callbacks, dependencies.history),
         };
     }
@@ -100,14 +97,6 @@ pub const Kernel = struct {
 
     fn receiveLoop(self: *Kernel, tasks: *Tasks) !void {
         try self.sessions.maintain();
-        {
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            for (try self.sessions.interruptedHostCallbacks(a)) |id| {
-                try self.callbacks.send(a, .{ .id = id, .text = "The previous runtime ended before this host command's completion was admitted. Its outcome is unknown; effects may already have occurred. The command was not replayed. Inspect the host before repeating it." });
-            }
-        }
         if (self.reception.cmpxchgStrong(.starting, .open, .release, .monotonic) != null) return;
         try self.dispatch(tasks);
         var maintained_at = std.Io.Clock.awake.now(self.io).toMilliseconds();
@@ -139,7 +128,7 @@ pub const Kernel = struct {
     fn dispatch(self: *Kernel, tasks: *Tasks) !void {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
-        const ready = try self.sessions.takeReadyBatch(arena.allocator(), self.max_parallel);
+        const ready = try self.sessions.takeReadyBatch(arena.allocator());
         var started: usize = 0;
         defer for (ready[started..]) |work| self.sessions.endWorker(work.session);
         for (ready) |work| {
@@ -168,11 +157,6 @@ pub const Kernel = struct {
         fn deinit(self: *RuntimeRound) void {
             for (self.forks.items) |plan| self.kernel.sessions.abandonFork(plan);
             self.forks.deinit(self.kernel.allocator);
-        }
-
-        fn registerCallback(context: *anyopaque) anyerror!u64 {
-            const self: *RuntimeRound = @ptrCast(@alignCast(context));
-            return self.kernel.sessions.registerHostCallback(self.work);
         }
 
         fn invoke(context: *anyopaque, a: Allocator, name: []const u8, arguments: []const u8) anyerror!?Content {
@@ -228,12 +212,16 @@ pub const Kernel = struct {
             var runtime: RuntimeRound = .{ .kernel = self, .work = work };
             defer runtime.deinit();
             try self.sessions.observeAttention(work, view.attention_revision);
-            const round = try self.engine.turn(a, session.session_id, view.input, .{ .context = &runtime, .invoke = RuntimeRound.invoke, .register_callback = RuntimeRound.registerCallback }, session.role);
+            const inference = try self.engine.infer(a, view.input, session.role);
+            const has_tools = inference.response.calls.len != 0;
+            if (has_tools) try self.sessions.setToolWait(work, true);
+            const replies = try self.engine.executeTools(a, session.session_id, inference, .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role);
+            if (has_tools) try self.sessions.setToolWait(work, false);
             delivery = .none;
-            try self.sessions.commitRound(work, round.output, round.replies, runtime.forks.items);
+            try self.sessions.commitRound(work, inference.response.output, replies, runtime.forks.items);
             runtime.forks.clearRetainingCapacity();
             try self.sessions.save();
-            if (round.replies.len == 0 and try self.sessions.finish(work, round.text)) return;
+            if (replies.len == 0 and try self.sessions.finish(work, inference.response.text)) return;
             if (try self.sessions.collectPending(work)) {
                 try self.admitEvents(work);
                 delivery = .latest;

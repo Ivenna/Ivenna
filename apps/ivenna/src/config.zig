@@ -15,7 +15,6 @@ pub const Config = struct {
         credentials: struct { username: []const u8, password: []const u8 },
     },
     mail_poll_interval_ms: u32,
-    max_parallel_attention: usize,
     max_sessions: usize,
     max_pending_events: usize,
     max_pending_callbacks: usize,
@@ -48,7 +47,6 @@ pub const Config = struct {
                 break :blk .{ .credentials = .{ .username = username, .password = password } };
             },
             .mail_poll_interval_ms = try number(u32, env, "MAIL_POLL_INTERVAL_MS", 2000),
-            .max_parallel_attention = try number(usize, env, "MAX_PARALLEL_ATTENTION", 4),
             .max_sessions = try number(usize, env, "MAX_SESSIONS", 128),
             .max_pending_events = try number(usize, env, "MAX_PENDING_EVENTS", 64),
             .max_pending_callbacks = try number(usize, env, "MAX_PENDING_CALLBACKS", 64),

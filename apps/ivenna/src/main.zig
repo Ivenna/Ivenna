@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     defer mail.deinit();
     var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
     try memory_client.checkAvailable(a);
-    var host_tools = host.Host.init(init.gpa, io, host_directory, data_directory, init.environ_map, mail.callbackPublisher(), config.max_host_commands);
+    var host_tools = host.Host.init(init.gpa, io, host_directory, data_directory, init.environ_map, config.max_host_commands);
     defer host_tools.deinit();
     var provider: responses.Provider = .{
         .client = &client,
@@ -59,7 +59,6 @@ pub fn main(init: std.process.Init) !void {
     }, .{
         .limits = config.context_limits,
         .poll_interval_ms = config.mail_poll_interval_ms,
-        .max_parallel = config.max_parallel_attention,
         .max_sessions = config.max_sessions,
         .max_pending_events = config.max_pending_events,
         .max_pending_callbacks = config.max_pending_callbacks,

@@ -36,7 +36,7 @@ An `events` record has `session_id: u64` and `items: Event[]`. Each admission re
 | `assignment` | `Assignment` | Initial work for a newly created activity session |
 | `report` | `Report` | Activity session completion, with assistant text when present |
 | `session_message` | `SessionMessage` | Observation sent directly by the core |
-| `callback` | `Callback` | A registered host completion or self-scheduled wakeup |
+| `callback` | `Callback` | A self-scheduled wakeup |
 
 #### Incoming messages
 
@@ -65,13 +65,7 @@ A `Report` notifies the core of [activity completion](communication.md#activity-
 | `from_session` | `u64` | Activity session that ended |
 | `text` | `Text` or `null` | Assistant text from the ending response |
 
-The `text` field is always present:
-
-| Example value | Meaning |
-| --- | --- |
-| `null` | The ending response contains no assistant text output items |
-| `""` | Text output items are present, but their combined text is empty |
-| `"Example text"` | Assistant text returned by the ending response |
+The `text` field is always present: `null` means the ending response had no assistant text output items; `""` means those items were present but their combined text was empty.
 
 #### Session messages and callbacks
 
@@ -83,16 +77,15 @@ The core's `send_session_message` produces a `SessionMessage`:
 | `observed_at_unix_ms` | `i64` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
 
-Completions from host commands that outlive a call and scheduled wakeups arrive as `Callback` observations for the sessions that started the command or scheduled the wakeup:
+Scheduled wakeups arrive as `Callback` observations for the sessions that scheduled them:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | `u64` | Registered callback identity |
-| `source` | `host` or `wakeup` | Kind of event source |
 | `observed_at_unix_ms` | `i64` | Time the runtime observed the callback |
-| `text` | `Text` | Host outcome or the supplied wakeup text |
+| `text` | `Text` | Supplied wakeup text |
 
-A host callback ID matches its `command_id`; a wakeup ID matches its `callback_id`. Pending host IDs in the current session snapshot also identify its command handles. Destinations survive sleep, context unloading, and restart, while host processes and handles survive only within one runtime. A registered callback ID is admitted at most once. Host results can report interrupted work with unknown effects; see [commands that outlive a call](host.md#commands-that-outlive-a-call) and [session communication](communication.md#session-communication-and-wakeups).
+The ID matches the `callback_id` returned by `wakeup`. Destinations survive sleep, context unloading, and restart. A registered callback ID is admitted at most once. See [session communication](communication.md#session-communication-and-wakeups).
 
 ### Handovers
 
@@ -131,10 +124,10 @@ Each inference ends its input with a turn containing both fields:
 | Field | Meaning |
 | --- | --- |
 | `session.role` | Enum value `core` or `activity` |
-| `session.callbacks` | Pending callback registrations for this session |
+| `session.callbacks` | Wakeup registrations awaiting admission for this session |
 | `runtime.observed_at_unix_ms` | Time of this snapshot in Unix milliseconds |
 | `runtime.registered_sessions` | Registered sessions, including dormant sessions and the core |
-| `runtime.running_sessions` | Sessions currently handling an activation |
+| `runtime.active_sessions` | Sessions handling an activation, including those waiting for tools |
 | `runtime.queued_inputs` | Events waiting in session queues, excluding reserved report slots |
 | `runtime.sessions` | `SessionInfo[]` roster for all registered sessions |
 
@@ -144,14 +137,16 @@ The snapshot is complete for these fields. Counts reflect admission: delivered c
 | --- | --- | --- |
 | `session_id` | `u64` | Stable session ID |
 | `role` | `Role` | `core` or `activity` |
-| `status` | `running`, `ready`, or `dormant` | Executing, awaiting an activation, or sleeping |
+| `status` | `running`, `waiting_for_tools`, `ready`, or `dormant` | Advancing an activation, waiting for tool replies, ready for scheduling, or sleeping |
 | `queued_inputs` | `usize` | Events waiting in this session's queue |
-| `pending_callbacks` | `usize` | Registrations awaiting admission to this session's history |
+| `pending_callbacks` | `usize` | Wakeup registrations awaiting admission to this session's history |
 | `last_active_unix_ms` | `i64` | Most recent activation start or end; `0` before its first activation |
 
-Each `session.callbacks` item is a `PendingCallback` with `id: u64`, `session_id: u64`, and `source` selecting `host` or `wakeup`. Its result text arrives separately as an event.
+Each `session.callbacks` item is a `PendingCallback` with `id: u64` and `session_id: u64`. Its wakeup text arrives separately as an event.
 
 `ready` means work is waiting, subject to scheduling and capacity. Core attention can produce this status with `queued_inputs: 0`.
+
+`waiting_for_tools` retains the current activation and context. Other sessions can advance, while new observations for this session wait for the complete model/tool round.
 
 For example, an ordinary core inference can receive a new observation with its current state:
 
@@ -165,7 +160,7 @@ current:
     runtime:
       observed_at_unix_ms: 1793966401000
       registered_sessions: 1
-      running_sessions: 1
+      active_sessions: 1
       queued_inputs: 0
       sessions:
         - session_id: 1
