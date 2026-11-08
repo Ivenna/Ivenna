@@ -36,9 +36,8 @@ pub const Memory = struct {
 
     pub const Request = union(enum) {
         inspect_memory_space: struct {},
-        browse_memory: struct {
+        visit_memory_room: struct {
             address: []const u8 = ".",
-            entry_only: bool = false,
             recursive_size: bool = false,
             offset: u32 = 0,
             max_results: u16 = 100,
@@ -104,7 +103,7 @@ pub const Memory = struct {
                     return error.InvalidToolArguments;
             }
             switch (request) {
-                .browse_memory => |args| if (args.max_results == 0 or args.max_results > 1000) {
+                .visit_memory_room => |args| if (args.max_results == 0 or args.max_results > 1000) {
                     return error.InvalidToolArguments;
                 },
                 .find_memory => |args| if (args.max_results == 0 or args.max_results > 1000) {

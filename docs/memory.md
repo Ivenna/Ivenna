@@ -1,26 +1,26 @@
 # Memory rooms
 
-Memory entries are files, and memory rooms are directories in a persistent workspace shared across sessions. Ivenna chooses what to retain and how to organize it: room hierarchy, entry names, formats, and cross-references are its own.
+Memory rooms hold Ivenna's shared, persistent memory beyond any one session. Ivenna chooses what to keep and how to arrange it: room hierarchy, names, content formats, and cross-references are its own. The [design intent](design.md#understanding-and-autonomy) describes memory's role in its continuing understanding.
 
-The [tool declarations](../packages/memory/src/tools.json) define the available operations and their parameters. Memory is a required runtime capability; the [running guide](running.md#memory-service) covers its service requirements and SSH connection, and the [architecture guide](architecture.md#autonomous-memory) explains its implementation responsibilities.
+The [tool declarations](../packages/memory/src/tools.json) define invocation parameters. This guide covers their effects and results; the [running guide](running.md#memory-service) covers service setup, and the [architecture guide](architecture.md#autonomous-memory) explains storage and transport.
 
 ## Addresses and organization
 
-An `address` is a literal path relative to the shared entrance, such as `languages/progress.md`; `.` is the entrance. Returned addresses use the same base. Use `find_memory` for name patterns. Addresses cannot escape the entrance through `..` or symbolic links.
+An `address` is a literal path relative to the shared entrance, such as `languages/progress.md`; `.` is the entrance. Returned addresses use the same base. Visiting a room does not change the base for later calls. Use `find_memory` for name patterns. Addresses cannot escape the entrance through `..` or symbolic links.
 
 Names consisting only of three or more dots, such as `...`, are unsupported. The entrance's `.ivenna-tmp` address is reserved for unpublished writes and is excluded from tools and occupied space. The [memory service requirements](running.md#memory-service) also apply when managing workspace files outside the tools.
 
 ## Result pages and shared state
 
-Browse, find, and recall replies are paginated. `offset` defaults to `0`, and `max_results` defaults to `100` (from `1` through `1000`). Replies include `offset`, `total`, and `next_offset`; pass a non-null `next_offset` as the next call's `offset` to continue. Results are sorted by address, then by line for content matches. The 32768-byte encoded JSON limit can shorten a page before `max_results` is reached. A single result whose metadata cannot fit returns `result_too_large`.
+Room visits, find, and recall replies are paginated. `offset` defaults to `0`, and `max_results` defaults to `100` (from `1` through `1000`). Replies include `offset`, `total`, and `next_offset`; pass a non-null `next_offset` as the next call's `offset` to continue. Results are sorted by address, then by line for content matches. The 32768-byte encoded JSON limit can shorten a page before `max_results` is reached. A single result whose metadata cannot fit returns `result_too_large`.
 
-The service serializes individual requests. A sequence of calls does not reserve entries or capacity between requests: another session can change them. Each reply describes its current snapshot. Changes between pages can alter offsets, results, and totals; pagination does not preserve a snapshot across calls. [Text reads](#reading) have their own byte offsets and page sizes.
+Each reply describes memory at that call. A sequence of calls reserves neither entries nor capacity between requests: another session can change them. Changes between pages can alter offsets, results, and totals; pagination does not preserve a snapshot across calls. [Text reads](#reading) have their own byte offsets and page sizes.
 
-## Browsing and metadata
+## Visiting a room
 
-`browse_memory` accepts an `address`, defaulting to `.`. A room address lists its immediate entries and child rooms; a memory entry address returns one record for that entry. Browsing retrieves metadata without memory contents.
+`visit_memory_room` opens a view of the room at `address`, defaulting to the shared entrance, `.`. It lists the room's immediate memories and child rooms without reading their contents. The address must identify a room; use `read_memory` to open a memory.
 
-Each record has an `address`, `name`, `kind`, and `size_bytes`. `kind` is `room` or `memory`. Entry addresses remain relative to the shared entrance, while the result's `address` identifies the selected entry or room. Listing an empty room returns `entries: []`. For example, `{"address":"languages"}` can return:
+Each record has an `address`, `name`, `kind`, and `size_bytes`. `kind` is `room` or `memory`. Entry addresses remain relative to the shared entrance, while the result's `address` identifies the visited room. Visiting an empty room returns `entries: []`. For example, `{"address":"languages"}` can return:
 
 ```json
 {
@@ -49,8 +49,6 @@ Each record has an `address`, `name`, `kind`, and `size_bytes`. `kind` is `room`
 
 A memory entry's `size_bytes` is its content length in bytes. A room's size is `null` when `recursive_size` is omitted or `false`: it was not measured in this call. Set `recursive_size: true` to measure the combined size of memories in each returned room and its descendants. An empty measured room has size `0`.
 
-Set `entry_only: true` to inspect the selected room itself instead of listing its contents. The shared entrance's own record has `address: "."` and `name: "."`. Both options default to `false`; selecting metadata and measuring room sizes are independent choices.
-
 ## Searching
 
 `find_memory` and `recall_memory` search a `room` and its descendants. The room defaults to `.`; returned addresses remain relative to the shared entrance.
@@ -63,7 +61,7 @@ Both tools default to literal, case-insensitive matching. Set `case_sensitive: t
 {"query":"*.md","room":"languages","match_mode":"glob"}
 ```
 
-`recall_memory` searches entry text with `literal` or `regex` matching. It returns one record per matching line, with `address`, a `line` number starting at 1, a `text` preview of at most 2048 UTF-8 bytes, and `text_truncated` to identify an omitted suffix. Use `read_memory` for complete text. For example, search text throughout the room with:
+`recall_memory` follows a textual clue through entry content with `literal` or `regex` matching. It does not retrieve by semantic similarity. It returns one record per matching line, with `address`, a `line` number starting at 1, a `text` preview of at most 2048 UTF-8 bytes, and `text_truncated` to identify an omitted suffix. Use `read_memory` for complete text. For example, search text throughout the room with:
 
 ```json
 {"clue":"French","room":"languages"}
@@ -108,19 +106,13 @@ A source file path can be absolute or relative to Ivenna's startup directory and
 | `append` | Append bytes without a separator, creating the entry if missing |
 | `replace` | Write the full content, creating or overwriting the entry |
 
-Create and append require an existing containing room. Replace also creates missing parent rooms. Use `create_memory_room` to create rooms explicitly; an existing room is reused.
+All three modes create missing parent rooms after checking the proposed write. Ivenna can remember directly at its chosen address. `create_memory_room` also creates rooms explicitly, including empty ones; an existing room is reused.
 
-Each new or updated entry is limited to 33554432 bytes (32 MiB), independently of the [shared capacity](#memory-space). A larger host source is rejected before transfer; an append whose resulting entry exceeds the limit is also rejected. Existing larger entries can still be browsed, searched, read in text pages, moved, or removed.
+Each new or updated entry is limited to 33554432 bytes (32 MiB), independently of the [shared capacity](#memory-space). A larger host source is rejected before transfer; an append whose resulting entry exceeds the limit is also rejected. Existing larger entries can still be listed, searched, read in text pages, moved, or removed.
 
-Recording and revision prepare a complete new file before publishing it at the address. A failed preparation preserves the previous entry. Replacing, appending, or revising one hard-linked name leaves its other names unchanged. Unpublished content is excluded from memory observations and logical capacity. Publication does not guarantee durability across a storage or power failure.
+Recording and revision publish a complete new entry at the chosen address. A failed preparation preserves the previous entry. Replacing, appending, or revising one hard-linked name leaves its other names unchanged. Unpublished content is excluded from memory observations and logical capacity. Publication does not guarantee durability across a storage or power failure.
 
-For example, call `create_memory_room` with:
-
-```json
-{"address":"languages"}
-```
-
-Then call `remember` to write a text entry:
+For example, call `remember` to write a text entry, creating its room if needed:
 
 ```json
 {"address":"languages/progress.md","content":{"text":"French: practice twice a week. Japanese: practice once a week."}}
@@ -128,7 +120,7 @@ Then call `remember` to write a text entry:
 
 ## Revising
 
-`revise_memory` replaces matching text in an entry. It requires UTF-8 text without NUL bytes and limits both the existing and revised entry to 32 MiB. Revisions default to literal, case-sensitive matching, and `old_text` must be nonempty.
+`revise_memory` replaces matching text in an entry. The existing entry must be UTF-8 text without NUL bytes; both the existing and revised entry are limited to 32 MiB. Revisions default to literal, case-sensitive matching, and `old_text` must be nonempty.
 
 By default, a unique match is replaced. No match returns `revision: "no_match"` without writing. Multiple non-overlapping matches return `ambiguous_match` without changing the entry; include more surrounding text or set `replace_all: true` to replace every match. The reply reports the match count in `matches` and one of these outcomes:
 
@@ -144,11 +136,11 @@ Set `match_mode: "regex"` to use a regular expression. Replacement text can refe
 {"address":"languages/progress.md","old_text":"(French|Japanese):","new_text":"${1} study:","replace_all":true,"match_mode":"regex"}
 ```
 
-With `replace_all: true`, regex validation and counting can use temporary memory beyond the entry's 32 MiB limit. The [architecture guide](architecture.md#autonomous-memory) explains this implementation limit.
+With `replace_all: true`, regex revision can require working memory beyond the entry's 32 MiB limit. See the [architecture guide](architecture.md#writes-and-capacity) for this implementation limit.
 
 ## Moving and removing
 
-For `move_memory`, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The operation fails if the resulting target already exists and otherwise returns the actual new address.
+For `move_memory`, `destination` can be a new address or an existing room. Moving into an existing room preserves the original name. The destination's containing room must already exist. The operation fails if the resulting target already exists and otherwise returns the actual new address.
 
 By default, `forget_memory` removes entries or empty rooms. Set `recursive: true` to remove a room and all its contents. The shared entrance cannot be moved or removed.
 
@@ -185,11 +177,12 @@ An operation error contains `code` and `message`. Common codes include:
 
 | Code | Meaning |
 | --- | --- |
+| `invalid_arguments` | The invocation does not match the tool's declared parameters |
 | `not_found` | The addressed entry or room does not exist |
 | `already_exists` | The target is occupied for `remember` in create mode or for `move_memory` |
 | `invalid_address` | The address is outside the workspace, unsupported, reserved, or identifies the wrong kind of entry |
 | `source_unavailable` | The host source file could not be read; no memory request was sent |
-| `unsupported_content` | Revision requires UTF-8 text without NUL bytes; no revision was written |
+| `unsupported_content` | The existing entry is not valid UTF-8 text or contains NUL bytes; no revision was written |
 | `invalid_range` | A read offset or page size is invalid |
 | `invalid_argument` | An argument such as empty revision text is invalid |
 | `invalid_pattern` | The revision pattern is invalid |

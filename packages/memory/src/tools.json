@@ -1,31 +1,17 @@
 [
   {
-    "name": "inspect_memory_space",
-    "description": "Return current usage and shared capacity across memory rooms.",
-    "parameters": {
-      "type": "object",
-      "properties": {},
-      "required": [],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "browse_memory",
-    "description": "Browse persistent memory shared across sessions. Inspect metadata without reading content, or list a room's immediate entries. Results are sorted by address; other sessions can change entries between pages.",
+    "name": "visit_memory_room",
+    "description": "Look around your memory rooms and see what you have kept. List a room's immediate memories and child rooms without reading their contents. Rooms are shared across sessions; entries are sorted by address and can change between pages.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "Literal path relative to the shared entrance, '.'. Omit to browse the entrance; use find_memory for name patterns."
-        },
-        "entry_only": {
-          "type": "boolean",
-          "description": "Return only the addressed entry or room's metadata; defaults to false."
+          "description": "Room address as a literal path relative to the shared entrance, '.'. Omit for the entrance; use find_memory to search names."
         },
         "recursive_size": {
           "type": "boolean",
-          "description": "Measure the combined size of memories in each returned room and its descendants. Defaults to false, leaving room size_bytes null."
+          "description": "Also measure the space occupied by each child room and its descendants. Default false leaves room size_bytes null; individual memories always report their size."
         },
         "offset": {
           "type": "integer",
@@ -45,8 +31,53 @@
     }
   },
   {
+    "name": "recall_memory",
+    "description": "Follow a clue into what you have remembered. Search text within a room and its descendants using literal or regex matching. Replies give matching lines with bounded previews and text_truncated; use read_memory for full content. Results are sorted by address and line and can change between pages.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "clue": {
+          "type": "string",
+          "description": "Text or pattern to match in memory entries. Matching is textual rather than semantic; literal matching ignores case by default."
+        },
+        "room": {
+          "type": "string",
+          "description": "Room address relative to the shared entrance. Omit to search from the entrance, '.'."
+        },
+        "match_mode": {
+          "type": "string",
+          "description": "Defaults to literal matching.",
+          "enum": [
+            "literal",
+            "regex"
+          ]
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "Match upper and lower case exactly. Omit to ignore case."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Zero-based result offset, default 0. Continue with a non-null next_offset from the previous reply; null means no more results."
+        },
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum results per page, default 100. The encoded reply limit can shorten a page."
+        }
+      },
+      "required": [
+        "clue"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "find_memory",
-    "description": "Locate entries and rooms by name within a room and its descendants. Results are sorted by address; other sessions can change matches between pages.",
+    "description": "Find your way to a memory or room whose name you partly remember. Search names within a room and its descendants, using literal, glob, or regex matching. Replies give addresses and kinds, sorted by address; matches can change between pages.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -91,59 +122,14 @@
     }
   },
   {
-    "name": "recall_memory",
-    "description": "Locate text by matching lines within a room and its descendants. Results are sorted by address and line; other sessions can change matches between pages. Each line has a bounded text preview and text_truncated; use read_memory for complete content.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "clue": {
-          "type": "string",
-          "description": "The text or pattern to find in memory entries."
-        },
-        "room": {
-          "type": "string",
-          "description": "Room address relative to the shared entrance. Omit to search from the entrance, '.'."
-        },
-        "match_mode": {
-          "type": "string",
-          "description": "Defaults to literal matching.",
-          "enum": [
-            "literal",
-            "regex"
-          ]
-        },
-        "case_sensitive": {
-          "type": "boolean",
-          "description": "Match upper and lower case exactly. Omit to ignore case."
-        },
-        "offset": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 4294967295,
-          "description": "Zero-based result offset, default 0. Continue with a non-null next_offset from the previous reply; null means no more results."
-        },
-        "max_results": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1000,
-          "description": "Maximum results per page, default 100. The encoded reply limit can shorten a page."
-        }
-      },
-      "required": [
-        "clue"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "read_memory",
-    "description": "Read an entry's content as text pages or a complete supported image. Replies retain source byte_length and an unavailable diagnostic when content cannot be supplied.",
+    "description": "Revisit a memory. Read text in pages or receive a complete supported image. Replies distinguish unavailable content from an empty memory and retain the source byte_length.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "The memory entry location, relative to the shared entrance."
+          "description": "The memory to open, relative to the shared entrance."
         },
         "interpretation": {
           "type": "string",
@@ -173,13 +159,13 @@
   },
   {
     "name": "remember",
-    "description": "Store text or copy a host file into an entry, with a limit of 32 MiB for both transferred content and the updated entry. Failed preparation preserves the previous entry.",
+    "description": "Keep something you want to carry beyond the present context. Write text or copy a host file's bytes into a memory; missing parent rooms are created. Transferred content and the updated memory are each limited to 32 MiB. Failed preparation leaves any previous memory intact.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "The location for the memory entry, relative to the shared entrance."
+          "description": "Memory address as a literal path relative to the shared entrance."
         },
         "content": {
           "type": "object",
@@ -189,7 +175,7 @@
               "properties": {
                 "text": {
                   "type": "string",
-                  "description": "Text to store."
+                  "description": "Text to remember, in your chosen format."
                 }
               },
               "required": [
@@ -221,11 +207,11 @@
               "additionalProperties": false
             }
           ],
-          "description": "Source of the content to store."
+          "description": "What to remember, supplied as text or copied from a host file."
         },
         "mode": {
           "type": "string",
-          "description": "create (default) requires a new entry; append adds bytes without a separator and creates a missing entry. Both require existing parent rooms. replace overwrites or creates the entry, creating missing parent rooms. Replacing or appending changes only the addressed hard-linked name.",
+          "description": "create (default) keeps a new memory and reports an occupied address; append adds bytes without a separator, creating a missing memory; replace writes the whole memory, creating or overwriting it. All modes create missing parent rooms and change only the addressed hard-linked name.",
           "enum": [
             "create",
             "append",
@@ -242,17 +228,17 @@
   },
   {
     "name": "revise_memory",
-    "description": "Revise UTF-8 text, with a 32 MiB limit for both the existing and revised entry. Replace one unique match by default: no match reports no_match, and multiple matches return ambiguous_match without writing. Replies report revision and matches.",
+    "description": "Let a memory change as your understanding changes. Replace text in one memory, keeping the rest. A unique, literal, case-sensitive match is replaced by default; no match reports no_match, and multiple matches return ambiguous_match without writing. Replies report revision and matches. The existing memory must be UTF-8 text without NUL bytes; both the existing and revised memory are limited to 32 MiB.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "The memory entry location, relative to the shared entrance."
+          "description": "The memory to reconsider, relative to the shared entrance."
         },
         "old_text": {
           "type": "string",
-          "description": "Text or pattern to replace.",
+          "description": "The part to change, as text or a pattern.",
           "minLength": 1
         },
         "new_text": {
@@ -282,13 +268,13 @@
   },
   {
     "name": "create_memory_room",
-    "description": "Create a memory room and any missing parent rooms. An existing room is reused.",
+    "description": "Make room for memories you want to keep together. Create a room and any missing parents; an existing room is reused.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "The new room location, relative to the shared entrance."
+          "description": "Where the room belongs, relative to the shared entrance."
         }
       },
       "required": [
@@ -299,7 +285,7 @@
   },
   {
     "name": "move_memory",
-    "description": "Move or rename a memory entry or a room and its contents. An occupied target is reported as an error.",
+    "description": "Reshape how your memories belong together. Move or rename a memory, or a room with its contents; replies give its resulting address. An occupied target is an error.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -309,7 +295,7 @@
         },
         "destination": {
           "type": "string",
-          "description": "The new location, or an existing room to move into. Both are relative to the shared entrance."
+          "description": "The new address, whose containing room must exist, or an existing room to move into. Relative to the shared entrance."
         }
       },
       "required": [
@@ -321,7 +307,7 @@
   },
   {
     "name": "forget_memory",
-    "description": "Remove a memory entry or an empty room.",
+    "description": "Let go of a memory or room you no longer want to keep. Remove a memory or an empty room; recursive removal also forgets everything in the room.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -337,6 +323,16 @@
       "required": [
         "address"
       ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "inspect_memory_space",
+    "description": "Sense how much space your memories occupy and how much remains. Return used_bytes, capacity_bytes, remaining_bytes, and used_ratio for all rooms together.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
       "additionalProperties": false
     }
   }

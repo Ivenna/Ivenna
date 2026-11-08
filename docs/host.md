@@ -1,6 +1,6 @@
 # Host shell
 
-The [host tools](../packages/host/src/tools.json) run shell code through the kernel's OS account on the shared host filesystem. They are available to activity sessions. A command has its own host identity so activities can discover and control it while it runs.
+The [host tools](../packages/host/src/tools.json) let activity sessions run programs, inspect their output, and interact with them through the kernel's OS account on the shared host filesystem. Each command has its own host identity so activities can discover and control it while it runs.
 
 | Tool | Purpose |
 | --- | --- |
@@ -16,7 +16,7 @@ Call `run_host_shell` to start a command:
 {"command":"make -j4","cwd":"/path/to/project"}
 ```
 
-Choose `yield_ms` according to what the activity should do next. A shorter wait returns control sooner for other work or incoming observations. A longer wait gives a command whose result is needed next more time to finish in the same exchange. Omit the argument to use `1000` milliseconds, or use `0` for an immediate observation. Each supplied value applies to that call; returning from the wait leaves unfinished execution running. `timeout_ms` separately sets how long the command may execute before it is stopped.
+`yield_ms` bounds how long this call waits for completion: it defaults to `1000` milliseconds, and `0` returns an immediate observation. Returning from the wait leaves unfinished execution running. `timeout_ms` separately limits how long the command may execute before it is stopped.
 
 If execution and cleanup finish within the wait, the call returns the final outcome with a complete-source output preview. Otherwise it returns a `command_id` for interaction and a distinct `callback_id` for one completion observation bound to the calling activity. The activity can continue reasoning without polling for completion. A returned `callback_id` confirms that registration even if the command has finished by the time its result snapshot is taken.
 
@@ -46,7 +46,7 @@ The inherited environment requests plain output with `NO_COLOR=1` and pagers set
 | `pipe` | Writable stdin until EOF is sent; stdout and stderr have separate logs |
 | `terminal` | A pseudo-terminal for programs that require a terminal; stdout and stderr are merged into the stdout log |
 
-Choose the input mode for the program's I/O protocol. For example, call `run_host_shell` with an immediate observation to retain a terminal REPL:
+For example, start an interactive Python process in a terminal and return immediately:
 
 ```json
 {"command":"python3 -u -i","mode":"terminal","yield_ms":0}
@@ -66,7 +66,7 @@ Call `continue_host_shell` with the selected `command_id`. Omit `action` to read
 {"command_id":17,"yield_ms":1000,"max_output_bytes":4096}
 ```
 
-Choose `yield_ms` for this observation: use `0` to inspect the current state, or a longer wait when the next decision needs new output or completion. Omit it to wait up to `1000` milliseconds; values through `4294967295` are supported. The command keeps its existing execution deadline. `max_output_bytes` has the same range and default as `run_host_shell`.
+For a continuation, `yield_ms` waits for unread output or completion. It defaults to `1000` milliseconds; `0` inspects the current state, and values through `4294967295` are supported. The command keeps its existing execution deadline. `max_output_bytes` has the same range and default as `run_host_shell`.
 
 The optional `action` selects exactly one operation:
 
@@ -143,11 +143,11 @@ For incremental `content.unavailable`, its `byte_length` describes the unsupport
 
 Command IDs identify executions within the current runtime; callback IDs identify registered observations retained across restart. A command handed off by its initial call remains owned by the host runtime and has one completion observation registered for its originating activity. That registration keeps the activity available across sleep until the observation is durably admitted. Reading or controlling the command from another activity does not redirect its completion. The `session_id` in inspection records identifies where the command started.
 
-A response without tool calls lets the activity sleep while an observation remains registered. Once its queue is empty and it has no pending registrations, it ends and [reports to the core](communication.md#activity-completion). Command state, handle retention, and the registered observation have separate lifetimes; draining a handle does not cancel its completion observation. Cancellation of a completion registration is unavailable.
+Command state, handle retention, and the registered observation have separate lifetimes. Draining a handle does not cancel its completion observation; cancellation is unavailable. A response without tool calls lets the activity sleep while an observation remains registered. See [activity completion](communication.md#activity-completion) for the conditions under which it sleeps or ends.
 
-`MAX_HOST_COMMANDS` limits live commands across all activities. Completion releases live capacity. A final result returned directly by `run_host_shell` retires its handle. A separate cache keeps up to eight finished handles available for recent output collection; a continue call that drains one retires it, and older finished handles can be reclaimed for other commands. Full logs have a [separate retention lifecycle](running.md#host-output-and-deployment-files).
+`MAX_HOST_COMMANDS` limits live commands across all activities. Completion releases live capacity. A final result returned directly by `run_host_shell` retires its handle. Finished background handles remain available in a bounded cache for recent output collection; a continue call that drains one retires it, and older finished handles can be reclaimed for other commands. See [command lifecycle](architecture.md#command-lifecycle) for the cache limit. Full logs have a [separate retention lifecycle](running.md#host-output-and-deployment-files).
 
-Shutdown stops and joins commands. Batch and pipe cleanup covers the command's process group; terminal cleanup covers its original OS session, including background jobs in separate job-control groups. Shell backgrounding with `&` remains within this managed lifetime. A program that explicitly creates another OS session, for example with `setsid`, gives that work an independent lifetime. If it holds the original terminal open, final output draining ends after one second with an unavailable-result diagnostic.
+Shutdown stops commands and waits for cleanup. Batch and pipe cleanup covers the command's process group; terminal cleanup covers its original OS session, including background jobs in separate job-control groups. Shell backgrounding with `&` remains within this managed lifetime. Work that creates another OS session has an independent lifetime. If it holds the original terminal open, final output draining ends after one second with an unavailable-result diagnostic. The [architecture guide](architecture.md#processes-and-terminals) describes process ownership and cleanup.
 
 Host processes and handles are not restored after restart, and commands are not replayed. A pending host completion is resolved with an observation of interruption and unknown effects if no result was already stored. A stored actual result takes precedence. A command ID in a restored observation identifies an execution in the earlier runtime, not a usable current handle. An interrupted call may also have produced effects without a saved outcome; inspect uncertain effects before repeating work. See [startup and interruption](architecture.md#startup-and-interruption).
 

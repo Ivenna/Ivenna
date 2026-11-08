@@ -97,7 +97,7 @@ Registered observations arrive as `Callback` events for the sessions that arrang
 
 A callback's observation time is sampled during intake, rather than at the wakeup deadline or host command's completion.
 
-The ID matches the `callback_id` returned by `wakeup` or a `run_host_shell` handoff result. `Source` is a tagged union: `wakeup: {}` identifies a scheduled wakeup, while `host: {command_id: 17}` identifies a host execution. Command and callback IDs are independent. The runtime supplies the source from the saved registration. See [callback delivery](communication.md#callback-mail) for destination retention and admission guarantees, and [host results](host.md#output-and-results) for the callback text's format.
+The ID matches the `callback_id` returned by `wakeup` or a `run_host_shell` handoff result. `Source` is a tagged union: `wakeup: {}` identifies a scheduled wakeup, while `host: {command_id: 17}` identifies a host execution. Command and callback IDs are independent. The runtime supplies the source from the saved registration. See [callback delivery](communication.md#callback-observations) for destination retention and admission guarantees, and [host results](host.md#output-and-results) for the callback text's format.
 
 A restored host source can identify an execution in an earlier runtime; its command ID is not a restored control handle. See [command lifetimes](host.md#command-lifetimes) for stored results and interruption observations after restart.
 

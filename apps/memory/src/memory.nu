@@ -189,10 +189,7 @@ def describe-entry [root: string, item: record, recursive_size: bool] {
     } else if $recursive_size {
         filesystem-operation { workspace-usage $target.path $root }
     } else { null }
-    $item | merge {
-        name: (if $item.address == "." { "." } else { $item.name }),
-        size_bytes: $size
-    }
+    $item | merge {size_bytes: $size}
 }
 
 def memory-capacity [] {
@@ -324,20 +321,11 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
                 used_ratio: ($usage / $capacity)
             }
         },
-        "browse_memory" => {
-            let target = existing $root ($args.address? | default ".")
-            let kind = match ($target.path | path type) {
-                "file" => "memory",
-                "dir" => "room",
-                _ => { fail invalid_address "This address is not a memory entry or room." }
-            }
-            let entries = if $kind == "memory" or ($args.entry_only? | default false) {
-                [(entry $root $target.entry_path)]
-            } else {
-                filesystem-operation { ls --all $target.path | collect }
-                    | each {|item| entry $root $item.name }
-                    | compact
-            }
+        "visit_memory_room" => {
+            let target = memory-room $root ($args.address? | default ".")
+            let entries = filesystem-operation { ls --all $target.path | collect }
+                | each {|item| entry $root $item.name }
+                | compact
             let described = $entries | sort-by address | each {|item| describe-entry $root $item ($args.recursive_size? | default false) }
             let selected = page $described $args {address: $target.address}
             {address: $target.address, entries: $selected.items, offset: $selected.offset, total: $selected.total, next_offset: $selected.next_offset}
@@ -385,26 +373,21 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
                 fail entry_too_large "A memory write can transfer at most 33554432 bytes (32 MiB)."
             }
             let content = $args.data | decode base64
-            match ($args.mode? | default "create") {
+            let append = match ($args.mode? | default "create") {
                 "create" => {
                     if ($target.path | path exists) {
                         fail already_exists $"Address '($target.address)' already exists."
                     }
-                    check-write $root $target.path ($content | bytes length) $capacity
-                    publish $root $target.path $content
+                    false
                 },
-                "append" => {
-                    let before = if ($target.path | path type) == "file" { filesystem-operation { ls $target.path | first | get size | into int } } else { 0 }
-                    check-write $root $target.path ($before + ($content | bytes length)) $capacity
-                    publish $root $target.path $content true
-                },
-                "replace" => {
-                    check-write $root $target.path ($content | bytes length) $capacity
-                    filesystem-operation { mkdir ($target.path | path dirname) }
-                    publish $root $target.path $content
-                },
+                "append" => true,
+                "replace" => false,
                 _ => { fail invalid_argument "The mode argument must be create, append, or replace." }
             }
+            let before = if $append and ($target.path | path type) == "file" { filesystem-operation { ls $target.path | first | get size | into int } } else { 0 }
+            check-write $root $target.path ($before + ($content | bytes length)) $capacity
+            filesystem-operation { mkdir ($target.path | path dirname) }
+            publish $root $target.path $content $append
             {address: $target.address}
         },
         "revise_memory" => {

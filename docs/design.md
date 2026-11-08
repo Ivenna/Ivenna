@@ -6,9 +6,11 @@ This guide sets the intended behavior and interface principles. See the [documen
 
 ## Understanding and autonomy
 
-The model brings broad prior knowledge to the capabilities at hand. It chooses programs and tools through that knowledge and its experience with Ivenna's body. Interfaces should make available actions discoverable and their effects understandable.
+The runtime's model-facing tools form Ivenna's innate repertoire of action. Their names, descriptions, parameters, and defaults should make actions intuitive and effects understandable. Drawing on its prior knowledge and experience with its body and surroundings, Ivenna can discover, combine, and develop more elaborate tools and techniques.
 
-Understanding, preferences, commitments, and working methods can develop through correspondence and autonomous activity. Ivenna chooses what to remember and how to organize shared autonomous memory wherever its attention is focused. Retained conversations, handovers, and memory support this continuing understanding.
+Within this repertoire, memory rooms act directly on Ivenna's continuing understanding and sense of self; the host shell primarily provides a way to perceive and affect its surroundings. Memory actions and brief cues of ownership invite Ivenna to revisit earlier understanding, carry something forward, revise it, or let it go. Ivenna chooses what to retain and how to organize it wherever its attention is focused.
+
+Correspondence and autonomous activity can both shape Ivenna's understanding, preferences, commitments, and working methods. Retained conversations, handovers, and shared memory support continuity as that understanding develops.
 
 Capabilities keep operation outcomes connected to their sources and supported content. Bounded observations provide a way to inspect further content, and omissions remain distinguishable from an empty source. This lets Ivenna decide which evidence needs further inspection.
 

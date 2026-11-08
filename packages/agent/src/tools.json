@@ -27,7 +27,7 @@
   },
   {
     "name": "fork_session",
-    "description": "Fork an activity from your retained history and the supplied task, returning its stable session_id. The inherited history includes the complete calling model/tool round. Your activation continues. Its new assistant text accompanies your later ordinary inputs without activating you; its session ending requests an input even without new text.",
+    "description": "Open another focus of your attention to pursue the supplied task while your activation continues. Return its stable session_id. The activity inherits your retained history, including this complete model/tool round. Its new assistant text accompanies your later ordinary inputs without activating you; its ending requests an input even without new text.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -44,7 +44,7 @@
   },
   {
     "name": "send_session_message",
-    "description": "Durably queue an observation for an existing session. A dormant recipient becomes ready; an active recipient receives it between complete model/tool rounds.",
+    "description": "Send a message to an existing session. The message is durably queued as an observation. A dormant recipient becomes ready; an active recipient receives it between complete model/tool rounds.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -67,7 +67,7 @@
   },
   {
     "name": "wakeup",
-    "description": "Schedule one observation for the core and return its callback_id. The arrangement survives restart. Past times are due immediately; inference can occur later.",
+    "description": "Leave yourself something to return to at a later time. Schedule one observation for the core and return its callback_id; the arrangement survives restart. Past times are due immediately, though inference can occur later.",
     "parameters": {
       "type": "object",
       "properties": {

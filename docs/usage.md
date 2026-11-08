@@ -41,7 +41,7 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 Ivenna can pursue work while receiving further messages and may consider several waiting messages together. Its activities can keep working or sleep while host commands run, then continue when results arrive. Scheduled wakeups also let work resume without a new message from you. Processing depends on runtime availability and capacity; a scheduled time does not guarantee a reply at that time.
 
-Continued work uses retained understanding and autonomous memory. Working histories can be condensed, so include relevant context in follow-up messages when detail may no longer be available.
+Continued work uses retained understanding and [autonomous memory](memory.md). Ivenna chooses what to retain, revisit, and revise as its understanding develops. Working histories can be condensed, so include relevant context in follow-up messages when detail may no longer be available.
 
 Ivenna moves its incoming copy to Trash after saving the complete observation, before working on that input. This does not indicate that the task is finished. Its outgoing copies enter Trash after confirmed submission. The mail service controls their eventual deletion; your received copies stay in your own account. See [data and retention](running.md#data-and-retention) for storage and cleanup.
 

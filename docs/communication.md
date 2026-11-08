@@ -1,14 +1,14 @@
 # Communication
 
-Correspondent IDs identify people and programs; session IDs identify Ivenna's separate working contexts. This guide covers [external correspondence](#external-correspondence) through `send_message` and [session coordination](#session-coordination) through forks, messages, wakeups, host completion observations, and activity reports. For sending messages to Ivenna, see the [usage guide](usage.md).
+Correspondent IDs identify people and programs; session IDs identify focuses of Ivenna's attention. This guide covers [external correspondence](#external-correspondence) through `send_message` and [session coordination](#session-coordination) through forks, messages, wakeups, host completion observations, and activity reports. For sending messages to Ivenna, see the [usage guide](usage.md).
 
 ## External correspondence
 
-Incoming correspondence enters the core. Both core and activity sessions can send messages.
+Incoming correspondence enters the core. Both core and activity sessions can send messages through `send_message`. Assistant text and activity reports remain internal unless Ivenna chooses to send them.
 
 ### Correspondents and IDs
 
-Each [incoming message](input.md#incoming-messages) records the correspondent IDs it came `from` and its free-form text. If `operator` relays Alice's words, `from` is `[operator]`; the text carries that attribution and context. The model relates the message to its ongoing understanding and decides whether to respond.
+Each [incoming message](input.md#incoming-messages) records the correspondent IDs it came `from` and its free-form text. If `operator` relays Alice's words, `from` is `[operator]`; any attribution to Alice belongs in the text. Receiving a message does not require a response.
 
 Retained observations, sending exchanges, and handovers preserve correspondent IDs and their context. Outgoing arguments record chosen recipients and text; results record submission outcomes.
 
@@ -83,7 +83,7 @@ The [agent tools](../packages/agent/src/tools.json) expose session messaging and
 
 `send_session_message` queues an observation for an existing session and confirms durable queue acceptance. The observation identifies the core as its sender; attribution to an earlier source belongs in the message text. A sleeping recipient wakes, while an active recipient admits the message between complete model/tool rounds, including after a long tool call finishes. Session IDs survive sleep, context unloading, and restart.
 
-`wakeup` retains its text and deadline across restart and returns the text to the core. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The core can sleep while waiting. Cancellation is unavailable.
+`wakeup` takes its `at_unix_ms` deadline in Unix milliseconds, retains the text and deadline across restart, and returns the text to the core as a callback observation. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The core can sleep while waiting. Cancellation is unavailable.
 
 The tools report defined failures without ending the runtime:
 
@@ -96,9 +96,13 @@ The tools report defined failures without ending the runtime:
 
 See [configuration](running.md#configuration) for capacity limits and [session messages and callbacks](input.md#session-messages-and-callbacks) for observation fields. Infrastructure failures follow the [availability contract](design.md#runtime-availability).
 
-### Callback mail
+### Callback observations
 
-Wakeups and [host commands](host.md#command-lifetimes) that outlive their initial call use durable JMAP callback mail, independently of SMTP reception. Each registration binds one observation and its source to the receiving session. The destination survives sleep, context unloading, and restart, and the observation is admitted at most once even if several mail copies arrive. Repeated publication preserves the first identifiable stored result. See [delivery and admission](architecture.md#event-sources-and-callback-admission) for the mechanism and [communication-copy retention](running.md#communication-copies) for the mail's lifetime.
+Wakeups and [host commands](host.md#command-lifetimes) that outlive their initial call deliver registered [callback observations](input.md#session-messages-and-callbacks), independently of external correspondence. Each registration binds one observation and its source to the receiving session. The destination survives sleep, context unloading, and restart, and the observation is admitted at most once even if several mail copies arrive. Repeated publication preserves the first identifiable stored result.
+
+The registration remains pending until its observation is admitted, even if its source has already finished. Source completion, result delivery, and activity completion are separate events.
+
+The current email adapter stores these observations as [callback mail](architecture.md#callback-delivery). See [delivery and admission](architecture.md#event-sources-and-callback-admission) for registration and resumption, and [communication-copy retention](running.md#communication-copies) for the mail's lifetime.
 
 ### Activity reports
 
@@ -112,6 +116,6 @@ One input can carry reports from several activities alongside other observations
 
 An activity response without tool calls returns control to the runtime. Queued observations continue the activation before it can complete. If its queue is empty but callback registrations remain pending, the activity sleeps with its identity and history retained. A host completion or session message from the core can resume it. Waiting for a tool instead keeps the current activation and context in place while other sessions advance.
 
-If the queue is empty and no callback registrations remain, a response without tool calls ends the session and releases its registered-session slot. The runtime records its ending, making the core ready even if no new text was produced. This establishes session completion; a host callback reports a command outcome or diagnostic. Ivenna assesses task success from the available evidence.
+If the queue is empty and no callback registrations remain, a response without tool calls ends the session and releases its registered-session slot. The runtime records its ending, making the core ready even if no new text was produced. An ending establishes session completion; task success depends on the available evidence.
 
 Completed session IDs are not reused, and messages to them return `unknown_session`. The current session roster shows which activities remain addressable. Reports keep their source IDs and remain available for core admission after the source session has ended.

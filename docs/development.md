@@ -57,13 +57,15 @@ Treat prompts and tool descriptions as editable interfaces:
 
 | Resource | Purpose |
 | --- | --- |
-| [system.md](../packages/agent/src/system.md) | Input interpretation and response scope needed by the model |
+| [system.md](../packages/agent/src/system.md) | Shared identity and continuity, observation interpretation, and action and response scope |
 | [Agent tools](../packages/agent/src/tools.json) | Correspondence, activity forks, session coordination, and wakeups |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | What a handover must preserve |
 
 Keep capability tool declarations with their implementation and register capabilities through `Tools`. The agent owns availability policy and must use the same role selection for declaration and invocation.
+
+Follow the [capability principles](design.md#understanding-and-autonomy) when writing these resources. Lead tool descriptions with an action and its effect. Put invocation details with their parameters and explain result distinctions needed for the next decision. Keep cues of ownership and continuity brief and open to Ivenna's judgment, leaving content, organization, and learned practices to its experience. Preserve precision about the operation behind a suggestive name.
 
 Put task facts and observations in user input. Prompts and tool descriptions should explain decisions and interpretation; field references belong in the [input contract](input.md), mechanisms in the architecture guide, and procedures in the running guides. Update affected resources and interface documentation together.
 
