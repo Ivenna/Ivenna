@@ -9,8 +9,11 @@ const Callback = @import("callback.zig");
 /// Invocation argument bytes are borrowed for the duration of the call.
 /// Results belong to the supplied allocator and outlive temporary I/O buffers.
 pub const Tools = struct {
+    /// Internal execution identity and its complete model-facing focus reference.
+    /// The focus reference and callback registrar are borrowed for this invocation.
     pub const Invocation = struct {
         session_id: u64,
+        focus_id: []const u8,
         callback: ?Callback.Registrar = null,
     };
 

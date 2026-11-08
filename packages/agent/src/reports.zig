@@ -20,7 +20,7 @@ pub const Checkpoint = struct {
 
 /// One collected assistant text or session ending, before model-input grouping.
 pub const Entry = struct {
-    from_session: u64,
+    from_focus: []const u8,
     observed_at_unix_ms: i64,
     content: union(enum) {
         assistant: []const u8,
@@ -177,7 +177,7 @@ pub const Outbox = struct {
 };
 
 fn validateReport(report: Entry) !void {
-    if (report.from_session <= 1) return error.InvalidHistory;
+    if ((contracts.Reference.sequence(report.from_focus) orelse return error.InvalidHistory) <= 1) return error.InvalidHistory;
 }
 
 fn equalKey(left: Key, right: Key) bool {

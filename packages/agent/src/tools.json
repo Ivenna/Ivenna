@@ -27,10 +27,15 @@
   },
   {
     "name": "open_focus",
-    "description": "Open another focus of your attention to pursue the supplied task while the core continues. Return its stable session_id. The activity inherits your retained history through this complete model/tool round. Its ordinary assistant text accompanies later core inputs without activating the core; its ending requests core attention even without new text.",
+    "description": "Open another focus of your attention to pursue the supplied task while the core continues. Return its stable focus_id. The activity inherits your retained history through this complete model/tool round. Its ordinary assistant text accompanies later core inputs without activating the core; its ending requests core attention even without new text.",
     "parameters": {
       "type": "object",
       "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A short name for this focus. The runtime appends a number; names may repeat."
+        },
         "task": {
           "type": "string",
           "minLength": 1,
@@ -38,6 +43,7 @@
         }
       },
       "required": [
+        "name",
         "task"
       ],
       "additionalProperties": false
@@ -45,14 +51,14 @@
   },
   {
     "name": "send_focus_message",
-    "description": "Share a thought or update with an existing focus, including your own. Durably queue the text as an observation and return the recipient's session_id. A dormant recipient becomes ready; an active recipient receives it between complete model/tool rounds.",
+    "description": "Share a thought or update with an existing focus, including your own. Durably queue the text as an observation and return the recipient's focus_id. A dormant recipient becomes ready; an active recipient receives it between complete model/tool rounds.",
     "parameters": {
       "type": "object",
       "properties": {
-        "session_id": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "The focus's runtime session_id from the current roster. Your own session_id is also valid."
+        "focus_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The complete focus_id from the current roster. Your own focus_id is also valid."
         },
         "text": {
           "type": "string",
@@ -61,7 +67,7 @@
         }
       },
       "required": [
-        "session_id",
+        "focus_id",
         "text"
       ],
       "additionalProperties": false
@@ -73,9 +79,14 @@
     "parameters": {
       "type": "object",
       "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A short name for this later attention. The runtime appends a number; names may repeat."
+        },
         "at_unix_ms": {
           "type": "integer",
-          "description": "When to request attention, as Unix time in milliseconds. Current runtime time is supplied in state."
+          "description": "When to request attention, as Unix time in milliseconds. The current observation time is supplied in `current`."
         },
         "text": {
           "type": "string",
@@ -84,6 +95,7 @@
         }
       },
       "required": [
+        "name",
         "at_unix_ms",
         "text"
       ],

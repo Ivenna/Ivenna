@@ -47,7 +47,7 @@ Decode external protocols in their owning components and supply typed contracts 
 
 Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
 
-[Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
+[Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Define this interface around focus identity, observations, and state that helps Ivenna choose its next action. Execution projects its internal session and delivery state into this interface. Keep named references intact across tool results, current state, observations, and handovers. Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
 The agent selects tools and reasoning per request; the model adapter encodes and measures the complete payload with those settings. Use the same encoder for measurement and inference, including tool-result limiting, without mutating a shared provider.
 

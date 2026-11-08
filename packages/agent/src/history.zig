@@ -24,7 +24,7 @@ const Source = union(enum) {
 
 pub const History = struct {
     pub const Wakeup = struct { id: u64, at_unix_ms: i64, text: []const u8 };
-    pub const CallbackRegistration = struct { id: u64, session_id: u64, source: contracts.Callback.Source };
+    pub const CallbackRegistration = struct { id: u64, reference: []const u8, session_id: u64, source: contracts.Callback.Source };
 
     next_session_id: u64,
     next_callback_id: u64,
@@ -35,8 +35,8 @@ pub const History = struct {
 
     pub const Session = struct {
         session_id: u64,
+        focus_id: []const u8,
         role: Input.Role,
-        last_active_unix_ms: i64,
         was_running: bool,
         epoch: u64,
         /// Null when unloaded; the confirmed checkpoint retains its selection.
@@ -52,18 +52,19 @@ pub const History = struct {
         for (self.sessions) |session| {
             if (session.session_id == 0 or session.session_id >= self.next_session_id or
                 (try identities.getOrPut(a, session.session_id)).found_existing) return error.InvalidHistory;
+            if (contracts.Reference.sequence(session.focus_id) != session.session_id) return error.InvalidHistory;
             switch (session.role) {
                 .core => {
-                    if (session.session_id != 1) return error.InvalidHistory;
+                    if (session.session_id != 1 or !std.mem.eql(u8, session.focus_id, "core-1")) return error.InvalidHistory;
                     cores += 1;
                 },
                 .activity => if (session.session_id == 1) return error.InvalidHistory,
             }
             for (session.observations) |event| switch (event) {
-                .assignment, .session_message => {},
+                .assignment, .focus_message => {},
                 else => return error.InvalidHistory,
             };
-            try validateEntries(session.session_id, session.entries orelse &.{});
+            try validateEntries(session.focus_id, session.entries orelse &.{});
         }
         if (cores != 1) return error.InvalidHistory;
         if (self.activity_reports) |reports| try reports.validate();
@@ -71,7 +72,8 @@ pub const History = struct {
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
             if (callback.id == 0 or callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
-            if (callback.source == .host and callback.source.host.command_id == 0) return error.InvalidHistory;
+            if (contracts.Reference.sequence(callback.reference) != callback.id) return error.InvalidHistory;
+            if (callback.source == .host and contracts.Reference.sequence(callback.source.host.command_id) == null) return error.InvalidHistory;
             const entry = try callbacks.getOrPut(a, callback.id);
             if (entry.found_existing) return error.InvalidHistory;
             entry.value_ptr.* = callback.source;
@@ -96,8 +98,8 @@ const Checkpoint = struct {
 
     const Session = struct {
         session_id: u64,
+        focus_id: []const u8,
         role: Input.Role,
-        last_active_unix_ms: i64,
         was_running: bool,
         epoch: u64,
         group: []const u8,
@@ -133,6 +135,7 @@ const Cache = struct {
         if (result.found_existing) return error.InvalidHistory;
         var owned = session;
         owned.group = try a.dupe(u8, session.group);
+        owned.focus_id = try a.dupe(u8, session.focus_id);
         result.value_ptr.* = .{ .checkpoint = owned };
         return result.value_ptr;
     }
@@ -177,8 +180,8 @@ pub const Persistence = struct {
             _ = try candidate.add(session);
             restored.* = .{
                 .session_id = session.session_id,
+                .focus_id = session.focus_id,
                 .role = session.role,
-                .last_active_unix_ms = session.last_active_unix_ms,
                 .was_running = session.was_running,
                 .epoch = session.epoch,
                 .entries = try a.alloc(Entry, session.count),
@@ -264,7 +267,7 @@ pub const Persistence = struct {
             try select(a, &selections, reference, .{ .entry = entry });
         }
         try self.readSelections(a, selections.items);
-        try validateEntries(session_id, entries);
+        try validateEntries(cached.checkpoint.focus_id, entries);
         return entries;
     }
 
@@ -317,12 +320,12 @@ pub const Persistence = struct {
         const sessions = try a.alloc(Checkpoint.Session, ordered.len);
         for (ordered, sessions) |session, *saved| {
             const stored = self.cache.sessions.get(session.session_id);
-            if (stored) |known| if (session.epoch < known.checkpoint.epoch) return error.InvalidHistory;
+            if (stored) |known| if (session.epoch < known.checkpoint.epoch or !std.mem.eql(u8, session.focus_id, known.checkpoint.focus_id)) return error.InvalidHistory;
             const current = if (stored) |known| if (known.checkpoint.epoch == session.epoch) known else null else null;
             saved.* = .{
                 .session_id = session.session_id,
+                .focus_id = session.focus_id,
                 .role = session.role,
-                .last_active_unix_ms = session.last_active_unix_ms,
                 .was_running = session.was_running,
                 .epoch = session.epoch,
                 .group = if (current) |known| known.checkpoint.group else try self.store.allocateGroup(a),
@@ -332,6 +335,7 @@ pub const Persistence = struct {
             };
             const cached = try candidate.add(saved.*);
             saved.group = cached.checkpoint.group;
+            saved.focus_id = cached.checkpoint.focus_id;
             if (session.entries) |entries| {
                 if (current) |known| if (entries.len < known.keys.items.len) return error.InvalidHistory;
                 for (entries, 0..) |entry, index| {
@@ -391,16 +395,16 @@ pub const Persistence = struct {
     }
 };
 
-fn validateEntries(session_id: u64, entries: []const Entry) !void {
+fn validateEntries(focus_id: []const u8, entries: []const Entry) !void {
     for (entries) |entry| switch (entry) {
         .record => |record| {
             const source = switch (record) {
-                .events => |events| events.session_id,
-                .handover => |handover| handover.session_id,
+                .events => |events| events.focus_id,
+                .handover => |handover| handover.focus_id,
             };
             // Only the core can fork. Its records retain their original
             // attribution inside an activity's independently stored history.
-            if (source != session_id and source != 1) return error.InvalidHistory;
+            if (!std.mem.eql(u8, source, focus_id) and !std.mem.eql(u8, source, "core-1")) return error.InvalidHistory;
         },
         .exchange => {},
     };

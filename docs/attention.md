@@ -1,6 +1,6 @@
 # Attention
 
-The core and activities are focuses of one Ivenna. Each focus has a runtime session with its own identity, working history, and event queue. A `session_id` identifies that focus in the current roster and in retained observations; it survives sleep and restart. Correspondent IDs belong to [external communication](communication.md), not to this internal coordination.
+The core and activities are focuses of one Ivenna. Each focus has its own identity, working history, and event queue. A `focus_id` identifies it in the current roster and retained observations; it survives sleep and restart. Correspondent IDs belong to [external communication](communication.md), not to this internal coordination.
 
 The core directs attention through these [agent tools](../packages/agent/src/tools.json):
 
@@ -12,36 +12,38 @@ The core directs attention through these [agent tools](../packages/agent/src/too
 
 Both roles can [communicate externally](communication.md) and [maintain memory](memory.md). Activities also have [host tools](host.md). The [design intent](design.md#core-and-concurrent-attention) explains these roles.
 
+Names are recognition cues and may repeat. Use each complete returned reference in later calls and when relating observations to earlier work. The core's reference is `core-1`. Names must be nonempty UTF-8 text without ASCII control characters; spaces alone are not accepted.
+
 ## Opening a focus
 
-Call `open_focus` with a nonempty `task` describing what this focus should pursue. Success returns its stable session identity:
+Call `open_focus` with a short `name` and nonempty `task` describing what this focus should pursue. The runtime appends a number to the name and returns the complete stable reference:
 
 ```json
-{"result":{"session_id":2}}
+{"result":{"focus_id":"practice-2"}}
 ```
 
 The activity inherits the core's retained history through the complete calling model/tool round, including any existing handover, then receives the task as its first new observation. The core continues its activation; their histories then grow independently.
 
-Inherited records keep their original [session IDs](input.md#records-and-turns). Core and activity use the same system prompt. The activity receives its own current-state snapshot and available tools. Queued observations and pending callback registrations keep their original destinations; historical tool calls are not replayed.
+Inherited records keep their original [focus IDs](input.md#records-and-turns). Core and activity use the same system prompt. The activity receives its own current-state snapshot and available tools. Queued observations and pending callback registrations keep their original destinations; historical tool calls are not replayed.
 
-Malformed arguments or an empty task return `invalid_arguments`. Exhausted session capacity returns `focus_unavailable`; existing focuses remain addressable. See [configuration](running.md#configuration) for capacity limits.
+Malformed arguments or an empty task return `invalid_arguments`. Exhausted focus capacity returns `focus_unavailable`; existing focuses remain addressable. See [configuration](running.md#configuration) for capacity limits.
 
 ## Reaching an existing focus
 
-Call `send_focus_message` with a `session_id` from the current roster and nonempty `text`. The core can address any existing focus, including itself. Success confirms durable queue acceptance:
+Call `send_focus_message` with a complete `focus_id` from the current roster and nonempty `text`. The core can address any existing focus, including itself. Success confirms durable queue acceptance:
 
 ```json
-{"result":{"session_id":2}}
+{"result":{"focus_id":"practice-2"}}
 ```
 
 The observation identifies the sending core as its source; attribution to an earlier source belongs in the text. A sleeping recipient becomes ready, while an active recipient admits the message between complete model/tool rounds, including after a long tool call finishes. Acceptance does not confirm that the recipient has read or acted on the message.
 
 ## Returning later
 
-Call `schedule_attention` with an `at_unix_ms` deadline in Unix milliseconds and nonempty `text` describing what to return to. The arrangement survives restart. Success returns a registered observation's identity:
+Call `schedule_attention` with a short `name`, an `at_unix_ms` deadline in Unix milliseconds, and nonempty `text` describing what to return to. The arrangement survives restart. Success returns its complete callback reference:
 
 ```json
-{"result":{"callback_id":5}}
+{"result":{"callback_id":"revisit-practice-5"}}
 ```
 
 The text later reaches the core as a callback observation with source `wakeup`. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The core can sleep while waiting. Cancellation is unavailable.
@@ -54,17 +56,17 @@ These actions return a JSON text part containing either `result` or an operation
 | --- | --- |
 | `invalid_arguments` | Arguments do not match the tool's parameters |
 | `unknown_tool` | The action is unavailable to the calling role or is not a current tool |
-| `focus_unavailable` | A new focus cannot fit the session limit |
-| `unknown_session` | The addressed focus no longer exists |
-| `session_queue_full` | The recipient cannot currently accept another event |
+| `focus_unavailable` | A new focus cannot fit the configured limit |
+| `unknown_focus` | The addressed focus is unknown or has ended |
+| `focus_queue_full` | The recipient cannot currently accept another event |
 
-`open_focus` reserves an identity; focus messages use the recipient's ordinary event allowance. See [configuration](running.md#configuration) for limits and [session messages and callbacks](input.md#session-messages-and-callbacks) for observation fields. Infrastructure failures follow the [availability contract](design.md#runtime-availability).
+`open_focus` reserves an identity; focus messages use the recipient's ordinary event allowance. See [configuration](running.md#configuration) for limits and [focus messages and callbacks](input.md#focus-messages-and-callbacks) for observation fields. Infrastructure failures follow the [availability contract](design.md#runtime-availability).
 
 ## Callback observations
 
-Scheduled attention and [host commands](host.md#command-lifetimes) that outlive their initial call deliver registered [callback observations](input.md#session-messages-and-callbacks), independently of external correspondence. Each registration binds one observation and its source to the receiving session. The destination survives sleep, context unloading, and restart, and the observation is admitted at most once even if several mail copies arrive. Repeated publication preserves the first identifiable stored result.
+Scheduled attention and [host commands](host.md#command-lifetimes) that outlive their initial call deliver registered [callback observations](input.md#focus-messages-and-callbacks), independently of external correspondence. Each callback reference connects an arrangement with its pending state and arriving observation. The runtime keeps that observation bound to the receiving focus and its source. The destination survives sleep, context unloading, and restart, and the observation is admitted at most once even if several mail copies arrive. Repeated publication preserves the first identifiable stored result.
 
-The registration remains pending until its observation is admitted, even if its source has already finished. Source completion, result delivery, and activity completion are separate events.
+The callback remains pending until its observation is admitted, even if its source has already finished. Source completion, result delivery, and activity completion are separate events.
 
 The current email adapter stores these observations as [callback mail](architecture.md#callback-delivery). See [delivery and admission](architecture.md#event-sources-and-callback-admission) for registration and resumption, and [communication-copy retention](running.md#communication-copies) for the mail's lifetime.
 
@@ -78,8 +80,8 @@ One input can carry reports from several activities alongside other observations
 
 ## Activity completion
 
-An activity response without tool calls returns control to the runtime. Queued observations continue the activation before it can complete. If its queue is empty but callback registrations remain pending, the activity sleeps with its identity and history retained. A host completion or focus message can resume it. Waiting for a tool instead keeps the current activation and context in place while other sessions advance.
+An activity response without tool calls returns control to the runtime. Queued observations continue the activation before it can complete. If its queue is empty but callback registrations remain pending, the activity sleeps with its identity and history retained. A host completion or focus message can resume it. Waiting for a tool instead keeps the current activation and context in place while other focuses advance.
 
-If the queue is empty and no callback registrations remain, a response without tool calls ends the session and releases its registered-session slot. The runtime records its ending, making the core ready even if no new text was produced. An ending establishes session completion; task success depends on the available evidence.
+If the queue is empty and no callback registrations remain, a response without tool calls ends the focus and releases its capacity slot. The runtime records its ending, making the core ready even if no new text was produced. An ending establishes focus completion; task success depends on the available evidence.
 
-Completed session IDs are not reused, and messages to them return `unknown_session`. The current roster shows which focuses remain addressable. Reports keep their source IDs and remain available for core admission after the source session has ended.
+Completed focus references are not reused, and messages to them return `unknown_focus`. The current roster shows which focuses remain addressable. Reports keep their source IDs and remain available for core admission after the source focus has ended.

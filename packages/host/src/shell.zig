@@ -14,6 +14,7 @@ pub const Shell = struct {
 
     pub const Mode = enum { batch, pipe, terminal };
     pub const Command = struct {
+        name: []const u8,
         command: []const u8,
         cwd: ?[]const u8 = null,
         shell: ?[]const u8 = null,

@@ -6,6 +6,8 @@ pub const Delivery = struct {
     arena: std.heap.ArenaAllocator,
     event: Input.Event,
     receipt: ?[]const u8,
+    /// Delivery routing remains internal; the event carries its semantic reference.
+    callback_id: ?u64 = null,
 
     /// Copy the event and optional transport receipt into the delivery arena.
     pub fn create(allocator: Allocator, event: Input.Event, receipt: ?[]const u8) !*Delivery {

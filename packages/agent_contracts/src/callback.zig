@@ -5,17 +5,21 @@ const Allocator = std.mem.Allocator;
 /// that started the command; retained sources do not restore control handles.
 pub const Source = union(enum) {
     wakeup,
-    host: struct { command_id: u64 },
+    host: struct { command_id: []const u8 },
 };
+
+/// Internal delivery identity and the complete model-facing association.
+/// The reference belongs to the allocator supplied to Registrar.open.
+pub const Registration = struct { id: u64, reference: []const u8 };
 
 /// Register one future observation for the invoking session. The registrar is
 /// borrowed for the tool call; success confirms durable registration.
 pub const Registrar = struct {
     context: *anyopaque,
-    register: *const fn (*anyopaque, Source) anyerror!u64,
+    register: *const fn (*anyopaque, Allocator, []const u8, Source) anyerror!Registration,
 
-    pub fn open(self: Registrar, source: Source) !u64 {
-        return self.register(self.context, source);
+    pub fn open(self: Registrar, a: Allocator, name: []const u8, source: Source) !Registration {
+        return self.register(self.context, a, name, source);
     }
 };
 

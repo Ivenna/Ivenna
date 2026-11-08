@@ -16,10 +16,10 @@ const report_read_batch = 64;
 /// Identity, working context, and pending observations for one session.
 pub const Session = struct {
     session_id: u64,
+    focus_id: []const u8 = &.{},
     role: Input.Role,
     epoch: u64 = 0,
     context: ?Context = null,
-    last_active_unix_ms: i64 = 0,
     needs_startup: bool = false,
     active: ?*Activation = null,
     pending: std.ArrayList(*Delivery) = .empty,
@@ -40,21 +40,20 @@ pub const Snapshot = struct {
         var current = self.current;
         var remaining: usize = 0;
         for (events[count..]) |event| remaining += @intFromBool(isInput(event));
-        current.state.runtime.queued_inputs += remaining;
-        const directory = try a.dupe(Input.SessionInfo, self.current.state.runtime.sessions);
-        current.state.runtime.sessions = directory;
+        const directory = try a.dupe(Input.FocusInfo, self.current.focuses);
+        current.focuses = directory;
 
         var callbacks: std.ArrayList(Input.PendingCallback) = .empty;
-        for (self.current.state.session.callbacks) |callback| {
+        for (self.current.callbacks) |callback| {
             const admitted = for (events[0..count]) |event| {
-                if (event == .callback and event.callback.id == callback.id) break true;
+                if (event == .callback and std.mem.eql(u8, event.callback.callback_id, callback.callback_id)) break true;
             } else false;
             if (!admitted) try callbacks.append(a, callback);
         }
-        current.state.session.callbacks = try callbacks.toOwnedSlice(a);
-        for (directory) |*session| if (session.session_id == current.session_id) {
+        current.callbacks = try callbacks.toOwnedSlice(a);
+        for (directory) |*session| if (std.mem.eql(u8, session.focus_id, current.focus_id)) {
             session.queued_inputs += remaining;
-            session.pending_callbacks = current.state.session.callbacks.len;
+            session.pending_callbacks = current.callbacks.len;
             break;
         };
         return current;
@@ -108,17 +107,17 @@ pub const Registry = struct {
                     .session_id = record.session_id,
                     .role = record.role,
                     .epoch = record.epoch,
-                    .last_active_unix_ms = record.last_active_unix_ms,
                     .needs_startup = true,
                 };
                 errdefer self.destroySession(session);
+                session.focus_id = try allocator.dupe(u8, record.focus_id);
                 if (record.role == .core) {
-                    session.context = try Context.restore(allocator, .{ .session_id = record.session_id, .epoch = record.epoch }, record.entries orelse return error.InvalidHistory);
+                    session.context = try Context.restore(allocator, .{ .session_id = record.session_id, .epoch = record.epoch }, record.focus_id, record.entries orelse return error.InvalidHistory);
                 }
                 try self.sessions.put(allocator, session.session_id, session);
             }
             self.core = self.sessions.get(1).?;
-            try self.callbacks.appendSlice(allocator, retained.callbacks);
+            for (retained.callbacks) |callback| try self.restoreCallback(callback);
             for (retained.wakeups) |wakeup| {
                 const text = try allocator.dupe(u8, wakeup.text);
                 errdefer allocator.free(text);
@@ -141,7 +140,8 @@ pub const Registry = struct {
             const core = try allocator.create(Session);
             core.* = .{ .session_id = 1, .role = .core, .needs_startup = true };
             errdefer self.destroySession(core);
-            core.context = try Context.init(allocator, .{ .session_id = 1, .epoch = 0 });
+            core.focus_id = try allocator.dupe(u8, "core-1");
+            core.context = try Context.init(allocator, .{ .session_id = 1, .epoch = 0 }, core.focus_id);
             try self.ensureStartupLocked(core);
             try self.sessions.put(allocator, 1, core);
             self.core = core;
@@ -159,6 +159,7 @@ pub const Registry = struct {
         self.noticed.deinit(self.allocator);
         for (self.wakeups.items) |wakeup| self.allocator.free(wakeup.text);
         self.wakeups.deinit(self.allocator);
+        for (self.callbacks.items) |callback| self.freeCallback(callback);
         self.callbacks.deinit(self.allocator);
         self.queued_callbacks.deinit(self.allocator);
         self.reports.deinit();
@@ -191,7 +192,7 @@ pub const Registry = struct {
                     return error.UnknownCallback;
                 };
                 break :blk .{ self.sessions.get(registration.session_id).?, Input.Event{ .callback = .{
-                    .id = callback.id,
+                    .callback_id = registration.reference,
                     .source = registration.source,
                     .observed_at_unix_ms = callback.observed_at_unix_ms,
                     .text = callback.text,
@@ -202,11 +203,12 @@ pub const Registry = struct {
         if (!self.hasCapacity(session)) return .deferred;
         const delivery = try Delivery.create(self.allocator, event, incoming.receipt);
         errdefer delivery.destroy(self.allocator);
+        delivery.callback_id = if (incoming.content == .callback) incoming.content.callback.id else null;
         try self.ensureStartupLocked(session);
         try session.pending.ensureUnusedCapacity(self.allocator, 1);
         const notice_key = if (incoming.receipt) |key| try self.allocator.dupe(u8, key) else null;
         errdefer if (notice_key) |key| self.allocator.free(key);
-        if (event == .callback) try self.queued_callbacks.put(self.allocator, event.callback.id, {});
+        if (delivery.callback_id) |id| try self.queued_callbacks.put(self.allocator, id, {});
         if (notice_key) |key| try self.noticed.put(self.allocator, key, .scheduled);
         session.pending.appendAssumeCapacity(delivery);
         return .accepted;
@@ -277,7 +279,7 @@ pub const Registry = struct {
         std.debug.assert(work.activation.admitted);
         for (work.activation.deliveries.items) |delivery| {
             std.debug.assert(delivery.receipt == null);
-            if (delivery.event == .callback) _ = self.queued_callbacks.remove(delivery.event.callback.id);
+            if (delivery.callback_id) |id| _ = self.queued_callbacks.remove(id);
             delivery.destroy(self.allocator);
         }
         work.activation.deliveries.clearRetainingCapacity();
@@ -305,12 +307,12 @@ pub const Registry = struct {
         session.context = context;
         session.epoch = context.scope.epoch;
         work.activation.admitted = true;
-        for (deliveries.items) |delivery| if (delivery.event == .callback) {
-            self.completeCallbackLocked(delivery.event.callback.id);
+        for (deliveries.items) |delivery| if (delivery.callback_id) |id| {
+            self.completeCallbackLocked(id);
         };
     }
 
-    pub fn prepareFork(self: *Registry, work: Work, task: []const u8) !ForkPlan {
+    pub fn prepareFork(self: *Registry, work: Work, name: []const u8, task: []const u8) !ForkPlan {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
@@ -321,6 +323,7 @@ pub const Registry = struct {
             .role = .activity,
         };
         errdefer self.destroySession(session);
+        session.focus_id = try contracts.Reference.create(self.allocator, name, self.next_session_id);
         const assignment = try Delivery.create(self.allocator, .{ .assignment = .{ .task = task } }, null);
         errdefer assignment.destroy(self.allocator);
         try session.pending.append(self.allocator, assignment);
@@ -349,6 +352,7 @@ pub const Registry = struct {
         for (plans) |plan| {
             plan.session.context = try completed.clone(self.allocator);
             plan.session.context.?.scope = .{ .session_id = plan.session.session_id, .epoch = 0 };
+            plan.session.context.?.focus_id = try plan.session.context.?.arena.allocator().dupe(u8, plan.session.focus_id);
         }
         try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(plans.len));
         session.context.?.deinit();
@@ -374,7 +378,7 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         assertWork(work);
         try self.reports.append(.{
-            .from_session = work.session.session_id,
+            .from_focus = work.session.focus_id,
             .observed_at_unix_ms = observed_at,
             .content = .{ .assistant = text.? },
         });
@@ -412,9 +416,9 @@ pub const Registry = struct {
             for (session.pending.items) |delivery| if (isInternal(delivery.event)) try observations.append(a, delivery.event);
             try retained.append(a, .{
                 .session_id = session.session_id,
+                .focus_id = session.focus_id,
                 .role = session.role,
                 .epoch = session.epoch,
-                .last_active_unix_ms = session.last_active_unix_ms,
                 .was_running = session.active != null or hasStartup(session.pending.items),
                 .entries = if (session.context) |*context| context.records() else null,
                 .observations = observations.items,
@@ -441,37 +445,24 @@ pub const Registry = struct {
     pub fn runtimeSnapshot(self: *Registry, a: Allocator, session: *Session) !Snapshot {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        var queued: usize = 0;
-        var active: usize = 0;
-        const directory = try a.alloc(Input.SessionInfo, self.sessions.count());
+        const directory = try a.alloc(Input.FocusInfo, self.sessions.count());
         var sessions = self.sessions.valueIterator();
-        for (directory) |*info| {
-            const item = sessions.next().?.*;
-            info.* = self.sessionInfoLocked(item);
-            queued += info.queued_inputs;
-            active += @intFromBool(item.active != null);
-        }
-        std.mem.sort(Input.SessionInfo, directory, {}, lessSession);
+        for (directory) |*info| info.* = self.sessionInfoLocked(sessions.next().?.*);
+        std.mem.sort(Input.FocusInfo, directory, {}, lessFocus);
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
         for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
-            .id = callback.id,
-            .source = callback.source,
+            .callback_id = try a.dupe(u8, callback.reference),
+            .source = try cloneSource(a, callback.source),
         });
-        return .{
-            .current = .{
-                .session_id = session.session_id,
-                .state = .{
-                    .session = .{ .role = session.role, .callbacks = own_callbacks.items },
-                    .runtime = .{
-                        .observed_at_unix_ms = self.now(),
-                        .registered_sessions = self.sessions.count(),
-                        .active_sessions = active,
-                        .queued_inputs = queued,
-                        .sessions = directory,
-                    },
-                },
-            },
-        };
+        // Snapshot strings outlive mutations and removal of their source sessions.
+        for (directory) |*info| info.focus_id = try a.dupe(u8, info.focus_id);
+        return .{ .current = .{
+            .focus_id = try a.dupe(u8, session.focus_id),
+            .role = session.role,
+            .observed_at_unix_ms = self.now(),
+            .callbacks = try own_callbacks.toOwnedSlice(a),
+            .focuses = directory,
+        } };
     }
 
     /// Finalize a response without tool calls when no queued input requires
@@ -486,7 +477,6 @@ pub const Registry = struct {
         const completed_activity = session != self.core and self.callbackCount(session.session_id) == 0;
         const finished_at = self.now();
         if (completed_activity) try self.recordCompletionLocked(session, finished_at);
-        session.last_active_unix_ms = finished_at;
         session.active = null;
         work.activation.destroy(self.allocator);
         if (completed_activity) {
@@ -511,21 +501,24 @@ pub const Registry = struct {
         }
     }
 
-    pub fn sendSessionMessage(self: *Registry, work: Work, target: u64, text: []const u8) !void {
+    pub fn sendFocusMessage(self: *Registry, work: Work, target: []const u8, text: []const u8) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        const session = self.sessions.get(target) orelse return error.UnknownSession;
+        var iterator = self.sessions.valueIterator();
+        const session = while (iterator.next()) |entry| {
+            if (std.mem.eql(u8, entry.*.focus_id, target)) break entry.*;
+        } else return error.UnknownSession;
         if (!self.hasCapacity(session)) return error.SessionQueueFull;
-        try self.enqueueLocked(session, .{ .session_message = .{
-            .from_session = work.session.session_id,
+        try self.enqueueLocked(session, .{ .focus_message = .{
+            .from_focus = work.session.focus_id,
             .observed_at_unix_ms = self.now(),
             .text = text,
         } });
         try self.saveLocked();
     }
 
-    pub fn scheduleWakeup(self: *Registry, work: Work, at: i64, text: []const u8) !u64 {
+    pub fn scheduleWakeup(self: *Registry, a: Allocator, work: Work, name: []const u8, at: i64, text: []const u8) ![]const u8 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
@@ -533,11 +526,11 @@ pub const Registry = struct {
         var transferred = false;
         errdefer if (!transferred) self.allocator.free(owned);
         try self.wakeups.ensureUnusedCapacity(self.allocator, 1);
-        const id = try self.registerCallbackLocked(work.session, .wakeup);
-        self.wakeups.appendAssumeCapacity(.{ .id = id, .at_unix_ms = at, .text = owned });
+        const registration = try self.registerCallbackLocked(work.session, name, .wakeup);
+        self.wakeups.appendAssumeCapacity(.{ .id = registration.id, .at_unix_ms = at, .text = owned });
         transferred = true;
         try self.saveLocked();
-        return id;
+        return a.dupe(u8, registration.reference);
     }
 
     pub fn dueWakeups(self: *Registry, a: Allocator) ![]const History.Wakeup {
@@ -558,13 +551,13 @@ pub const Registry = struct {
         try self.saveLocked();
     }
 
-    pub fn registerCallback(self: *Registry, work: Work, source: contracts.Callback.Source) !u64 {
+    pub fn registerCallback(self: *Registry, a: Allocator, work: Work, name: []const u8, source: contracts.Callback.Source) !contracts.Callback.Registration {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        const id = try self.registerCallbackLocked(work.session, source);
+        const registration = try self.registerCallbackLocked(work.session, name, source);
         try self.saveLocked();
-        return id;
+        return .{ .id = registration.id, .reference = try a.dupe(u8, registration.reference) };
     }
 
     /// Before startup dispatch, these registrations belong to commands from the
@@ -573,16 +566,39 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         var pending: std.ArrayList(History.CallbackRegistration) = .empty;
-        for (self.callbacks.items) |callback| if (callback.source == .host) try pending.append(a, callback);
+        for (self.callbacks.items) |callback| if (callback.source == .host) try pending.append(a, .{
+            .id = callback.id,
+            .reference = try a.dupe(u8, callback.reference),
+            .session_id = callback.session_id,
+            .source = try cloneSource(a, callback.source),
+        });
         return pending.toOwnedSlice(a);
     }
 
-    fn registerCallbackLocked(self: *Registry, session: *Session, source: contracts.Callback.Source) !u64 {
-        try self.callbacks.ensureUnusedCapacity(self.allocator, 1);
+    fn registerCallbackLocked(self: *Registry, session: *Session, name: []const u8, source: contracts.Callback.Source) !History.CallbackRegistration {
         const id = self.next_callback_id;
-        self.callbacks.appendAssumeCapacity(.{ .id = id, .session_id = session.session_id, .source = source });
-        self.next_callback_id += 1;
-        return id;
+        const next = try std.math.add(u64, id, 1);
+        const reference = try contracts.Reference.create(self.allocator, name, id);
+        errdefer self.allocator.free(reference);
+        const owned_source = try cloneSource(self.allocator, source);
+        errdefer freeSource(self.allocator, owned_source);
+        const registration: History.CallbackRegistration = .{ .id = id, .reference = reference, .session_id = session.session_id, .source = owned_source };
+        try self.callbacks.append(self.allocator, registration);
+        self.next_callback_id = next;
+        return registration;
+    }
+
+    fn restoreCallback(self: *Registry, saved: History.CallbackRegistration) !void {
+        const reference = try self.allocator.dupe(u8, saved.reference);
+        errdefer self.allocator.free(reference);
+        const source = try cloneSource(self.allocator, saved.source);
+        errdefer freeSource(self.allocator, source);
+        try self.callbacks.append(self.allocator, .{ .id = saved.id, .reference = reference, .session_id = saved.session_id, .source = source });
+    }
+
+    fn freeCallback(self: *Registry, callback: History.CallbackRegistration) void {
+        self.allocator.free(callback.reference);
+        freeSource(self.allocator, callback.source);
     }
 
     fn callbackLocked(self: *Registry, id: u64) ?History.CallbackRegistration {
@@ -592,7 +608,7 @@ pub const Registry = struct {
 
     fn completeCallbackLocked(self: *Registry, id: u64) void {
         for (self.callbacks.items, 0..) |callback, index| if (callback.id == id) {
-            _ = self.callbacks.orderedRemove(index);
+            self.freeCallback(self.callbacks.orderedRemove(index));
             break;
         };
         self.removeWakeupLocked(id);
@@ -632,7 +648,7 @@ pub const Registry = struct {
     fn recordCompletionLocked(self: *Registry, session: *Session, ended_at: i64) !void {
         try self.ensureStartupLocked(self.core);
         try self.reports.append(.{
-            .from_session = session.session_id,
+            .from_focus = session.focus_id,
             .observed_at_unix_ms = ended_at,
             .content = .ended,
         });
@@ -653,7 +669,6 @@ pub const Registry = struct {
         session.pending.clearRetainingCapacity();
         session.active = activation;
         session.borrowed_workers += 1;
-        session.last_active_unix_ms = self.now();
         return .{ .session = session, .activation = activation };
     }
 
@@ -679,7 +694,7 @@ pub const Registry = struct {
                 .observed_at_unix_ms = report.observed_at_unix_ms,
             }} else &.{};
             delivery.* = try Delivery.create(self.allocator, .{ .activity = .{
-                .from_session = report.from_session,
+                .from_focus = report.from_focus,
                 .messages = messages,
                 .ended_at_unix_ms = if (report.content == .ended) report.observed_at_unix_ms else null,
             } }, null);
@@ -693,7 +708,7 @@ pub const Registry = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const entries = try self.history.restoreEntries(arena.allocator(), session.session_id);
-        session.context = try Context.restore(self.allocator, .{ .session_id = session.session_id, .epoch = session.epoch }, entries);
+        session.context = try Context.restore(self.allocator, .{ .session_id = session.session_id, .epoch = session.epoch }, session.focus_id, entries);
     }
 
     fn ensureStartupLocked(self: *Registry, session: *Session) !void {
@@ -731,7 +746,7 @@ pub const Registry = struct {
         work.activation.waiting_for_tools = waiting;
     }
 
-    fn sessionInfoLocked(self: *Registry, session: *Session) Input.SessionInfo {
+    fn sessionInfoLocked(self: *Registry, session: *Session) Input.FocusInfo {
         var endings: usize = 0;
         if (session == self.core) {
             endings = self.reports.pendingEndings();
@@ -742,12 +757,11 @@ pub const Registry = struct {
             };
         }
         return .{
-            .session_id = session.session_id,
+            .focus_id = session.focus_id,
             .role = session.role,
             .status = if (session.active) |activation| (if (activation.waiting_for_tools) .waiting_for_tools else .running) else if (self.hasWork(session)) .ready else .dormant,
             .queued_inputs = queuedOrdinary(session.pending.items) + endings,
             .pending_callbacks = self.callbackCount(session.session_id),
-            .last_active_unix_ms = session.last_active_unix_ms,
         };
     }
 
@@ -761,6 +775,7 @@ pub const Registry = struct {
         for (session.pending.items) |delivery| delivery.destroy(self.allocator);
         session.pending.deinit(self.allocator);
         if (session.context) |*context| context.deinit();
+        self.allocator.free(session.focus_id);
         self.allocator.destroy(session);
     }
 
@@ -795,13 +810,13 @@ fn hasStartup(deliveries: []const *Delivery) bool {
 
 fn isInternal(event: Input.Event) bool {
     return switch (event) {
-        .assignment, .session_message => true,
+        .assignment, .focus_message => true,
         .startup, .input, .callback, .activity => false,
     };
 }
 
-fn lessSession(_: void, left: Input.SessionInfo, right: Input.SessionInfo) bool {
-    return left.session_id < right.session_id;
+fn lessFocus(_: void, left: Input.FocusInfo, right: Input.FocusInfo) bool {
+    return (contracts.Reference.sequence(left.focus_id) orelse unreachable) < (contracts.Reference.sequence(right.focus_id) orelse unreachable);
 }
 
 fn lessSessionId(_: void, left: *Session, right: *Session) bool {
@@ -810,4 +825,15 @@ fn lessSessionId(_: void, left: *Session, right: *Session) bool {
 
 fn assertWork(work: Work) void {
     std.debug.assert(work.session.active == work.activation);
+}
+
+fn cloneSource(a: Allocator, source: contracts.Callback.Source) !contracts.Callback.Source {
+    return switch (source) {
+        .wakeup => .wakeup,
+        .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
+    };
+}
+
+fn freeSource(a: Allocator, source: contracts.Callback.Source) void {
+    if (source == .host) a.free(source.host.command_id);
 }

@@ -6,10 +6,9 @@
       "type": "object",
       "properties": {
         "command_id": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 18446744073709551615,
-          "description": "Omit to list commands."
+          "type": "string",
+          "minLength": 1,
+          "description": "The complete command_id returned earlier. Omit to list commands."
         }
       },
       "required": [],
@@ -18,10 +17,15 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. If execution and cleanup finish during the wait, return a final result. Otherwise return command_id and callback_id, registering one completion observation for this session so it can sleep while waiting. A callback_id confirms the registration even if the returned command snapshot is already final. Initial previews and continuation reads are independent and may overlap. Full output remains in log files.",
+    "description": "Run a named command in a fresh shell. If execution and cleanup finish during the wait, return a final result. Otherwise return command_id and callback_id, registering one completion observation for this focus so it can sleep while waiting. A callback_id confirms the registration even if the returned command snapshot is already final. Initial previews and continuation reads are independent and may overlap. Full output remains in log files.",
     "parameters": {
       "type": "object",
       "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A short name for this work. The runtime adds numbers to form command_id and, when needed, callback_id; names may repeat."
+        },
         "command": {
           "type": "string",
           "minLength": 1
@@ -76,6 +80,7 @@
         }
       },
       "required": [
+        "name",
         "command"
       ],
       "additionalProperties": false
@@ -88,10 +93,9 @@
       "type": "object",
       "properties": {
         "command_id": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 18446744073709551615,
-          "description": "Runtime command handle returned by run_host_shell or listed by inspect_host_shell."
+          "type": "string",
+          "minLength": 1,
+          "description": "The complete command_id returned by run_host_shell or listed by inspect_host_shell."
         },
         "action": {
           "type": "object",

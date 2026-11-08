@@ -172,9 +172,9 @@ pub const Kernel = struct {
             self.forks.deinit(self.kernel.allocator);
         }
 
-        fn registerCallback(context: *anyopaque, source: contracts.Callback.Source) anyerror!u64 {
+        fn registerCallback(context: *anyopaque, a: Allocator, name: []const u8, source: contracts.Callback.Source) anyerror!contracts.Callback.Registration {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
-            return self.kernel.sessions.registerCallback(self.work, source);
+            return self.kernel.sessions.registerCallback(a, self.work, name, source);
         }
 
         fn invoke(context: *anyopaque, a: Allocator, request: AgentTools.Request) anyerror!Content {
@@ -185,21 +185,21 @@ pub const Kernel = struct {
                     .invalid_recipient => try runtimeError(a, "invalid_recipient", "The recipient ID is invalid."),
                 },
                 .send_focus_message => |message| blk: {
-                    self.kernel.sessions.sendSessionMessage(self.work, message.session_id, message.text) catch |err| return try toolFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .session_id = message.session_id });
+                    self.kernel.sessions.sendFocusMessage(self.work, message.focus_id, message.text) catch |err| return try toolFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .focus_id = message.focus_id });
                 },
                 .schedule_attention => |args| blk: {
-                    const id = self.kernel.sessions.scheduleWakeup(self.work, args.at_unix_ms, args.text) catch |err| return try toolFailure(a, err);
+                    const id = self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at_unix_ms, args.text) catch |err| return try toolFailure(a, err);
                     break :blk try runtimeResult(a, .{ .callback_id = id });
                 },
                 .open_focus => |args| blk: {
                     try self.forks.ensureUnusedCapacity(self.kernel.allocator, 1);
-                    const plan = self.kernel.sessions.prepareFork(self.work, args.task) catch |err| switch (err) {
-                        error.SessionCapacityUnavailable => return try runtimeError(a, "focus_unavailable", "The session limit has been reached. Existing sessions remain addressable."),
+                    const plan = self.kernel.sessions.prepareFork(self.work, args.name, args.task) catch |err| switch (err) {
+                        error.SessionCapacityUnavailable => return try runtimeError(a, "focus_unavailable", "The focus limit has been reached. Existing focuses remain addressable."),
                         else => return err,
                     };
                     self.forks.appendAssumeCapacity(plan);
-                    break :blk try runtimeResult(a, .{ .session_id = plan.session.session_id });
+                    break :blk try runtimeResult(a, .{ .focus_id = plan.session.focus_id });
                 },
             };
         }
@@ -225,10 +225,13 @@ pub const Kernel = struct {
             try self.sessions.recordAssistant(work, inference.response.text);
             const has_tools = inference.response.calls.len != 0;
             if (has_tools) try self.sessions.setToolWait(work, true);
-            const replies = try self.engine.executeTools(a, session.session_id, inference, .{
+            const replies = try self.engine.executeTools(a, .{
+                .session_id = session.session_id,
+                .focus_id = session.focus_id,
+                .callback = .{ .context = &runtime, .register = RuntimeRound.registerCallback },
+            }, inference, .{
                 .context = &runtime,
                 .invoke = RuntimeRound.invoke,
-                .callback = .{ .context = &runtime, .register = RuntimeRound.registerCallback },
             });
             if (has_tools) try self.sessions.setToolWait(work, false);
             delivery = .none;
@@ -284,7 +287,7 @@ pub const Kernel = struct {
         var selected = try history.clone(self.allocator);
         errdefer selected.deinit();
         const grouped = try Input.coalesceActivityReports(a, events.items[0..count]);
-        try selected.appendRecord(.{ .events = .{ .session_id = work.session.session_id, .items = grouped } });
+        try selected.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = grouped } });
         return .{ .count = count, .context = selected };
     }
 
@@ -304,10 +307,9 @@ pub const Kernel = struct {
         const trial = scratch.allocator();
         defer _ = scratch.reset(.retain_capacity);
         var current = try snapshot.afterAdmission(trial, events, events.len);
-        current.state.runtime.queued_inputs = 0;
-        const directory = try trial.dupe(Input.SessionInfo, current.state.runtime.sessions);
+        const directory = try trial.dupe(Input.FocusInfo, current.focuses);
         for (directory) |*session| session.queued_inputs = 0;
-        current.state.runtime.sessions = directory;
+        current.focuses = directory;
         const grouped = try trial.dupe(Input.Event, try Input.coalesceActivityReports(trial, events));
         for (grouped) |*event| if (event.* == .activity) {
             event.activity.ended_at_unix_ms = 0;
@@ -391,8 +393,8 @@ fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
 
 fn toolFailure(a: Allocator, err: anyerror) !Content {
     return switch (err) {
-        error.UnknownSession => runtimeError(a, "unknown_session", "The session does not exist."),
-        error.SessionQueueFull => runtimeError(a, "session_queue_full", "The session's event queue is full."),
+        error.UnknownSession => runtimeError(a, "unknown_focus", "The focus does not exist."),
+        error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The focus cannot currently accept another observation."),
         else => err,
     };
 }

@@ -17,7 +17,7 @@ Set `interpretation: "image_url"` on a memory read or host command to present th
 Ivenna supplies the text unchanged, without fetching or validating the URL or referenced media. The configured model service handles the reference. For example:
 
 ```json
-{"command":"printf '%s' 'https://example.com/image.png'","interpretation":"image_url"}
+{"name":"image-reference","command":"printf '%s' 'https://example.com/image.png'","interpretation":"image_url"}
 ```
 
 Omit `interpretation` when the source already contains image bytes or when a URL should remain text. A partial text range is never treated as an image reference.

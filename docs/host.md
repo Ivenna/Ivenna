@@ -1,6 +1,6 @@
 # Host shell
 
-The [host tools](../packages/host/src/tools.json) let activity sessions run programs, inspect their output, and interact with them through the kernel's OS account on the shared host filesystem. Each command has its own host identity so activities can discover and control it while it runs.
+The [host tools](../packages/host/src/tools.json) let activity focuses run programs, inspect their output, and interact with them through the kernel's OS account on the shared host filesystem. Each command has its own host identity so activities can discover and control it while it runs.
 
 | Tool | Purpose |
 | --- | --- |
@@ -13,17 +13,18 @@ The [host tools](../packages/host/src/tools.json) let activity sessions run prog
 Call `run_host_shell` to start a command:
 
 ```json
-{"command":"make -j4","cwd":"/path/to/project"}
+{"name":"build","command":"make -j4","cwd":"/path/to/project"}
 ```
 
 `yield_ms` bounds how long this call waits for completion: it defaults to `1000` milliseconds, and `0` returns an immediate observation. Returning from the wait leaves unfinished execution running. `timeout_ms` separately limits how long the command may execute before it is stopped.
 
-If execution and cleanup finish within the wait, the call returns the final outcome with a complete-source output preview. Otherwise it returns a `command_id` for interaction and a distinct `callback_id` for one completion observation bound to the calling activity. The activity can continue reasoning without polling for completion. A returned `callback_id` confirms that registration even if the command has finished by the time its result snapshot is taken.
+If execution and cleanup finish within the wait, the call returns the final outcome with a complete-source output preview. Otherwise it returns a complete `command_id` for interaction and a `callback_id` for one completion observation bound to the calling activity. Both use the supplied name as their prefix and have independently assigned numeric suffixes. The activity can continue reasoning without polling for completion. A returned `callback_id` confirms that registration even if the command has finished by the time its result snapshot is taken.
 
 The tool wait retains the current activation and context while the core and other activities continue. After the complete model/tool round, the next inference receives the tool reply together with newly admitted observations.
 
 | Argument | Meaning |
 | --- | --- |
+| `name` | Required short name; the runtime appends a number to form the command reference; names may repeat |
 | `command` | Required command text, interpreted by the selected shell |
 | `cwd` | Working directory, absolute or relative to the kernel's startup directory; defaults to that startup directory |
 | `shell` | Shell executable accepting `-c`; defaults to `/bin/sh` |
@@ -33,6 +34,8 @@ The tool wait retains the current activation and context while the core and othe
 | `timeout_ms` | Optional positive execution deadline in milliseconds, up to `4294967295`; omitted means no execution deadline |
 | `max_output_bytes` | Combined encoded stdout/stderr preview budget, from `512` through `16384` bytes; defaults to `16384`; result metadata and log paths are additional |
 | `interpretation` | Optional `"image_url"` for presenting complete stdout as an [image reference](content.md#image-url-references) once the command has finished |
+
+Names must be nonempty UTF-8 text without ASCII control characters; spaces alone are not accepted.
 
 Each start creates a fresh shell. Its directory and environment changes belong to that command; keep it running in an [input mode](#input-modes) to preserve state across calls. The command string follows the selected shell's syntax, while `cwd` is a literal path resolved before shell startup.
 
@@ -49,21 +52,21 @@ The inherited environment requests plain output with `NO_COLOR=1` and pagers set
 For example, start an interactive Python process in a terminal and return immediately:
 
 ```json
-{"command":"python3 -u -i","mode":"terminal","yield_ms":0}
+{"name":"python","command":"python3 -u -i","mode":"terminal","yield_ms":0}
 ```
 
 A terminal starts with 24 rows and 80 columns and can be resized. The tool returns its output stream without rendering a screen. Terminal processing can alter input and output bytes; use `batch` or `pipe` when bytes must be preserved. See the [runtime requirements](running.md#runtime-requirements) for terminal support.
 
 ## Continuing and controlling a command
 
-Use a `command_id` returned by a yielded `run_host_shell` call or listed by `inspect_host_shell`. Commands are discoverable across activities, including while the starting activity is still waiting in `run_host_shell`. Input and control do not wait for another observation call's yield deadline.
+Use the complete `command_id` returned by a yielded `run_host_shell` call or listed by `inspect_host_shell`. Commands are discoverable across activities, including while the starting activity is still waiting in `run_host_shell`. Input and control do not wait for another observation call's yield deadline.
 
-Call `inspect_host_shell` with `{}` to inspect the default `shell`, startup `cwd`, and `commands`, or pass `{"command_id":17}` to select one. Entries include `command_id`, originating `session_id`, `command_preview` (up to 160 UTF-8 bytes), `state`, `mode`, `stdin_open`, and `input_pending`. The list has a 32 KiB encoded reply budget; `total_commands` and `commands_truncated` identify omitted entries.
+Call `inspect_host_shell` with `{}` to inspect the default `shell`, startup `cwd`, and `commands`, or pass `{"command_id":"build-17"}` to select one. Entries include `command_id`, originating `focus_id`, `command_preview` (up to 160 UTF-8 bytes), `state`, `mode`, `stdin_open`, and `input_pending`. The list has a 32 KiB encoded reply budget; `total_commands` and `commands_truncated` identify omitted entries.
 
 Call `continue_host_shell` with the selected `command_id`. Omit `action` to read more output:
 
 ```json
-{"command_id":17,"yield_ms":1000,"max_output_bytes":4096}
+{"command_id":"build-17","yield_ms":1000,"max_output_bytes":4096}
 ```
 
 For a continuation, `yield_ms` waits for unread output or completion. It defaults to `1000` milliseconds; `0` inspects the current state, and values through `4294967295` are supported. The command keeps its existing execution deadline. `max_output_bytes` has the same range and default as `run_host_shell`.
@@ -90,7 +93,7 @@ Command observations contain state, elapsed time, full log paths, stream byte le
 | Result field | Meaning |
 | --- | --- |
 | `command_id` | Host command identity, returned for a handoff or continuation and included in a stored completion result; usable as a handle only in its originating runtime while retained |
-| `callback_id` | Returned when the initial call arranges a completion observation; distinct from `command_id` |
+| `callback_id` | Reference for the completion observation arranged by the initial call |
 | `state.running` | The command is still running |
 | `state.finished` | The final outcome: `completed` with an exit code or other OS termination status, `timed_out`, or `not_started` with a reason |
 | `state.unavailable` | The host could not establish a complete outcome; `reason` describes the failure |
@@ -105,8 +108,8 @@ A running pipe command can return:
 ```json
 {
   "result": {
-    "command_id": 17,
-    "callback_id": 5,
+    "command_id": "build-17",
+    "callback_id": "build-5",
     "state": {"running": {}},
     "elapsed_ms": 1002,
     "mode": "pipe",
@@ -135,13 +138,13 @@ When `run_host_shell` returns the final result directly, it supplies a complete-
 
 Final complete stdout can supply an image or image URL reference through [content classification](content.md). The first final `continue_host_shell` observation of a retained handle can supply its complete native media once, independently of the text cursor. This stdout description has no `range` and advances the shared cursor to the end. If a command finishes before its initial handoff snapshot, that initial result can also carry native media without consuming the continuation's first-final allowance. Running output remains text or an unavailable-content diagnostic.
 
-A registered completion arrives as a [callback observation](input.md#session-messages-and-callbacks) whose source identifies the command. Its text contains the final result with an independent complete-source preview or an output diagnostic. It reports the host outcome; Ivenna assesses whether the assigned task succeeded. The callback consumes neither the shared continuation cursors nor their first-final media observation. It carries media descriptions and log paths; `media_omission: "asynchronous_media_unavailable"` marks a native part that the text-only callback cannot carry.
+A registered completion arrives as a [callback observation](input.md#focus-messages-and-callbacks) whose source identifies the command. Its text contains the final result with an independent complete-source preview or an output diagnostic. It reports the host outcome; Ivenna assesses whether the assigned task succeeded. The callback consumes neither the shared continuation cursors nor their first-final media observation. It carries media descriptions and log paths; `media_omission: "asynchronous_media_unavailable"` marks a native part that the text-only callback cannot carry.
 
-For incremental `content.unavailable`, its `byte_length` describes the unsupported range; the stream's `byte_length` describes the entire log snapshot. Without a range, the diagnostic concerns the complete source. Full logs remain under `<DATA_DIR>/host/<originating session_id>/` independently of handle retention, and can be read through another command to inspect omitted text or media.
+For incremental `content.unavailable`, its `byte_length` describes the unsupported range; the stream's `byte_length` describes the entire log snapshot. Without a range, the diagnostic concerns the complete source. Full logs remain at the returned paths under `<DATA_DIR>/host/` independently of handle retention, and can be read through another command to inspect omitted text or media.
 
 ## Command lifetimes
 
-Command IDs identify executions within the current runtime; callback IDs identify registered observations retained across restart. A command handed off by its initial call remains owned by the host runtime and has one completion observation registered for its originating activity. That registration keeps the activity available across sleep until the observation is durably admitted. Reading or controlling the command from another activity does not redirect its completion. The `session_id` in inspection records identifies where the command started.
+Complete command references identify executions within the current runtime; callback references connect the initial handoff with its later observation and remain retained across restart. A command handed off by its initial call remains owned by the host runtime and has one completion observation registered for its originating activity. That registration keeps the activity available across sleep until the observation is durably admitted. Reading or controlling the command from another activity does not redirect its completion. The `focus_id` in inspection records identifies where the command started.
 
 Command state, handle retention, and the registered observation have separate lifetimes. Draining a handle does not cancel its completion observation; cancellation is unavailable. A response without tool calls lets the activity sleep while an observation remains registered. See [activity completion](attention.md#activity-completion) for the conditions under which it sleeps or ends.
 

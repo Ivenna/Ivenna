@@ -7,9 +7,9 @@ const Allocator = std.mem.Allocator;
 /// selection. Kernel owns their effects within the calling model/tool round.
 pub const Request = union(enum) {
     send_message: contracts.Communication.Message,
-    open_focus: struct { task: []const u8 },
-    send_focus_message: struct { session_id: u64, text: []const u8 },
-    schedule_attention: struct { at_unix_ms: i64, text: []const u8 },
+    open_focus: struct { name: []const u8, task: []const u8 },
+    send_focus_message: struct { focus_id: []const u8, text: []const u8 },
+    schedule_attention: struct { name: []const u8, at_unix_ms: i64, text: []const u8 },
 
     /// Unknown names belong to other capabilities. A recognized action that is
     /// unavailable to this role must not fall through to another implementation.
@@ -24,9 +24,9 @@ pub const Request = union(enum) {
         };
         switch (request) {
             .send_message => |args| if (args.recipients.len == 0 or args.text.len == 0) return error.InvalidToolArguments,
-            .open_focus => |args| if (args.task.len == 0) return error.InvalidToolArguments,
-            .send_focus_message => |args| if (args.session_id == 0 or args.text.len == 0) return error.InvalidToolArguments,
-            .schedule_attention => |args| if (args.text.len == 0) return error.InvalidToolArguments,
+            .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
+            .send_focus_message => |args| if (args.focus_id.len == 0 or args.text.len == 0) return error.InvalidToolArguments,
+            .schedule_attention => |args| if (!contracts.Reference.validName(args.name) or args.text.len == 0) return error.InvalidToolArguments,
         }
         return request;
     }

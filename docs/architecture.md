@@ -64,7 +64,9 @@ Shared [communication types](../packages/agent_contracts/src/communication.zig) 
 
 `Communication.SendResult` distinguishes a submitted message from an unsupported recipient. The sending adapter classifies recipient support before submission; execution renders the corresponding tool result. Infrastructure failures propagate through the error channel.
 
-`Tools.Invocation` identifies the calling session and supplies a registrar borrowed for that invocation. A capability retains the returned callback ID for later publication through `Callback.Publisher`; it does not retain the registrar or choose another receiving session.
+`Tools.Invocation` carries the internal calling session ID and its model-facing `focus_id`, together with a registrar borrowed for that invocation. The registrar accepts a name and source and returns `Callback.Registration`: an internal numeric delivery ID and a complete reference allocated for the caller. A capability retains the numeric ID for publication through `Callback.Publisher` and presents the reference as `callback_id`; it does not retain the registrar or choose another receiving session.
+
+[Reference](../packages/agent_contracts/src/reference.zig) validates names and formats `<name>-<number>` references for Agent and Host. Each owner allocates its own numeric sequence and controls reference lifetime. Lookup checks the complete reference; its numeric suffix alone does not establish identity.
 
 The email integration uses the configured mail account for correspondence, callbacks, and working history. It owns native addressing, folders, markers, and record lifecycles behind the shared contracts. The [email boundary](#email-boundary) describes its storage protocols and operation ownership.
 
@@ -94,7 +96,7 @@ Reception status belongs to the service boundary. Model reasoning and tools do n
 
 The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes. A worker retains its inference output and context while the tool batch executes, then commits the complete round before its model-round arena ends.
 
-The registry stores each session's `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Sleeping sessions retain their identities and roles through context unloading and restart. Completed activities leave the registry; session IDs increase monotonically and are not reused. The core remains registered.
+The registry stores each session's internal numeric ID, stable named `focus_id`, and `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Sleeping sessions retain their identities and roles through context unloading and restart. Completed activities leave the registry; session IDs increase monotonically and are not reused. The core remains registered.
 
 ### Scheduling and capacity
 
@@ -108,9 +110,9 @@ Correspondence and callback mail stay in their durable sources when their destin
 
 Correspondence enters the core's FIFO queue independently of mail threads. Both roles expose external communication and shared memory. The core exposes `open_focus`, `send_focus_message`, and `schedule_attention`; activities expose host tools. [Agent actions](../packages/agent/src/tools.zig) own typed arguments, recognition, and a single role rule used by declaration selection and invocation. Engine records the inference's role and uses it again for execution; Kernel receives parsed actions and owns their effects. Inherited tool calls do not establish current availability. Saved wakeup registrations retain their destinations during restoration and delivery.
 
-`send_focus_message` uses the registry's durable session-message queue with a target chosen by the core. The registry records the calling core as `from_session`. Messages consume ordinary event capacity and can make a sleeping recipient ready. They do not register an awaited reply. Activity expressions remain in their separate outbox and accompany the core's ordinary inputs without activating it.
+`send_focus_message` uses the registry's durable session-message queue with a target chosen by the core. The registry records the calling core's complete reference as `from_focus`. Messages consume ordinary event capacity and can make a sleeping recipient ready. They do not register an awaited reply. Activity expressions remain in their separate outbox and accompany the core's ordinary inputs without activating it.
 
-Each inference receives a fresh session roster. Persistent callback registrations retain their receiving session IDs; `runtimeSnapshot` filters for the caller and projects only `id` and `source` into `Input.PendingCallback`. Observations, reports, and handovers retain task understanding.
+Each inference receives a fresh focus roster. Persistent callback registrations retain their numeric delivery IDs, complete references, receiving session IDs, and sources. `runtimeSnapshot` filters for the caller and projects `callback_id` and `source` into `Input.PendingCallback`. Observations, reports, and handovers retain task understanding.
 
 Runtime state changes update the next snapshot without scheduling the core. Unread assistant messages also do not make it ready; an activity's ending does. Ordinary tool replies can continue an already active core session.
 
@@ -128,13 +130,13 @@ The selected group and checkpoint are saved before receipts are acknowledged and
 
 Only the core can invoke `open_focus`. Each call reserves a new identity and prepares an assignment. At round commit, the registry appends the complete model output and one reply per tool call to a candidate core context. It independently clones that context for each prepared activity, then publishes the completed core context and all new activities together. Publication leaves the core's activation running. A round can fork several activities, subject to identity capacity.
 
-Each copy includes retained observations, complete native model/tool exchanges, and any existing handover followed by later history. All replies from the calling round are included, even those produced after the fork call. Forking generates no extra summary. Original record session IDs remain intact as provenance; historical tool calls are not replayed.
+Each copy includes retained observations, complete native model/tool exchanges, and any existing handover followed by later history. All replies from the calling round are included, even those produced after the fork call. Forking generates no extra summary. Original record focus references remain intact as provenance; historical tool calls are not replayed.
 
 The assignment is the activity's first new queued observation. Temporary inference turns, queued observations, callback registrations, and wakeup schedules are not copied or transferred. The activity receives its own current-state snapshot and selected tools under the same system prompt. Inherited assistant output is not collected again as a new report. See [opening a focus](attention.md#opening-a-focus) and [assignment fields](input.md#assignments-and-reports).
 
 ## Activity reports
 
-After an ordinary activity inference returns successfully, Kernel persists its non-null `Response.text` as an assistant fact in the activity journal before invoking tools. The source session ID and the time the runtime collected the complete response accompany the text. This collection copies new text once; it excludes reasoning, tool replies, compaction responses, and inherited exchanges. The complete native model/tool round is committed separately after execution. A restart can therefore preserve a reported expression even when its source round was interrupted before commit; that expression does not establish tool effects.
+After an ordinary activity inference returns successfully, Kernel persists its non-null `Response.text` as an assistant fact in the activity journal before invoking tools. The source focus reference and the time the runtime collected the complete response accompany the text. This collection copies new text once; it excludes reasoning, tool replies, compaction responses, and inherited exchanges. The complete native model/tool round is committed separately after execution. A restart can therefore preserve a reported expression even when its source round was interrupted before commit; that expression does not establish tool effects.
 
 The registry appends single assistant and ending facts to one ordered durable outbox owned by [reports.zig](../packages/agent/src/reports.zig). Its `Entry` represents an internal fact independently of the model-facing `Input.ActivityReport`. An ending carries the time the runtime established session completion. Bodies are separate immutable history records linked by predecessor keys. Its checkpoint selects the unread suffix through a storage group, head key, unread count, and ending count. The runtime retains the selected record metadata and loads bodies in internal pages of 64 facts. Assistant text does not schedule the core. An ending both records the source session's completion and supplies a reason for core work, including when no assistant text was produced.
 
@@ -152,11 +154,11 @@ After the checkpoint is confirmed and worker borrows end, a sleeping activity ca
 
 ## Event sources and callback admission
 
-The registry persists monotonically increasing callback IDs with their receiving sessions and `Callback.Source`: either `wakeup` or `host: { command_id }`. An invocation's registrar binds the destination without exposing session routing to Host. A wakeup saves its registration and deadline together; a yielded host command saves its registration before returning its callback ID. Both publish through `Callback.Publisher`. Forking and context unloading do not copy or retarget registrations.
+The registry persists monotonically increasing numeric callback delivery IDs, named references, receiving sessions, and `Callback.Source`: either `wakeup` or `host: { command_id }` with the complete command reference. A tool-supplied name and the numeric delivery sequence form the model-facing `callback_id`. An invocation's registrar binds the destination without exposing session routing to Host. Scheduled attention saves its registration and deadline together; a yielded host command saves its registration before returning its callback reference. Both publish through `Callback.Publisher` using the internal numeric delivery ID. Forking and context unloading do not copy or retarget registrations.
 
 A wakeup also stores `History.Wakeup { id, at_unix_ms, text }`. The intake loop durably publishes a due wakeup's text before removing that entry; its callback registration remains until admission. After a crash, the loop can republish text from a retained entry through the [first-result-preserving publisher](#callback-delivery). Polling, queue capacity, and scheduling can delay inference beyond the deadline.
 
-Intake resolves the ID through its registration, adds the saved source to the observation, and defers a full destination. `queued_callbacks` blocks duplicate acceptance and acknowledgement until the accepted delivery is durably saved and any receipt acknowledged. Admission saves the observation and registration removal in one checkpoint. Later copies of a consumed positive ID below the saved next-ID counter are acknowledged without another observation. Other unknown IDs fail execution.
+Intake resolves the numeric delivery ID through its registration, adds the saved callback reference and source to the model observation, and defers a full destination. The owned `Delivery` keeps the numeric ID separately for admission and acknowledgement; it is not part of the rendered observation. `queued_callbacks` blocks duplicate acceptance and acknowledgement until the accepted delivery is durably saved and any receipt acknowledged. Admission saves the observation and registration removal in one checkpoint. Later copies of a consumed positive ID below the saved next-ID counter are acknowledged without another observation. Other unknown IDs fail execution.
 
 ## Working history and user messages
 
@@ -168,11 +170,11 @@ Context prepends the embedded [system.md](../packages/agent/src/system.md) as on
 
 For ordinary work, `Context.Delivery.latest` moves the newest event record from the history prefix into `purpose.work.events`, leaving retained Context unchanged. Afterward, `Context.Delivery.none` keeps the full history prefix and supplies empty events, even after empty model output. Candidate assembly uses the same turn shape with the [projected admission state](#activation-admission). Summary assembly reads the full retained prefix; [compaction](#bounded-model-context) owns replacement.
 
-Appending clones and renders the new entry. Inference snapshots and activity forks copy retained contents for independent ownership; workers retain request snapshots through the complete model/tool round. An activity's copy sets `Context.scope` to its own session ID and epoch zero, preserving the original session IDs inside inherited records.
+Appending clones and renders the new entry. Inference snapshots and activity forks copy retained contents for independent ownership; workers retain request snapshots through the complete model/tool round. An activity's copy sets its internal `Context.scope` to its own numeric session ID and epoch zero and its current reference to its own `focus_id`. Original focus references inside inherited records remain unchanged.
 
 ### Runtime state snapshots
 
-Each turn repeats the complete runtime projection, including the roster and caller's pending callbacks, without a delta baseline. Its observation time dates the snapshot; delivered activity messages and endings keep their original times. Snapshot size grows with the roster and registrations and competes with history and tools for the request budget. The [design choice](design.md#events-and-waiting) keeps snapshots self-contained across restart and compaction; model messages and memory carry understanding.
+Each turn projects the current focus reference, role, observation time, pending callbacks, and focus roster directly under `current`, without a delta baseline. Roster entries retain status and per-focus queue and pending-observation counts; global totals and activation timestamps are not projected. Its observation time dates the snapshot; delivered activity messages and endings keep their original times. Snapshot size grows with the roster and registrations and competes with history and tools for the request budget. The [design choice](design.md#events-and-waiting) keeps snapshots self-contained across restart and compaction; model messages and memory carry understanding.
 
 ## Model requests and tools
 
@@ -211,11 +213,11 @@ The agent's [history persistence](../packages/agent/src/history.zig) stores immu
 | Storage group | An opaque identifier used by `HistoryStore` to discover related immutable records, such as a session segment or report journal |
 | Committed chain | The checkpoint's selected records in one segment, identified by a head key and entry count |
 
-Each entry contains either a complete admitted `Input.Record` or a complete model-output and tool-result batch as `Model.Item[]`. Exchanges preserve opaque model output, including reasoning, and typed tool replies with text and media. Local image bytes remain in the records; remote images retain their URLs. Inherited observation and handover records keep the core's original session ID.
+Each entry contains either a complete admitted `Input.Record` or a complete model-output and tool-result batch as `Model.Item[]`. Exchanges preserve opaque model output, including reasoning, and typed tool replies with text and media. Local image bytes remain in the records; remote images retain their URLs. Inherited observation and handover records keep the core's original focus reference.
 
 Working history and the activity outbox share a [record codec](../packages/agent/src/record_codec.zig) for compact UTF-8 ZON bodies and content keys. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. The storage group and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal observations are stored together in a separate immutable observation-array record in the session's current group.
 
-The checkpoint contains the next session and callback identifiers, pending callback registrations with their sources and bound destinations, scheduled wakeups with their deadlines and text, and the [activity outbox's unread selection](#activity-reports). For each registered session it records the ID, role, last activity, interrupted-execution state, epoch, current group, committed head, and entry count. An optional key selects the unread observation array in that group. Retained model/tool exchanges and admitted observations remain in the selected records.
+The checkpoint contains the next numeric session and callback identifiers, pending callback registrations with their complete references, sources, and bound destinations, scheduled wakeups with their deadlines and text, and the [activity outbox's unread selection](#activity-reports). For each registered session it records the internal ID, `focus_id`, role, interrupted-execution state, epoch, current group, committed head, and entry count. An optional key selects the unread observation array in that group. Retained model/tool exchanges and admitted observations remain in the selected records.
 
 Appending advances the head and count without adding a per-entry reference to the checkpoint. A sleeping session can retain this confirmed selection without materialized context entries. The latest confirmed checkpoint selects the records kept by [history maintenance](#history-retention) and available for subsequent restoration.
 
@@ -225,7 +227,7 @@ Appending advances the head and count without adding a per-entry reference to th
 
 Saves follow assistant report collection, admission, complete rounds, compaction, forks, completion, and unread-input or source changes. Materialized records are encoded and hashed against the cached committed chain; cold sessions reuse their confirmed selection. Required creates must succeed before checkpoint publication. Unconfirmed writes remain outside selected paths. Unchanged checkpoints skip publication; a publication error invalidates that comparison digest because storage may already have accepted it.
 
-Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Session IDs inside retained observation and handover records must identify either the restoring session or the core (`1`). Matching physical duplicates can supply one logical occurrence. Missing or inconsistent committed records fail restoration.
+Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Complete focus references inside retained observation and handover records must identify either the restoring focus or the core (`core-1`). Matching physical duplicates can supply one logical occurrence. Missing or inconsistent committed records fail restoration.
 
 Startup reads and validates all selected session history. It rebuilds the outbox's unread metadata from its checkpoint and loads report bodies in admission windows. It materializes the core context and discards temporary activity entries; activity contexts are materialized when scheduled. Later cold restores read only that session's history. Delivery objects, receipts, worker ownership, and host process handles are not checkpointed. See [startup](#startup-and-interruption) for reconstruction.
 
@@ -342,7 +344,7 @@ The handler translates selected-entry filesystem and pattern failures into tool 
 
 ### Command lifecycle
 
-Host reserves live capacity and assigns a runtime-scoped command ID before launch. `run_host_shell` waits on `std.Io.Condition` until process and input cleanup finish or the call's wait expires. If cleanup has completed, the call returns a complete-source result and retires the handle. Otherwise Host persists a completion registration with source `host: { command_id }`, retains the command, and returns the command and callback IDs. Other activities can discover and control a command while its caller waits.
+Host reserves live capacity and appends its runtime-scoped numeric sequence to the supplied name before launch, producing the complete command reference. `run_host_shell` waits on `std.Io.Condition` until process and input cleanup finish or the call's wait expires. If cleanup has completed, the call returns a complete-source result and retires the handle. Otherwise Host persists a completion registration with source `host: { command_id }`, using the command name for its callback prefix, retains the command, and returns the complete command and callback references. Other activities can discover and control a command while its caller waits.
 
 If the invocation has no registrar, Host stops and joins the command and returns `handoff_unavailable` with its observed result. Registration failures propagate under the [availability contract](design.md#runtime-availability); a failed history publication may still have saved the registration.
 
@@ -356,7 +358,7 @@ The Host mutex protects registry state, references, capacity, and input admissio
 
 The initial call keeps `handoff_pending` set until it rejects handoff or has saved the registration and prepared its tool result. Supervision waits for that flag to clear before publishing a completion, covering commands that finish during registration. It sets `settled` after process and input cleanup. Failure cleanup waits for that state without waiting for publication, so it can finish while the initial call still owns the handoff decision.
 
-Command lookup is shared across activities; inspection records retain the originating session as provenance. Initial observations and completion publication do not take the continuation lock; their [output collection](#output-and-delivery) is independent of the shared cursors.
+Command lookup is shared across activities; inspection records retain the originating `focus_id` as provenance. Initial observations and completion publication do not take the continuation lock; their [output collection](#output-and-delivery) is independent of the shared cursors.
 
 ### Processes and terminals
 

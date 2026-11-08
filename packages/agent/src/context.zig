@@ -17,16 +17,18 @@ pub const Context = struct {
     arena: std.heap.ArenaAllocator,
     /// This session's current history segment.
     scope: Scope,
+    focus_id: []const u8,
     entries: std.ArrayList(Entry) = .empty,
     messages: std.ArrayList(Model.Item) = .empty,
 
-    pub fn init(allocator: Allocator, scope: Scope) !Context {
-        return restore(allocator, scope, &.{});
+    pub fn init(allocator: Allocator, scope: Scope, focus_id: []const u8) !Context {
+        return restore(allocator, scope, focus_id, &.{});
     }
 
-    pub fn restore(allocator: Allocator, scope: Scope, entries: []const Entry) !Context {
-        var self: Context = .{ .allocator = allocator, .arena = .init(allocator), .scope = scope };
+    pub fn restore(allocator: Allocator, scope: Scope, focus_id: []const u8, entries: []const Entry) !Context {
+        var self: Context = .{ .allocator = allocator, .arena = .init(allocator), .scope = scope, .focus_id = undefined };
         errdefer self.deinit();
+        self.focus_id = try self.arena.allocator().dupe(u8, focus_id);
         try self.entries.ensureTotalCapacity(allocator, entries.len);
         for (entries) |entry| try self.append(entry);
         return self;
@@ -45,7 +47,7 @@ pub const Context = struct {
 
     /// Return an independently owned snapshot of this session's retained history.
     pub fn clone(self: *const Context, allocator: Allocator) !Context {
-        return restore(allocator, self.scope, self.entries.items);
+        return restore(allocator, self.scope, self.focus_id, self.entries.items);
     }
 
     pub fn appendRecord(self: *Context, record: Input.Record) !void {
@@ -102,8 +104,8 @@ pub const Context = struct {
 
     pub fn withHandover(self: *const Context, allocator: Allocator, summary: []const u8) !Context {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
-        const record: Input.Record = .{ .handover = .{ .session_id = scope.session_id, .summary = summary } };
-        return restore(allocator, scope, &.{.{ .record = record }});
+        const record: Input.Record = .{ .handover = .{ .focus_id = self.focus_id, .summary = summary } };
+        return restore(allocator, scope, self.focus_id, &.{.{ .record = record }});
     }
 
     fn append(self: *Context, entry: Entry) !void {
@@ -113,8 +115,8 @@ pub const Context = struct {
             .record => |record| {
                 try self.messages.ensureUnusedCapacity(self.allocator, 1);
                 const copy: Input.Record = switch (record) {
-                    .events => |group| .{ .events = .{ .session_id = group.session_id, .items = try cloneEvents(a, group.items) } },
-                    .handover => |handover| .{ .handover = .{ .session_id = handover.session_id, .summary = try a.dupe(u8, handover.summary) } },
+                    .events => |group| .{ .events = .{ .focus_id = try a.dupe(u8, group.focus_id), .items = try cloneEvents(a, group.items) } },
+                    .handover => |handover| .{ .handover = .{ .focus_id = try a.dupe(u8, handover.focus_id), .summary = try a.dupe(u8, handover.summary) } },
                 };
                 const text = try Input.renderRecord(a, copy);
                 self.entries.appendAssumeCapacity(.{ .record = copy });
@@ -148,19 +150,19 @@ fn cloneEvents(a: Allocator, events: []const Input.Event) ![]const Input.Event {
                 .observed_at_unix_ms = message.observed_at_unix_ms,
             };
             break :blk .{ .activity = .{
-                .from_session = report.from_session,
+                .from_focus = try a.dupe(u8, report.from_focus),
                 .messages = messages,
                 .ended_at_unix_ms = report.ended_at_unix_ms,
             } };
         },
-        .session_message => |message| .{ .session_message = .{
-            .from_session = message.from_session,
+        .focus_message => |message| .{ .focus_message = .{
+            .from_focus = try a.dupe(u8, message.from_focus),
             .observed_at_unix_ms = message.observed_at_unix_ms,
             .text = try a.dupe(u8, message.text),
         } },
         .callback => |callback| .{ .callback = .{
-            .id = callback.id,
-            .source = callback.source,
+            .callback_id = try a.dupe(u8, callback.callback_id),
+            .source = try cloneCallbackSource(a, callback.source),
             .observed_at_unix_ms = callback.observed_at_unix_ms,
             .text = try a.dupe(u8, callback.text),
         } },
@@ -183,5 +185,12 @@ fn cloneItem(a: Allocator, item: Model.Item) !Model.Item {
             };
             break :blk .{ .tool_result = .{ .call_id = try a.dupe(u8, result.call_id), .content = .{ .parts = parts } } };
         },
+    };
+}
+
+fn cloneCallbackSource(a: Allocator, source: @import("agent_contracts").Callback.Source) !@import("agent_contracts").Callback.Source {
+    return switch (source) {
+        .wakeup => .wakeup,
+        .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
     };
 }

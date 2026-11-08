@@ -46,7 +46,7 @@ Core and activity sessions use the same configured model and output-token limit.
 
 `MAX_SESSIONS` counts the core and all registered activities, including those asleep. Startup fails if saved identities exceed it; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a slot. Ready sessions can advance concurrently. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes). The session and command defaults are tuning starting points; size them for the workload and resources available.
 
-`MAX_PENDING_EVENTS` limits ordinary accepted events buffered for a session. Startup observations, passive activity expressions, and activity endings are excluded. Opening a focus and admitting its ending do not need space in the core's ordinary event queue. Correspondence and callback mail have independent intake allowances and stay in their durable sources when their destination is full. Focus messages use this ordinary allowance and return `session_queue_full` when the recipient cannot accept them. Capacity and polling can delay scheduled work.
+`MAX_PENDING_EVENTS` limits ordinary accepted events buffered for a session. Startup observations, passive activity expressions, and activity endings are excluded. Opening a focus and admitting its ending do not need space in the core's ordinary event queue. Correspondence and callback mail have independent intake allowances and stay in their durable sources when their destination is full. Focus messages use this ordinary allowance and return `focus_queue_full` when the recipient cannot accept them. Capacity and polling can delay scheduled work.
 
 Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. Callback registrations have no separate count limit; a larger callback list or roster leaves less room for history and observations. These budgets also apply to an activity's inherited history. A generated handover has no separate byte limit, but the complete replacement request must fit. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
 
@@ -160,7 +160,7 @@ When an incoming message fails admission with `ContextBudgetExhausted`, it remai
 
 Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
 
-The current history format includes an activity-report outbox and per-session `activity` observations with timestamped `messages` and `ended_at_unix_ms`. Checkpoints or observations using earlier shapes are incompatible with this executable.
+The current history format preserves named focus and callback references alongside internal routing identities. Activity observations carry `from_focus`, timestamped `messages`, and `ended_at_unix_ms`; retained records and handovers identify their producing or receiving `focus_id`. Checkpoints or observations using earlier shapes are incompatible with this executable.
 
 ## Data and retention
 
@@ -170,7 +170,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | --- | --- |
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
-| `<DATA_DIR>/host/<session_id>/` | Full stdout and stderr from host commands |
+| `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
 
@@ -219,6 +219,8 @@ History and callback mail are JMAP Email objects. A backup or transfer used for 
 | Records | `ivenna-history-<token>`, `X-Ivenna-History-Key`, and `X-Ivenna-History-Previous` when present |
 | Current checkpoint candidates | Membership in `Ivenna History`, `ivenna-current`, and `X-Ivenna-History-Revision` |
 | Pending callback mail | Complete text, From and To matching `MAIL_ADDRESS`, membership in `Ivenna Callbacks`, `ivenna-callback`, exact `ivenna-callback-<id>` keyword, and matching `X-Ivenna-Callback-Id` header |
+
+The callback keyword and header contain the internal numeric delivery ID; the checkpoint registration preserves its complete named reference.
 
 If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration uses logical groups, record keys, and callback IDs. An import that preserves bodies alone is insufficient. See [updating the executable](#updating-the-executable) for storage-format compatibility.
 
