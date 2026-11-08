@@ -47,7 +47,7 @@ Decode external protocols in their owning components and supply typed contracts 
 
 Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
 
-[Input](../packages/agent/src/input.zig) owns runtime user-message rendering. Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
+[Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
 The agent selects tools and reasoning per request; the model adapter encodes and measures the complete payload with those settings. Use the same encoder for measurement and inference, including tool-result limiting, without mutating a shared provider.
 
@@ -80,6 +80,8 @@ Keep a session's identity independent of context residency, and retain its histo
 Working history records what a session can safely continue from. Context owns retained observations, complete model/tool exchanges, and handovers; current facts accompany them for one inference. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
 
 Persistence changes must keep the saved context, admitted observations, and pending registrations consistent, including when saving succeeds but acknowledgement does not. The agent owns history encoding and retention selection; `HistoryStore` adapters own native representation and protocol limits. The [history contract](architecture.md#persistent-working-history) explains publication, restoration, and retirement.
+
+Activity expressions are cross-session observations of what the source said, distinct from a committed model/tool round. Preserve unread reports independently of the source context, and advance their consumption with core history admission in the same checkpoint. Compaction output and inherited exchanges must not be published again as new activity expressions.
 
 Storage failures must not silently replace history with an empty context. [Startup](architecture.md#startup-and-interruption) reconstructs understanding and pending work without replaying effects.
 

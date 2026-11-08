@@ -10,9 +10,15 @@ pub const Assignment = struct {
     task: []const u8,
 };
 
-pub const Report = struct {
+pub const ActivityMessage = struct {
+    text: []const u8,
+    observed_at_unix_ms: i64,
+};
+
+pub const ActivityReport = struct {
     from_session: u64,
-    text: ?[]const u8,
+    messages: []const ActivityMessage,
+    ended_at_unix_ms: ?i64,
 };
 
 pub const Handover = struct {
@@ -76,10 +82,48 @@ pub const Event = union(enum) {
     startup: Startup,
     input: IncomingMessage,
     assignment: Assignment,
-    report: Report,
+    activity: ActivityReport,
     session_message: SessionMessage,
     callback: Callback,
 };
+
+/// Group selected activity observations by their first appearance. Returned
+/// arrays belong to arena; text and other event payloads borrow events.
+pub fn coalesceActivityReports(arena: Allocator, events: []const Event) ![]const Event {
+    const Group = struct {
+        position: usize,
+        from_session: u64,
+        messages: std.ArrayList(ActivityMessage) = .empty,
+        ended_at_unix_ms: ?i64 = null,
+    };
+    var groups: std.ArrayList(Group) = .empty;
+    var positions: std.AutoHashMapUnmanaged(u64, usize) = .empty;
+    var result: std.ArrayList(Event) = .empty;
+    try result.ensureTotalCapacity(arena, events.len);
+    for (events) |event| switch (event) {
+        .activity => |report| {
+            if (report.messages.len == 0 and report.ended_at_unix_ms == null) continue;
+            const entry = try positions.getOrPut(arena, report.from_session);
+            const index = if (entry.found_existing) entry.value_ptr.* else new: {
+                const index = groups.items.len;
+                try groups.append(arena, .{ .position = result.items.len, .from_session = report.from_session });
+                entry.value_ptr.* = index;
+                result.appendAssumeCapacity(.{ .activity = report });
+                break :new index;
+            };
+            const group = &groups.items[index];
+            try group.messages.appendSlice(arena, report.messages);
+            if (report.ended_at_unix_ms) |at| group.ended_at_unix_ms = at;
+        },
+        else => result.appendAssumeCapacity(event),
+    };
+    for (groups.items) |*group| result.items[group.position] = .{ .activity = .{
+        .from_session = group.from_session,
+        .messages = try group.messages.toOwnedSlice(arena),
+        .ended_at_unix_ms = group.ended_at_unix_ms,
+    } };
+    return result.toOwnedSlice(arena);
+}
 
 pub const EventGroup = struct {
     session_id: u64,

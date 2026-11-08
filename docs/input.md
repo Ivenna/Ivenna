@@ -25,7 +25,7 @@ Session IDs remain stable across waiting, context unloading, and restart. Finish
 
 ### Event groups
 
-An `events` record has `session_id: u64` and `items: Event[]`. Each admission retains a FIFO group. When delivered directly in a work turn, its items appear in `purpose.work.events` without duplicating the record in that request's prefix. Later history keeps the record without transient state. If compaction runs first, the handover instead carries the admitted observations. See [admission](architecture.md#activation-admission).
+An `events` record has `session_id: u64` and `items: Event[]`. Each admission retains one group. When delivered directly in a work turn, its items appear in `purpose.work.events` without duplicating the record in that request's prefix. Later history keeps the record without transient state. If compaction runs first, the handover instead carries the admitted observations. See [admission](architecture.md#activation-admission).
 
 `Event` selects one branch:
 
@@ -34,7 +34,7 @@ An `events` record has `session_id: u64` and `items: Event[]`. Each admission re
 | `startup` | `Startup` | Observation that a new runtime has begun |
 | `input` | `IncomingMessage` | Observation of what correspondents said |
 | `assignment` | `Assignment` | Initial work for a newly created activity session |
-| `report` | `Report` | Activity session completion, with assistant text when present |
+| `activity` | `ActivityReport` | One activity's newly admitted messages and ending information |
 | `session_message` | `SessionMessage` | Observation sent directly by the core |
 | `callback` | `Callback` | A registered wakeup or host completion observation |
 
@@ -48,7 +48,7 @@ Correspondence enters the core as an `input` observation of who said what; it im
 | `text` | `Text` | Complete message text |
 | `observed_at_unix_ms` | `i64` | Runtime observation time in Unix milliseconds |
 
-`from` contains readable [correspondent IDs](communication.md#correspondents-and-ids) accepted by `send_message`. Restoring history preserves the original observation time.
+`from` contains readable [correspondent IDs](communication.md#correspondents-and-ids) accepted by `send_message`. The observation time is sampled during intake, rather than when the correspondent wrote or sent the message. Restoring history preserves that time.
 
 #### Startup and restart
 
@@ -58,14 +58,23 @@ Correspondence enters the core as an `input` observation of who said what; it im
 
 An `Assignment` has `task: Text`, specifying what the activity should pursue within its inherited understanding. It is the activity's first new queued observation after the [fork](communication.md#forking-an-activity-session).
 
-A `Report` notifies the core of [activity completion](communication.md#activity-completion) and preserves the ending response's assistant text as a nullable field:
+An `ActivityReport` groups newly admitted information from one activity:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `from_session` | `u64` | Activity session that ended |
-| `text` | `Text` or `null` | Assistant text from the ending response |
+| `from_session` | `u64` | Source activity session |
+| `messages` | `ActivityMessage[]` | New assistant texts from this activity, in recorded order |
+| `ended_at_unix_ms` | `?i64` | Time the runtime established session completion, or `null` when this report includes no ending |
 
-The `text` field is always present: `null` means the ending response had no assistant text output items; `""` means those items were present but their combined text was empty.
+Each `ActivityMessage` has `text: Text` and `observed_at_unix_ms: i64`. The time records when the runtime collected the complete model response, before its tools execute. It does not date the events described in the text. Message and ending times use Unix milliseconds.
+
+All three report fields are present. Messages and an ending can appear in the same report. An ending without further unread text has `messages: []` and a non-null `ended_at_unix_ms`; earlier admitted texts are not repeated. An explicitly empty assistant text remains a message with `text: ""`. A report with no messages and a null ending is omitted. A null ending means only that this report contains no ending; it does not establish that the source session is still running.
+
+Each ordinary activity inference that returns assistant text produces one message. Absent text records no message. Reasoning, tool replies, compaction output, and inherited history do not produce new messages. The text records what the activity expressed, not whether its proposed actions took effect.
+
+One ordinary core input, including a tool continuation, can contain ordinary events and reports from several activities. Newly admitted messages for the same session are grouped once, and groups follow the session's first appearance in the selected observations. Each session's message order and recorded times are preserved; the grouping does not encode cross-session interleaving. Persistence, restart, and later admission preserve the original message and ending times. The encoded request budget determines how much can enter one input.
+
+Text alone does not activate the core. An ending does, even without new text, and establishes [session completion](communication.md#activity-completion), not task success. Admission retains these observations in the core's history. Unadmitted information remains available for later admission.
 
 #### Session messages and callbacks
 
@@ -85,6 +94,8 @@ Registered observations arrive as `Callback` events for the sessions that arrang
 | `source` | `Source` | `wakeup` or `host` with the originating `command_id` |
 | `observed_at_unix_ms` | `i64` | Time the runtime observed the callback |
 | `text` | `Text` | Supplied wakeup text or serialized host result or diagnostic |
+
+A callback's observation time is sampled during intake, rather than at the wakeup deadline or host command's completion.
 
 The ID matches the `callback_id` returned by `wakeup` or a `run_host_shell` handoff result. `Source` is a tagged union: `wakeup: {}` identifies a scheduled wakeup, while `host: {command_id: 17}` identifies a host execution. Command and callback IDs are independent. The runtime supplies the source from the saved registration. See [callback delivery](communication.md#callback-mail) for destination retention and admission guarantees, and [host results](host.md#output-and-results) for the callback text's format.
 
@@ -118,7 +129,7 @@ Each inference ends its input with a turn containing both fields:
 | `work` | `events: Event[]` | Continue ordinary work with these new observations |
 | `summarize` | `instructions: Text` | Generate a handover from the complete retained message sequence |
 
-`work.events` can be empty, including after a tool exchange or when the core is scheduled to reconsider concurrent attention without a new event. The turn still supplies fresh current state. The attention signal stays internal; it introduces no revision field or historical notice.
+`work.events` can be empty while continuing work after a tool exchange. The turn still supplies fresh current state. Activity text and runtime state changes do not independently schedule the core; a report with a non-null `ended_at_unix_ms` does.
 
 ### Current state and session roles
 
@@ -131,23 +142,23 @@ Each inference ends its input with a turn containing both fields:
 | `runtime.observed_at_unix_ms` | Time of this snapshot in Unix milliseconds |
 | `runtime.registered_sessions` | Registered sessions, including dormant sessions and the core |
 | `runtime.active_sessions` | Sessions handling an activation, including those waiting for tools |
-| `runtime.queued_inputs` | Events waiting in session queues, excluding reserved report slots |
+| `runtime.queued_inputs` | Queued events that require input, including activity endings; excludes passive assistant messages |
 | `runtime.sessions` | `SessionInfo[]` roster for all registered sessions |
 
-The snapshot is complete for these fields. A callback registration stays pending even after its result is published or queued; it leaves the list and count when its observation is admitted to history. Other sessions can act after sampling. Each `SessionInfo` contains:
+The snapshot is complete for these fields. Its observation time dates the snapshot, not the events delivered alongside it. Queue counts exclude the current admission batch. A callback registration stays pending even after its result is published or queued; it leaves the list and count when its observation is admitted to history. Other sessions can act after sampling. Each `SessionInfo` contains:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `session_id` | `u64` | Stable session ID |
 | `role` | `Role` | `core` or `activity` |
 | `status` | `running`, `waiting_for_tools`, `ready`, or `dormant` | Advancing an activation, waiting for tool replies, ready for scheduling, or sleeping |
-| `queued_inputs` | `usize` | Events waiting in this session's queue |
+| `queued_inputs` | `usize` | Queued events that require input for this session, including activity endings for the core; excludes passive assistant reports |
 | `pending_callbacks` | `usize` | Registered observations awaiting admission to this session's history |
 | `last_active_unix_ms` | `i64` | Most recent activation start or end; `0` before its first activation |
 
 Each `session.callbacks` item is a `PendingCallback` with `id: u64` and `source: Source`, belonging to `current.session_id`. The ID links the current registration to its arrangement in retained messages or a handover; the observation's text arrives separately as an event. A pending host source identifies the execution being observed; it does not imply that its process is still running or its handle remains available.
 
-`ready` means work is waiting, subject to scheduling and capacity. Core attention can produce this status with `queued_inputs: 0`.
+`ready` means work is waiting, subject to scheduling and capacity. Unread assistant reports alone do not make the core ready.
 
 `waiting_for_tools` retains the current activation and context. Other sessions can advance, while new observations for this session wait for the complete model/tool round.
 
@@ -179,10 +190,20 @@ purpose:
           from: [operator]
           text: Keep each practice session to 20 minutes.
           observed_at_unix_ms: 1793966401000
+      - activity:
+          from_session: 2
+          messages:
+            - text: The practice outline is ready.
+              observed_at_unix_ms: 1793966400000
+          ended_at_unix_ms: 1793966400500
+      - activity:
+          from_session: 3
+          messages: []
+          ended_at_unix_ms: 1793966400600
 ```
 
 ## Handover generation and replacement
 
-A maintenance inference receives the retained LLM messages—the system prompt, user records, native model output, and tool replies—plus a turn with `current` and `purpose.summarize.instructions`. Tools are disabled. Instructions come from [compaction.md](../packages/agent/src/compaction.md); events waiting for admission remain outside this request, and core attention stays pending.
+A maintenance inference receives the retained LLM messages—the system prompt, user records, native model output, and tool replies—plus a turn with `current` and `purpose.summarize.instructions`. Tools are disabled. Instructions come from [compaction.md](../packages/agent/src/compaction.md); events and activity reports waiting for admission remain outside this request.
 
 After the handover passes validation, it replaces the retained messages. The next ordinary request contains the system prompt, a `handover` record, and a fresh work turn. Session identity and role persist. See [bounded model context](architecture.md#bounded-model-context) for generation, replacement, and admission budgets.

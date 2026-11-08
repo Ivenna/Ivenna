@@ -1,6 +1,6 @@
 # Communication
 
-Correspondent IDs identify people and programs; session IDs identify Ivenna's separate working contexts. This guide covers [external correspondence](#external-correspondence) through `send_message` and [session coordination](#session-coordination) through forks, messages, wakeups, host completion observations, and completion reports. For sending messages to Ivenna, see the [usage guide](usage.md).
+Correspondent IDs identify people and programs; session IDs identify Ivenna's separate working contexts. This guide covers [external correspondence](#external-correspondence) through `send_message` and [session coordination](#session-coordination) through forks, messages, wakeups, host completion observations, and activity reports. For sending messages to Ivenna, see the [usage guide](usage.md).
 
 ## External correspondence
 
@@ -70,7 +70,7 @@ The activity inherits the core's retained history through the complete calling m
 
 Inherited records keep their original [session IDs](input.md#records-and-turns). The activity receives its own current-state snapshot and tools. Queued observations and pending callback registrations keep their original destinations; historical tool calls are not replayed.
 
-An empty task or malformed arguments return `invalid_arguments`. Exhausted session capacity or core report capacity returns `fork_unavailable`; existing sessions remain addressable. See [configuration](running.md#configuration) for capacity limits.
+An empty task or malformed arguments return `invalid_arguments`. Exhausted session capacity returns `fork_unavailable`; existing sessions remain addressable. See [configuration](running.md#configuration) for capacity limits.
 
 ### Session communication and wakeups
 
@@ -93,7 +93,6 @@ The tools report defined failures without ending the runtime:
 | `unknown_tool` | The tool is unavailable to the calling session |
 | `unknown_session` | The message's recipient session does not exist |
 | `session_queue_full` | The message's recipient cannot currently accept another event |
-| `callback_unavailable` | The calling session has no capacity for another observation registration |
 
 See [configuration](running.md#configuration) for capacity limits and [session messages and callbacks](input.md#session-messages-and-callbacks) for observation fields. Infrastructure failures follow the [availability contract](design.md#runtime-availability).
 
@@ -101,10 +100,18 @@ See [configuration](running.md#configuration) for capacity limits and [session m
 
 Wakeups and [host commands](host.md#command-lifetimes) that outlive their initial call use durable JMAP callback mail, independently of SMTP reception. Each registration binds one observation and its source to the receiving session. The destination survives sleep, context unloading, and restart, and the observation is admitted at most once even if several mail copies arrive. Repeated publication preserves the first identifiable stored result. See [delivery and admission](architecture.md#event-sources-and-callback-admission) for the mechanism and [communication-copy retention](running.md#communication-copies) for the mail's lifetime.
 
+### Activity reports
+
+New assistant text from ordinary activity inferences is collected in order for the core, including text accompanying tool calls. It is retained before those tools execute, so the text may describe intentions whose effects are not yet known. Reasoning, tool replies, compaction output, and inherited history are not collected as new expressions.
+
+These texts do not activate the core. They accompany ordinary core inputs, including continuations after tools, within the request budget. Information that has not been admitted remains available in recorded order. Admitted reports become retained observations in the core's history; they remain attributed to their source activity.
+
+One input can carry reports from several activities alongside other observations. An ending can accompany new text or arrive later without repeating admitted messages. The [input contract](input.md#assignments-and-reports) defines grouping and the observation times preserved through waiting and restart.
+
 ### Activity completion
 
 An activity response without tool calls returns control to the runtime. Queued observations continue the activation before it can complete. If its queue is empty but callback registrations remain pending, the activity sleeps with its identity and history retained. A host completion or session message from the core can resume it. Waiting for a tool instead keeps the current activation and context in place while other sessions advance.
 
-If the queue is empty and no callback registrations remain, a response without tool calls ends the session and releases its registered-session slot. The core automatically receives a [report](input.md#assignments-and-reports) with the ending response's assistant text, or `null` if no text was present. This report establishes session completion; a host callback reports a command outcome or diagnostic. Ivenna assesses task success from the available evidence.
+If the queue is empty and no callback registrations remain, a response without tool calls ends the session and releases its registered-session slot. The runtime records its ending, making the core ready even if no new text was produced. This establishes session completion; a host callback reports a command outcome or diagnostic. Ivenna assesses task success from the available evidence.
 
-Completed session IDs are not reused, and messages to them return `unknown_session`. The current session roster shows which activities remain addressable. Intermediate assistant text stays in the producing session's history; passive visibility of that text to the core is not implemented.
+Completed session IDs are not reused, and messages to them return `unknown_session`. The current session roster shows which activities remain addressable. Reports keep their source IDs and remain available for core admission after the source session has ended.

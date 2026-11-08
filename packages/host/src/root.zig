@@ -7,6 +7,7 @@ const contracts = @import("agent_contracts");
 const Callback = contracts.Callback;
 const Tools = contracts.Tools;
 const Model = contracts.Model;
+const finished_command_cache = 8;
 
 /// One process registry serves completed calls and background commands.
 pub const Host = struct {
@@ -190,11 +191,7 @@ pub const Host = struct {
                 self.stopAndWait(job);
                 return self.handoffFailure(a, job, "This call has no session destination for command completion.");
             };
-            const id = registrar.open(.{ .host = .{ .command_id = job.command_id } }) catch |err| {
-                if (err != error.CallbackCapacityUnavailable) return err;
-                self.stopAndWait(job);
-                return self.handoffFailure(a, job, "The session's pending callback limit has been reached.");
-            };
+            const id = try registrar.open(.{ .host = .{ .command_id = job.command_id } });
             try self.mutex.lock(self.shell.io);
             job.callback_id = id;
             job.retained = true;
@@ -599,7 +596,7 @@ pub const Host = struct {
                 count += 1;
                 if (oldest == null or job.completed_sequence < oldest.?.completed_sequence) oldest = job;
             };
-            if (count <= self.max_host_commands) return;
+            if (count <= finished_command_cache) return;
             self.retireLocked(oldest.?);
         }
     }

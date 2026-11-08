@@ -20,6 +20,10 @@ One core session coordinates Ivenna, relating correspondence to retained underst
 
 Only the core can [fork an activity session](communication.md#forking-an-activity-session). An activity inherits the core's retained understanding and receives a free-form assignment to pursue from it. Inheritance carries relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
 
+New assistant text from activities is collected for the core's ordinary inputs, allowing it to follow concurrent work without reasoning on every update. One input can present several activities while preserving each source's message order and observation times. The core interprets these expressions as what an activity said; they do not establish the effects of its tools.
+
+An activity's ending always requests the core's attention, whether or not it produced text. Expressions and runtime state changes do not independently activate the core.
+
 Only the core can send direct session messages and schedule wakeups. Both roles can communicate externally and maintain autonomous memory; host tools belong to activities. Core coordination must remain responsive while activities pursue their work. See [scheduling and capacity](architecture.md#scheduling-and-capacity) for the current dispatch and resource limits.
 
 ## Communication with people and programs
@@ -32,7 +36,7 @@ Ivenna chooses whether to communicate, to whom, and what to say through `send_me
 
 A task describes work to accomplish. A session has a stable identity, retained understanding, and an event queue. Each activation continues a session's work through model/tool rounds, admitting further events between complete rounds so new information can guide the next decision without interrupting an inference or tool.
 
-A response without tool calls ends the activation when no queued arrivals or core attention signal require more reasoning. At that boundary, an activity with an observation still registered sleeps with its identity and understanding retained; otherwise its session ends and the core receives a [completion report](communication.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
+A response without tool calls ends the activation when no queued arrivals require more reasoning. At that boundary, an activity with an observation still registered sleeps with its identity and understanding retained; otherwise its session ends and the core receives an [ending observation](communication.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
 
 ### Events and waiting
 

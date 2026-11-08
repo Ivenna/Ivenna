@@ -11,13 +11,11 @@
           "items": {
             "type": "string",
             "minLength": 1
-          },
-          "description": "Correspondent IDs."
+          }
         },
         "text": {
           "type": "string",
-          "minLength": 1,
-          "description": "Message text."
+          "minLength": 1
         }
       },
       "required": [
@@ -29,14 +27,13 @@
   },
   {
     "name": "fork_session",
-    "description": "Fork an activity from your retained history and the supplied task, returning its stable session_id. The inherited history includes the complete calling model/tool round. Your activation continues, and the core receives a completion report when the activity session ends.",
+    "description": "Fork an activity from your retained history and the supplied task, returning its stable session_id. The inherited history includes the complete calling model/tool round. Your activation continues. Its new assistant text accompanies your later ordinary inputs without activating you; its session ending requests an input even without new text.",
     "parameters": {
       "type": "object",
       "properties": {
         "task": {
           "type": "string",
-          "minLength": 1,
-          "description": "Activity to pursue from the inherited understanding."
+          "minLength": 1
         }
       },
       "required": [
@@ -54,12 +51,11 @@
         "session_id": {
           "type": "integer",
           "minimum": 1,
-          "description": "Recipient session ID; the current roster lists existing sessions."
+          "description": "The current roster lists existing sessions."
         },
         "text": {
           "type": "string",
-          "minLength": 1,
-          "description": "Observation or coordination intent."
+          "minLength": 1
         }
       },
       "required": [

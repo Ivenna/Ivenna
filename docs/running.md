@@ -32,12 +32,10 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
-| `MAX_PENDING_EVENTS` | Maximum ordinary events per session, including reserved activity reports in the core | `64` |
-| `MAX_PENDING_CALLBACKS` | Maximum wakeup and host completion registrations not yet durably admitted per session | `64` |
-| `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions; the same count bounds retained finished command handles | `8` |
+| `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session; excludes activity messages and endings | `64` |
+| `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
-| `HANDOVER_MAX_BYTES` | Maximum retained handover text | `8192` |
 | `DATA_DIR` | Base directory for host command output in the kernel filesystem | `.ivenna` |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
@@ -46,11 +44,11 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 
 Core and activity sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
 
-Each ready session can advance through its own serial worker while other sessions continue. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a registered-session slot; the core remains registered. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes).
+`MAX_SESSIONS` counts the core and all registered activities, including those asleep. Startup fails if saved identities exceed it; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a slot. Ready sessions can advance concurrently. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes). The session and command defaults are tuning starting points; size them for the workload and resources available.
 
-Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. An activity waiting for tools retains its activation, context, and report reservation. Sleeping activities awaiting host completion observations keep their identity slots and release report reservations until they resume. Startup observations are excluded from the allowance. Correspondence and callback mail have independent intake allowances and stay stored when their destination is full. Capacity and polling can delay scheduled work.
+`MAX_PENDING_EVENTS` limits ordinary accepted events buffered for a session. Startup observations, activity messages, and activity endings are excluded. Forks and activity resumption do not need space in the core's ordinary event queue. Correspondence and callback mail have independent intake allowances and stay in their durable sources when their destination is full. Direct session messages return `session_queue_full` when the recipient cannot accept them. Capacity and polling can delay scheduled work.
 
-Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. A larger roster or callback list leaves less room for history and observations. These budgets also apply to an activity's inherited history. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
+Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. Callback registrations have no separate count limit; a larger callback list or roster leaves less room for history and observations. These budgets also apply to an activity's inherited history. A generated handover has no separate byte limit, but the complete replacement request must fit. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
@@ -121,7 +119,7 @@ The kernel's startup directory becomes the default directory for host commands. 
 
 Use one kernel per mailbox. Startup discovers the account, checks memory availability, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
 
-Startup reads and validates all selected history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
+Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
 
 ## Service status and reception
 
@@ -162,7 +160,7 @@ When an incoming message fails admission with `ContextBudgetExhausted`, it remai
 
 Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
 
-The current callback format includes a tagged source in pending registrations and retained callback events. Checkpoints containing registrations, and history containing callback events, from the preceding format without this source are incompatible with this executable.
+The current history format includes an activity-report outbox and per-session `activity` observations with timestamped `messages` and `ended_at_unix_ms`. Checkpoints or observations using earlier shapes are incompatible with this executable.
 
 ## Data and retention
 
@@ -189,7 +187,7 @@ Ivenna releases a communication copy when its observation has been durably admit
 | Outgoing message | Created in Drafts; confirmed submission moves the copy to Trash without cancelling delivery |
 | Interrupted outgoing copy | Initialization or the next poll moves the runtime's leftover outgoing copy to Trash |
 
-Acknowledgement confirms durable admission, not completion of the requested work. Pending supported input remains available for admission. Internal assignments and reports are saved as working history rather than separate communication copies.
+Acknowledgement confirms durable admission, not completion of the requested work. Pending supported input remains available for admission. Internal assignments are saved with session work. Activity reports are retained as outbox history records until core admission; they are not separate correspondence copies.
 
 Publisher first-result preservation lasts while an identifiable callback copy remains, including in Trash. Losing that copy permits new publication, but saved [admission deduplication](architecture.md#event-sources-and-callback-admission) still prevents another observation for a consumed ID.
 
@@ -197,20 +195,22 @@ The mail account is not a permanent transcript: original copies expire under the
 
 ### Working history
 
-The latest checkpoint selects the histories needed to continue all registered sessions, including sleeping sessions whose contexts are unloaded, and retains callback registrations with their sources, along with scheduled wakeups. Ivenna classifies its saved history at startup and periodically during operation, placing records according to that checkpoint:
+The latest checkpoint selects the histories needed to continue all registered sessions, including sleeping sessions whose contexts are unloaded, and retains callback registrations with their sources, scheduled wakeups, and the unread activity-report outbox. Ivenna classifies its saved history at startup and periodically during operation, placing records according to that checkpoint:
 
 | Location | Contents |
 | --- | --- |
-| `Ivenna History` | Latest checkpoint and selected working histories of all registered sessions |
+| `Ivenna History` | Latest checkpoint, selected session histories, and unread activity-report records |
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
 Forks store independent copies of inherited history; include these copies when sizing the mailbox. Compaction replaces only that session's selection, allowing its previous records to move to Trash while other sessions keep their own copies.
 
-A sleeping activity retains its history even when its context is unloaded. When the session ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. Its report remains part of the core's work, and shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
+A sleeping activity retains its history even when its context is unloaded. When the session ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. Its unread reports remain selected independently of that session until the core admits them. Admitted reports belong to the core's history, and shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
+
+Unread activity expressions retain every new text in order with its original observation time; they are not replaced with the latest text. Ending times are also retained. The core admits reports within its ordinary request budget. Unread reference metadata grows with the backlog, and all unread bodies occupy mailbox storage. Activity messages and endings are outside `MAX_PENDING_EVENTS`, so size runtime memory and mailbox capacity for work that can accumulate before the core next reads it. See [activity reports](architecture.md#activity-reports) for reading and admission behavior.
 
 ### Backups and transfers
 
-History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
+History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 
 | Applies to | Preserve |
 | --- | --- |

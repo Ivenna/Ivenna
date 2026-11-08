@@ -145,7 +145,7 @@ Command IDs identify executions within the current runtime; callback IDs identif
 
 A response without tool calls lets the activity sleep while an observation remains registered. Once its queue is empty and it has no pending registrations, it ends and [reports to the core](communication.md#activity-completion). Command state, handle retention, and the registered observation have separate lifetimes; draining a handle does not cancel its completion observation. Cancellation of a completion registration is unavailable.
 
-`MAX_HOST_COMMANDS` limits live commands across all activities. Completion releases live capacity. A final result returned directly by `run_host_shell` retires its handle. Up to the same configured count of finished retained handles remains available for output collection; a continue call that drains one retires it, and older finished handles can be reclaimed for other commands. Full logs have a [separate retention lifecycle](running.md#host-output-and-deployment-files).
+`MAX_HOST_COMMANDS` limits live commands across all activities. Completion releases live capacity. A final result returned directly by `run_host_shell` retires its handle. A separate cache keeps up to eight finished handles available for recent output collection; a continue call that drains one retires it, and older finished handles can be reclaimed for other commands. Full logs have a [separate retention lifecycle](running.md#host-output-and-deployment-files).
 
 Shutdown stops and joins commands. Batch and pipe cleanup covers the command's process group; terminal cleanup covers its original OS session, including background jobs in separate job-control groups. Shell backgrounding with `&` remains within this managed lifetime. A program that explicitly creates another OS session, for example with `setsid`, gives that work an independent lifetime. If it holds the original terminal open, final output draining ends after one second with an unavailable-result diagnostic.
 
@@ -159,7 +159,7 @@ Errors describe the failed operation without erasing effects already produced. D
 | --- | --- |
 | `invalid_arguments` | The invocation does not match the tool's arguments |
 | `commands_unavailable` | No live-command slot is available; the command was not started |
-| `handoff_unavailable` | A started command could not obtain its completion registration; it was stopped and joined, with its observed outcome and logs retained in the result |
+| `handoff_unavailable` | The call had no destination for its completion observation; the started command was stopped and joined, with its observed outcome and logs retained in the result |
 | `unknown_command` | The handle is unknown or was retired; full logs have a separate lifetime |
 | `command_finished` | An input or control action targeted a finished command; read its remaining output instead |
 | `stdin_closed` | The command has no writable input, including batch mode and a pipe after EOF |

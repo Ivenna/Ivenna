@@ -61,7 +61,6 @@ pub fn main(init: std.process.Init) !void {
         .poll_interval_ms = config.mail_poll_interval_ms,
         .max_sessions = config.max_sessions,
         .max_pending_events = config.max_pending_events,
-        .max_pending_callbacks = config.max_pending_callbacks,
     });
     defer kernel.deinit();
     var service = try Service.listen(io, config.service_address, &kernel);

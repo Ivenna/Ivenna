@@ -146,10 +146,18 @@ fn cloneEvents(a: Allocator, events: []const Input.Event) ![]const Input.Event {
             break :blk .{ .input = .{ .from = from, .text = try a.dupe(u8, input.text), .observed_at_unix_ms = input.observed_at_unix_ms } };
         },
         .assignment => |assignment| .{ .assignment = .{ .task = try a.dupe(u8, assignment.task) } },
-        .report => |report| .{ .report = .{
-            .from_session = report.from_session,
-            .text = if (report.text) |text| try a.dupe(u8, text) else null,
-        } },
+        .activity => |report| blk: {
+            const messages = try a.alloc(Input.ActivityMessage, report.messages.len);
+            for (report.messages, messages) |message, *cloned| cloned.* = .{
+                .text = try a.dupe(u8, message.text),
+                .observed_at_unix_ms = message.observed_at_unix_ms,
+            };
+            break :blk .{ .activity = .{
+                .from_session = report.from_session,
+                .messages = messages,
+                .ended_at_unix_ms = report.ended_at_unix_ms,
+            } };
+        },
         .session_message => |message| .{ .session_message = .{
             .from_session = message.from_session,
             .observed_at_unix_ms = message.observed_at_unix_ms,

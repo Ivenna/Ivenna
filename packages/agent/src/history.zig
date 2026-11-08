@@ -1,6 +1,8 @@
 const std = @import("std");
 const contracts = @import("agent_contracts");
 const Input = @import("input.zig");
+const Codec = @import("record_codec.zig");
+const Reports = @import("reports.zig");
 const Allocator = std.mem.Allocator;
 const Store = contracts.HistoryStore;
 const Key = Store.Key;
@@ -29,6 +31,7 @@ pub const History = struct {
     sessions: []const Session,
     wakeups: []const Wakeup,
     callbacks: []const CallbackRegistration,
+    activity_reports: ?Reports.Checkpoint,
 
     pub const Session = struct {
         session_id: u64,
@@ -57,12 +60,13 @@ pub const History = struct {
                 .activity => if (session.session_id == 1) return error.InvalidHistory,
             }
             for (session.observations) |event| switch (event) {
-                .assignment, .report, .session_message => {},
+                .assignment, .session_message => {},
                 else => return error.InvalidHistory,
             };
             try validateEntries(session.session_id, session.entries orelse &.{});
         }
         if (cores != 1) return error.InvalidHistory;
+        if (self.activity_reports) |reports| try reports.validate();
         var callbacks: std.AutoHashMapUnmanaged(u64, contracts.Callback.Source) = .empty;
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
@@ -88,6 +92,7 @@ const Checkpoint = struct {
     sessions: []const Session,
     wakeups: []const History.Wakeup,
     callbacks: []const History.CallbackRegistration,
+    activity_reports: ?Reports.Checkpoint,
 
     const Session = struct {
         session_id: u64,
@@ -155,7 +160,7 @@ pub const Persistence = struct {
             self.published_checkpoint_digest = null;
             return null;
         };
-        const checkpoint = try decode(Checkpoint, a, document);
+        const checkpoint = try Codec.decode(Checkpoint, a, document);
         if (checkpoint.sessions.len > max_sessions) return error.SessionCapacityUnavailable;
         const sessions = try a.alloc(History.Session, checkpoint.sessions.len);
         var candidate: Cache = .init(self.allocator);
@@ -164,8 +169,8 @@ pub const Persistence = struct {
         defer owners.deinit(a);
         for (checkpoint.sessions, sessions) |session, *restored| {
             if (session.group.len == 0 or (session.head == null) != (session.count == 0)) return error.InvalidHistory;
-            if (session.head) |key| if (!validKey(key)) return error.InvalidHistory;
-            if (session.observations) |key| if (!validKey(key)) return error.InvalidHistory;
+            if (session.head) |key| if (!Codec.validKey(key)) return error.InvalidHistory;
+            if (session.observations) |key| if (!Codec.validKey(key)) return error.InvalidHistory;
             const owner = try owners.getOrPut(a, session.group);
             if (owner.found_existing) return error.InvalidHistory;
             owner.value_ptr.* = session.session_id;
@@ -230,10 +235,11 @@ pub const Persistence = struct {
             .sessions = sessions,
             .wakeups = checkpoint.wakeups,
             .callbacks = checkpoint.callbacks,
+            .activity_reports = checkpoint.activity_reports,
         };
         try history.validate(a);
         std.mem.swap(Cache, &self.cache, &candidate);
-        self.published_checkpoint_digest = digest(document);
+        self.published_checkpoint_digest = Codec.digest(document);
         return history;
     }
 
@@ -273,8 +279,8 @@ pub const Persistence = struct {
             for (batch, references[0..count]) |selected, *reference| reference.* = selected.reference;
             const bodies = try self.store.read(scratch.allocator(), references[0..count]);
             for (batch, bodies) |selected, body| {
-                if (!equalKey(digest(body), selected.reference.key)) return error.InvalidHistory;
-                switch (try decode(Source, a, body)) {
+                if (!equalKey(Codec.digest(body), selected.reference.key)) return error.InvalidHistory;
+                switch (try Codec.decode(Source, a, body)) {
                     .entry => |entry| {
                         if (!equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
                         switch (selected.destination) {
@@ -350,14 +356,15 @@ pub const Persistence = struct {
             cached.checkpoint = saved.*;
         }
         try builder.flush();
-        const document = try encode(a, Checkpoint{
+        const document = try Codec.encode(a, Checkpoint{
             .next_session_id = history.next_session_id,
             .next_callback_id = history.next_callback_id,
             .sessions = sessions,
             .wakeups = history.wakeups,
             .callbacks = history.callbacks,
+            .activity_reports = history.activity_reports,
         });
-        const candidate_digest = digest(document);
+        const candidate_digest = Codec.digest(document);
         if (self.published_checkpoint_digest) |published| {
             if (equalKey(published, candidate_digest)) return;
         }
@@ -368,8 +375,8 @@ pub const Persistence = struct {
         self.published_checkpoint_digest = candidate_digest;
     }
 
-    /// Reconcile storage with the confirmed histories and unread observations.
-    pub fn maintain(self: *Persistence, a: Allocator) !void {
+    /// Retain confirmed session records together with the caller's unread reports.
+    pub fn maintain(self: *Persistence, a: Allocator, extra: []const Store.RecordId) !void {
         std.debug.assert(self.published_checkpoint_digest != null);
         var records: std.ArrayList(Store.RecordId) = .empty;
         defer records.deinit(a);
@@ -379,6 +386,7 @@ pub const Persistence = struct {
             for (session.keys.items) |key| try records.append(a, .{ .group = group, .key = key });
             if (session.checkpoint.observations) |key| try records.append(a, .{ .group = group, .key = key });
         }
+        try records.appendSlice(a, extra);
         try self.store.maintain(a, .{ .records = records.items });
     }
 };
@@ -450,8 +458,8 @@ const Builder = struct {
 
     fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry, confirmed: ?Key) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
-        const body = try encode(self.encoding.allocator(), Source{ .entry = .{ .previous = previous, .value = value } });
-        const key = digest(body);
+        const body = try Codec.encode(self.encoding.allocator(), Source{ .entry = .{ .previous = previous, .value = value } });
+        const key = Codec.digest(body);
         if (confirmed) |known| {
             if (!equalKey(known, key)) return error.InvalidHistory;
         } else try self.add(group, key, previous, body);
@@ -460,8 +468,8 @@ const Builder = struct {
 
     fn observations(self: *Builder, group: []const u8, events: []const Input.Event, confirmed: ?Key) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
-        const body = try encode(self.encoding.allocator(), Source{ .observations = events });
-        const key = digest(body);
+        const body = try Codec.encode(self.encoding.allocator(), Source{ .observations = events });
+        const key = Codec.digest(body);
         if (confirmed) |known| if (equalKey(known, key)) return key;
         try self.add(group, key, null, body);
         return key;
@@ -490,11 +498,6 @@ const Builder = struct {
     }
 };
 
-fn validKey(key: Key) bool {
-    for (key) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
-    return true;
-}
-
 fn equalKey(left: Key, right: Key) bool {
     return std.mem.eql(u8, &left, &right);
 }
@@ -502,30 +505,4 @@ fn equalKey(left: Key, right: Key) bool {
 fn equalPrevious(left: ?Key, right: ?Key) bool {
     if (left) |key| return if (right) |other| equalKey(key, other) else false;
     return right == null;
-}
-
-fn digest(data: []const u8) Key {
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});
-    return std.fmt.bytesToHex(hash, .lower);
-}
-
-fn encode(a: Allocator, value: anytype) ![]const u8 {
-    var writer: std.Io.Writer.Allocating = .init(a);
-    defer writer.deinit();
-    try std.zon.stringify.serialize(value, .{ .whitespace = false }, &writer.writer);
-    return writer.toOwnedSlice();
-}
-
-fn decode(comptime T: type, a: Allocator, data: []const u8) !T {
-    var diagnostics: std.zon.parse.Diagnostics = undefined;
-    return std.zon.parse.fromSlice(T, .{
-        .gpa = a,
-        .arena = a,
-        .source = try a.dupeSentinel(u8, data, 0),
-        .diagnostics = &diagnostics,
-    }) catch |err| switch (err) {
-        error.ParseZon => error.InvalidHistory,
-        else => err,
-    };
 }

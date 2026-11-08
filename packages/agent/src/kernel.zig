@@ -29,7 +29,6 @@ pub const Kernel = struct {
     pub const Limits = struct {
         request_bytes: u64 = 65536,
         compaction_bytes: u64 = 131072,
-        handover_bytes: usize = 8192,
     };
 
     pub const Dependencies = struct {
@@ -45,7 +44,6 @@ pub const Kernel = struct {
         poll_interval_ms: u32,
         max_sessions: usize,
         max_pending_events: usize,
-        max_pending_callbacks: usize,
     };
 
     pub fn init(allocator: Allocator, io: std.Io, dependencies: Dependencies, config: Config) !Kernel {
@@ -58,7 +56,7 @@ pub const Kernel = struct {
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
             .poll_interval_ms = config.poll_interval_ms,
-            .sessions = try Sessions.Registry.init(allocator, io, config.max_sessions, config.max_pending_events, config.max_pending_callbacks, dependencies.history),
+            .sessions = try Sessions.Registry.init(allocator, io, config.max_sessions, config.max_pending_events, dependencies.history),
         };
     }
 
@@ -206,7 +204,6 @@ pub const Kernel = struct {
             try self.forks.ensureUnusedCapacity(self.kernel.allocator, 1);
             const plan = self.kernel.sessions.prepareFork(self.work, request) catch |err| switch (err) {
                 error.SessionCapacityUnavailable => return try runtimeError(a, "fork_unavailable", "The session limit has been reached. Existing sessions remain addressable."),
-                error.SessionQueueFull => return try runtimeError(a, "fork_unavailable", "No queue capacity is available for the activity's report."),
                 else => return err,
             };
             self.forks.appendAssumeCapacity(plan);
@@ -230,8 +227,8 @@ pub const Kernel = struct {
             defer view.deinit();
             var runtime: RuntimeRound = .{ .kernel = self, .work = work };
             defer runtime.deinit();
-            try self.sessions.observeAttention(work, view.attention_revision);
             const inference = try self.engine.infer(a, view.input, session.role);
+            try self.sessions.recordAssistant(work, inference.response.text);
             const has_tools = inference.response.calls.len != 0;
             if (has_tools) try self.sessions.setToolWait(work, true);
             const replies = try self.engine.executeTools(a, session.session_id, inference, .{
@@ -244,7 +241,7 @@ pub const Kernel = struct {
             try self.sessions.commitRound(work, inference.response.output, replies, runtime.forks.items);
             runtime.forks.clearRetainingCapacity();
             try self.sessions.save();
-            if (replies.len == 0 and try self.sessions.finish(work, inference.response.text)) return;
+            if (replies.len == 0 and try self.sessions.finish(work)) return;
             if (try self.sessions.collectPending(work)) {
                 try self.admitEvents(work);
                 delivery = .latest;
@@ -254,29 +251,75 @@ pub const Kernel = struct {
 
     const Selection = struct { count: usize, context: Context };
 
-    /// Admit a FIFO prefix at a decision boundary. Later arrivals remain queued
-    /// for the next boundary; each admitted group is retained independently.
-    fn selectEvents(self: *Kernel, a: Allocator, work: Work, history: *const Context, snapshot: Sessions.Snapshot) !?Selection {
+    /// Fill one ordinary input across I/O pages, measuring grouped activity
+    /// reports. The retained selection still identifies a raw delivery prefix.
+    fn selectEvents(self: *Kernel, a: Allocator, work: Work, history: *const Context, initial: Sessions.Snapshot) !?Selection {
         var count: usize = 0;
-        const deliveries = work.activation.deliveries.items;
-        const events = try a.alloc(Input.Event, deliveries.len);
-        for (deliveries, events) |delivery, *event| event.* = delivery.event;
+        var snapshot = initial;
+        var events: std.ArrayList(Input.Event) = .empty;
+        defer events.deinit(a);
         var trial_arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer trial_arena.deinit();
-        for (1..events.len + 1) |end| {
-            const trial = trial_arena.allocator();
-            const current = try snapshot.afterAdmission(trial, events, end);
-            const input = try history.requestWithEvents(trial, events[0..end], current);
-            const bytes = try self.engine.requestBytes(trial, input, work.session.role);
-            _ = trial_arena.reset(.retain_capacity);
-            if (bytes > self.limits.request_bytes) break;
-            count = end;
+        while (true) {
+            for (work.activation.deliveries.items[events.items.len..]) |delivery| try events.append(a, delivery.event);
+            if (try self.eventsFit(&trial_arena, work.session.role, history, snapshot, events.items, events.items.len)) {
+                count = events.items.len;
+                if (!try self.sessions.extendReports(work)) break;
+                snapshot = try self.sessions.runtimeSnapshot(a, work.session);
+                continue;
+            }
+            // Grouping and state projection need not grow monotonically. Check
+            // prefix sizes after an overflow instead of stopping at the first failure.
+            var start: usize = 1;
+            if (count != 0 and try self.eventsFit(&trial_arena, work.session.role, history, snapshot, events.items, count)) {
+                start = count + 1;
+            } else count = 0;
+            for (start..events.items.len) |end| {
+                if (try self.eventsFit(&trial_arena, work.session.role, history, snapshot, events.items, end)) count = end;
+            }
+            if (work.session.role == .core and
+                try self.extendedReportsCouldFit(&trial_arena, work.session.role, history, snapshot, events.items) and
+                try self.sessions.extendReports(work))
+            {
+                snapshot = try self.sessions.runtimeSnapshot(a, work.session);
+                continue;
+            }
+            break;
         }
         if (count == 0) return null;
         var selected = try history.clone(self.allocator);
         errdefer selected.deinit();
-        try selected.appendRecord(.{ .events = .{ .session_id = work.session.session_id, .items = events[0..count] } });
+        const grouped = try Input.coalesceActivityReports(a, events.items[0..count]);
+        try selected.appendRecord(.{ .events = .{ .session_id = work.session.session_id, .items = grouped } });
         return .{ .count = count, .context = selected };
+    }
+
+    fn eventsFit(self: *Kernel, scratch: *std.heap.ArenaAllocator, role: Input.Role, history: *const Context, snapshot: Sessions.Snapshot, events: []const Input.Event, count: usize) !bool {
+        const trial = scratch.allocator();
+        defer _ = scratch.reset(.retain_capacity);
+        const current = try snapshot.afterAdmission(trial, events, count);
+        const grouped = try Input.coalesceActivityReports(trial, events[0..count]);
+        const input = try history.requestWithEvents(trial, grouped, current);
+        return try self.engine.requestBytes(trial, input, role) <= self.limits.request_bytes;
+    }
+
+    /// An encoding-only lower bound permits looking beyond an overflowing page:
+    /// later endings can change timestamp and queue encodings, but cannot remove text.
+    /// This optimistic projection is never admitted or supplied to inference.
+    fn extendedReportsCouldFit(self: *Kernel, scratch: *std.heap.ArenaAllocator, role: Input.Role, history: *const Context, snapshot: Sessions.Snapshot, events: []const Input.Event) !bool {
+        const trial = scratch.allocator();
+        defer _ = scratch.reset(.retain_capacity);
+        var current = try snapshot.afterAdmission(trial, events, events.len);
+        current.state.runtime.queued_inputs = 0;
+        const directory = try trial.dupe(Input.SessionInfo, current.state.runtime.sessions);
+        for (directory) |*session| session.queued_inputs = 0;
+        current.state.runtime.sessions = directory;
+        const grouped = try trial.dupe(Input.Event, try Input.coalesceActivityReports(trial, events));
+        for (grouped) |*event| if (event.* == .activity) {
+            event.activity.ended_at_unix_ms = 0;
+        };
+        const input = try history.requestWithEvents(trial, grouped, current);
+        return try self.engine.requestBytes(trial, input, role) <= self.limits.request_bytes;
     }
 
     fn admitEvents(self: *Kernel, work: Work) !void {
@@ -288,7 +331,8 @@ pub const Kernel = struct {
         var snapshot = try self.sessions.runtimeSnapshot(a, work.session);
         var selection = try self.selectEvents(a, work, &history, snapshot);
         if (selection == null and history.history().len > 1) {
-            const summary = try Compaction.summarize(self.engine.model, a, &history, snapshot.current, self.limits.compaction_bytes, self.limits.handover_bytes);
+            snapshot = try self.sessions.runtimeSnapshot(a, work.session);
+            const summary = try Compaction.summarize(self.engine.model, a, &history, snapshot.current, self.limits.compaction_bytes);
             var compacted = try history.withHandover(self.allocator, summary);
             defer compacted.deinit();
             snapshot = try self.sessions.runtimeSnapshot(a, work.session);
@@ -313,7 +357,6 @@ pub const Kernel = struct {
     const RequestView = struct {
         context: Context,
         input: []const Model.Item,
-        attention_revision: u64,
 
         fn deinit(self: *RequestView) void {
             self.context.deinit();
@@ -326,8 +369,8 @@ pub const Kernel = struct {
         errdefer view.deinit();
         const snapshot = try self.sessions.runtimeSnapshot(a, session);
         const input = try view.request(a, snapshot.current, delivery);
-        if (try self.engine.requestBytes(a, input, session.role) <= self.limits.request_bytes) return .{ .context = view, .input = input, .attention_revision = snapshot.attention_revision };
-        const summary = try Compaction.summarize(self.engine.model, a, &view, snapshot.current, self.limits.compaction_bytes, self.limits.handover_bytes);
+        if (try self.engine.requestBytes(a, input, session.role) <= self.limits.request_bytes) return .{ .context = view, .input = input };
+        const summary = try Compaction.summarize(self.engine.model, a, &view, snapshot.current, self.limits.compaction_bytes);
         var candidate = try view.withHandover(self.allocator, summary);
         var installed = false;
         errdefer if (!installed) candidate.deinit();
@@ -340,7 +383,7 @@ pub const Kernel = struct {
         installed = true;
         try self.sessions.save();
         view.deinit();
-        return .{ .context = replacement, .input = replacement_input, .attention_revision = replacement_snapshot.attention_revision };
+        return .{ .context = replacement, .input = replacement_input };
     }
 };
 
@@ -363,7 +406,6 @@ fn toolFailure(a: Allocator, err: anyerror) !Content {
     return switch (err) {
         error.UnknownSession => runtimeError(a, "unknown_session", "The session does not exist."),
         error.SessionQueueFull => runtimeError(a, "session_queue_full", "The session's event queue is full."),
-        error.CallbackCapacityUnavailable => runtimeError(a, "callback_unavailable", "The pending callback limit has been reached."),
         else => err,
     };
 }

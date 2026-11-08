@@ -2,6 +2,7 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const History = @import("history.zig").History;
 const Persistence = @import("history.zig").Persistence;
+const Reports = @import("reports.zig");
 const Input = @import("input.zig");
 const WorkInput = @import("work.zig");
 const Delivery = WorkInput.Delivery;
@@ -10,6 +11,7 @@ const Allocator = std.mem.Allocator;
 const contracts = @import("agent_contracts");
 const Model = contracts.Model;
 const Incoming = contracts.Inbox.Incoming;
+const report_read_batch = 64;
 
 /// Identity, working context, and pending observations for one session.
 pub const Session = struct {
@@ -22,25 +24,23 @@ pub const Session = struct {
     active: ?*Activation = null,
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
-    report_reserved: bool = false,
 };
 
 pub const Work = struct { session: *Session, activation: *Activation };
 pub const ForkRequest = struct { task: []const u8 };
 pub const ForkPlan = struct { session: *Session };
 
-/// Current model input and the internal attention generation captured with it.
-/// Measuring or summarizing this snapshot does not consume the generation.
+/// Current model input projected for admission candidates.
 pub const Snapshot = struct {
     current: Input.Current,
-    attention_revision: u64,
 
     /// Project the registry effects of admitting a prefix, without changing
-    /// this snapshot or consuming attention. Each candidate owns its arrays.
+    /// this snapshot. Each candidate owns its arrays.
     pub fn afterAdmission(self: Snapshot, a: Allocator, events: []const Input.Event, count: usize) !Input.Current {
         std.debug.assert(count > 0 and count <= events.len);
         var current = self.current;
-        const remaining = events.len - count;
+        var remaining: usize = 0;
+        for (events[count..]) |event| remaining += @intFromBool(isInput(event));
         current.state.runtime.queued_inputs += remaining;
         const directory = try a.dupe(Input.SessionInfo, self.current.state.runtime.sessions);
         current.state.runtime.sessions = directory;
@@ -67,8 +67,8 @@ pub const Registry = struct {
     io: std.Io,
     max_sessions: usize,
     max_pending: usize,
-    max_callbacks: usize,
     history: Persistence,
+    reports: Reports.Outbox,
     mutex: std.Io.Mutex = .init,
     core: *Session,
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
@@ -77,23 +77,18 @@ pub const Registry = struct {
     callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
-    /// Core queue capacity held for activity reports, including forks
-    /// waiting for their model round to commit.
-    report_slots: usize = 0,
     next_session_id: u64 = 2,
     next_callback_id: u64 = 1,
-    attention_revision: u64 = 0,
-    observed_revision: u64 = 0,
     started_at_unix_ms: i64,
 
-    pub fn init(allocator: Allocator, io: std.Io, max_sessions: usize, max_pending: usize, max_callbacks: usize, history: contracts.HistoryStore) !Registry {
+    pub fn init(allocator: Allocator, io: std.Io, max_sessions: usize, max_pending: usize, history: contracts.HistoryStore) !Registry {
         var self: Registry = .{
             .allocator = allocator,
             .io = io,
             .max_sessions = max_sessions,
             .max_pending = max_pending,
-            .max_callbacks = max_callbacks,
             .history = .init(allocator, history),
+            .reports = try Reports.Outbox.init(allocator, history, null),
             .core = undefined,
             .started_at_unix_ms = std.Io.Clock.real.now(io).toMilliseconds(),
         };
@@ -103,6 +98,9 @@ pub const Registry = struct {
         const a = arena.allocator();
         const saved = try self.history.load(a, max_sessions);
         if (saved) |retained| {
+            const reports = try Reports.Outbox.init(allocator, history, retained.activity_reports);
+            self.reports.deinit();
+            self.reports = reports;
             self.next_session_id = retained.next_session_id;
             self.next_callback_id = retained.next_callback_id;
             for (retained.sessions) |record| {
@@ -164,6 +162,7 @@ pub const Registry = struct {
         self.wakeups.deinit(self.allocator);
         self.callbacks.deinit(self.allocator);
         self.queued_callbacks.deinit(self.allocator);
+        self.reports.deinit();
         self.history.deinit();
         self.* = undefined;
     }
@@ -205,8 +204,7 @@ pub const Registry = struct {
         const delivery = try Delivery.create(self.allocator, event, incoming.receipt);
         errdefer delivery.destroy(self.allocator);
         try self.ensureStartupLocked(session);
-        try session.pending.ensureUnusedCapacity(self.allocator, 1 + (if (session == self.core) self.report_slots else 0));
-        self.changedLocked(session);
+        try session.pending.ensureUnusedCapacity(self.allocator, 1);
         const notice_key = if (incoming.receipt) |key| try self.allocator.dupe(u8, key) else null;
         errdefer if (notice_key) |key| self.allocator.free(key);
         if (event == .callback) try self.queued_callbacks.put(self.allocator, event.callback.id, {});
@@ -241,10 +239,33 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         assertWork(work);
         std.debug.assert(work.activation.deliveries.items.len == 0);
-        if (work.session.pending.items.len == 0) return false;
-        try work.activation.deliveries.appendSlice(self.allocator, work.session.pending.items);
+        const reports = try self.reportDeliveriesLocked(work.session);
+        defer self.allocator.free(reports);
+        errdefer for (reports) |report| report.destroy(self.allocator);
+        const count = work.session.pending.items.len + reports.len;
+        if (count == 0) return false;
+        try work.activation.deliveries.ensureUnusedCapacity(self.allocator, count);
+        work.activation.deliveries.appendSliceAssumeCapacity(work.session.pending.items);
+        work.activation.deliveries.appendSliceAssumeCapacity(reports);
         work.session.pending.clearRetainingCapacity();
         work.activation.admitted = false;
+        return true;
+    }
+
+    /// Extend an unadmitted core batch by one I/O page without invoking the model.
+    pub fn extendReports(self: *Registry, work: Work) !bool {
+        if (work.session != self.core) return false;
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        std.debug.assert(!work.activation.admitted);
+        var staged: usize = 0;
+        for (work.activation.deliveries.items) |delivery| staged += @intFromBool(delivery.event == .activity);
+        const reports = try self.readReportDeliveriesLocked(staged);
+        defer self.allocator.free(reports);
+        errdefer for (reports) |report| report.destroy(self.allocator);
+        if (reports.len == 0) return false;
+        try work.activation.deliveries.appendSlice(self.allocator, reports);
         return true;
     }
 
@@ -271,7 +292,14 @@ pub const Registry = struct {
         const deliveries = &work.activation.deliveries;
         std.debug.assert(count != 0 and count <= deliveries.items.len);
         const suffix = deliveries.items[count..];
-        try session.pending.ensureUnusedCapacity(self.allocator, suffix.len + (if (session == self.core) self.report_slots else 0));
+        var report_count: usize = 0;
+        var endings: usize = 0;
+        for (deliveries.items[0..count]) |delivery| if (delivery.event == .activity) {
+            report_count += 1;
+            endings += @intFromBool(delivery.event.activity.ended_at_unix_ms != null);
+        };
+        try session.pending.ensureUnusedCapacity(self.allocator, suffix.len);
+        if (report_count != 0) try self.reports.consume(report_count, endings);
         session.pending.insertSliceAssumeCapacity(0, suffix);
         deliveries.items.len = count;
         if (session.context) |*previous| previous.deinit();
@@ -288,13 +316,10 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         assertWork(work);
         if (self.sessions.count() + self.reserved_sessions >= self.max_sessions) return error.SessionCapacityUnavailable;
-        if (!self.hasCapacity(self.core)) return error.SessionQueueFull;
-        try self.core.pending.ensureUnusedCapacity(self.allocator, self.report_slots + 1);
         const session = try self.allocator.create(Session);
         session.* = .{
             .session_id = self.next_session_id,
             .role = .activity,
-            .report_reserved = true,
         };
         errdefer self.destroySession(session);
         const assignment = try Delivery.create(self.allocator, .{ .assignment = .{ .task = request.task } }, null);
@@ -302,7 +327,6 @@ pub const Registry = struct {
         try session.pending.append(self.allocator, assignment);
         self.next_session_id += 1;
         self.reserved_sessions += 1;
-        self.report_slots += 1;
         return .{ .session = session };
     }
 
@@ -310,7 +334,6 @@ pub const Registry = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.reserved_sessions -= 1;
-        self.releaseReportLocked(plan.session);
         self.destroySession(plan.session);
     }
 
@@ -334,7 +357,6 @@ pub const Registry = struct {
         for (plans) |plan| {
             self.sessions.putAssumeCapacity(plan.session.session_id, plan.session);
             self.reserved_sessions -= 1;
-            self.changedLocked(plan.session);
         }
     }
 
@@ -343,6 +365,21 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         try self.restoreContextLocked(session);
         return session.context.?.clone(self.allocator);
+    }
+
+    /// Retain newly emitted activity text without scheduling the core.
+    pub fn recordAssistant(self: *Registry, work: Work, text: ?[]const u8) !void {
+        if (work.session == self.core or text == null) return;
+        const observed_at = self.now();
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        try self.reports.append(.{
+            .from_session = work.session.session_id,
+            .observed_at_unix_ms = observed_at,
+            .content = .{ .assistant = text.? },
+        });
+        try self.saveLocked();
     }
 
     pub fn save(self: *Registry) !void {
@@ -357,7 +394,8 @@ pub const Registry = struct {
         try self.saveLocked();
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        try self.history.maintain(arena.allocator());
+        const a = arena.allocator();
+        try self.history.maintain(a, try self.reports.retained(a));
     }
 
     fn saveLocked(self: *Registry) !void {
@@ -389,6 +427,7 @@ pub const Registry = struct {
             .wakeups = self.wakeups.items,
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
+            .activity_reports = self.reports.checkpoint(),
         });
     }
 
@@ -410,7 +449,7 @@ pub const Registry = struct {
         for (directory) |*info| {
             const item = sessions.next().?.*;
             info.* = self.sessionInfoLocked(item);
-            queued += item.pending.items.len;
+            queued += info.queued_inputs;
             active += @intFromBool(item.active != null);
         }
         std.mem.sort(Input.SessionInfo, directory, {}, lessSession);
@@ -433,37 +472,22 @@ pub const Registry = struct {
                     },
                 },
             },
-            .attention_revision = self.attention_revision,
         };
     }
 
-    /// Consume only the generation supplied to a real ordinary inference. A
-    /// later change remains pending even when it arrives after its snapshot.
-    pub fn observeAttention(self: *Registry, work: Work, revision: u64) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        assertWork(work);
-        if (work.session != self.core) return;
-        std.debug.assert(revision <= self.attention_revision);
-        self.observed_revision = @max(self.observed_revision, revision);
-    }
-
-    /// Finalize a response without tool calls when no queued events or core attention
-    /// remain. Callback checks, reporting, and session retirement share the same lock.
-    pub fn finish(self: *Registry, work: Work, text: ?[]const u8) !bool {
+    /// Finalize a response without tool calls when no queued input requires
+    /// another round. Callback checks, reporting, and session retirement share
+    /// the same lock.
+    pub fn finish(self: *Registry, work: Work) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
-        if (session.pending.items.len != 0 or (session == self.core and self.attentionPending())) return false;
+        if (self.hasWork(session)) return false;
         const completed_activity = session != self.core and self.callbackCount(session.session_id) == 0;
-        self.changedLocked(session);
-        if (completed_activity) {
-            try self.reportCompletionLocked(session, text);
-        } else {
-            self.releaseReportLocked(session);
-        }
-        session.last_active_unix_ms = self.now();
+        const finished_at = self.now();
+        if (completed_activity) try self.recordCompletionLocked(session, finished_at);
+        session.last_active_unix_ms = finished_at;
         session.active = null;
         work.activation.destroy(self.allocator);
         if (completed_activity) {
@@ -555,9 +579,7 @@ pub const Registry = struct {
     }
 
     fn registerCallbackLocked(self: *Registry, session: *Session, source: contracts.Callback.Source) !u64 {
-        if (self.callbackCount(session.session_id) >= self.max_callbacks) return error.CallbackCapacityUnavailable;
         try self.callbacks.ensureUnusedCapacity(self.allocator, 1);
-        self.changedLocked(session);
         const id = self.next_callback_id;
         self.callbacks.appendAssumeCapacity(.{ .id = id, .session_id = session.session_id, .source = source });
         self.next_callback_id += 1;
@@ -608,43 +630,63 @@ pub const Registry = struct {
         for (absent.items) |key| if (self.noticed.fetchRemove(key)) |entry| self.allocator.free(entry.key);
     }
 
-    fn reportCompletionLocked(self: *Registry, session: *Session, text: ?[]const u8) !void {
-        const report = try Delivery.create(self.allocator, .{ .report = .{ .from_session = session.session_id, .text = text } }, null);
-        errdefer report.destroy(self.allocator);
-        std.debug.assert(session.report_reserved and self.report_slots > 0);
+    fn recordCompletionLocked(self: *Registry, session: *Session, ended_at: i64) !void {
         try self.ensureStartupLocked(self.core);
-        try self.core.pending.ensureUnusedCapacity(self.allocator, self.report_slots);
-        self.releaseReportLocked(session);
-        self.core.pending.appendAssumeCapacity(report);
-    }
-
-    fn releaseReportLocked(self: *Registry, session: *Session) void {
-        if (session.report_reserved) {
-            self.report_slots -= 1;
-            session.report_reserved = false;
-        }
+        try self.reports.append(.{
+            .from_session = session.session_id,
+            .observed_at_unix_ms = ended_at,
+            .content = .ended,
+        });
     }
 
     fn takeReady(self: *Registry, session: *Session) !?Work {
         if (session.active != null or !self.hasWork(session)) return null;
-        const reserve_report = session != self.core and !session.report_reserved;
-        if (reserve_report) {
-            if (!self.hasCapacity(self.core)) return null;
-            try self.core.pending.ensureUnusedCapacity(self.allocator, self.report_slots + 1);
-        }
         try self.restoreContextLocked(session);
-        const activation = try Activation.create(self.allocator, session.pending.items);
-        activation.admitted = session.pending.items.len == 0;
-        if (reserve_report) {
-            self.report_slots += 1;
-            session.report_reserved = true;
-        }
+        const reports = try self.reportDeliveriesLocked(session);
+        defer self.allocator.free(reports);
+        errdefer for (reports) |report| report.destroy(self.allocator);
+        var deliveries: std.ArrayList(*Delivery) = .empty;
+        defer deliveries.deinit(self.allocator);
+        try deliveries.appendSlice(self.allocator, session.pending.items);
+        try deliveries.appendSlice(self.allocator, reports);
+        const activation = try Activation.create(self.allocator, deliveries.items);
+        activation.admitted = deliveries.items.len == 0;
         session.pending.clearRetainingCapacity();
         session.active = activation;
         session.borrowed_workers += 1;
         session.last_active_unix_ms = self.now();
-        self.changedLocked(session);
         return .{ .session = session, .activation = activation };
+    }
+
+    fn reportDeliveriesLocked(self: *Registry, session: *Session) ![]*Delivery {
+        if (session != self.core) return self.allocator.alloc(*Delivery, 0);
+        for (session.pending.items) |delivery| if (delivery.event == .activity) return self.allocator.alloc(*Delivery, 0);
+        return self.readReportDeliveriesLocked(0);
+    }
+
+    fn readReportDeliveriesLocked(self: *Registry, start: usize) ![]*Delivery {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const reports = try self.reports.peek(arena.allocator(), start, report_read_batch);
+        const deliveries = try self.allocator.alloc(*Delivery, reports.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (deliveries[0..initialized]) |delivery| delivery.destroy(self.allocator);
+            self.allocator.free(deliveries);
+        }
+        for (reports, deliveries) |report, *delivery| {
+            const messages: []const Input.ActivityMessage = if (report.content == .assistant) &.{.{
+                .text = report.content.assistant,
+                .observed_at_unix_ms = report.observed_at_unix_ms,
+            }} else &.{};
+            delivery.* = try Delivery.create(self.allocator, .{ .activity = .{
+                .from_session = report.from_session,
+                .messages = messages,
+                .ended_at_unix_ms = if (report.content == .ended) report.observed_at_unix_ms else null,
+            } }, null);
+            initialized += 1;
+        }
+        return deliveries;
     }
 
     fn restoreContextLocked(self: *Registry, session: *Session) !void {
@@ -667,22 +709,13 @@ pub const Registry = struct {
         const delivery = try Delivery.create(self.allocator, event, null);
         errdefer delivery.destroy(self.allocator);
         try self.ensureStartupLocked(session);
-        try session.pending.ensureUnusedCapacity(self.allocator, 1 + (if (session == self.core) self.report_slots else 0));
-        self.changedLocked(session);
+        try session.pending.ensureUnusedCapacity(self.allocator, 1);
         session.pending.appendAssumeCapacity(delivery);
     }
 
-    fn changedLocked(self: *Registry, session: *Session) void {
-        if (session == self.core) return;
-        self.attention_revision += 1;
-    }
-
-    fn attentionPending(self: *const Registry) bool {
-        return self.attention_revision != self.observed_revision;
-    }
-
     fn hasWork(self: *const Registry, session: *const Session) bool {
-        return session.pending.items.len != 0 or (session == self.core and self.attentionPending());
+        for (session.pending.items) |delivery| if (delivery.event != .activity) return true;
+        return session == self.core and self.reports.pendingEndings() != 0;
     }
 
     fn callbackCount(self: *const Registry, session_id: u64) usize {
@@ -697,15 +730,23 @@ pub const Registry = struct {
         assertWork(work);
         if (work.activation.waiting_for_tools == waiting) return;
         work.activation.waiting_for_tools = waiting;
-        self.changedLocked(work.session);
     }
 
     fn sessionInfoLocked(self: *Registry, session: *Session) Input.SessionInfo {
+        var endings: usize = 0;
+        if (session == self.core) {
+            endings = self.reports.pendingEndings();
+            if (session.active) |activation| if (!activation.admitted) {
+                for (activation.deliveries.items) |delivery| if (delivery.event == .activity and delivery.event.activity.ended_at_unix_ms != null) {
+                    endings -= 1;
+                };
+            };
+        }
         return .{
             .session_id = session.session_id,
             .role = session.role,
             .status = if (session.active) |activation| (if (activation.waiting_for_tools) .waiting_for_tools else .running) else if (self.hasWork(session)) .ready else .dormant,
-            .queued_inputs = session.pending.items.len,
+            .queued_inputs = queuedOrdinary(session.pending.items) + endings,
             .pending_callbacks = self.callbackCount(session.session_id),
             .last_active_unix_ms = session.last_active_unix_ms,
         };
@@ -713,7 +754,7 @@ pub const Registry = struct {
 
     fn hasCapacity(self: *Registry, session: *Session) bool {
         const active_count = if (session.active) |activation| deliveryCount(activation.deliveries.items) else 0;
-        return deliveryCount(session.pending.items) + active_count + (if (session == self.core) self.report_slots else 0) < self.max_pending;
+        return deliveryCount(session.pending.items) + active_count < self.max_pending;
     }
 
     fn destroySession(self: *Registry, session: *Session) void {
@@ -731,8 +772,21 @@ pub const Registry = struct {
 
 fn deliveryCount(deliveries: []const *Delivery) usize {
     var count: usize = 0;
-    for (deliveries) |delivery| count += @intFromBool(delivery.event != .startup);
+    for (deliveries) |delivery| count += @intFromBool(delivery.event != .startup and delivery.event != .activity);
     return count;
+}
+
+fn queuedOrdinary(deliveries: []const *Delivery) usize {
+    var count: usize = 0;
+    for (deliveries) |delivery| count += @intFromBool(delivery.event != .activity);
+    return count;
+}
+
+fn isInput(event: Input.Event) bool {
+    return switch (event) {
+        .activity => |report| report.ended_at_unix_ms != null,
+        else => true,
+    };
 }
 
 fn hasStartup(deliveries: []const *Delivery) bool {
@@ -742,8 +796,8 @@ fn hasStartup(deliveries: []const *Delivery) bool {
 
 fn isInternal(event: Input.Event) bool {
     return switch (event) {
-        .assignment, .report, .session_message => true,
-        .startup, .input, .callback => false,
+        .assignment, .session_message => true,
+        .startup, .input, .callback, .activity => false,
     };
 }
 
