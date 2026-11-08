@@ -2,7 +2,7 @@
 
 This contract defines runtime-generated `role=user` messages within the LLM conversation: retained observations and handovers, current execution facts, and inference purpose. Native model output and tool replies retain their own roles and formats. See [message assembly](architecture.md#working-history-and-user-messages).
 
-The [Input definitions](../packages/agent/src/input.zig) define fields and the [system prompt](../packages/agent/src/system.md) explains model interpretation.
+The [Input definitions](../packages/agent/src/input.zig) define fields. All sessions use the same [system prompt](../packages/agent/src/system.md), which explains model interpretation; current state and available tools identify each focus's circumstances and possible actions.
 
 ## Records and turns
 
@@ -56,7 +56,7 @@ Correspondence enters the core as an `input` observation of who said what; it im
 
 #### Assignments and reports
 
-An `Assignment` has `task: Text`, specifying what the activity should pursue within its inherited understanding. It is the activity's first new queued observation after the [fork](communication.md#forking-an-activity-session).
+An `Assignment` has `task: Text`, specifying what the activity should pursue within its inherited understanding. It is the activity's first new queued observation after [opening that focus](attention.md#opening-a-focus).
 
 An `ActivityReport` groups newly admitted information from one activity:
 
@@ -74,17 +74,19 @@ Each ordinary activity inference that returns assistant text produces one messag
 
 One ordinary core input, including a tool continuation, can contain ordinary events and reports from several activities. Newly admitted messages for the same session are grouped once, and groups follow the session's first appearance in the selected observations. Each session's message order and recorded times are preserved; the grouping does not encode cross-session interleaving. Persistence, restart, and later admission preserve the original message and ending times. The encoded request budget determines how much can enter one input.
 
-Text alone does not activate the core. An ending does, even without new text, and establishes [session completion](communication.md#activity-completion), not task success. Admission retains these observations in the core's history. Unadmitted information remains available for later admission.
+Text alone does not activate the core. An ending does, even without new text, and establishes [session completion](attention.md#activity-completion), not task success. Admission retains these observations in the core's history. Unadmitted information remains available for later admission.
 
 #### Session messages and callbacks
 
-The core's `send_session_message` produces a `SessionMessage`:
+The core's `send_focus_message` produces a `SessionMessage`:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `from_session` | `u64` | Sending core session, supplied by the runtime |
 | `observed_at_unix_ms` | `i64` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
+
+A focus message preserves its actual sender and enters the selected recipient's ordinary event queue. It can resume a sleeping recipient. It does not create a callback registration or arrange a reply.
 
 Registered observations arrive as `Callback` events for the sessions that arranged them:
 
@@ -97,7 +99,7 @@ Registered observations arrive as `Callback` events for the sessions that arrang
 
 A callback's observation time is sampled during intake, rather than at the wakeup deadline or host command's completion.
 
-The ID matches the `callback_id` returned by `wakeup` or a `run_host_shell` handoff result. `Source` is a tagged union: `wakeup: {}` identifies a scheduled wakeup, while `host: {command_id: 17}` identifies a host execution. Command and callback IDs are independent. The runtime supplies the source from the saved registration. See [callback delivery](communication.md#callback-observations) for destination retention and admission guarantees, and [host results](host.md#output-and-results) for the callback text's format.
+The ID matches the `callback_id` returned by `schedule_attention` or a `run_host_shell` handoff result. `Source` is a tagged union: `wakeup: {}` identifies a scheduled wakeup, while `host: {command_id: 17}` identifies a host execution. Command and callback IDs are independent. The runtime supplies the source from the saved registration. See [callback delivery](attention.md#callback-observations) for destination retention and admission guarantees, and [host results](host.md#output-and-results) for the callback text's format.
 
 A restored host source can identify an execution in an earlier runtime; its command ID is not a restored control handle. See [command lifetimes](host.md#command-lifetimes) for stored results and interruption observations after restart.
 
@@ -204,6 +206,6 @@ purpose:
 
 ## Handover generation and replacement
 
-A maintenance inference receives the retained LLM messages—the system prompt, user records, native model output, and tool replies—plus a turn with `current` and `purpose.summarize.instructions`. Tools are disabled. Instructions come from [compaction.md](../packages/agent/src/compaction.md); events and activity reports waiting for admission remain outside this request.
+A maintenance inference receives the common system prompt, retained user records and native model/tool exchanges, and a turn with `current` and `purpose.summarize.instructions`. Tools are disabled. The handover instructions come from [compaction.md](../packages/agent/src/compaction.md); events and activity reports waiting for admission remain outside this request.
 
-After the handover passes validation, it replaces the retained messages. The next ordinary request contains the system prompt, a `handover` record, and a fresh work turn. Session identity and role persist. See [bounded model context](architecture.md#bounded-model-context) for generation, replacement, and admission budgets.
+After the handover passes validation, it replaces the working history. The next ordinary request assembles the same system prompt, the `handover` record, and a fresh work turn. Session identity and role persist. See [bounded model context](architecture.md#bounded-model-context) for generation, replacement, and admission budgets.

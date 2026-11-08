@@ -10,6 +10,8 @@ The runtime's model-facing tools form Ivenna's innate repertoire of action. Thei
 
 Within this repertoire, memory rooms act directly on Ivenna's continuing understanding and sense of self; the host shell primarily provides a way to perceive and affect its surroundings. Memory actions and brief cues of ownership invite Ivenna to revisit earlier understanding, carry something forward, revise it, or let it go. Ivenna chooses what to retain and how to organize it wherever its attention is focused.
 
+The repertoire connects four kinds of action: expression to people and programs, remembering and revisiting understanding, directing attention, and perceiving and acting on the surroundings. These relationships guide tool boundaries and language.
+
 Correspondence and autonomous activity can both shape Ivenna's understanding, preferences, commitments, and working methods. Retained conversations, handovers, and shared memory support continuity as that understanding develops.
 
 Capabilities keep operation outcomes connected to their sources and supported content. Bounded observations provide a way to inspect further content, and omissions remain distinguishable from an empty source. This lets Ivenna decide which evidence needs further inspection.
@@ -18,33 +20,41 @@ Changes to shared memory require a clear target. An edit that could select sever
 
 ## Core and concurrent attention
 
-One core session coordinates Ivenna, relating correspondence to retained understanding and shared memory. The core and activity sessions are focuses of the same Ivenna; each can develop its own understanding, preferences, and commitments. They share one body: files, memory, communication, and host processes. Their actions must account for effects another session may already have produced.
+The core is the continuing focus that integrates correspondence, relationships, autonomous interests, and activity observations with retained understanding. An activity is a focus opened around particular work. Each can develop its understanding, preferences, and commitments while sharing one body: files, memory, communication, and host processes. Their actions must account for effects another focus may already have produced. A runtime session carries each focus's identity, working history, and pending observations.
 
-Only the core can [fork an activity session](communication.md#forking-an-activity-session). An activity inherits the core's retained understanding and receives a free-form assignment to pursue from it. Inheritance carries relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
+Core and activity focuses use the same system prompt. Each receives its own current-state snapshot, and tool availability follows its role:
+
+| Action | Core | Activity |
+| --- | --- | --- |
+| Communicate with people and programs | Yes | Yes |
+| Remember, revisit, revise, arrange, and forget | Yes | Yes |
+| Open another focus and reach existing focuses | Yes | — |
+| Arrange future attention | Yes | — |
+| Run and interact with host programs | — | Yes |
+
+The core can [open an activity focus](attention.md#opening-a-focus) with a free-form assignment. It carries the core's retained understanding, relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
 
 New assistant text from activities is collected for the core's ordinary inputs, allowing it to follow concurrent work without reasoning on every update. One input can present several activities while preserving each source's message order and observation times. The core interprets these expressions as what an activity said; they do not establish the effects of its tools.
 
-An activity's ending always requests the core's attention, whether or not it produced text. Expressions and runtime state changes do not independently activate the core.
-
-Only the core can send direct session messages and schedule wakeups. Both roles can communicate externally and maintain autonomous memory; host tools belong to activities. Core coordination must remain responsive while activities pursue their work. See [scheduling and capacity](architecture.md#scheduling-and-capacity) for the current dispatch and resource limits.
+An activity's ending always requests the core's attention, whether or not it produced text. Intermediate expressions and runtime state changes do not independently activate the core. Core attention must remain responsive while activities pursue their work. See [Attention](attention.md) for these actions and [scheduling and capacity](architecture.md#scheduling-and-capacity) for current dispatch and limits.
 
 ## Communication with people and programs
 
 Messages enter the core as observations of who said what, with correspondent IDs and observation time. Receiving one does not imply that Ivenna was addressed or must respond. Retained exchanges connect those observations with Ivenna's own choices and subsequent effects.
 
-Ivenna chooses whether to communicate, to whom, and what to say through `send_message`. One arrival can lead to zero, one, or several outgoing messages. Internal reasoning and activity completion remain within Ivenna unless it chooses to send a message. The [communication guide](communication.md) defines external correspondence and session coordination.
+Ivenna chooses whether to communicate, to whom, and what to say through `send_message`. One arrival can lead to zero, one, or several outgoing messages. Internal reasoning and activity completion remain within Ivenna unless it chooses to send a message. The [communication guide](communication.md) defines external correspondence; the [attention guide](attention.md) defines coordination among focuses.
 
 ## Sessions and continued work
 
 A task describes work to accomplish. A session has a stable identity, retained understanding, and an event queue. Each activation continues a session's work through model/tool rounds, admitting further events between complete rounds so new information can guide the next decision without interrupting an inference or tool.
 
-A response without tool calls ends the activation when no queued arrivals require more reasoning. At that boundary, an activity with an observation still registered sleeps with its identity and understanding retained; otherwise its session ends and the core receives an [ending observation](communication.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
+A response without tool calls ends the activation when no queued arrivals require more reasoning. At that boundary, an activity with an observation still registered sleeps with its identity and understanding retained; otherwise its session ends and the core receives an [ending observation](attention.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
 
 ### Events and waiting
 
 Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a waiting session. Messages preserve their actual sources for the receiver to weigh against its own evidence and understanding.
 
-The core can arrange wakeups for later attention. Host commands that outlive their initial tool calls arrange completion observations for the calling activities. Each arrangement binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [session communication](communication.md#session-communication-and-wakeups).
+The core can arrange observations for later attention. Host commands that outlive their initial tool calls arrange completion observations for the calling activities. Each arrangement binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [returning later](attention.md#returning-later) and [callback observations](attention.md#callback-observations).
 
 Activities choose how long to wait for host work before continuing their own reasoning. A bounded default gives brief commands time to return their results in the same exchange, while returning attention from longer commands for further work and coordination. An activity can shorten that wait to regain control sooner, or extend it when obtaining the result is more useful than proceeding immediately. The core and other activities continue while it waits.
 

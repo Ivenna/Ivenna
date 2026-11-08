@@ -328,7 +328,7 @@
   },
   {
     "name": "inspect_memory_space",
-    "description": "Sense how much space your memories occupy and how much remains. Return used_bytes, capacity_bytes, remaining_bytes, and used_ratio for all rooms together.",
+    "description": "See how much space your memories occupy and how much remains. Return used_bytes, capacity_bytes, remaining_bytes, and used_ratio for all rooms together.",
     "parameters": {
       "type": "object",
       "properties": {},

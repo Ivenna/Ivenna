@@ -7,7 +7,7 @@ const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
 /// Owned working history and the model-message view derived from it. Registry
-/// synchronizes mutation; current context and summary requests are temporary.
+/// synchronizes mutation; instructions and current turns enter only requests.
 pub const Context = struct {
     /// Only a newly admitted group is presented as this turn's observations.
     /// Older groups remain in the LLM conversation, even after empty output.
@@ -20,16 +20,14 @@ pub const Context = struct {
     entries: std.ArrayList(Entry) = .empty,
     messages: std.ArrayList(Model.Item) = .empty,
 
-    pub fn init(allocator: Allocator, scope: Scope, system_text: []const u8) !Context {
-        return restore(allocator, scope, &.{}, system_text);
+    pub fn init(allocator: Allocator, scope: Scope) !Context {
+        return restore(allocator, scope, &.{});
     }
 
-    pub fn restore(allocator: Allocator, scope: Scope, entries: []const Entry, system_text: []const u8) !Context {
+    pub fn restore(allocator: Allocator, scope: Scope, entries: []const Entry) !Context {
         var self: Context = .{ .allocator = allocator, .arena = .init(allocator), .scope = scope };
         errdefer self.deinit();
-        const a = self.arena.allocator();
         try self.entries.ensureTotalCapacity(allocator, entries.len);
-        try self.messages.append(allocator, .{ .message = .{ .role = .system, .text = try a.dupe(u8, system_text) } });
         for (entries) |entry| try self.append(entry);
         return self;
     }
@@ -41,17 +39,13 @@ pub const Context = struct {
         self.* = undefined;
     }
 
-    pub fn history(self: *const Context) []const Model.Item {
-        return self.messages.items;
-    }
-
     pub fn records(self: *const Context) []const Entry {
         return self.entries.items;
     }
 
     /// Return an independently owned snapshot of this session's retained history.
     pub fn clone(self: *const Context, allocator: Allocator) !Context {
-        return restore(allocator, self.scope, self.entries.items, self.messages.items[0].message.text);
+        return restore(allocator, self.scope, self.entries.items);
     }
 
     pub fn appendRecord(self: *Context, record: Input.Record) !void {
@@ -99,16 +93,17 @@ pub const Context = struct {
     }
 
     fn buildRequest(self: *const Context, a: Allocator, prefix_len: usize, turn: Input.Turn) ![]const Model.Item {
-        const messages = try a.alloc(Model.Item, prefix_len + 1);
-        @memcpy(messages[0..prefix_len], self.messages.items[0..prefix_len]);
-        messages[prefix_len] = .{ .message = .{ .role = .user, .text = try Input.renderTurn(a, turn) } };
+        const messages = try a.alloc(Model.Item, prefix_len + 2);
+        messages[0] = .{ .message = .{ .role = .system, .text = @embedFile("system.md") } };
+        @memcpy(messages[1 .. prefix_len + 1], self.messages.items[0..prefix_len]);
+        messages[prefix_len + 1] = .{ .message = .{ .role = .user, .text = try Input.renderTurn(a, turn) } };
         return messages;
     }
 
     pub fn withHandover(self: *const Context, allocator: Allocator, summary: []const u8) !Context {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
         const record: Input.Record = .{ .handover = .{ .session_id = scope.session_id, .summary = summary } };
-        return restore(allocator, scope, &.{.{ .record = record }}, self.messages.items[0].message.text);
+        return restore(allocator, scope, &.{.{ .record = record }});
     }
 
     fn append(self: *Context, entry: Entry) !void {

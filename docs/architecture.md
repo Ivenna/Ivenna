@@ -2,7 +2,7 @@
 
 This guide describes Ivenna's current implementation: package responsibilities, execution, and service and storage protocols. The kernel retains working histories across restarts and constructs fresh execution state on startup. The application assembles the runtime and exposes health and reception status.
 
-The [design intent](design.md) sets the behavioral goals and interface principles. The [input contract](input.md) defines runtime-generated user messages, [communication](communication.md) defines message observations and explicit sending, and the [usage guide](usage.md) explains correspondence with Ivenna.
+The [design intent](design.md) sets the behavioral goals and interface principles. The [input contract](input.md) defines runtime-generated user messages, [communication](communication.md) defines correspondence and explicit sending, and [attention](attention.md) defines focus coordination and observation lifetimes. The [usage guide](usage.md) explains correspondence with Ivenna.
 
 ## Responsibilities
 
@@ -10,7 +10,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | --- | --- |
 | [apps/ivenna](../apps/ivenna) | Configure and assemble the runtime, serve HTTP status, and own process startup and shutdown |
 | [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
-| [packages/agent](../packages/agent/src/root.zig) | Coordinate sessions, activity forks, activations, and retained history; own model-input rendering, execution policy, session prompts, and coordination tools |
+| [packages/agent](../packages/agent/src/root.zig) | Coordinate focuses, sessions, activations, and retained history; own model-input rendering, execution policy, session prompts, and expression and attention actions |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
 | [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, decode Responses output, and apply model content limits |
@@ -106,7 +106,9 @@ Correspondence and callback mail stay in their durable sources when their destin
 
 ### Coordination and current state
 
-Correspondence enters the core's FIFO queue independently of mail threads. Both roles expose external communication and shared memory. Only the core exposes `fork_session`, `send_session_message`, and `wakeup`; only activity sessions expose host tools. See the [agent declarations](../packages/agent/src/tools.json). Engine applies the same role policy to declarations and invocation, independently of tools mentioned in inherited history. This check governs new calls; saved wakeup registrations retain their destinations during restoration and delivery.
+Correspondence enters the core's FIFO queue independently of mail threads. Both roles expose external communication and shared memory. The core exposes `open_focus`, `send_focus_message`, and `schedule_attention`; activities expose host tools. [Agent actions](../packages/agent/src/tools.zig) own typed arguments, recognition, and a single role rule used by declaration selection and invocation. Engine records the inference's role and uses it again for execution; Kernel receives parsed actions and owns their effects. Inherited tool calls do not establish current availability. Saved wakeup registrations retain their destinations during restoration and delivery.
+
+`send_focus_message` uses the registry's durable session-message queue with a target chosen by the core. The registry records the calling core as `from_session`. Messages consume ordinary event capacity and can make a sleeping recipient ready. They do not register an awaited reply. Activity expressions remain in their separate outbox and accompany the core's ordinary inputs without activating it.
 
 Each inference receives a fresh session roster. Persistent callback registrations retain their receiving session IDs; `runtimeSnapshot` filters for the caller and projects only `id` and `source` into `Input.PendingCallback`. Observations, reports, and handovers retain task understanding.
 
@@ -124,11 +126,11 @@ The selected group and checkpoint are saved before receipts are acknowledged and
 
 ## Activity forks
 
-Only the core can invoke `fork_session`. Each call reserves a new identity and prepares an assignment. At round commit, the registry appends the complete model output and one reply per tool call to a candidate core context. It independently clones that context for each prepared activity, then publishes the completed core context and all new activities together. Publication leaves the core's activation running. A round can fork several activities, subject to identity capacity.
+Only the core can invoke `open_focus`. Each call reserves a new identity and prepares an assignment. At round commit, the registry appends the complete model output and one reply per tool call to a candidate core context. It independently clones that context for each prepared activity, then publishes the completed core context and all new activities together. Publication leaves the core's activation running. A round can fork several activities, subject to identity capacity.
 
 Each copy includes retained observations, complete native model/tool exchanges, and any existing handover followed by later history. All replies from the calling round are included, even those produced after the fork call. Forking generates no extra summary. Original record session IDs remain intact as provenance; historical tool calls are not replayed.
 
-The assignment is the activity's first new queued observation. Temporary inference turns, queued observations, callback registrations, and wakeup schedules are not copied or transferred. The activity receives its own current-state snapshot. Inherited assistant output is not collected again as a new report. See the [fork interface](communication.md#forking-an-activity-session) and [assignment fields](input.md#assignments-and-reports).
+The assignment is the activity's first new queued observation. Temporary inference turns, queued observations, callback registrations, and wakeup schedules are not copied or transferred. The activity receives its own current-state snapshot and selected tools under the same system prompt. Inherited assistant output is not collected again as a new report. See [opening a focus](attention.md#opening-a-focus) and [assignment fields](input.md#assignments-and-reports).
 
 ## Activity reports
 
@@ -158,11 +160,13 @@ Intake resolves the ID through its registration, adds the saved source to the ob
 
 ## Working history and user messages
 
-[Context](../packages/agent/src/context.zig) owns retained observations, complete native `Model.Item` exchanges, and handovers. It caches the LLM message view from those entries and the current system prompt. Model output remains opaque adapter continuation bytes, including reasoning; tool replies keep their typed content. [History persistence](#persistent-working-history) stores entries and selects them for restoration.
+[Context](../packages/agent/src/context.zig) owns retained observations, complete native `Model.Item` exchanges, and handovers, and caches their LLM message view. Model output remains opaque adapter continuation bytes, including reasoning; tool replies keep their typed content. [History persistence](#persistent-working-history) stores entries and selects them for restoration.
+
+Context prepends the embedded [system.md](../packages/agent/src/system.md) as one system message before the selected history and current turn. Its text is identical for core and activity sessions; the current role appears in the turn, and Engine selects available tools separately. The system message is assembled independently of retained entries. Ordinary requests, admission candidates, and compaction all use this assembly path, including its encoded cost.
 
 [Input](../packages/agent/src/input.zig) renders the runtime's user messages within that conversation. `Record` selects retained `events` or `handover`; `Turn` combines fresh `current` facts with one purpose, `work` or `summarize`. See the [field contract](input.md).
 
-For ordinary work, `Context.Delivery.latest` moves the newest event record from the request prefix into `purpose.work.events`, leaving retained Context unchanged. Afterward, `Context.Delivery.none` keeps the full prefix and supplies empty events, even after empty model output. Candidate assembly uses the same turn shape with the [projected admission state](#activation-admission). Summary assembly reads the full retained prefix; [compaction](#bounded-model-context) owns replacement.
+For ordinary work, `Context.Delivery.latest` moves the newest event record from the history prefix into `purpose.work.events`, leaving retained Context unchanged. Afterward, `Context.Delivery.none` keeps the full history prefix and supplies empty events, even after empty model output. Candidate assembly uses the same turn shape with the [projected admission state](#activation-admission). Summary assembly reads the full retained prefix; [compaction](#bounded-model-context) owns replacement.
 
 Appending clones and renders the new entry. Inference snapshots and activity forks copy retained contents for independent ownership; workers retain request snapshots through the complete model/tool round. An activity's copy sets `Context.scope` to its own session ID and epoch zero, preserving the original session IDs inside inherited records.
 
@@ -172,7 +176,7 @@ Each turn repeats the complete runtime projection, including the roster and call
 
 ## Model requests and tools
 
-[Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). Role-filtered agent declarations are joined by Memory through `shared_tools` and, for activity sessions, Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection.
+[Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). [tools.zig](../packages/agent/src/tools.zig) selects agent declarations and parses their arguments using one explicit role rule. Memory joins through `shared_tools` and, for activity sessions, Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection. Runtime action effects remain in Kernel's calling round, including focus preparation and atomic publication with the completed round.
 
 Kernel calls inference and tool execution separately, marking the session as `waiting_for_tools` while Engine executes a returned batch. The activation remains owned by the same worker. Engine retains the prepared request through tool execution so the provider can apply content limits to the complete result batch.
 
@@ -188,9 +192,9 @@ The adapter distinguishes absent assistant text from empty text by whether messa
 
 `CONTEXT_REQUEST_BYTES` bounds the complete encoded ordinary request, including messages, current state, tools, reasoning settings, and images. The kernel checks before each inference. `LLM_MAX_OUTPUT_TOKENS` independently bounds output, including reasoning.
 
-Compaction reads the retained LLM messages plus a turn with fresh current state and summary instructions from [compaction.md](../packages/agent/src/compaction.md). This inference uses no tools and `high` reasoning, bounded by `CONTEXT_COMPACTION_BYTES`. It admits no waiting events or unread activity reports.
+Compaction uses the common system prompt, the retained messages, and a turn with fresh current state and handover instructions from [compaction.md](../packages/agent/src/compaction.md). This inference uses no tools and `high` reasoning, bounded by `CONTEXT_COMPACTION_BYTES`. It admits no waiting events or unread activity reports.
 
-The generated handover must be nonempty after trimming. Before installation, the kernel checks the complete replacement ordinary request with fresh state against `CONTEXT_REQUEST_BYTES`; the handover has no separate byte limit. Successful replacement leaves the system prompt and handover, followed by a new work turn; earlier message storage follows [retention](#history-retention).
+The generated handover must be nonempty after trimming. Before installation, the kernel checks the complete replacement ordinary request with fresh state against `CONTEXT_REQUEST_BYTES`; the handover has no separate byte limit. Successful replacement leaves the handover record as working history. The next request adds the same system prompt and a fresh work turn; earlier message storage follows [retention](#history-retention).
 
 Requests that cannot meet their bounds fail explicitly. Admission measures complete candidate requests with a reusable trial arena; byte counts are not token estimates.
 
@@ -235,7 +239,7 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 ## Startup and interruption
 
-Startup discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, activity outbox references, callbacks, and wakeups. Contexts use the current system prompt. Communication-copy and history maintenance complete before reception opens.
+Startup discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, activity outbox references, callbacks, and wakeups. Requests receive the common system prompt independently of restored history. Communication-copy and history maintenance complete before reception opens.
 
 The core and sessions with interrupted activations or unread incoming events queue startup immediately. Other activity sessions prepend startup when a real event first arrives; newly created sessions begin with an assignment. Unread assistant reports retain their passive status and accompany the core's next ordinary input; unread endings still request its activation.
 

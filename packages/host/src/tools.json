@@ -1,7 +1,7 @@
 [
   {
-    "name": "get_host_shell",
-    "description": "Inspect the default shell, startup directory, and commands across activities, including commands whose initial calls are still waiting. Command IDs belong to this runtime. Finished handles have bounded retention; full logs remain independently available.",
+    "name": "inspect_host_shell",
+    "description": "Observe shell defaults and command snapshots across activities, including commands whose initial calls are still waiting. Return the default shell, startup directory, and matching command handles. Command IDs belong to this runtime. Finished handles have bounded retention; full logs remain independently available.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -91,7 +91,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 18446744073709551615,
-          "description": "Runtime command handle returned by run_host_shell or listed by get_host_shell."
+          "description": "Runtime command handle returned by run_host_shell or listed by inspect_host_shell."
         },
         "action": {
           "type": "object",

@@ -39,7 +39,7 @@ pub const Host = struct {
         max_output_bytes: u32 = 16384,
     };
     pub const Request = union(enum) {
-        get_host_shell: struct { command_id: ?u64 = null },
+        inspect_host_shell: struct { command_id: ?u64 = null },
         run_host_shell: Shell.Command,
         continue_host_shell: Continue,
         pub fn parse(a: Allocator, name: []const u8, arguments: []const u8) !?Request {
@@ -51,7 +51,7 @@ pub const Host = struct {
                 }),
             };
             switch (request) {
-                .get_host_shell => |args| if (args.command_id == 0) return error.InvalidToolArguments,
+                .inspect_host_shell => |args| if (args.command_id == 0) return error.InvalidToolArguments,
                 .run_host_shell => |args| {
                     if (!validText(args.command) or !validBudget(args.max_output_bytes) or args.timeout_ms == 0) return error.InvalidToolArguments;
                     if (args.cwd) |cwd| if (!validText(cwd)) return error.InvalidToolArguments;
@@ -164,7 +164,7 @@ pub const Host = struct {
     }
     pub fn invoke(self: *Host, a: Allocator, context: Context, request: Request) !Content {
         return switch (request) {
-            .get_host_shell => |args| self.describe(a, args.command_id),
+            .inspect_host_shell => |args| self.describe(a, args.command_id),
             .run_host_shell => |args| self.execute(a, context, args),
             .continue_host_shell => |args| self.continueCommand(a, args),
         };

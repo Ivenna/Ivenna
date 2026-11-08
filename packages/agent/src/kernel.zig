@@ -4,6 +4,7 @@ const Compaction = @import("compaction.zig");
 const Engine = @import("engine.zig").Engine;
 const Content = @import("content").Content;
 const Input = @import("input.zig");
+const AgentTools = @import("tools.zig");
 const Sessions = @import("sessions.zig");
 const contracts = @import("agent_contracts");
 const Communication = contracts.Communication;
@@ -176,38 +177,31 @@ pub const Kernel = struct {
             return self.kernel.sessions.registerCallback(self.work, source);
         }
 
-        fn invoke(context: *anyopaque, a: Allocator, name: []const u8, arguments: []const u8) anyerror!?Content {
+        fn invoke(context: *anyopaque, a: Allocator, request: AgentTools.Request) anyerror!Content {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
-            if (std.mem.eql(u8, name, "send_message")) {
-                const message = try parseArguments(Communication.Message, a, arguments);
-                if (message.recipients.len == 0 or message.text.len == 0) return error.InvalidToolArguments;
-                return switch (try self.kernel.sender.send(a, message)) {
+            return switch (request) {
+                .send_message => |message| switch (try self.kernel.sender.send(a, message)) {
                     .submitted => |submission| try runtimeResult(a, submission),
                     .invalid_recipient => try runtimeError(a, "invalid_recipient", "The recipient ID is invalid."),
-                };
-            }
-            if (std.mem.eql(u8, name, "send_session_message")) {
-                const message = try parseArguments(struct { session_id: u64, text: []const u8 }, a, arguments);
-                if (message.session_id == 0 or message.text.len == 0) return error.InvalidToolArguments;
-                self.kernel.sessions.sendSessionMessage(self.work, message.session_id, message.text) catch |err| return try toolFailure(a, err);
-                return try runtimeResult(a, .{ .session_id = message.session_id });
-            }
-            if (std.mem.eql(u8, name, "wakeup")) {
-                const request = try parseArguments(struct { at_unix_ms: i64, text: []const u8 }, a, arguments);
-                if (request.text.len == 0) return error.InvalidToolArguments;
-                const id = self.kernel.sessions.scheduleWakeup(self.work, request.at_unix_ms, request.text) catch |err| return try toolFailure(a, err);
-                return try runtimeResult(a, .{ .callback_id = id });
-            }
-            if (!std.mem.eql(u8, name, "fork_session")) return null;
-            const request = try parseArguments(Sessions.ForkRequest, a, arguments);
-            if (request.task.len == 0) return error.InvalidToolArguments;
-            try self.forks.ensureUnusedCapacity(self.kernel.allocator, 1);
-            const plan = self.kernel.sessions.prepareFork(self.work, request) catch |err| switch (err) {
-                error.SessionCapacityUnavailable => return try runtimeError(a, "fork_unavailable", "The session limit has been reached. Existing sessions remain addressable."),
-                else => return err,
+                },
+                .send_focus_message => |message| blk: {
+                    self.kernel.sessions.sendSessionMessage(self.work, message.session_id, message.text) catch |err| return try toolFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .session_id = message.session_id });
+                },
+                .schedule_attention => |args| blk: {
+                    const id = self.kernel.sessions.scheduleWakeup(self.work, args.at_unix_ms, args.text) catch |err| return try toolFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .callback_id = id });
+                },
+                .open_focus => |args| blk: {
+                    try self.forks.ensureUnusedCapacity(self.kernel.allocator, 1);
+                    const plan = self.kernel.sessions.prepareFork(self.work, args.task) catch |err| switch (err) {
+                        error.SessionCapacityUnavailable => return try runtimeError(a, "focus_unavailable", "The session limit has been reached. Existing sessions remain addressable."),
+                        else => return err,
+                    };
+                    self.forks.appendAssumeCapacity(plan);
+                    break :blk try runtimeResult(a, .{ .session_id = plan.session.session_id });
+                },
             };
-            self.forks.appendAssumeCapacity(plan);
-            return try runtimeResult(a, .{ .session_id = plan.session.session_id });
         }
     };
 
@@ -235,7 +229,7 @@ pub const Kernel = struct {
                 .context = &runtime,
                 .invoke = RuntimeRound.invoke,
                 .callback = .{ .context = &runtime, .register = RuntimeRound.registerCallback },
-            }, session.role);
+            });
             if (has_tools) try self.sessions.setToolWait(work, false);
             delivery = .none;
             try self.sessions.commitRound(work, inference.response.output, replies, runtime.forks.items);
@@ -330,7 +324,7 @@ pub const Kernel = struct {
         defer history.deinit();
         var snapshot = try self.sessions.runtimeSnapshot(a, work.session);
         var selection = try self.selectEvents(a, work, &history, snapshot);
-        if (selection == null and history.history().len > 1) {
+        if (selection == null and history.records().len != 0) {
             snapshot = try self.sessions.runtimeSnapshot(a, work.session);
             const summary = try Compaction.summarize(self.engine.model, a, &history, snapshot.current, self.limits.compaction_bytes);
             var compacted = try history.withHandover(self.allocator, summary);
@@ -386,13 +380,6 @@ pub const Kernel = struct {
         return .{ .context = replacement, .input = replacement_input };
     }
 };
-
-fn parseArguments(comptime T: type, a: Allocator, arguments: []const u8) !T {
-    return std.json.parseFromSliceLeaky(T, a, arguments, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return error.InvalidToolArguments,
-    };
-}
 
 fn runtimeResult(a: Allocator, value: anytype) !Content {
     return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = value }, .{}));

@@ -3,6 +3,7 @@ const contracts = @import("agent_contracts");
 const Model = contracts.Model;
 const Tools = contracts.Tools;
 const Input = @import("input.zig");
+const AgentTools = @import("tools.zig");
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
@@ -20,17 +21,18 @@ pub const Engine = struct {
         activity: Model.ReasoningEffort = .high,
     };
 
-    /// Kernel supplies attention operations without giving tool execution
-    /// ownership of sessions or their retained histories.
+    /// Kernel supplies effects tied to the calling session and round without
+    /// giving tool execution ownership of sessions or their retained histories.
     pub const RuntimeTools = struct {
         context: *anyopaque,
-        invoke: *const fn (*anyopaque, Allocator, []const u8, []const u8) anyerror!?Content,
+        invoke: *const fn (*anyopaque, Allocator, AgentTools.Request) anyerror!Content,
         callback: contracts.Callback.Registrar,
     };
 
     pub const Inference = struct {
         request: Model.Request,
         response: Model.Response,
+        role: Input.Role,
     };
 
     /// Declarations and response data belong to a. Request history borrows the
@@ -38,12 +40,12 @@ pub const Engine = struct {
     pub fn infer(self: *Engine, a: Allocator, history: []const Model.Item, role: Input.Role) !Inference {
         try self.io.checkCancel();
         const request = try self.modelRequest(a, history, role);
-        return .{ .request = request, .response = try self.model.next(a, request) };
+        return .{ .request = request, .response = try self.model.next(a, request), .role = role };
     }
 
     /// Execute the decoded batch in order, retaining its complete request for
     /// the provider's tool-content limits. Replies belong to a.
-    pub fn executeTools(self: *Engine, a: Allocator, session_id: u64, inference: Inference, runtime_tools: ?RuntimeTools, role: Input.Role) ![]const Model.Item {
+    pub fn executeTools(self: *Engine, a: Allocator, session_id: u64, inference: Inference, runtime_tools: ?RuntimeTools) ![]const Model.Item {
         var request = inference.request;
         const response = inference.response;
         var messages: std.ArrayList(Model.Item) = .empty;
@@ -51,7 +53,7 @@ pub const Engine = struct {
         try messages.appendSlice(a, response.output);
         const reply_start = messages.items.len;
         for (response.calls) |call| {
-            const content = self.invoke(a, session_id, call.name, call.arguments, runtime_tools, role) catch |err| switch (err) {
+            const content = self.invoke(a, session_id, call.name, call.arguments, runtime_tools, inference.role) catch |err| switch (err) {
                 error.InvalidToolArguments, error.UnknownTool => try Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
                     .@"error" = .{
                         .code = if (err == error.UnknownTool) "unknown_tool" else "invalid_arguments",
@@ -68,9 +70,9 @@ pub const Engine = struct {
     }
 
     fn invoke(self: *Engine, a: Allocator, session_id: u64, name: []const u8, arguments: []const u8, runtime_tools: ?RuntimeTools, role: Input.Role) !Content {
-        if (!coordinationAvailable(role, name)) return error.UnknownTool;
-        if (runtime_tools) |runtime| {
-            if (try runtime.invoke(runtime.context, a, name, arguments)) |result| return result;
+        if (try AgentTools.Request.parse(a, role, name, arguments)) |request| {
+            const runtime = runtime_tools orelse return error.UnknownTool;
+            return runtime.invoke(runtime.context, a, request);
         }
         for (self.capabilities(role)) |group| {
             for (group) |tools| {
@@ -105,21 +107,11 @@ pub const Engine = struct {
     /// The agent owns coordination policy; each registered body capability
     /// supplies its declarations together with its invocation entry point.
     fn toolDeclarations(self: *Engine, a: Allocator, role: Input.Role) ![]const Model.Tool {
-        const coordination = try std.json.parseFromSliceLeaky([]const Model.Tool, a, @embedFile("tools.json"), .{});
         var selected: std.ArrayList(Model.Tool) = .empty;
-        for (coordination) |tool| {
-            if (coordinationAvailable(role, tool.name)) try selected.append(a, tool);
-        }
+        try selected.appendSlice(a, try AgentTools.declarations(a, role));
         for (self.capabilities(role)) |group| {
             for (group) |capability| try selected.appendSlice(a, capability.declarations);
         }
         return selected.toOwnedSlice(a);
     }
 };
-
-fn coordinationAvailable(role: Input.Role, name: []const u8) bool {
-    return role == .core or
-        (!std.mem.eql(u8, name, "fork_session") and
-            !std.mem.eql(u8, name, "send_session_message") and
-            !std.mem.eql(u8, name, "wakeup"));
-}

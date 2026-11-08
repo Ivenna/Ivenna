@@ -27,7 +27,6 @@ pub const Session = struct {
 };
 
 pub const Work = struct { session: *Session, activation: *Activation };
-pub const ForkRequest = struct { task: []const u8 };
 pub const ForkPlan = struct { session: *Session };
 
 /// Current model input projected for admission candidates.
@@ -114,7 +113,7 @@ pub const Registry = struct {
                 };
                 errdefer self.destroySession(session);
                 if (record.role == .core) {
-                    session.context = try Context.restore(allocator, .{ .session_id = record.session_id, .epoch = record.epoch }, record.entries orelse return error.InvalidHistory, @embedFile("system.md"));
+                    session.context = try Context.restore(allocator, .{ .session_id = record.session_id, .epoch = record.epoch }, record.entries orelse return error.InvalidHistory);
                 }
                 try self.sessions.put(allocator, session.session_id, session);
             }
@@ -142,7 +141,7 @@ pub const Registry = struct {
             const core = try allocator.create(Session);
             core.* = .{ .session_id = 1, .role = .core, .needs_startup = true };
             errdefer self.destroySession(core);
-            core.context = try Context.init(allocator, .{ .session_id = 1, .epoch = 0 }, @embedFile("system.md"));
+            core.context = try Context.init(allocator, .{ .session_id = 1, .epoch = 0 });
             try self.ensureStartupLocked(core);
             try self.sessions.put(allocator, 1, core);
             self.core = core;
@@ -311,7 +310,7 @@ pub const Registry = struct {
         };
     }
 
-    pub fn prepareFork(self: *Registry, work: Work, request: ForkRequest) !ForkPlan {
+    pub fn prepareFork(self: *Registry, work: Work, task: []const u8) !ForkPlan {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
@@ -322,7 +321,7 @@ pub const Registry = struct {
             .role = .activity,
         };
         errdefer self.destroySession(session);
-        const assignment = try Delivery.create(self.allocator, .{ .assignment = .{ .task = request.task } }, null);
+        const assignment = try Delivery.create(self.allocator, .{ .assignment = .{ .task = task } }, null);
         errdefer assignment.destroy(self.allocator);
         try session.pending.append(self.allocator, assignment);
         self.next_session_id += 1;
@@ -694,7 +693,7 @@ pub const Registry = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const entries = try self.history.restoreEntries(arena.allocator(), session.session_id);
-        session.context = try Context.restore(self.allocator, .{ .session_id = session.session_id, .epoch = session.epoch }, entries, @embedFile("system.md"));
+        session.context = try Context.restore(self.allocator, .{ .session_id = session.session_id, .epoch = session.epoch }, entries);
     }
 
     fn ensureStartupLocked(self: *Registry, session: *Session) !void {

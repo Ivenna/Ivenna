@@ -26,14 +26,15 @@
     }
   },
   {
-    "name": "fork_session",
-    "description": "Open another focus of your attention to pursue the supplied task while your activation continues. Return its stable session_id. The activity inherits your retained history, including this complete model/tool round. Its new assistant text accompanies your later ordinary inputs without activating you; its ending requests an input even without new text.",
+    "name": "open_focus",
+    "description": "Open another focus of your attention to pursue the supplied task while the core continues. Return its stable session_id. The activity inherits your retained history through this complete model/tool round. Its ordinary assistant text accompanies later core inputs without activating the core; its ending requests core attention even without new text.",
     "parameters": {
       "type": "object",
       "properties": {
         "task": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "What this focus should pursue."
         }
       },
       "required": [
@@ -43,19 +44,20 @@
     }
   },
   {
-    "name": "send_session_message",
-    "description": "Send a message to an existing session. The message is durably queued as an observation. A dormant recipient becomes ready; an active recipient receives it between complete model/tool rounds.",
+    "name": "send_focus_message",
+    "description": "Share a thought or update with an existing focus, including your own. Durably queue the text as an observation and return the recipient's session_id. A dormant recipient becomes ready; an active recipient receives it between complete model/tool rounds.",
     "parameters": {
       "type": "object",
       "properties": {
         "session_id": {
           "type": "integer",
           "minimum": 1,
-          "description": "The current roster lists existing sessions."
+          "description": "The focus's runtime session_id from the current roster. Your own session_id is also valid."
         },
         "text": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "The thought or update to deliver."
         }
       },
       "required": [
@@ -66,14 +68,14 @@
     }
   },
   {
-    "name": "wakeup",
+    "name": "schedule_attention",
     "description": "Leave yourself something to return to at a later time. Schedule one observation for the core and return its callback_id; the arrangement survives restart. Past times are due immediately, though inference can occur later.",
     "parameters": {
       "type": "object",
       "properties": {
         "at_unix_ms": {
           "type": "integer",
-          "description": "Current runtime time is supplied in state."
+          "description": "When to request attention, as Unix time in milliseconds. Current runtime time is supplied in state."
         },
         "text": {
           "type": "string",

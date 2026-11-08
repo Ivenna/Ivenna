@@ -4,7 +4,7 @@ The [host tools](../packages/host/src/tools.json) let activity sessions run prog
 
 | Tool | Purpose |
 | --- | --- |
-| `get_host_shell` | Inspect shell defaults and discover command handles |
+| `inspect_host_shell` | Inspect shell defaults and discover command handles |
 | `run_host_shell` | Start a command and wait for completion up to a bounded duration |
 | `continue_host_shell` | Read output, supply input, send a signal, or resize a terminal |
 
@@ -56,9 +56,9 @@ A terminal starts with 24 rows and 80 columns and can be resized. The tool retur
 
 ## Continuing and controlling a command
 
-Use a `command_id` returned by a yielded `run_host_shell` call or listed by `get_host_shell`. Commands are discoverable across activities, including while the starting activity is still waiting in `run_host_shell`. Input and control do not wait for another observation call's yield deadline.
+Use a `command_id` returned by a yielded `run_host_shell` call or listed by `inspect_host_shell`. Commands are discoverable across activities, including while the starting activity is still waiting in `run_host_shell`. Input and control do not wait for another observation call's yield deadline.
 
-Call `get_host_shell` with `{}` to inspect the default `shell`, startup `cwd`, and `commands`, or pass `{"command_id":17}` to select one. Entries include `command_id`, originating `session_id`, `command_preview` (up to 160 UTF-8 bytes), `state`, `mode`, `stdin_open`, and `input_pending`. The list has a 32 KiB encoded reply budget; `total_commands` and `commands_truncated` identify omitted entries.
+Call `inspect_host_shell` with `{}` to inspect the default `shell`, startup `cwd`, and `commands`, or pass `{"command_id":17}` to select one. Entries include `command_id`, originating `session_id`, `command_preview` (up to 160 UTF-8 bytes), `state`, `mode`, `stdin_open`, and `input_pending`. The list has a 32 KiB encoded reply budget; `total_commands` and `commands_truncated` identify omitted entries.
 
 Call `continue_host_shell` with the selected `command_id`. Omit `action` to read more output:
 
@@ -143,7 +143,7 @@ For incremental `content.unavailable`, its `byte_length` describes the unsupport
 
 Command IDs identify executions within the current runtime; callback IDs identify registered observations retained across restart. A command handed off by its initial call remains owned by the host runtime and has one completion observation registered for its originating activity. That registration keeps the activity available across sleep until the observation is durably admitted. Reading or controlling the command from another activity does not redirect its completion. The `session_id` in inspection records identifies where the command started.
 
-Command state, handle retention, and the registered observation have separate lifetimes. Draining a handle does not cancel its completion observation; cancellation is unavailable. A response without tool calls lets the activity sleep while an observation remains registered. See [activity completion](communication.md#activity-completion) for the conditions under which it sleeps or ends.
+Command state, handle retention, and the registered observation have separate lifetimes. Draining a handle does not cancel its completion observation; cancellation is unavailable. A response without tool calls lets the activity sleep while an observation remains registered. See [activity completion](attention.md#activity-completion) for the conditions under which it sleeps or ends.
 
 `MAX_HOST_COMMANDS` limits live commands across all activities. Completion releases live capacity. A final result returned directly by `run_host_shell` retires its handle. Finished background handles remain available in a bounded cache for recent output collection; a continue call that drains one retires it, and older finished handles can be reclaimed for other commands. See [command lifecycle](architecture.md#command-lifecycle) for the cache limit. Full logs have a [separate retention lifecycle](running.md#host-output-and-deployment-files).
 
