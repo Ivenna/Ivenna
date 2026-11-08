@@ -106,7 +106,7 @@ Each activity activation reserves one report slot within the core's event allowa
 
 ### Coordination and current state
 
-Correspondence enters the core's FIFO queue independently of mail threads. Both roles expose external communication, wakeups, and shared memory. Only the core exposes `fork_session` and `send_session_message`; only activity sessions expose host tools. See the [agent declarations](../packages/agent/src/tools.json). Engine applies the same role policy to declarations and invocation, independently of tools mentioned in inherited history.
+Correspondence enters the core's FIFO queue independently of mail threads. Both roles expose external communication and shared memory. Only the core exposes `fork_session`, `send_session_message`, and `wakeup`; only activity sessions expose host tools. See the [agent declarations](../packages/agent/src/tools.json). Engine applies the same role policy to declarations and invocation, independently of tools mentioned in inherited history. This check governs new calls; saved wakeup registrations retain their destinations during restoration and delivery.
 
 Each inference receives a fresh session roster. Persistent callback registrations retain their receiving session IDs; `runtimeSnapshot` filters for the caller and projects only `id` and `source` into `Input.PendingCallback`. Observations, reports, and handovers retain task understanding.
 

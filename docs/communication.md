@@ -74,16 +74,16 @@ An empty task or malformed arguments return `invalid_arguments`. Exhausted sessi
 
 ### Session communication and wakeups
 
-The [agent tools](../packages/agent/src/tools.json) distinguish core coordination from self-scheduled wakeups:
+The [agent tools](../packages/agent/src/tools.json) expose session messaging and self-scheduled wakeups to the core:
 
 | Tool | Available to | Arguments | Example success |
 | --- | --- | --- | --- |
 | `send_session_message` | Core | `session_id`, nonempty `text` | `{"result":{"session_id":2}}` identifies the recipient whose queue accepted the observation |
-| `wakeup` | Core and activity | `at_unix_ms`, nonempty `text` | `{"result":{"callback_id":5}}` identifies a scheduled observation for the calling session |
+| `wakeup` | Core | `at_unix_ms`, nonempty `text` | `{"result":{"callback_id":5}}` identifies a scheduled observation for the core |
 
 `send_session_message` queues an observation for an existing session and confirms durable queue acceptance. The observation identifies the core as its sender; attribution to an earlier source belongs in the message text. A sleeping recipient wakes, while an active recipient admits the message between complete model/tool rounds, including after a long tool call finishes. Session IDs survive sleep, context unloading, and restart.
 
-`wakeup` retains its text and deadline across restart and returns the text to the calling session. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The session can sleep while waiting. Cancellation is unavailable.
+`wakeup` retains its text and deadline across restart and returns the text to the core. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The core can sleep while waiting. Cancellation is unavailable.
 
 The tools report defined failures without ending the runtime:
 
@@ -103,7 +103,7 @@ Wakeups and [host commands](host.md#command-lifetimes) that outlive their initia
 
 ### Activity completion
 
-An activity response without tool calls returns control to the runtime. Queued observations continue the activation before it can complete. If its queue is empty but callback registrations remain pending, the activity sleeps with its identity and history retained. A wakeup, host completion, or session message from the core can resume it. Waiting for a tool instead keeps the current activation and context in place while other sessions advance.
+An activity response without tool calls returns control to the runtime. Queued observations continue the activation before it can complete. If its queue is empty but callback registrations remain pending, the activity sleeps with its identity and history retained. A host completion or session message from the core can resume it. Waiting for a tool instead keeps the current activation and context in place while other sessions advance.
 
 If the queue is empty and no callback registrations remain, a response without tool calls ends the session and releases its registered-session slot. The core automatically receives a [report](input.md#assignments-and-reports) with the ending response's assistant text, or `null` if no text was present. This report establishes session completion; a host callback reports a command outcome or diagnostic. Ivenna assesses task success from the available evidence.
 

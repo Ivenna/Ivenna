@@ -119,5 +119,7 @@ pub const Engine = struct {
 
 fn coordinationAvailable(role: Input.Role, name: []const u8) bool {
     return role == .core or
-        (!std.mem.eql(u8, name, "fork_session") and !std.mem.eql(u8, name, "send_session_message"));
+        (!std.mem.eql(u8, name, "fork_session") and
+            !std.mem.eql(u8, name, "send_session_message") and
+            !std.mem.eql(u8, name, "wakeup"));
 }

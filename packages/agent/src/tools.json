@@ -71,13 +71,13 @@
   },
   {
     "name": "wakeup",
-    "description": "Schedule one observation for this session and return its callback_id. The arrangement survives restart and keeps an activity available while it waits. Past times are due immediately; inference can occur later.",
+    "description": "Schedule one observation for the core and return its callback_id. The arrangement survives restart. Past times are due immediately; inference can occur later.",
     "parameters": {
       "type": "object",
       "properties": {
         "at_unix_ms": {
           "type": "integer",
-          "description": "Unix time in milliseconds. Current runtime time is supplied in state."
+          "description": "Current runtime time is supplied in state."
         },
         "text": {
           "type": "string",

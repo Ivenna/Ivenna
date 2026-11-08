@@ -20,7 +20,7 @@ One core session coordinates Ivenna, relating correspondence to retained underst
 
 Only the core can [fork an activity session](communication.md#forking-an-activity-session). An activity inherits the core's retained understanding and receives a free-form assignment to pursue from it. Inheritance carries relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
 
-Only the core can send direct session messages. Both roles can communicate externally and maintain autonomous memory; host tools belong to activities. Core coordination must remain responsive while activities pursue their work. See [scheduling and capacity](architecture.md#scheduling-and-capacity) for the current dispatch and resource limits.
+Only the core can send direct session messages and schedule wakeups. Both roles can communicate externally and maintain autonomous memory; host tools belong to activities. Core coordination must remain responsive while activities pursue their work. See [scheduling and capacity](architecture.md#scheduling-and-capacity) for the current dispatch and resource limits.
 
 ## Communication with people and programs
 
@@ -32,13 +32,13 @@ Ivenna chooses whether to communicate, to whom, and what to say through `send_me
 
 A task describes work to accomplish. A session has a stable identity, retained understanding, and an event queue. Each activation continues a session's work through model/tool rounds, admitting further events between complete rounds so new information can guide the next decision without interrupting an inference or tool.
 
-A response without tool calls ends the activation when no queued arrivals or core attention signal require more reasoning. At that boundary, an activity with a registered wakeup or host completion still pending sleeps with its identity and understanding retained; otherwise its session ends and the core receives a [completion report](communication.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
+A response without tool calls ends the activation when no queued arrivals or core attention signal require more reasoning. At that boundary, an activity with an observation still registered sleeps with its identity and understanding retained; otherwise its session ends and the core receives a [completion report](communication.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
 
 ### Events and waiting
 
 Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a waiting session. Messages preserve their actual sources for the receiver to weigh against its own evidence and understanding.
 
-Sessions can arrange wakeups and completion observations from host commands that outlive their initial tool calls. Each arrangement binds one observation to the receiving session, keeping it available across sleep and restart without repeated model checks. See [session communication](communication.md#session-communication-and-wakeups).
+The core can arrange wakeups for later attention. Host commands that outlive their initial tool calls arrange completion observations for the calling activities. Each arrangement binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [session communication](communication.md#session-communication-and-wakeups).
 
 Activities choose how long to wait for host work before continuing their own reasoning. A bounded default gives brief commands time to return their results in the same exchange, while returning attention from longer commands for further work and coordination. An activity can shorten that wait to regain control sooner, or extend it when obtaining the result is more useful than proceeding immediately. The core and other activities continue while it waits.
 
