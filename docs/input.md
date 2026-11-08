@@ -36,7 +36,7 @@ An `events` record has `session_id: u64` and `items: Event[]`. Each admission re
 | `assignment` | `Assignment` | Initial work for a newly created activity session |
 | `report` | `Report` | Activity session completion, with assistant text when present |
 | `session_message` | `SessionMessage` | Observation sent directly by the core |
-| `callback` | `Callback` | A self-scheduled wakeup |
+| `callback` | `Callback` | A registered wakeup or host completion observation |
 
 #### Incoming messages
 
@@ -77,15 +77,18 @@ The core's `send_session_message` produces a `SessionMessage`:
 | `observed_at_unix_ms` | `i64` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
 
-Scheduled wakeups arrive as `Callback` observations for the sessions that scheduled them:
+Registered observations arrive as `Callback` events for the sessions that arranged them:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | `u64` | Registered callback identity |
+| `source` | `Source` | `wakeup` or `host` with the originating `command_id` |
 | `observed_at_unix_ms` | `i64` | Time the runtime observed the callback |
-| `text` | `Text` | Supplied wakeup text |
+| `text` | `Text` | Supplied wakeup text or serialized host result or diagnostic |
 
-The ID matches the `callback_id` returned by `wakeup`. Destinations survive sleep, context unloading, and restart. A registered callback ID is admitted at most once. See [session communication](communication.md#session-communication-and-wakeups).
+The ID matches the `callback_id` returned by `wakeup` or a `run_host_shell` handoff result. `Source` is a tagged union: `wakeup: {}` identifies a scheduled wakeup, while `host: {command_id: 17}` identifies a host execution. Command and callback IDs are independent. The runtime supplies the source from the saved registration. See [callback delivery](communication.md#callback-mail) for destination retention and admission guarantees, and [host results](host.md#output-and-results) for the callback text's format.
+
+A restored host source can identify an execution in an earlier runtime; its command ID is not a restored control handle. See [command lifetimes](host.md#command-lifetimes) for stored results and interruption observations after restart.
 
 ### Handovers
 
@@ -124,14 +127,14 @@ Each inference ends its input with a turn containing both fields:
 | Field | Meaning |
 | --- | --- |
 | `session.role` | Enum value `core` or `activity` |
-| `session.callbacks` | Wakeup registrations awaiting admission for this session |
+| `session.callbacks` | Registered observations awaiting admission for this session |
 | `runtime.observed_at_unix_ms` | Time of this snapshot in Unix milliseconds |
 | `runtime.registered_sessions` | Registered sessions, including dormant sessions and the core |
 | `runtime.active_sessions` | Sessions handling an activation, including those waiting for tools |
 | `runtime.queued_inputs` | Events waiting in session queues, excluding reserved report slots |
 | `runtime.sessions` | `SessionInfo[]` roster for all registered sessions |
 
-The snapshot is complete for these fields. Counts reflect admission: delivered callbacks are no longer pending, while queued events remain counted. Other sessions can act after sampling. Each `SessionInfo` contains:
+The snapshot is complete for these fields. A callback registration stays pending even after its result is published or queued; it leaves the list and count when its observation is admitted to history. Other sessions can act after sampling. Each `SessionInfo` contains:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -139,10 +142,10 @@ The snapshot is complete for these fields. Counts reflect admission: delivered c
 | `role` | `Role` | `core` or `activity` |
 | `status` | `running`, `waiting_for_tools`, `ready`, or `dormant` | Advancing an activation, waiting for tool replies, ready for scheduling, or sleeping |
 | `queued_inputs` | `usize` | Events waiting in this session's queue |
-| `pending_callbacks` | `usize` | Wakeup registrations awaiting admission to this session's history |
+| `pending_callbacks` | `usize` | Registered observations awaiting admission to this session's history |
 | `last_active_unix_ms` | `i64` | Most recent activation start or end; `0` before its first activation |
 
-Each `session.callbacks` item is a `PendingCallback` with `id: u64` and `session_id: u64`. Its wakeup text arrives separately as an event.
+Each `session.callbacks` item is a `PendingCallback` with `id: u64` and `source: Source`, belonging to `current.session_id`. The ID links the current registration to its arrangement in retained messages or a handover; the observation's text arrives separately as an event. A pending host source identifies the execution being observed; it does not imply that its process is still running or its handle remains available.
 
 `ready` means work is waiting, subject to scheduling and capacity. Core attention can produce this status with `queued_inputs: 0`.
 

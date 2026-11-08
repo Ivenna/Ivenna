@@ -4,7 +4,7 @@ Ivenna is an agent runtime, designed as [a body for an LLM soul](docs/design.md)
 
 A core session coordinates Ivenna's attention and correspondence. It can fork activity sessions that inherit its retained understanding and pursue their own assignments. These focuses share files, autonomous memory, communication, and host processes while developing their own subsequent histories.
 
-People and programs communicate with Ivenna through messages. The model observes who said what, chooses how to act, and decides when to communicate and whom to address through an [explicit sending tool](docs/communication.md). Its sessions can pursue work and wait for tools independently, and scheduled wakeups let it reconsider work without new correspondence. Saved understanding and memory support continuation across restart.
+People and programs communicate with Ivenna through messages. The model observes who said what, chooses how to act, and decides when to communicate and whom to address through an [explicit sending tool](docs/communication.md). Its sessions can pursue work independently, continue while host commands run, and resume from completion observations or scheduled wakeups without new correspondence. Saved understanding and memory support continuation across restart.
 
 The current implementation uses email for correspondence and working history, shared [memory rooms](docs/memory.md) over SSH, and [host commands](docs/host.md) for activities. Communication and memory must be available for it to run. The deployment user owns the records, memory, and artifacts; the [running guide](docs/running.md) describes service requirements and retained data.
 

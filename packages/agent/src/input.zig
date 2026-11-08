@@ -32,11 +32,12 @@ pub const SessionMessage = struct {
 
 pub const PendingCallback = struct {
     id: u64,
-    session_id: u64,
+    source: contracts.Callback.Source,
 };
 
 pub const Callback = struct {
     id: u64,
+    source: contracts.Callback.Source,
     observed_at_unix_ms: i64,
     text: []const u8,
 };
@@ -50,7 +51,7 @@ pub const SessionInfo = struct {
     last_active_unix_ms: i64,
 };
 
-/// A complete projection of program state, not the model's working memory.
+/// Current session and runtime facts exposed to the model.
 pub const State = struct {
     session: struct {
         role: Role,

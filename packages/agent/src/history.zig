@@ -22,12 +22,13 @@ const Source = union(enum) {
 
 pub const History = struct {
     pub const Wakeup = struct { id: u64, at_unix_ms: i64, text: []const u8 };
+    pub const CallbackRegistration = struct { id: u64, session_id: u64, source: contracts.Callback.Source };
 
     next_session_id: u64,
     next_callback_id: u64,
     sessions: []const Session,
     wakeups: []const Wakeup,
-    callbacks: []const Input.PendingCallback,
+    callbacks: []const CallbackRegistration,
 
     pub const Session = struct {
         session_id: u64,
@@ -62,17 +63,20 @@ pub const History = struct {
             try validateEntries(session.session_id, session.entries orelse &.{});
         }
         if (cores != 1) return error.InvalidHistory;
-        var callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        var callbacks: std.AutoHashMapUnmanaged(u64, contracts.Callback.Source) = .empty;
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
             if (callback.id == 0 or callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
+            if (callback.source == .host and callback.source.host.command_id == 0) return error.InvalidHistory;
             const entry = try callbacks.getOrPut(a, callback.id);
             if (entry.found_existing) return error.InvalidHistory;
+            entry.value_ptr.* = callback.source;
         }
         var wakeup_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer wakeup_ids.deinit(a);
         for (self.wakeups) |wakeup| {
-            if (!callbacks.contains(wakeup.id) or (try wakeup_ids.getOrPut(a, wakeup.id)).found_existing) return error.InvalidHistory;
+            const source = callbacks.get(wakeup.id) orelse return error.InvalidHistory;
+            if (source != .wakeup or (try wakeup_ids.getOrPut(a, wakeup.id)).found_existing) return error.InvalidHistory;
         }
     }
 };
@@ -83,7 +87,7 @@ const Checkpoint = struct {
     next_callback_id: u64,
     sessions: []const Session,
     wakeups: []const History.Wakeup,
-    callbacks: []const Input.PendingCallback,
+    callbacks: []const History.CallbackRegistration,
 
     const Session = struct {
         session_id: u64,

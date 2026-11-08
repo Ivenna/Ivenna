@@ -33,7 +33,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary events per session, including reserved activity reports in the core | `64` |
-| `MAX_PENDING_CALLBACKS` | Maximum wakeup registrations not yet durably admitted per session | `64` |
+| `MAX_PENDING_CALLBACKS` | Maximum wakeup and host completion registrations not yet durably admitted per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions; the same count bounds retained finished command handles | `8` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
@@ -48,7 +48,7 @@ Core and activity sessions use the same configured model and output-token limit.
 
 Each ready session can advance through its own serial worker while other sessions continue. `MAX_SESSIONS` must accommodate every registered identity or startup fails; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a registered-session slot; the core remains registered. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes).
 
-Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. An activity waiting for tools retains its activation, context, and report reservation. An activity whose activation ends with a wakeup pending sleeps with its identity retained and releases the report reservation until it resumes. Startup observations are excluded from the allowance. Correspondence and callback mail have independent intake allowances and stay stored when their destination is full. Capacity and polling can delay scheduled work.
+Each session's ordinary events use its `MAX_PENDING_EVENTS` allowance; the core also reserves space there for activity reports. A fork needs both an available identity and a report slot. An activity waiting for tools retains its activation, context, and report reservation. Sleeping activities awaiting registered wakeups or host completions keep their identity slots and release report reservations until they resume. Startup observations are excluded from the allowance. Correspondence and callback mail have independent intake allowances and stay stored when their destination is full. Capacity and polling can delay scheduled work.
 
 Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. A larger roster or callback list leaves less room for history and observations. These budgets also apply to an activity's inherited history. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
 
@@ -64,7 +64,7 @@ Use the [supported email addresses](communication.md#current-email-addressing). 
 
 For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks when presenting correspondent IDs. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
-Wakeup callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped. See [callback mail](communication.md#callback-mail) for the delivery contract.
+Wakeup and host completion callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped. See [callback mail](communication.md#callback-mail) for the delivery contract.
 
 Configure automatic Trash expiry and cleanup of unreferenced storage in the mail service. These processes must continue independently of the kernel. Choose retention with the provider's full policy scope in mind: Trash and Junk policies can also remove ordinary mail. The [local Stalwart setup](../dev/README.md#configuring-mail) provides a concrete configuration.
 
@@ -148,7 +148,9 @@ Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception
 
 Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
 
-The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other activity sessions remain asleep until an event arrives. Every session's pending wakeups survive restart, including deadlines that passed while the runtime was unavailable, and their callbacks return to the original session.
+The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other activity sessions remain asleep until an event arrives.
+
+Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose deadlines passed while the runtime was unavailable become due. Host completions without stored results receive interruption observations with unknown effects; already stored results are preserved.
 
 Host processes and command handles are not restored, and commands are not replayed. Working history preserves confirmed model/tool exchanges; an interrupted operation may have produced effects without a saved result. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
 
@@ -159,6 +161,8 @@ When an incoming message fails admission with `ContextBudgetExhausted`, it remai
 ### Updating the executable
 
 Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
+
+The current callback format includes a tagged source in pending registrations and retained callback events. Checkpoints containing registrations, and history containing callback events, from the preceding format without this source are incompatible with this executable.
 
 ## Data and retention
 
@@ -193,7 +197,7 @@ The mail account is not a permanent transcript: original copies expire under the
 
 ### Working history
 
-The latest checkpoint selects the histories needed to continue all registered sessions, including sleeping sessions whose contexts are unloaded, and retains callback registrations and wakeup deadlines. Ivenna classifies its saved history at startup and periodically during operation, placing records according to that checkpoint:
+The latest checkpoint selects the histories needed to continue all registered sessions, including sleeping sessions whose contexts are unloaded, and retains callback registrations with their sources, along with scheduled wakeups. Ivenna classifies its saved history at startup and periodically during operation, placing records according to that checkpoint:
 
 | Location | Contents |
 | --- | --- |

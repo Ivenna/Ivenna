@@ -74,7 +74,7 @@ pub const Registry = struct {
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
     noticed: std.StringHashMapUnmanaged(enum { scheduled, acknowledged }) = .empty,
     wakeups: std.ArrayList(History.Wakeup) = .empty,
-    callbacks: std.ArrayList(Input.PendingCallback) = .empty,
+    callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
     /// Core queue capacity held for activity reports, including forks
@@ -194,6 +194,7 @@ pub const Registry = struct {
                 };
                 break :blk .{ self.sessions.get(registration.session_id).?, Input.Event{ .callback = .{
                     .id = callback.id,
+                    .source = registration.source,
                     .observed_at_unix_ms = callback.observed_at_unix_ms,
                     .text = callback.text,
                 } } };
@@ -414,7 +415,10 @@ pub const Registry = struct {
         }
         std.mem.sort(Input.SessionInfo, directory, {}, lessSession);
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
-        for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, callback);
+        for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
+            .id = callback.id,
+            .source = callback.source,
+        });
         return .{
             .current = .{
                 .session_id = session.session_id,
@@ -506,7 +510,7 @@ pub const Registry = struct {
         var transferred = false;
         errdefer if (!transferred) self.allocator.free(owned);
         try self.wakeups.ensureUnusedCapacity(self.allocator, 1);
-        const id = try self.registerCallbackLocked(work.session);
+        const id = try self.registerCallbackLocked(work.session, .wakeup);
         self.wakeups.appendAssumeCapacity(.{ .id = id, .at_unix_ms = at, .text = owned });
         transferred = true;
         try self.saveLocked();
@@ -531,17 +535,36 @@ pub const Registry = struct {
         try self.saveLocked();
     }
 
-    fn registerCallbackLocked(self: *Registry, session: *Session) !u64 {
+    pub fn registerCallback(self: *Registry, work: Work, source: contracts.Callback.Source) !u64 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        const id = try self.registerCallbackLocked(work.session, source);
+        try self.saveLocked();
+        return id;
+    }
+
+    /// Before startup dispatch, these registrations belong to commands from the
+    /// previous runtime. Their processes and control handles are not restored.
+    pub fn pendingHostCallbacks(self: *Registry, a: Allocator) ![]const History.CallbackRegistration {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var pending: std.ArrayList(History.CallbackRegistration) = .empty;
+        for (self.callbacks.items) |callback| if (callback.source == .host) try pending.append(a, callback);
+        return pending.toOwnedSlice(a);
+    }
+
+    fn registerCallbackLocked(self: *Registry, session: *Session, source: contracts.Callback.Source) !u64 {
         if (self.callbackCount(session.session_id) >= self.max_callbacks) return error.CallbackCapacityUnavailable;
         try self.callbacks.ensureUnusedCapacity(self.allocator, 1);
         self.changedLocked(session);
         const id = self.next_callback_id;
-        self.callbacks.appendAssumeCapacity(.{ .id = id, .session_id = session.session_id });
+        self.callbacks.appendAssumeCapacity(.{ .id = id, .session_id = session.session_id, .source = source });
         self.next_callback_id += 1;
         return id;
     }
 
-    fn callbackLocked(self: *Registry, id: u64) ?Input.PendingCallback {
+    fn callbackLocked(self: *Registry, id: u64) ?History.CallbackRegistration {
         for (self.callbacks.items) |callback| if (callback.id == id) return callback;
         return null;
     }

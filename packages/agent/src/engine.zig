@@ -25,6 +25,7 @@ pub const Engine = struct {
     pub const RuntimeTools = struct {
         context: *anyopaque,
         invoke: *const fn (*anyopaque, Allocator, []const u8, []const u8) anyerror!?Content,
+        callback: contracts.Callback.Registrar,
     };
 
     pub const Inference = struct {
@@ -75,6 +76,7 @@ pub const Engine = struct {
             for (group) |tools| {
                 if (try tools.invoke(tools.context, a, .{
                     .session_id = session_id,
+                    .callback = if (runtime_tools) |runtime| runtime.callback else null,
                 }, name, arguments)) |result| return result;
             }
         }

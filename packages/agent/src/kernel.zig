@@ -96,6 +96,7 @@ pub const Kernel = struct {
     }
 
     fn receiveLoop(self: *Kernel, tasks: *Tasks) !void {
+        try self.restoreHostCallbacks();
         try self.sessions.maintain();
         if (self.reception.cmpxchgStrong(.starting, .open, .release, .monotonic) != null) return;
         try self.dispatch(tasks);
@@ -123,6 +124,19 @@ pub const Kernel = struct {
             }
             try self.io.sleep(.fromMilliseconds(self.poll_interval_ms), .awake);
         }
+    }
+
+    fn restoreHostCallbacks(self: *Kernel) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const pending = try self.sessions.pendingHostCallbacks(a);
+        if (pending.len == 0) return;
+        const text = try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{
+            .code = "host_interrupted",
+            .message = "The command's outcome is unknown after restart. Effects may already have occurred. The command was not replayed; the source command_id belongs to the previous runtime and is not a current control handle.",
+        } }, .{});
+        for (pending) |callback| try self.callbacks.send(a, .{ .id = callback.id, .text = text });
     }
 
     fn dispatch(self: *Kernel, tasks: *Tasks) !void {
@@ -157,6 +171,11 @@ pub const Kernel = struct {
         fn deinit(self: *RuntimeRound) void {
             for (self.forks.items) |plan| self.kernel.sessions.abandonFork(plan);
             self.forks.deinit(self.kernel.allocator);
+        }
+
+        fn registerCallback(context: *anyopaque, source: contracts.Callback.Source) anyerror!u64 {
+            const self: *RuntimeRound = @ptrCast(@alignCast(context));
+            return self.kernel.sessions.registerCallback(self.work, source);
         }
 
         fn invoke(context: *anyopaque, a: Allocator, name: []const u8, arguments: []const u8) anyerror!?Content {
@@ -215,7 +234,11 @@ pub const Kernel = struct {
             const inference = try self.engine.infer(a, view.input, session.role);
             const has_tools = inference.response.calls.len != 0;
             if (has_tools) try self.sessions.setToolWait(work, true);
-            const replies = try self.engine.executeTools(a, session.session_id, inference, .{ .context = &runtime, .invoke = RuntimeRound.invoke }, session.role);
+            const replies = try self.engine.executeTools(a, session.session_id, inference, .{
+                .context = &runtime,
+                .invoke = RuntimeRound.invoke,
+                .callback = .{ .context = &runtime, .register = RuntimeRound.registerCallback },
+            }, session.role);
             if (has_tools) try self.sessions.setToolWait(work, false);
             delivery = .none;
             try self.sessions.commitRound(work, inference.response.output, replies, runtime.forks.items);

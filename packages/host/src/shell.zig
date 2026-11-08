@@ -20,7 +20,7 @@ pub const Shell = struct {
         login: bool = false,
         mode: Mode = .batch,
         timeout_ms: ?u32 = null,
-        yield_ms: ?u32 = null,
+        yield_ms: u32 = 1000,
         max_output_bytes: u32 = 16384,
         interpretation: ?content.Interpretation = null,
     };
@@ -45,7 +45,7 @@ pub const Shell = struct {
         }
     };
     pub const Streams = struct { stdout: Stream, stderr: Stream };
-    pub const Collection = enum { complete, incremental };
+    pub const Collection = enum { complete, initial, incremental };
     pub const Start = union(enum) { ready: Invocation, unavailable: anyerror };
     pub const Invocation = struct {
         io: std.Io,

@@ -1,6 +1,7 @@
 const std = @import("std");
 const Content = @import("content").Content;
 const Model = @import("model.zig");
+const Callback = @import("callback.zig");
 
 /// A body capability supplies a result when it recognizes the tool name.
 /// Null delegates to another capability; invocation failures propagate.
@@ -10,6 +11,7 @@ const Model = @import("model.zig");
 pub const Tools = struct {
     pub const Invocation = struct {
         session_id: u64,
+        callback: ?Callback.Registrar = null,
     };
 
     context: *anyopaque,

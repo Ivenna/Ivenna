@@ -45,7 +45,7 @@ Keep configuration with the behavior it controls. Execution owns scheduling, con
 
 Decode external protocols in their owning components and supply typed contracts to execution. Rely on the guarantees established there; validate additional requirements at the boundary that owns them. Model coexisting fields together and mutually exclusive alternatives as variants with their own payloads.
 
-Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns wakeup registration, routing, and admission.
+Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
 
 [Input](../packages/agent/src/input.zig) owns runtime user-message rendering. Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
@@ -71,7 +71,7 @@ Put task facts and observations in user input. Prompts and tool descriptions sho
 
 Execution owns session state and the boundaries at which new observations can affect it. Preserve complete model/tool rounds when changing admission or scheduling. The [architecture guide](architecture.md#sessions-work-and-communication) defines registry synchronization and the lifetimes of activations, contexts, and workers.
 
-Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values and cancel and join tasks before releasing their dependencies. The owning capability manages independent resources; the agent manages session lifetimes and [scheduled observations](architecture.md#event-sources-and-callback-admission).
+Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values and cancel and join tasks before releasing their dependencies. The owning capability manages independent resources and publishes their registered outcomes; the agent manages session lifetimes and [future observations](architecture.md#event-sources-and-callback-admission). Bind capability registrations through the invoking session's execution-owned registrar, and persist a registration before returning its callback identity.
 
 Keep a session's identity independent of context residency, and retain its history for as long as it can resume. The [availability contract](design.md#runtime-availability) governs whether a failure is an observation or ends execution.
 

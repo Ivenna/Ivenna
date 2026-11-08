@@ -4,13 +4,15 @@ const process = @import("process.zig");
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 const contracts = @import("agent_contracts");
+const Callback = contracts.Callback;
 const Tools = contracts.Tools;
 const Model = contracts.Model;
 
-/// One process registry serves completed calls and explicitly retained commands.
+/// One process registry serves completed calls and background commands.
 pub const Host = struct {
     allocator: Allocator,
     shell: Shell,
+    publisher: Callback.Publisher,
     max_host_commands: usize,
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
@@ -75,6 +77,10 @@ pub const Host = struct {
         session_id: u64,
         command_id: u64,
         retained: bool,
+        callback_id: ?u64 = null,
+        // Publish only after the initial call finishes its handoff decision.
+        handoff_pending: bool = true,
+        settled: bool = false,
         refs: usize = 2, // Registry and initial invocation; tasks add their own refs.
         operations: std.Io.Mutex = .init,
         state: State,
@@ -97,31 +103,43 @@ pub const Host = struct {
     const InputStatus = struct { open: bool, pending: bool, @"error": ?[]const u8 };
     const Snapshot = struct { state: PublicState, elapsed_ms: u64, stdin: InputStatus };
     const Create = union(enum) { capacity, unavailable: anyerror, job: *Job };
+    const ToolError = struct { code: []const u8, message: []const u8, effects: []const u8 };
     const Observation = struct {
         command_id: ?u64,
+        callback_id: ?u64 = null,
+        asynchronous: bool = false,
         snapshot: Snapshot,
         mode: Shell.Mode,
         streams: Shell.Streams,
 
         fn render(self: Observation, a: Allocator) !Content {
+            return self.renderWithError(a, null);
+        }
+
+        fn renderWithError(self: Observation, a: Allocator, failure: ?ToolError) !Content {
             const result = .{
                 .command_id = self.command_id,
+                .callback_id = self.callback_id,
                 .state = self.snapshot.state,
                 .elapsed_ms = self.snapshot.elapsed_ms,
                 .mode = self.mode,
                 .stdin = self.snapshot.stdin,
                 .stdout = self.streams.stdout.describe(),
                 .stderr = self.streams.stderr.describe(),
+                .media_omission = if (self.asynchronous and self.streams.stdout.content == .image) @as(?[]const u8, "asynchronous_media_unavailable") else null,
             };
-            const text = try success(a, result);
-            if (self.streams.stdout.content == .image)
+            const text = if (failure) |err|
+                try std.json.Stringify.valueAlloc(a, .{ .@"error" = err, .result = result }, .{ .emit_null_optional_fields = false })
+            else
+                try success(a, result);
+            if (!self.asynchronous and self.streams.stdout.content == .image)
                 return Content.fromParts(a, &.{ .{ .text = text }, .{ .image = self.streams.stdout.content.image } });
             return Content.fromText(a, text);
         }
     };
 
-    pub fn init(allocator: Allocator, io: std.Io, directory: []const u8, data_directory: []const u8, environ: *const std.process.Environ.Map, max_host_commands: usize) Host {
-        return .{ .allocator = allocator, .shell = .{ .io = io, .directory = directory, .data_directory = data_directory, .environ = environ }, .max_host_commands = max_host_commands };
+    pub fn init(allocator: Allocator, io: std.Io, directory: []const u8, data_directory: []const u8, environ: *const std.process.Environ.Map, publisher: Callback.Publisher, max_host_commands: usize) Host {
+        return .{ .allocator = allocator, .shell = .{ .io = io, .directory = directory, .data_directory = data_directory, .environ = environ }, .publisher = publisher, .max_host_commands = max_host_commands };
     }
     pub fn deinit(self: *Host) void {
         self.stop();
@@ -158,22 +176,40 @@ pub const Host = struct {
             .job => |job| job,
         };
         defer self.release(job);
+        defer self.finishHandoff(job);
         var retained = false;
         defer if (!retained) self.retireAndStop(job);
         // Waiting for execution does not own the observation cursor. Other
         // activities may inspect or control this command while its caller waits.
         try self.waitForCompletion(job, args.yield_ms);
         try self.mutex.lock(self.shell.io);
-        if (job.state == .running) {
+        const needs_handoff = !job.settled;
+        self.mutex.unlock(self.shell.io);
+        if (needs_handoff) {
+            const registrar = context.callback orelse {
+                self.stopAndWait(job);
+                return self.handoffFailure(a, job, "This call has no session destination for command completion.");
+            };
+            const id = registrar.open(.{ .host = .{ .command_id = job.command_id } }) catch |err| {
+                if (err != error.CallbackCapacityUnavailable) return err;
+                self.stopAndWait(job);
+                return self.handoffFailure(a, job, "The session's pending callback limit has been reached.");
+            };
+            try self.mutex.lock(self.shell.io);
+            job.callback_id = id;
             job.retained = true;
             retained = true;
-        }
-        self.mutex.unlock(self.shell.io);
-        if (retained) {
+            self.pruneFinishedLocked();
+            self.mutex.unlock(self.shell.io);
             errdefer self.retireAndStop(job);
-            try job.operations.lock(self.shell.io);
-            defer job.operations.unlock(self.shell.io);
-            return self.observe(a, job, .incremental, args.max_output_bytes);
+            var observation = self.collect(a, job, .initial, args.max_output_bytes) catch |err|
+                return self.outputFailureResult(a, job, job.command_id, id, err, .{
+                    .code = "host_unavailable",
+                    .message = "Could not read the command's initial background output.",
+                    .effects = "The command was handed off successfully, and a completion observation was registered for this session. Command or input effects may already have occurred.",
+                });
+            observation.callback_id = id;
+            return observation.render(a);
         }
         return self.observe(a, job, .complete, args.max_output_bytes);
     }
@@ -224,7 +260,7 @@ pub const Host = struct {
         job.* = .{ .arena = arena, .invocation = invocation, .args = command, .session_id = session_id, .command_id = command_id, .retained = false, .state = switch (invocation.backend) {
             .process => .running,
             .not_started => |reason| .{ .finished = .{ .not_started = .{ .reason = reason } } },
-        }, .input_open = args.mode != .batch and invocation.backend == .process };
+        }, .settled = invocation.backend == .not_started, .input_open = args.mode != .batch and invocation.backend == .process };
         initialized = true;
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
@@ -340,6 +376,7 @@ pub const Host = struct {
         job.input_tasks.cancel(self.shell.io);
         self.mutex.lockUncancelable(self.shell.io);
         self.active -= 1;
+        job.settled = true;
         self.completed_sequence += 1;
         job.completed_sequence = self.completed_sequence;
         if (result == .failed and result.failed == error.OutOfMemory) self.failLocked(error.OutOfMemory);
@@ -347,6 +384,46 @@ pub const Host = struct {
         self.pruneFinishedLocked();
         self.mutex.unlock(self.shell.io);
         if (result == .failed and result.failed == error.Canceled) return error.Canceled;
+        self.publishCompletion(job) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
+            self.mutex.lockUncancelable(self.shell.io);
+            self.failLocked(err);
+            self.mutex.unlock(self.shell.io);
+        };
+    }
+
+    fn finishHandoff(self: *Host, job: *Job) void {
+        self.mutex.lockUncancelable(self.shell.io);
+        defer self.mutex.unlock(self.shell.io);
+        job.handoff_pending = false;
+        self.changed.broadcast(self.shell.io);
+    }
+
+    fn publishCompletion(self: *Host, job: *Job) !void {
+        const id = blk: {
+            try self.mutex.lock(self.shell.io);
+            defer self.mutex.unlock(self.shell.io);
+            while (job.handoff_pending and !self.stopping) try self.changed.wait(self.shell.io, &self.mutex);
+            if (self.stopping) return;
+            break :blk job.callback_id orelse return;
+        };
+        // The supervision reference retains logs even after another activity
+        // drains or the registry reclaims the command's control handle.
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var observation = self.collect(a, job, .complete, job.args.max_output_bytes) catch |err| {
+            const failure = try self.outputFailureResult(a, job, job.command_id, null, err, .{
+                .code = "host_unavailable",
+                .message = "Could not read the command's final output.",
+                .effects = "The command's observed state and log paths are included below; inspect uncertain effects before repeating work.",
+            });
+            return self.publisher.send(a, .{ .id = id, .text = failure.parts[0].text });
+        };
+        observation.command_id = job.command_id;
+        observation.asynchronous = true;
+        const result = try observation.render(a);
+        try self.publisher.send(a, .{ .id = id, .text = result.parts[0].text });
     }
 
     fn observe(self: *Host, a: Allocator, job: *Job, kind: Shell.Collection, budget: usize) !Content {
@@ -357,13 +434,20 @@ pub const Host = struct {
     fn collect(self: *Host, a: Allocator, job: *Job, kind: Shell.Collection, budget: usize) !Observation {
         const current = try self.snapshot(job);
         return .{
-            .command_id = if (kind == .incremental) job.command_id else null,
+            .command_id = if (kind == .complete) null else job.command_id,
             .snapshot = current,
             .mode = job.args.mode,
-            .streams = if (kind == .complete)
-                try job.invocation.complete(a, job.args.interpretation, budget)
-            else
-                try job.invocation.collect(a, &job.cursors, &job.final_stdout_collected, current.state != .running, job.args.interpretation, budget),
+            .streams = switch (kind) {
+                .complete => try job.invocation.complete(a, job.args.interpretation, budget),
+                .initial => blk: {
+                    // The starting call observes its own prefix without waiting
+                    // behind another activity or consuming its shared cursor.
+                    var cursors: [2]u64 = .{ 0, 0 };
+                    var final_stdout_collected = false;
+                    break :blk try job.invocation.collect(a, &cursors, &final_stdout_collected, current.state != .running, job.args.interpretation, budget);
+                },
+                .incremental => try job.invocation.collect(a, &job.cursors, &job.final_stdout_collected, current.state != .running, job.args.interpretation, budget),
+            },
         };
     }
 
@@ -377,18 +461,14 @@ pub const Host = struct {
         }, .elapsed_ms = if (job.state == .running) job.invocation.elapsed() else job.elapsed_ms, .stdin = .{ .open = job.input_open and job.state == .running, .pending = job.input_pending, .@"error" = if (job.input_error) |err| @errorName(err) else null } };
     }
 
-    fn waitForCompletion(self: *Host, job: *Job, milliseconds: ?u32) !void {
+    fn waitForCompletion(self: *Host, job: *Job, milliseconds: u32) !void {
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
-        if (milliseconds) |limit| {
-            const deadline = std.Io.Clock.Timestamp.fromNow(self.shell.io, .{ .raw = .fromMilliseconds(limit), .clock = .awake });
-            while (job.state == .running or job.input_pending) self.changed.waitTimeout(self.shell.io, &self.mutex, .{ .deadline = deadline }) catch |err| switch (err) {
-                error.Timeout => return,
-                error.Canceled => return err,
-            };
-        } else {
-            while (job.state == .running or job.input_pending) try self.changed.wait(self.shell.io, &self.mutex);
-        }
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.shell.io, .{ .raw = .fromMilliseconds(milliseconds), .clock = .awake });
+        while (!job.settled) self.changed.waitTimeout(self.shell.io, &self.mutex, .{ .deadline = deadline }) catch |err| switch (err) {
+            error.Timeout => return,
+            error.Canceled => return err,
+        };
     }
 
     fn waitForUpdate(self: *Host, job: *Job, milliseconds: u32) !void {
@@ -437,6 +517,39 @@ pub const Host = struct {
         return Content.fromText(a, try success(a, .{ .shell = "/bin/sh", .cwd = self.shell.directory, .commands = entries.items, .commands_truncated = entries.items.len < total, .total_commands = total }));
     }
 
+    fn handoffFailure(self: *Host, a: Allocator, job: *Job, reason: []const u8) !Content {
+        const failure: ToolError = .{
+            .code = "handoff_unavailable",
+            .message = reason,
+            .effects = "The command started, but no completion callback was registered. It has now finished or been stopped and reaped; effects already produced remain.",
+        };
+        const observation = self.collect(a, job, .complete, job.args.max_output_bytes) catch |err|
+            return self.outputFailureResult(a, job, null, null, err, failure);
+        return observation.renderWithError(a, failure);
+    }
+
+    fn outputFailureResult(self: *Host, a: Allocator, job: *Job, command_id: ?u64, callback_id: ?u64, err: anyerror, failure: ToolError) !Content {
+        switch (err) {
+            error.Canceled, error.OutOfMemory => return err,
+            else => {},
+        }
+        const current = try self.snapshot(job);
+        return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
+            .@"error" = failure,
+            .result = .{
+                .command_id = command_id,
+                .callback_id = callback_id,
+                .state = current.state,
+                .elapsed_ms = current.elapsed_ms,
+                .mode = job.args.mode,
+                .stdin = current.stdin,
+                .stdout = .{ .path = job.invocation.stdout_path },
+                .stderr = .{ .path = job.invocation.stderr_path },
+                .output_error = @errorName(err),
+            },
+        }, .{ .emit_null_optional_fields = false }));
+    }
+
     fn acquire(self: *Host, id: u64) !?*Job {
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
@@ -475,8 +588,8 @@ pub const Host = struct {
         defer self.mutex.unlock(self.shell.io);
         if (job.state == .running) {
             job.invocation.backend.process.cancel(self.shell.io);
-            while (job.state == .running) self.changed.waitUncancelable(self.shell.io, &self.mutex);
         }
+        while (!job.settled) self.changed.waitUncancelable(self.shell.io, &self.mutex);
     }
     fn pruneFinishedLocked(self: *Host) void {
         while (true) {
@@ -497,6 +610,7 @@ pub const Host = struct {
     fn stop(self: *Host) void {
         self.mutex.lockUncancelable(self.shell.io);
         self.stopping = true;
+        self.changed.broadcast(self.shell.io);
         self.mutex.unlock(self.shell.io);
         self.tasks.cancel(self.shell.io);
     }

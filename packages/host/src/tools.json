@@ -1,7 +1,7 @@
 [
   {
     "name": "get_host_shell",
-    "description": "Inspect shell defaults and discover commands across activities, including ones whose run_host_shell call is still waiting. Command IDs belong to this runtime. Finished handles have bounded retention; full logs remain independently available.",
+    "description": "Inspect the default shell and startup directory, and discover commands across activities, including ones whose run_host_shell call is still waiting. Command IDs belong to this runtime. Finished handles have bounded retention; full logs remain independently available.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -9,7 +9,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 18446744073709551615,
-          "description": "Select a command, or omit to list commands."
+          "description": "Omit to list commands."
         }
       },
       "required": [],
@@ -18,28 +18,27 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Execute shell code on the shared host. Each call starts a fresh shell and waits for completion by default. Set yield_ms to return earlier with a command_id for continue_host_shell if still running. Completion produces no event. Results include bounded output and full log paths; final stdout can supply native images.",
+    "description": "Each call starts a fresh shell; keep a process running to preserve shell or REPL state across calls. Commands that finish execution and cleanup during the wait return a final result; otherwise the call returns command_id and callback_id, with one completion observation arranged for this session. Its registration lets the session sleep while awaiting the outcome without polling. A callback_id confirms that observation even if the snapshot is already terminal. Initial previews are independent of continuation reads, which may repeat them. Full output remains in log files.",
     "parameters": {
       "type": "object",
       "properties": {
         "command": {
           "type": "string",
-          "minLength": 1,
-          "description": "Code passed to the selected shell with -c. Keep the same command running to preserve shell or REPL state across calls."
+          "minLength": 1
         },
         "cwd": {
           "type": "string",
           "minLength": 1,
-          "description": "Literal working directory; relative paths and the default use the kernel's startup directory."
+          "description": "Literal path; relative paths and omission use the kernel's startup directory."
         },
         "shell": {
           "type": "string",
           "minLength": 1,
-          "description": "Shell executable accepting -c; defaults to /bin/sh."
+          "description": "Must accept -c. Omit for /bin/sh."
         },
         "login": {
           "type": "boolean",
-          "description": "Use shell -lc to load the selected shell's login startup files; default false."
+          "description": "Load startup files through -lc; default false."
         },
         "mode": {
           "type": "string",
@@ -54,13 +53,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 4294967295,
-          "description": "Execution deadline in milliseconds; omitted means no deadline."
+          "description": "Stops the command at expiry. Omit to run without a deadline."
         },
         "max_output_bytes": {
           "type": "integer",
           "minimum": 512,
           "maximum": 16384,
-          "description": "Combined encoded stdout/stderr preview budget; default 16384 bytes. Metadata and native media are separate."
+          "description": "Shared by stdout and stderr after JSON encoding; default 16384. Metadata and native media are additional."
         },
         "interpretation": {
           "type": "string",
@@ -73,7 +72,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Optional wait limit for this call in milliseconds. Omit to wait for completion; 0 takes an immediate snapshot. Returning a running command leaves it owned by the host runtime, without keeping the originating activity alive."
+          "description": "Omit for 1000. Use 0 to observe immediately, a short wait to handle other work sooner, or a longer wait when obtaining the result is more useful than proceeding now."
         }
       },
       "required": [
@@ -84,7 +83,7 @@
   },
   {
     "name": "continue_host_shell",
-    "description": "Read output or act on an existing command. Incremental reads share per-stream cursors across activities; a waiting run_host_shell call keeps an independent complete-source final result. Final media can be collected once through the handle, independently of earlier text reads. A finished yielded handle retires when its output is drained.",
+    "description": "Read output or act on an existing command. Continue calls share per-stream cursors across activities, independently of the run call's initial preview and completion callback. This call preserves the original completion destination and registers no new callback. The first final continue observation can supply native stdout once across activities, independently of initial previews, text cursors, and callback delivery. Callback text carries media descriptions. A finished background handle retires when its output is drained.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -121,7 +120,7 @@
                     "text": {
                       "type": "string",
                       "maxLength": 16384,
-                      "description": "Input to write, at most 16384 UTF-8 bytes. Only one write can be pending; stdin.pending and stdin.error report delivery."
+                      "description": "Limited to 16384 UTF-8 bytes. Only one write can be pending; stdin.pending and stdin.error report delivery."
                     },
                     "eof": {
                       "type": "boolean",
@@ -175,14 +174,12 @@
                     "rows": {
                       "type": "integer",
                       "minimum": 1,
-                      "maximum": 65535,
-                      "description": "Terminal rows."
+                      "maximum": 65535
                     },
                     "cols": {
                       "type": "integer",
                       "minimum": 1,
-                      "maximum": 65535,
-                      "description": "Terminal columns."
+                      "maximum": 65535
                     }
                   },
                   "required": [
@@ -204,13 +201,13 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Wait for unread output or completion up to this many milliseconds; default 1000. Use 0 for an immediate snapshot."
+          "description": "Waits for unread output or completion. Omit for 1000; use 0 to inspect the current state, or a longer wait when the next decision needs new output."
         },
         "max_output_bytes": {
           "type": "integer",
           "minimum": 512,
           "maximum": 16384,
-          "description": "Combined encoded stdout/stderr preview budget; default 16384 bytes. Metadata and native media are separate."
+          "description": "Shared by stdout and stderr after JSON encoding; default 16384. Metadata and native media are additional."
         }
       },
       "required": [
