@@ -61,13 +61,15 @@ Treat prompts and tool descriptions as editable interfaces:
 | [Agent tools](../packages/agent/src/tools.json) | External expression, opening and reaching focuses, and future attention |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
-| [compaction.md](../packages/agent/src/compaction.md) | What a handover must preserve |
+| [compaction.md](../packages/agent/src/compaction.md) | Understanding to carry into a handover |
 
 Keep capability tool declarations with their implementation and register capabilities through `Tools`. The agent owns availability policy and must use the same role selection for declaration and invocation.
 
 Keep agent-owned action recognition, typed arguments, and role selection together in [tools.zig](../packages/agent/src/tools.zig); Kernel owns their effects. All sessions use the same system prompt. Express differences in available actions through tool selection, and identify the current focus, task, and circumstances in user input. Ordinary inference, admission measurement, and compaction prepend the same prompt independently of retained history.
 
-Follow the [capability principles](design.md#understanding-and-autonomy) when writing these resources. Lead tool descriptions with an action and its effect. Put invocation details with their parameters and explain result distinctions needed for the next decision. Keep cues of ownership and continuity brief and open to Ivenna's judgment, leaving content, organization, and learned practices to its experience. Preserve precision about the operation behind a suggestive name.
+Follow the [capability principles](design.md#understanding-and-autonomy) when writing these resources. Read each tool declaration as one interface: names, structure, constraints, and descriptions appear together. Express value choices and bounds structurally, and mirror actual runtime defaults in schema annotations. Use descriptions for the action, its effects, and parameter or result semantics the structure cannot convey. Keep cues of ownership and continuity brief and open to Ivenna's judgment, leaving content, organization, and learned practices to its experience. Preserve precision about the operation behind a suggestive name.
+
+Allow for mistaken reasoning and incomplete recall in the interfaces and execution flow. Keep references discoverable where they are needed, and treat invalid selections as operation outcomes. Prompts explain meaning and invite judgment; they do not establish programmatic guarantees. Prefer small, local responses to model errors, including another inference where it can correct the result. Let unresolved execution failures follow the availability contract.
 
 Put task facts and observations in user input. Prompts and tool descriptions should explain decisions and interpretation; field references belong in the [input contract](input.md), mechanisms in the architecture guide, and procedures in the running guides. Update affected resources and interface documentation together.
 
@@ -81,7 +83,7 @@ Keep a session's identity independent of context residency, and retain its histo
 
 ### Working history
 
-Working history records what a session can safely continue from. Context owns retained observations, complete model/tool exchanges, and handovers; current facts accompany them for one inference. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
+Working history records what a session retains for continued reasoning. Context owns retained observations, complete model/tool exchanges, and handovers; current facts accompany them for one inference. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
 
 Persistence changes must keep the saved context, admitted observations, and pending registrations consistent, including when saving succeeds but acknowledgement does not. The agent owns history encoding and retention selection; `HistoryStore` adapters own native representation and protocol limits. The [history contract](architecture.md#persistent-working-history) explains publication, restoration, and retirement.
 
@@ -112,6 +114,6 @@ The executable is installed at `zig-out/bin/ivenna` and embeds the [model-facing
 
 Build the application and exercise the affected behavior through communication and model/tool work. Choose checks from the contract being changed: establish what Ivenna or its correspondents should observe, then follow that outcome across the components that produce, deliver, and retain it. A boundary change needs evidence from its producers and consumers together.
 
-Exercise failure and interruption where they can separate an external effect from its recorded outcome. Confirm that the resulting observation supports a reliable next action. Where state or tasks survive a call, verify their restoration and cleanup through the owning component's contract. Scale these checks to the changed behavior and affected boundaries.
+Exercise failure and interruption where they can separate an external effect from its recorded outcome. Confirm that the resulting observation exposes known effects and uncertainty. Where state or tasks survive a call, verify their restoration and cleanup through the owning component's contract. Scale these checks to the changed behavior and affected boundaries.
 
 Report the checks performed and their limits. Distinguish reconstruction of understanding from execution recovery.

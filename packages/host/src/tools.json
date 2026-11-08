@@ -1,14 +1,20 @@
 [
   {
     "name": "inspect_host_shell",
-    "description": "Observe shell defaults and command snapshots across activities, including commands whose initial calls are still waiting. Return the default shell, startup directory, and matching command handles. Command IDs belong to this runtime. Finished handles have bounded retention; full logs remain independently available.",
+    "description": "Inspect shell defaults and discover commands across activities, including work whose initial call is still waiting. Command handles remain usable until retirement or restart; full logs persist independently.",
     "parameters": {
       "type": "object",
       "properties": {
         "command_id": {
           "type": "string",
           "minLength": 1,
-          "description": "The complete command_id returned earlier. Omit to list commands."
+          "description": "Select one command; omit to list current commands."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Position in the matching command list. Use the reply's next_offset to continue; null marks the end."
         }
       },
       "required": [],
@@ -17,14 +23,14 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a named command in a fresh shell. If execution and cleanup finish during the wait, return a final result. Otherwise return command_id and callback_id, registering one completion observation for this focus so it can sleep while waiting. A callback_id confirms the registration even if the returned command snapshot is already final. Initial previews and continuation reads are independent and may overlap. Full output remains in log files.",
+    "description": "Run a command in a fresh shell. Return its outcome, or command_id and callback_id when it continues beyond the wait. A returned callback_id confirms one completion observation for this focus. Full output remains in logs.",
     "parameters": {
       "type": "object",
       "properties": {
         "name": {
           "type": "string",
           "minLength": 1,
-          "description": "A short name for this work. The runtime adds numbers to form command_id and, when needed, callback_id; names may repeat."
+          "maxLength": 32
         },
         "command": {
           "type": "string",
@@ -33,16 +39,18 @@
         "cwd": {
           "type": "string",
           "minLength": 1,
-          "description": "Literal path; relative paths and omission use the kernel's startup directory."
+          "description": "Working directory, relative to the startup directory when not absolute; omission uses that directory."
         },
         "shell": {
           "type": "string",
           "minLength": 1,
-          "description": "Must accept -c. Omit for /bin/sh."
+          "default": "/bin/sh",
+          "description": "Shell executable accepting -c."
         },
         "login": {
           "type": "boolean",
-          "description": "Load startup files through -lc; default false."
+          "default": false,
+          "description": "Use the shell's -lc initialization."
         },
         "mode": {
           "type": "string",
@@ -51,32 +59,35 @@
             "pipe",
             "terminal"
           ],
-          "description": "batch (default) has closed stdin; pipe accepts streamed input; terminal provides terminal behavior with merged stdout/stderr. Batch and pipe preserve output bytes; terminal processing can alter them."
+          "default": "batch",
+          "description": "batch closes stdin; pipe accepts input; terminal merges stdout/stderr and applies terminal processing."
         },
         "timeout_ms": {
           "type": "integer",
           "minimum": 1,
           "maximum": 4294967295,
-          "description": "Stops the command at expiry. Omit to run without a deadline."
+          "description": "Stop the command after this duration; omission leaves it without a deadline."
         },
         "max_output_bytes": {
           "type": "integer",
           "minimum": 512,
           "maximum": 16384,
-          "description": "Shared by stdout and stderr after JSON encoding; default 16384. Metadata and native media are additional."
+          "default": 16384,
+          "description": "Budget shared by stdout and stderr after JSON encoding; metadata and native media are additional."
         },
         "interpretation": {
           "type": "string",
           "enum": [
             "image_url"
           ],
-          "description": "Present final stdout text, up to 16 KiB, as an image URL passed unchanged to the model service. Image bytes are recognized automatically."
+          "description": "Treat complete stdout text of up to 16 KiB as an image URL. Image bytes are recognized automatically."
         },
         "yield_ms": {
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "How long this call waits before returning control, default 1000 ms. Zero returns immediately. This does not limit command duration."
+          "default": 1000,
+          "description": "Wait for completion before returning control; zero returns immediately. This wait does not limit command duration."
         }
       },
       "required": [
@@ -88,14 +99,14 @@
   },
   {
     "name": "continue_host_shell",
-    "description": "Read output, send input, or control an existing command. Activities share per-stream read cursors, independently of the initial preview and completion callback. This call keeps the original completion destination and registers no new callback. The first continuation after completion can supply complete stdout as an image or image URL once across activities, independently of text cursors. Completion callbacks carry text descriptions of media. A finished background handle retires when its output is drained.",
+    "description": "Read more output or interact with a command. Reads advance shared stdout/stderr positions across activities, independently of initial previews and completion observations. Completion still goes to the focus that started the command. Draining a finished command retires its handle.",
     "parameters": {
       "type": "object",
       "properties": {
         "command_id": {
           "type": "string",
           "minLength": 1,
-          "description": "The complete command_id returned by run_host_shell or listed by inspect_host_shell."
+          "description": "From run_host_shell or inspect_host_shell."
         },
         "action": {
           "type": "object",
@@ -123,18 +134,19 @@
                   "properties": {
                     "text": {
                       "type": "string",
-                      "maxLength": 16384,
-                      "description": "Limited to 16384 UTF-8 bytes. Only one write can be pending; stdin.pending and stdin.error report delivery."
+                      "maxLength": 4096
                     },
                     "eof": {
                       "type": "boolean",
-                      "description": "After this text, close pipe stdin or send terminal Ctrl-D. Terminal input remains writable."
+                      "default": false,
+                      "description": "Close pipe stdin after this text, or send Ctrl-D to a terminal without closing its input."
                     }
                   },
                   "required": [
                     "text"
                   ],
-                  "additionalProperties": false
+                  "additionalProperties": false,
+                  "description": "Only one write can be pending; stdin.pending and stdin.error report delivery."
                 }
               },
               "required": [
@@ -155,7 +167,7 @@
                         "terminate",
                         "kill"
                       ],
-                      "description": "Send SIGINT, SIGTERM, or SIGKILL, respectively. Interrupt targets the terminal foreground group; terminate and kill cover its original session. Without a terminal, signals target the command's process group."
+                      "description": "Interrupt reaches the terminal foreground group; terminate and kill reach its original session. Without a terminal, signals reach the command's process group."
                     }
                   },
                   "required": [
@@ -190,7 +202,8 @@
                     "rows",
                     "cols"
                   ],
-                  "additionalProperties": false
+                  "additionalProperties": false,
+                  "description": "Requires terminal mode."
                 }
               },
               "required": [
@@ -199,19 +212,24 @@
               "additionalProperties": false
             }
           ],
-          "description": "Apply input or control before reading output; omit to read only. Controls remain available while another call waits. Resize requires terminal mode."
+          "default": {
+            "read": {}
+          },
+          "description": "Apply input or control before observing output, even while another call waits."
         },
         "yield_ms": {
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Wait for unread output or completion, default 1000 ms. Zero returns the current state immediately."
+          "default": 1000,
+          "description": "Wait for unread output or completion; zero returns the current state."
         },
         "max_output_bytes": {
           "type": "integer",
           "minimum": 512,
           "maximum": 16384,
-          "description": "Shared by stdout and stderr after JSON encoding; default 16384. Metadata and native media are additional."
+          "default": 16384,
+          "description": "Budget shared by stdout and stderr after JSON encoding; metadata and native media are additional."
         }
       },
       "required": [

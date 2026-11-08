@@ -177,6 +177,11 @@ pub const Kernel = struct {
             return self.kernel.sessions.registerCallback(a, self.work, name, source);
         }
 
+        fn issueCommandReference(context: *anyopaque, a: Allocator, name: []const u8) anyerror![]const u8 {
+            const self: *RuntimeRound = @ptrCast(@alignCast(context));
+            return self.kernel.sessions.issueCommandReference(a, self.work, name);
+        }
+
         fn invoke(context: *anyopaque, a: Allocator, request: AgentTools.Request) anyerror!Content {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
             return switch (request) {
@@ -229,6 +234,7 @@ pub const Kernel = struct {
                 .session_id = session.session_id,
                 .focus_id = session.focus_id,
                 .callback = .{ .context = &runtime, .register = RuntimeRound.registerCallback },
+                .command_reference = .{ .context = &runtime, .issue = RuntimeRound.issueCommandReference },
             }, inference, .{
                 .context = &runtime,
                 .invoke = RuntimeRound.invoke,
@@ -247,6 +253,7 @@ pub const Kernel = struct {
     }
 
     const Selection = struct { count: usize, context: Context };
+    const max_summary_attempts = 2;
 
     /// Fill one ordinary input across I/O pages, measuring grouped activity
     /// reports. The retained selection still identifies a raw delivery prefix.
@@ -327,12 +334,23 @@ pub const Kernel = struct {
         var snapshot = try self.sessions.runtimeSnapshot(a, work.session);
         var selection = try self.selectEvents(a, work, &history, snapshot);
         if (selection == null and history.records().len != 0) {
-            snapshot = try self.sessions.runtimeSnapshot(a, work.session);
-            const summary = try Compaction.summarize(self.engine.model, a, &history, snapshot.current, self.limits.compaction_bytes);
-            var compacted = try history.withHandover(self.allocator, summary);
-            defer compacted.deinit();
-            snapshot = try self.sessions.runtimeSnapshot(a, work.session);
-            selection = try self.selectEvents(a, work, &compacted, snapshot);
+            var rejection: ?Compaction.Rejection = null;
+            for (0..max_summary_attempts) |_| {
+                snapshot = try self.sessions.runtimeSnapshot(a, work.session);
+                const result = try Compaction.summarize(self.engine.model, a, &history, snapshot.current, self.limits.compaction_bytes, rejection);
+                switch (result) {
+                    .rejected => |reason| rejection = reason,
+                    .summary => |summary| {
+                        var compacted = try history.withHandover(self.allocator, summary);
+                        defer compacted.deinit();
+                        snapshot = try self.sessions.runtimeSnapshot(a, work.session);
+                        selection = try self.selectEvents(a, work, &compacted, snapshot);
+                        if (selection != null) break;
+                        rejection = .too_large;
+                    },
+                }
+            }
+            if (selection == null) return rejection.?.failure();
         }
         var selected = selection orelse return error.ContextBudgetExhausted;
         {
@@ -366,20 +384,34 @@ pub const Kernel = struct {
         const snapshot = try self.sessions.runtimeSnapshot(a, session);
         const input = try view.request(a, snapshot.current, delivery);
         if (try self.engine.requestBytes(a, input, session.role) <= self.limits.request_bytes) return .{ .context = view, .input = input };
-        const summary = try Compaction.summarize(self.engine.model, a, &view, snapshot.current, self.limits.compaction_bytes);
-        var candidate = try view.withHandover(self.allocator, summary);
-        var installed = false;
-        errdefer if (!installed) candidate.deinit();
-        var replacement = try candidate.clone(self.allocator);
-        errdefer replacement.deinit();
-        const replacement_snapshot = try self.sessions.runtimeSnapshot(a, session);
-        const replacement_input = try replacement.request(a, replacement_snapshot.current, .none);
-        if (try self.engine.requestBytes(a, replacement_input, session.role) > self.limits.request_bytes) return error.ContextBudgetExhausted;
-        try self.sessions.replaceContext(session, candidate);
-        installed = true;
-        try self.sessions.save();
-        view.deinit();
-        return .{ .context = replacement, .input = replacement_input };
+        var rejection: ?Compaction.Rejection = null;
+        for (0..max_summary_attempts) |_| {
+            const current = (try self.sessions.runtimeSnapshot(a, session)).current;
+            const result = try Compaction.summarize(self.engine.model, a, &view, current, self.limits.compaction_bytes, rejection);
+            switch (result) {
+                .rejected => |reason| rejection = reason,
+                .summary => |summary| {
+                    var candidate = try view.withHandover(self.allocator, summary);
+                    var installed = false;
+                    defer if (!installed) candidate.deinit();
+                    var replacement = try candidate.clone(self.allocator);
+                    errdefer replacement.deinit();
+                    const replacement_snapshot = try self.sessions.runtimeSnapshot(a, session);
+                    const replacement_input = try replacement.request(a, replacement_snapshot.current, .none);
+                    if (try self.engine.requestBytes(a, replacement_input, session.role) > self.limits.request_bytes) {
+                        replacement.deinit();
+                        rejection = .too_large;
+                        continue;
+                    }
+                    try self.sessions.replaceContext(session, candidate);
+                    installed = true;
+                    try self.sessions.save();
+                    view.deinit();
+                    return .{ .context = replacement, .input = replacement_input };
+                },
+            }
+        }
+        return rejection.?.failure();
     }
 };
 

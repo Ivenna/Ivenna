@@ -9,6 +9,7 @@ const Tools = contracts.Tools;
 const Model = contracts.Model;
 const Reference = contracts.Reference;
 const finished_command_cache = 8;
+const max_input_characters = 4096;
 
 /// One process registry serves completed calls and background commands.
 pub const Host = struct {
@@ -21,7 +22,6 @@ pub const Host = struct {
     tasks: std.Io.Group = .init,
     jobs: std.ArrayList(*Job) = .empty,
     active: usize = 0,
-    next_command_id: u64 = 1,
     completed_sequence: u64 = 0,
     stopping: bool = false,
     failure: ?anyerror = null,
@@ -39,8 +39,9 @@ pub const Host = struct {
         yield_ms: u32 = 1000,
         max_output_bytes: u32 = 16384,
     };
+    pub const Inspect = struct { command_id: ?[]const u8 = null, offset: usize = 0 };
     pub const Request = union(enum) {
-        inspect_host_shell: struct { command_id: ?[]const u8 = null },
+        inspect_host_shell: Inspect,
         run_host_shell: Shell.Command,
         continue_host_shell: Continue,
         pub fn parse(a: Allocator, name: []const u8, arguments: []const u8) !?Request {
@@ -63,7 +64,10 @@ pub const Host = struct {
                 .continue_host_shell => |args| {
                     if (!validText(args.command_id) or !validBudget(args.max_output_bytes)) return error.InvalidToolArguments;
                     switch (args.action) {
-                        .write => |write| if (write.text.len > 16384) return error.InvalidToolArguments,
+                        .write => |write| {
+                            const length = std.unicode.utf8CountCodepoints(write.text) catch return error.InvalidToolArguments;
+                            if (length > max_input_characters) return error.InvalidToolArguments;
+                        },
                         .resize => |size| if (size.rows == 0 or size.cols == 0) return error.InvalidToolArguments,
                         else => {},
                     }
@@ -167,7 +171,7 @@ pub const Host = struct {
     }
     pub fn invoke(self: *Host, a: Allocator, context: Context, request: Request) !Content {
         return switch (request) {
-            .inspect_host_shell => |args| self.describe(a, args.command_id),
+            .inspect_host_shell => |args| self.describe(a, args),
             .run_host_shell => |args| self.execute(a, context, args),
             .continue_host_shell => |args| self.continueCommand(a, args),
         };
@@ -224,11 +228,6 @@ pub const Host = struct {
             self.mutex.unlock(self.shell.io);
             return .capacity;
         }
-        const command_id = self.next_command_id;
-        self.next_command_id = std.math.add(u64, command_id, 1) catch |err| {
-            self.mutex.unlock(self.shell.io);
-            return err;
-        };
         // Reserve capacity before setup, without blocking other commands on
         // filesystem or executable startup I/O under the registry mutex.
         self.active += 1;
@@ -254,7 +253,8 @@ pub const Host = struct {
         command.command = try owned.dupe(u8, args.command);
         command.cwd = if (args.cwd) |cwd| try owned.dupe(u8, cwd) else null;
         command.shell = if (args.shell) |shell| try owned.dupe(u8, shell) else null;
-        const reference = try Reference.create(owned, args.name, command_id);
+        const issuer = context.command_reference orelse return error.MissingCommandReferenceIssuer;
+        const reference = try issuer.create(owned, args.name);
         const focus_id = try owned.dupe(u8, context.focus_id);
         const invocation = switch (try self.shell.start(owned, context.session_id, command)) {
             .ready => |invocation| invocation,
@@ -283,7 +283,7 @@ pub const Host = struct {
     }
 
     fn continueCommand(self: *Host, a: Allocator, args: Continue) !Content {
-        const job = try self.acquire(args.command_id) orelse return toolError(a, "unknown_command", "This command handle is unknown or retired. Inspect recorded log paths; handles belong to the runtime that created them.");
+        const job = try self.acquire(args.command_id) orelse return toolError(a, "unknown_command", "This command handle is unknown or retired. Use inspect_host_shell to find current commands; recorded log paths remain available independently.");
         defer self.release(job);
         // Apply input or a signal promptly even when another caller is
         // waiting to collect this command's next output range.
@@ -492,32 +492,42 @@ pub const Host = struct {
         }
     }
 
-    fn describe(self: *Host, a: Allocator, selected_id: ?[]const u8) !Content {
+    fn describe(self: *Host, a: Allocator, args: Inspect) !Content {
         const Entry = struct { command_id: []const u8, focus_id: []const u8, command_preview: []const u8, state: PublicState, mode: Shell.Mode, stdin_open: bool, input_pending: bool };
+        const Page = struct { shell: []const u8 = "/bin/sh", cwd: []const u8, commands: []const Entry, offset: usize, next_offset: ?usize, total_commands: usize };
         var entries: std.ArrayList(Entry) = .empty;
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
         var total: usize = 0;
-        for (self.jobs.items) |job| if (selected_id == null or std.mem.eql(u8, job.command_id, selected_id.?)) {
+        for (self.jobs.items) |job| if (args.command_id == null or std.mem.eql(u8, job.command_id, args.command_id.?)) {
             total += 1;
         };
-        if (selected_id != null and total == 0) return toolError(a, "unknown_command", "This command handle is unknown or retired.");
+        if (args.command_id != null and total == 0) return toolError(a, "unknown_command", "This command handle is unknown or retired. Omit command_id to find current commands.");
+        var position: usize = 0;
         for (self.jobs.items) |job| {
             const id = job.command_id;
-            if (selected_id) |selected| if (!std.mem.eql(u8, id, selected)) continue;
-            var end = @min(job.args.command.len, 160);
-            while (end > 0 and end < job.args.command.len and job.args.command[end] & 0xc0 == 0x80) end -= 1;
-            try entries.append(a, .{ .command_id = id, .focus_id = job.focus_id, .command_preview = job.args.command[0..end], .state = switch (job.state) {
+            if (args.command_id) |selected| if (!std.mem.eql(u8, id, selected)) continue;
+            if (position < args.offset) {
+                position += 1;
+                continue;
+            }
+            var preview_end = @min(job.args.command.len, 160);
+            while (preview_end > 0 and preview_end < job.args.command.len and job.args.command[preview_end] & 0xc0 == 0x80) preview_end -= 1;
+            try entries.append(a, .{ .command_id = id, .focus_id = job.focus_id, .command_preview = job.args.command[0..preview_end], .state = switch (job.state) {
                 .running => .running,
                 .finished => |outcome| .{ .finished = outcome },
                 .failed => |err| .{ .unavailable = .{ .reason = @errorName(err) } },
             }, .mode = job.args.mode, .stdin_open = job.input_open and job.state == .running, .input_pending = job.input_pending });
-            if (encodedLength(.{ .result = .{ .shell = "/bin/sh", .cwd = self.shell.directory, .commands = entries.items, .commands_truncated = true, .total_commands = total } }) > 32768) {
+            const end = args.offset + entries.items.len;
+            const page: Page = .{ .cwd = self.shell.directory, .commands = entries.items, .offset = args.offset, .next_offset = if (end < total) end else null, .total_commands = total };
+            if (encodedLength(.{ .result = page }) > 32768) {
                 _ = entries.pop();
                 break;
             }
         }
-        return Content.fromText(a, try success(a, .{ .shell = "/bin/sh", .cwd = self.shell.directory, .commands = entries.items, .commands_truncated = entries.items.len < total, .total_commands = total }));
+        const end = args.offset + entries.items.len;
+        const page: Page = .{ .cwd = self.shell.directory, .commands = entries.items, .offset = args.offset, .next_offset = if (end < total) end else null, .total_commands = total };
+        return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = page }, .{}));
     }
 
     fn handoffFailure(self: *Host, a: Allocator, job: *Job, reason: []const u8) !Content {
@@ -641,6 +651,6 @@ fn outputFailure(a: Allocator, err: anyerror) !Content {
 fn encodedLength(value: anytype) usize {
     var buffer: [128]u8 = undefined;
     var discard: std.Io.Writer.Discarding = .init(&buffer);
-    std.json.Stringify.value(value, .{ .emit_null_optional_fields = false }, &discard.writer) catch unreachable;
+    std.json.Stringify.value(value, .{}, &discard.writer) catch unreachable;
     return @intCast(discard.fullCount());
 }

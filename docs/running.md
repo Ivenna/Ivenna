@@ -48,7 +48,9 @@ Core and activity sessions use the same configured model and output-token limit.
 
 `MAX_PENDING_EVENTS` limits ordinary accepted events buffered for a session. Startup observations, passive activity expressions, and activity endings are excluded. Opening a focus and admitting its ending do not need space in the core's ordinary event queue. Correspondence and callback mail have independent intake allowances and stay in their durable sources when their destination is full. Focus messages use this ordinary allowance and return `focus_queue_full` when the recipient cannot accept them. Capacity and polling can delay scheduled work.
 
-Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. Callback registrations have no separate count limit; a larger callback list or roster leaves less room for history and observations. These budgets also apply to an activity's inherited history. A generated handover has no separate byte limit, but the complete replacement request must fit. Input that still cannot fit after compaction fails with `ContextBudgetExhausted` and stops the runtime. See [context budgets](architecture.md#bounded-model-context).
+Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. Callback registrations have no separate count limit; a larger callback list or roster leaves less room for history and observations. These budgets also apply to an activity's inherited history. A generated handover has no separate byte limit, but the complete replacement request must fit.
+
+Compaction allows one further inference if the first handover has missing or blank text, includes tool calls, or leaves the replacement request over budget. If both attempts fail, or a summary request itself exceeds `CONTEXT_COMPACTION_BYTES`, the runtime stops with its earlier history and unadmitted observations intact. Input that still cannot fit after compaction fails with `ContextBudgetExhausted`. See [context budgets](architecture.md#bounded-model-context).
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
@@ -154,13 +156,13 @@ Host processes and command handles are not restored, and commands are not replay
 
 ### Recovering from an admission failure
 
-When an incoming message fails admission with `ContextBudgetExhausted`, it remains unacknowledged. Before restarting, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate; restarting alone does not resolve the budget failure.
+When an incoming message fails admission with `ContextBudgetExhausted`, it remains unacknowledged. On restart, the runtime retries admission from saved history; a new summary may produce a request that fits. If the limit recurs, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate.
 
 ### Updating the executable
 
 Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
 
-The current history format preserves named focus and callback references alongside internal routing identities. Activity observations carry `from_focus`, timestamped `messages`, and `ended_at_unix_ms`; retained records and handovers identify their producing or receiving `focus_id`. Checkpoints or observations using earlier shapes are incompatible with this executable.
+The current history format preserves named focus and callback references alongside internal routing identities and includes the next command number in the checkpoint. Activity observations carry `from_focus`, timestamped `messages`, and `ended_at_unix_ms`; retained records and handovers identify their producing or receiving `focus_id`. Checkpoints or observations using earlier shapes are incompatible with this executable.
 
 ## Data and retention
 

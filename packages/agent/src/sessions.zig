@@ -77,6 +77,7 @@ pub const Registry = struct {
     reserved_sessions: usize = 0,
     next_session_id: u64 = 2,
     next_callback_id: u64 = 1,
+    next_command_id: u64 = 1,
     started_at_unix_ms: i64,
 
     pub fn init(allocator: Allocator, io: std.Io, max_sessions: usize, max_pending: usize, history: contracts.HistoryStore) !Registry {
@@ -101,6 +102,7 @@ pub const Registry = struct {
             self.reports = reports;
             self.next_session_id = retained.next_session_id;
             self.next_callback_id = retained.next_callback_id;
+            self.next_command_id = retained.next_command_id;
             for (retained.sessions) |record| {
                 const session = try allocator.create(Session);
                 session.* = .{
@@ -427,6 +429,7 @@ pub const Registry = struct {
         try self.history.save(a, .{
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
+            .next_command_id = self.next_command_id,
             .wakeups = self.wakeups.items,
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
@@ -549,6 +552,19 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         self.removeWakeupLocked(id);
         try self.saveLocked();
+    }
+
+    pub fn issueCommandReference(self: *Registry, a: Allocator, work: Work, name: []const u8) ![]const u8 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        const id = self.next_command_id;
+        const next = try std.math.add(u64, id, 1);
+        const reference = try contracts.Reference.create(a, name, id);
+        errdefer a.free(reference);
+        self.next_command_id = next;
+        try self.saveLocked();
+        return reference;
     }
 
     pub fn registerCallback(self: *Registry, a: Allocator, work: Work, name: []const u8, source: contracts.Callback.Source) !contracts.Callback.Registration {

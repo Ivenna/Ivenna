@@ -1,7 +1,7 @@
 [
   {
     "name": "send_message",
-    "description": "Send text to one or more correspondents by ID. Each call submits one message and returns a submission reference; submission does not confirm recipient delivery.",
+    "description": "Send text to correspondents by ID. Returns a submission reference; recipient delivery remains unconfirmed.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -27,19 +27,18 @@
   },
   {
     "name": "open_focus",
-    "description": "Open another focus of your attention to pursue the supplied task while the core continues. Return its stable focus_id. The activity inherits your retained history through this complete model/tool round. Its ordinary assistant text accompanies later core inputs without activating the core; its ending requests core attention even without new text.",
+    "description": "Open another focus of your attention around a task while the core continues. Returns its focus_id.",
     "parameters": {
       "type": "object",
       "properties": {
         "name": {
           "type": "string",
           "minLength": 1,
-          "description": "A short name for this focus. The runtime appends a number; names may repeat."
+          "maxLength": 32
         },
         "task": {
           "type": "string",
-          "minLength": 1,
-          "description": "What this focus should pursue."
+          "minLength": 1
         }
       },
       "required": [
@@ -51,19 +50,18 @@
   },
   {
     "name": "send_focus_message",
-    "description": "Share a thought or update with an existing focus, including your own. Durably queue the text as an observation and return the recipient's focus_id. A dormant recipient becomes ready; an active recipient receives it between complete model/tool rounds.",
+    "description": "Share a thought or update with a focus. Queues an observation and makes a sleeping recipient ready.",
     "parameters": {
       "type": "object",
       "properties": {
         "focus_id": {
           "type": "string",
           "minLength": 1,
-          "description": "The complete focus_id from the current roster. Your own focus_id is also valid."
+          "description": "A focus in the current roster, including your own."
         },
         "text": {
           "type": "string",
-          "minLength": 1,
-          "description": "The thought or update to deliver."
+          "minLength": 1
         }
       },
       "required": [
@@ -75,23 +73,22 @@
   },
   {
     "name": "schedule_attention",
-    "description": "Leave yourself something to return to at a later time. Schedule one observation for the core and return its callback_id; the arrangement survives restart. Past times are due immediately, though inference can occur later.",
+    "description": "Leave yourself something to return to later. Registers an observation for the core and returns its callback_id; the arrangement survives restart.",
     "parameters": {
       "type": "object",
       "properties": {
         "name": {
           "type": "string",
           "minLength": 1,
-          "description": "A short name for this later attention. The runtime appends a number; names may repeat."
+          "maxLength": 32
         },
         "at_unix_ms": {
           "type": "integer",
-          "description": "When to request attention, as Unix time in milliseconds. The current observation time is supplied in `current`."
+          "description": "Past times are due immediately; inference can follow later."
         },
         "text": {
           "type": "string",
-          "minLength": 1,
-          "description": "What to reconsider when this observation arrives."
+          "minLength": 1
         }
       },
       "required": [

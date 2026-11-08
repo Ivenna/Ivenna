@@ -1,6 +1,6 @@
 # Host shell
 
-The [host tools](../packages/host/src/tools.json) let activity focuses run programs, inspect their output, and interact with them through the kernel's OS account on the shared host filesystem. Each command has its own host identity so activities can discover and control it while it runs.
+The [host tools](../packages/host/src/tools.json) let activity focuses run programs, inspect their output, and interact with them through the kernel's OS account on the shared host filesystem. Command references let activities discover and control running work.
 
 | Tool | Purpose |
 | --- | --- |
@@ -35,7 +35,7 @@ The tool wait retains the current activation and context while the core and othe
 | `max_output_bytes` | Combined encoded stdout/stderr preview budget, from `512` through `16384` bytes; defaults to `16384`; result metadata and log paths are additional |
 | `interpretation` | Optional `"image_url"` for presenting complete stdout as an [image reference](content.md#image-url-references) once the command has finished |
 
-Names must be nonempty UTF-8 text without ASCII control characters; spaces alone are not accepted.
+Names must contain 1–32 Unicode code points and no ASCII control characters; spaces alone are not accepted.
 
 Each start creates a fresh shell. Its directory and environment changes belong to that command; keep it running in an [input mode](#input-modes) to preserve state across calls. The command string follows the selected shell's syntax, while `cwd` is a literal path resolved before shell startup.
 
@@ -61,7 +61,9 @@ A terminal starts with 24 rows and 80 columns and can be resized. The tool retur
 
 Use the complete `command_id` returned by a yielded `run_host_shell` call or listed by `inspect_host_shell`. Commands are discoverable across activities, including while the starting activity is still waiting in `run_host_shell`. Input and control do not wait for another observation call's yield deadline.
 
-Call `inspect_host_shell` with `{}` to inspect the default `shell`, startup `cwd`, and `commands`, or pass `{"command_id":"build-17"}` to select one. Entries include `command_id`, originating `focus_id`, `command_preview` (up to 160 UTF-8 bytes), `state`, `mode`, `stdin_open`, and `input_pending`. The list has a 32 KiB encoded reply budget; `total_commands` and `commands_truncated` identify omitted entries.
+Call `inspect_host_shell` with `{}` to inspect the default `shell`, startup `cwd`, and the first page of `commands`, or pass `{"command_id":"build-17"}` to select one. Entries include `command_id`, originating `focus_id`, `command_preview` (up to 160 UTF-8 bytes), `state`, `mode`, `stdin_open`, and `input_pending`.
+
+The complete inspection reply fits 32 KiB. `offset` defaults to `0`; the result supplies that offset, `total_commands`, and `next_offset`. Pass a non-null `next_offset` as the next call's `offset` to read further entries. At the end, `next_offset` is `null`. An offset beyond the list returns no commands. An exact `command_id` filter applies before pagination. Pages follow the current registry order, which can change as commands retire.
 
 Call `continue_host_shell` with the selected `command_id`. Omit `action` to read more output:
 
@@ -82,7 +84,7 @@ The optional `action` selects exactly one operation:
 
 `eof: true` in `action.write` closes pipe stdin after the supplied text; later writes cannot reopen it. In terminal mode it sends Ctrl-D and leaves the transport writable.
 
-Each write accepts at most 16384 UTF-8 bytes and proceeds independently of the observation call. `stdin.pending` identifies a write still in flight; another write returns `input_busy` until it finishes. An optional `stdin.error` reports a failed or canceled write. Some input may already have reached the program when an error occurs; inspect its response before repeating that input.
+Each write accepts at most 4096 Unicode code points and proceeds independently of the observation call. `stdin.pending` identifies a write still in flight; another write returns `input_busy` until it finishes. An optional `stdin.error` reports a failed or canceled write. Some input may already have reached the program when an error occurs; inspect its response before repeating that input.
 
 Interrupt targets the terminal's foreground group, or the command's process group without a terminal. Terminate and kill cover the original terminal session or command group. A program can handle or ignore SIGINT and SIGTERM; SIGKILL forces termination. Output remains available for collection afterward.
 
@@ -144,7 +146,7 @@ For incremental `content.unavailable`, its `byte_length` describes the unsupport
 
 ## Command lifetimes
 
-Complete command references identify executions within the current runtime; callback references connect the initial handoff with its later observation and remain retained across restart. A command handed off by its initial call remains owned by the host runtime and has one completion observation registered for its originating activity. That registration keeps the activity available across sleep until the observation is durably admitted. Reading or controlling the command from another activity does not redirect its completion. The `focus_id` in inspection records identifies where the command started.
+Complete command references identify executions. Their numeric suffixes advance across restarts, while control handles remain available only in their originating runtime. Callback references connect the initial handoff with its later observation and remain retained across restart. A command handed off by its initial call remains owned by the host runtime and has one completion observation registered for its originating activity. That registration keeps the activity available across sleep until the observation is durably admitted. Reading or controlling the command from another activity does not redirect its completion. The `focus_id` in inspection records identifies where the command started.
 
 Command state, handle retention, and the registered observation have separate lifetimes. Draining a handle does not cancel its completion observation; cancellation is unavailable. A response without tool calls lets the activity sleep while an observation remains registered. See [activity completion](attention.md#activity-completion) for the conditions under which it sleeps or ends.
 

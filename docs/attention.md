@@ -12,7 +12,9 @@ The core directs attention through these [agent tools](../packages/agent/src/too
 
 Both roles can [communicate externally](communication.md) and [maintain memory](memory.md). Activities also have [host tools](host.md). The [design intent](design.md#core-and-concurrent-attention) explains these roles.
 
-Names are recognition cues and may repeat. Use each complete returned reference in later calls and when relating observations to earlier work. The core's reference is `core-1`. Names must be nonempty UTF-8 text without ASCII control characters; spaces alone are not accepted.
+Names are recognition cues and may repeat. The core's reference is `core-1`. Current state supplies addressable focus references and the current focus's pending callback references. Use each complete reference in later calls and when relating observations to earlier work.
+
+Names must contain 1–32 Unicode code points and no ASCII control characters; spaces alone are not accepted.
 
 ## Opening a focus
 

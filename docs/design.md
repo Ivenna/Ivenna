@@ -16,6 +16,8 @@ Correspondence and autonomous activity can both shape Ivenna's understanding, pr
 
 Model-facing inputs describe current attention, observations, and possible actions. References connect earlier choices with their effects and later observations. Ivenna supplies brief names when opening a focus, starting a command, or arranging future attention; the runtime adds numeric suffixes for distinction. Names remain its own choice, while the complete references support exact addressing and association.
 
+Reasoning can lose details, confuse references, or choose unsuccessful actions. Current state and discoverable command handles support recognition without requiring exact recall. The runtime owns delivery; Ivenna can reconsider an action from its outcome.
+
 Capabilities keep operation outcomes connected to their sources and supported content. Bounded observations provide a way to inspect further content, and omissions remain distinguishable from an empty source. This lets Ivenna decide which evidence needs further inspection.
 
 Changes to shared memory require a clear target. An edit that could select several occurrences requires an explicit choice, and the previous entry remains intact until its replacement is ready. Ivenna can refine an intended change without losing the memory it was trying to revise.
@@ -66,13 +68,15 @@ Each inference receives a self-contained snapshot of the runtime facts exposed b
 
 ### Context and continuity
 
-Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) condenses retained exchanges into a handover that preserves self-understanding, preferences, commitments, uncertainty, effects, and the identities needed to continue. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
+Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) asks Ivenna to condense retained exchanges into a handover, carrying forward self-understanding, preferences, commitments, uncertainty, effects, and the references needed to continue. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
+
+If a handover is unusable or the replacement still exceeds the request budget, the runtime asks Ivenna to generate another handover from the original retained history. If that attempt also fails, execution stops with the earlier history and pending observations intact.
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 
 ## Runtime availability
 
-Communication and autonomous memory are required for Ivenna to operate. Infrastructure, model, and session-execution failures end the runtime and its concurrent work. Defined tool outcomes, including unsuccessful or uncertain actions, remain observations from which Ivenna decides how to continue.
+Communication and autonomous memory are required for Ivenna to operate. Infrastructure, model-service, and session-execution failures end the runtime and its concurrent work. Defined tool outcomes, including mistaken references and unsuccessful or uncertain actions, remain observations from which Ivenna decides how to continue.
 
 The receiving boundary checks Ivenna's reception status before accepting correspondence. Reception closes during startup, shutdown, or failure; sender retry and queuing belong to the sender. See [reception readiness](running.md#service-status-and-reception) for the precheck's limits.
 

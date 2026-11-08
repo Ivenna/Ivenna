@@ -1,29 +1,32 @@
 [
   {
     "name": "visit_memory_room",
-    "description": "Look around your memory rooms and see what you have kept. List a room's immediate memories and child rooms without reading their contents. Rooms are shared across sessions; entries are sorted by address and can change between pages.",
+    "description": "Look around your memory rooms and see what you have kept. List the room's memories and child rooms without opening them, ordered by address.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "Room address as a literal path relative to the shared entrance, '.'. Omit for the entrance; use find_memory to search names."
+          "description": "Literal path from the shared entrance.",
+          "default": "."
         },
         "recursive_size": {
           "type": "boolean",
-          "description": "Also measure the space occupied by each child room and its descendants. Default false leaves room size_bytes null; individual memories always report their size."
+          "description": "Also measure child rooms with their descendants; otherwise room size_bytes is null.",
+          "default": false
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Zero-based result offset, default 0. Continue with a non-null next_offset from the previous reply; null means no more results."
+          "description": "Continue with the returned next_offset; null marks the end.",
+          "default": 0
         },
         "max_results": {
           "type": "integer",
           "minimum": 1,
           "maximum": 1000,
-          "description": "Maximum results per page, default 100. The encoded reply limit can shorten a page."
+          "default": 100
         }
       },
       "required": [],
@@ -32,41 +35,42 @@
   },
   {
     "name": "recall_memory",
-    "description": "Follow a clue into what you have remembered. Search text within a room and its descendants using literal or regex matching. Replies give matching lines with bounded previews and text_truncated; use read_memory for full content. Results are sorted by address and line and can change between pages.",
+    "description": "Follow a clue into what you have remembered. Search memory text below a room and return matching lines with previews.",
     "parameters": {
       "type": "object",
       "properties": {
         "clue": {
-          "type": "string",
-          "description": "Text or pattern to match in memory entries. Matching is textual rather than semantic; literal matching ignores case by default."
+          "type": "string"
         },
         "room": {
           "type": "string",
-          "description": "Room address relative to the shared entrance. Omit to search from the entrance, '.'."
+          "description": "Room path from the shared entrance.",
+          "default": "."
         },
         "match_mode": {
           "type": "string",
-          "description": "Defaults to literal matching.",
           "enum": [
             "literal",
             "regex"
-          ]
+          ],
+          "default": "literal"
         },
         "case_sensitive": {
           "type": "boolean",
-          "description": "Match upper and lower case exactly. Omit to ignore case."
+          "default": false
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Zero-based result offset, default 0. Continue with a non-null next_offset from the previous reply; null means no more results."
+          "description": "Continue with the returned next_offset; null marks the end.",
+          "default": 0
         },
         "max_results": {
           "type": "integer",
           "minimum": 1,
           "maximum": 1000,
-          "description": "Maximum results per page, default 100. The encoded reply limit can shorten a page."
+          "default": 100
         }
       },
       "required": [
@@ -77,42 +81,44 @@
   },
   {
     "name": "find_memory",
-    "description": "Find your way to a memory or room whose name you partly remember. Search names within a room and its descendants, using literal, glob, or regex matching. Replies give addresses and kinds, sorted by address; matches can change between pages.",
+    "description": "Find your way to a memory or room whose name you partly remember. Search names below a room and return matching addresses.",
     "parameters": {
       "type": "object",
       "properties": {
         "query": {
           "type": "string",
-          "description": "Name or name pattern to find. Literal matching finds part of a name."
+          "description": "Literal matching finds part of a name."
         },
         "room": {
           "type": "string",
-          "description": "Room address relative to the shared entrance. Omit to search from the entrance, '.'."
+          "description": "Room path from the shared entrance.",
+          "default": "."
         },
         "match_mode": {
           "type": "string",
-          "description": "Defaults to literal matching.",
           "enum": [
             "literal",
             "glob",
             "regex"
-          ]
+          ],
+          "default": "literal"
         },
         "case_sensitive": {
           "type": "boolean",
-          "description": "Match upper and lower case exactly. Omit to ignore case."
+          "default": false
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Zero-based result offset, default 0. Continue with a non-null next_offset from the previous reply; null means no more results."
+          "description": "Continue with the returned next_offset; null marks the end.",
+          "default": 0
         },
         "max_results": {
           "type": "integer",
           "minimum": 1,
           "maximum": 1000,
-          "description": "Maximum results per page, default 100. The encoded reply limit can shorten a page."
+          "default": 100
         }
       },
       "required": [
@@ -123,32 +129,34 @@
   },
   {
     "name": "read_memory",
-    "description": "Revisit a memory. Read text in pages or receive a complete supported image. Replies distinguish unavailable content from an empty memory and retain the source byte_length.",
+    "description": "Revisit a memory. Read text in pages or receive a complete supported image. Replies distinguish unavailable content from an empty memory.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "The memory to open, relative to the shared entrance."
+          "description": "Memory path from the shared entrance."
         },
         "interpretation": {
           "type": "string",
           "enum": [
             "image_url"
           ],
-          "description": "Present the entry's complete nonempty text as an image URL. Omit for automatic byte detection."
+          "description": "Use the memory's complete text as the image URL."
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
-          "description": "Byte offset at a UTF-8 character boundary, default 0. Continue with a non-null next_offset; null means the end. Images and image_url interpretation require offset 0.",
-          "maximum": 9223372036854775807
+          "description": "Byte offset at a UTF-8 character boundary. Continue with next_offset; null marks the end. Images and image_url interpretation require offset 0.",
+          "maximum": 9223372036854775807,
+          "default": 0
         },
         "max_bytes": {
           "type": "integer",
           "minimum": 4,
           "maximum": 8192,
-          "description": "Maximum text bytes per page, default 8192. UTF-8 boundaries and the encoded reply limit can shorten a page. Complete images and image_url interpretation use their own limits."
+          "description": "Text pages may be shorter at UTF-8 boundaries or the reply limit; media use separate limits.",
+          "default": 8192
         }
       },
       "required": [
@@ -159,13 +167,13 @@
   },
   {
     "name": "remember",
-    "description": "Keep something you want to carry beyond the present context. Write text or copy a host file's bytes into a memory; missing parent rooms are created. Transferred content and the updated memory are each limited to 32 MiB. Failed preparation leaves any previous memory intact.",
+    "description": "Keep something you want to carry beyond the present context. Missing parent rooms are created. Each transfer and the resulting memory are limited to 32 MiB; failed preparation leaves any previous memory intact.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "Memory address as a literal path relative to the shared entrance."
+          "description": "Memory path from the shared entrance."
         },
         "content": {
           "type": "object",
@@ -174,8 +182,7 @@
               "type": "object",
               "properties": {
                 "text": {
-                  "type": "string",
-                  "description": "Text to remember, in your chosen format."
+                  "type": "string"
                 }
               },
               "required": [
@@ -206,17 +213,17 @@
               ],
               "additionalProperties": false
             }
-          ],
-          "description": "What to remember, supplied as text or copied from a host file."
+          ]
         },
         "mode": {
           "type": "string",
-          "description": "create (default) keeps a new memory and reports an occupied address; append adds bytes without a separator, creating a missing memory; replace writes the whole memory, creating or overwriting it. All modes create missing parent rooms and change only the addressed hard-linked name.",
+          "description": "create keeps a new memory at an unused address; append adds bytes without a separator; replace overwrites the memory. Append and replace also create a missing memory.",
           "enum": [
             "create",
             "append",
             "replace"
-          ]
+          ],
+          "default": "create"
         }
       },
       "required": [
@@ -228,34 +235,35 @@
   },
   {
     "name": "revise_memory",
-    "description": "Let a memory change as your understanding changes. Replace text in one memory, keeping the rest. A unique, literal, case-sensitive match is replaced by default; no match reports no_match, and multiple matches return ambiguous_match without writing. Replies report revision and matches. The existing memory must be UTF-8 text without NUL bytes; both the existing and revised memory are limited to 32 MiB.",
+    "description": "Let a memory change as your understanding changes. Replace matching text while keeping the rest. The existing memory must be UTF-8 text without NUL bytes; both versions are limited to 32 MiB.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "The memory to reconsider, relative to the shared entrance."
+          "description": "Memory path from the shared entrance."
         },
         "old_text": {
           "type": "string",
-          "description": "The part to change, as text or a pattern.",
           "minLength": 1
         },
         "new_text": {
           "type": "string",
-          "description": "The replacement text. Regex mode expands captures such as ${1} and ${name}; literal mode keeps this text as supplied."
+          "description": "Regex replacements expand captures such as ${1} and ${name}."
         },
         "replace_all": {
           "type": "boolean",
-          "description": "Replace every non-overlapping match instead of one unique match. Defaults to false."
+          "description": "Replace every non-overlapping match; otherwise require one unique match.",
+          "default": false
         },
         "match_mode": {
           "type": "string",
-          "description": "Defaults to literal, case-sensitive matching.",
+          "description": "Case-sensitive matching.",
           "enum": [
             "literal",
             "regex"
-          ]
+          ],
+          "default": "literal"
         }
       },
       "required": [
@@ -268,13 +276,13 @@
   },
   {
     "name": "create_memory_room",
-    "description": "Make room for memories you want to keep together. Create a room and any missing parents; an existing room is reused.",
+    "description": "Make room for memories you want to keep together. Missing parent rooms are created; an existing room is reused.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "Where the room belongs, relative to the shared entrance."
+          "description": "Room path from the shared entrance."
         }
       },
       "required": [
@@ -285,17 +293,17 @@
   },
   {
     "name": "move_memory",
-    "description": "Reshape how your memories belong together. Move or rename a memory, or a room with its contents; replies give its resulting address. An occupied target is an error.",
+    "description": "Reshape how your memories belong together. Move or rename a memory or a room with its contents. An occupied target is an error.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "The location of a memory entry or room, relative to the shared entrance."
+          "description": "Memory or room path from the shared entrance."
         },
         "destination": {
           "type": "string",
-          "description": "The new address, whose containing room must exist, or an existing room to move into. Relative to the shared entrance."
+          "description": "New path from the shared entrance, or an existing room to move into. The containing room must exist."
         }
       },
       "required": [
@@ -307,17 +315,18 @@
   },
   {
     "name": "forget_memory",
-    "description": "Let go of a memory or room you no longer want to keep. Remove a memory or an empty room; recursive removal also forgets everything in the room.",
+    "description": "Let go of a memory or room you no longer want to keep. Remove a memory or an empty room.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "The location of a memory entry or room, relative to the shared entrance."
+          "description": "Memory or room path from the shared entrance."
         },
         "recursive": {
           "type": "boolean",
-          "description": "Remove all entries and child rooms at this location. Omit to remove only an entry or an empty room."
+          "description": "Also remove a room's memories and child rooms.",
+          "default": false
         }
       },
       "required": [
@@ -328,7 +337,7 @@
   },
   {
     "name": "inspect_memory_space",
-    "description": "See how much space your memories occupy and how much remains. Return used_bytes, capacity_bytes, remaining_bytes, and used_ratio for all rooms together.",
+    "description": "See how much space your memories occupy and how much remains.",
     "parameters": {
       "type": "object",
       "properties": {},
