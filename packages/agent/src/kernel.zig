@@ -228,8 +228,6 @@ pub const Kernel = struct {
             defer runtime.deinit();
             const inference = try self.engine.infer(a, view.input, session.role);
             try self.sessions.recordAssistant(work, inference.response.text);
-            const has_tools = inference.response.calls.len != 0;
-            if (has_tools) try self.sessions.setToolWait(work, true);
             const replies = try self.engine.executeTools(a, .{
                 .session_id = session.session_id,
                 .focus_id = session.focus_id,
@@ -239,7 +237,6 @@ pub const Kernel = struct {
                 .context = &runtime,
                 .invoke = RuntimeRound.invoke,
             });
-            if (has_tools) try self.sessions.setToolWait(work, false);
             delivery = .none;
             try self.sessions.commitRound(work, inference.response.output, replies, runtime.forks.items);
             runtime.forks.clearRetainingCapacity();
@@ -257,29 +254,28 @@ pub const Kernel = struct {
 
     /// Fill one ordinary input across I/O pages, measuring grouped activity
     /// reports. The retained selection still identifies a raw delivery prefix.
-    fn selectEvents(self: *Kernel, a: Allocator, work: Work, history: *const Context, initial: Sessions.Snapshot) !?Selection {
+    fn selectEvents(self: *Kernel, a: Allocator, work: Work, history: *const Context) !?Selection {
         var count: usize = 0;
-        var snapshot = initial;
+        const current = try self.sessions.current(a, work.session);
         var events: std.ArrayList(Input.Event) = .empty;
         defer events.deinit(a);
         var trial_arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer trial_arena.deinit();
         while (true) {
             for (work.activation.deliveries.items[events.items.len..]) |delivery| try events.append(a, delivery.event);
-            if (try self.eventsFit(&trial_arena, work.session.role, history, snapshot, events.items, events.items.len)) {
+            if (try self.eventsFit(&trial_arena, work.session.role, history, current, events.items, events.items.len)) {
                 count = events.items.len;
                 if (!try self.sessions.extendReports(work)) break;
-                snapshot = try self.sessions.runtimeSnapshot(a, work.session);
                 continue;
             }
             // After an overflow, select the largest fitting prefix of the loaded
-            // deliveries using the current snapshot.
+            // deliveries using the same inference identity and time.
             var start: usize = 1;
-            if (count != 0 and try self.eventsFit(&trial_arena, work.session.role, history, snapshot, events.items, count)) {
+            if (count != 0 and try self.eventsFit(&trial_arena, work.session.role, history, current, events.items, count)) {
                 start = count + 1;
             } else count = 0;
             for (start..events.items.len) |end| {
-                if (try self.eventsFit(&trial_arena, work.session.role, history, snapshot, events.items, end)) count = end;
+                if (try self.eventsFit(&trial_arena, work.session.role, history, current, events.items, end)) count = end;
             }
             break;
         }
@@ -291,10 +287,9 @@ pub const Kernel = struct {
         return .{ .count = count, .context = selected };
     }
 
-    fn eventsFit(self: *Kernel, scratch: *std.heap.ArenaAllocator, role: Input.Role, history: *const Context, snapshot: Sessions.Snapshot, events: []const Input.Event, count: usize) !bool {
+    fn eventsFit(self: *Kernel, scratch: *std.heap.ArenaAllocator, role: Input.Role, history: *const Context, current: Input.Current, events: []const Input.Event, count: usize) !bool {
         const trial = scratch.allocator();
         defer _ = scratch.reset(.retain_capacity);
-        const current = try snapshot.afterAdmission(trial, events, count);
         const grouped = try Input.coalesceActivityReports(trial, events[0..count]);
         const input = try history.requestWithEvents(trial, grouped, current);
         return try self.engine.requestBytes(trial, input, role) <= self.limits.request_bytes;
@@ -306,20 +301,18 @@ pub const Kernel = struct {
         const a = arena.allocator();
         var history = try self.sessions.snapshot(work.session);
         defer history.deinit();
-        var snapshot = try self.sessions.runtimeSnapshot(a, work.session);
-        var selection = try self.selectEvents(a, work, &history, snapshot);
+        var selection = try self.selectEvents(a, work, &history);
         if (selection == null and history.records().len != 0) {
             var rejection: ?Compaction.Rejection = null;
             for (0..max_summary_attempts) |_| {
-                snapshot = try self.sessions.runtimeSnapshot(a, work.session);
-                const result = try Compaction.summarize(self.engine.model, a, &history, snapshot.current, self.limits.compaction_bytes, rejection);
+                const state = try self.sessions.compactionSnapshot(a, work.session);
+                const result = try Compaction.summarize(self.engine.model, a, &history, state, self.limits.compaction_bytes, rejection);
                 switch (result) {
                     .rejected => |reason| rejection = reason,
-                    .summary => |summary| {
-                        var compacted = try history.withHandover(self.allocator, summary);
+                    .handover => |handover| {
+                        var compacted = try history.withHandover(self.allocator, handover);
                         defer compacted.deinit();
-                        snapshot = try self.sessions.runtimeSnapshot(a, work.session);
-                        selection = try self.selectEvents(a, work, &compacted, snapshot);
+                        selection = try self.selectEvents(a, work, &compacted);
                         if (selection != null) break;
                         rejection = .too_large;
                     },
@@ -356,23 +349,23 @@ pub const Kernel = struct {
     fn requestContext(self: *Kernel, a: Allocator, session: *Session, delivery: Context.Delivery) !RequestView {
         var view = try self.sessions.snapshot(session);
         errdefer view.deinit();
-        const snapshot = try self.sessions.runtimeSnapshot(a, session);
-        const input = try view.request(a, snapshot.current, delivery);
+        const current = try self.sessions.current(a, session);
+        const input = try view.request(a, current, delivery);
         if (try self.engine.requestBytes(a, input, session.role) <= self.limits.request_bytes) return .{ .context = view, .input = input };
         var rejection: ?Compaction.Rejection = null;
         for (0..max_summary_attempts) |_| {
-            const current = (try self.sessions.runtimeSnapshot(a, session)).current;
-            const result = try Compaction.summarize(self.engine.model, a, &view, current, self.limits.compaction_bytes, rejection);
+            const snapshot = try self.sessions.compactionSnapshot(a, session);
+            const result = try Compaction.summarize(self.engine.model, a, &view, snapshot, self.limits.compaction_bytes, rejection);
             switch (result) {
                 .rejected => |reason| rejection = reason,
-                .summary => |summary| {
-                    var candidate = try view.withHandover(self.allocator, summary);
+                .handover => |handover| {
+                    var candidate = try view.withHandover(self.allocator, handover);
                     var installed = false;
                     defer if (!installed) candidate.deinit();
                     var replacement = try candidate.clone(self.allocator);
                     errdefer replacement.deinit();
-                    const replacement_snapshot = try self.sessions.runtimeSnapshot(a, session);
-                    const replacement_input = try replacement.request(a, replacement_snapshot.current, .none);
+                    const replacement_current = try self.sessions.current(a, session);
+                    const replacement_input = try replacement.request(a, replacement_current, .none);
                     if (try self.engine.requestBytes(a, replacement_input, session.role) > self.limits.request_bytes) {
                         replacement.deinit();
                         rejection = .too_large;
@@ -400,7 +393,7 @@ fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
 
 fn toolFailure(a: Allocator, err: anyerror) !Content {
     return switch (err) {
-        error.UnknownSession => runtimeError(a, "unknown_focus", "The focus does not exist."),
+        error.UnknownSession => runtimeError(a, "unknown_focus", "The focus is not addressable."),
         error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The focus cannot currently accept another observation."),
         else => err,
     };

@@ -6,6 +6,8 @@ const Allocator = std.mem.Allocator;
 const Key = @import("agent_contracts").HistoryStore.Key;
 
 pub fn encode(a: Allocator, value: anytype) ![]const u8 {
+    // ZON inspects the complete nested history schema at compile time.
+    @setEvalBranchQuota(10_000);
     var writer: std.Io.Writer.Allocating = .init(a);
     defer writer.deinit();
     try std.zon.stringify.serialize(value, .{ .whitespace = false }, &writer.writer);

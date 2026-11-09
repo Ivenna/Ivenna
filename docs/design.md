@@ -26,7 +26,7 @@ Correspondence and autonomous activity can both shape Ivenna's understanding, pr
 
 Model-facing inputs describe current attention, observations, and possible actions. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect earlier choices with their effects and later observations. Ivenna supplies brief names when opening a focus, starting a command, or arranging future attention; the runtime adds numeric suffixes for distinction. Names remain its own choice, while the complete references support exact addressing and association.
 
-Reasoning can lose details, confuse references, or choose unsuccessful actions. Current state and discoverable command handles support recognition without requiring exact recall. The runtime owns delivery; Ivenna can reconsider an action from its outcome.
+Reasoning can lose details, confuse references, or choose unsuccessful actions. Operation results, observations, and discoverable command handles support recognition and recovery. The runtime retains the references and routing state needed for delivery and resumption independently of Ivenna's recollection or generated summaries. Ivenna can reconsider an action from its outcome.
 
 Capabilities keep operation outcomes connected to their sources and supported content. Bounded observations provide a way to inspect further content, and omissions remain distinguishable from an empty source. This lets Ivenna decide which evidence needs further inspection.
 
@@ -36,13 +36,13 @@ Changes to shared memory require a clear target. An edit that could select sever
 
 The core is the continuing focus that integrates correspondence, relationships, autonomous interests, and activity observations with retained understanding. An activity is a focus opened around particular work. Each can develop its understanding, preferences, and commitments while sharing one body: files, memory, communication, and host processes. Their actions must account for effects another focus may already have produced. A runtime session carries each focus's identity, working history, and pending observations.
 
-Core and activity focuses use the same system prompt. Each receives its own current-state snapshot, and tool availability follows its role:
+Core and activity focuses use the same system prompt. Each receives observations and changes in its circumstances, and tool availability follows its role:
 
 | Action | Core | Activity |
 | --- | --- | --- |
 | Communicate with people and programs | Yes | Yes |
 | Remember, revisit, revise, arrange, and forget | Yes | Yes |
-| Open another focus and reach existing focuses | Yes | — |
+| Open and reach focuses | Yes | — |
 | Arrange future attention | Yes | — |
 | Run and interact with host programs | — | Yes |
 
@@ -74,11 +74,11 @@ Activities choose how long to wait for host work before continuing their own rea
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
 
-Each inference receives a self-contained snapshot of the runtime facts exposed by the interface, including after restart or compaction. These facts place retained understanding in its current circumstances; task meaning remains in model messages, handovers, and memory.
-
 ### Context and continuity
 
-Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) asks Ivenna to condense retained exchanges into a handover, carrying forward relevant understanding and unfinished thought, relationships, preferences, commitments, uncertainty, effects, and the references needed to continue. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
+Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) asks Ivenna to condense retained exchanges into a handover, carrying forward relevant understanding and unfinished thought, relationships, preferences, commitments, uncertainty, and effects. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
+
+A handover combines generated understanding with sampled runtime state. The runtime makes the sample available during compaction and carries it forward unchanged alongside the summary. Ivenna chooses what experiences and relationships mean and what to retain about them.
 
 Compaction keeps the original history and pending observations intact until a usable handover is ready. If it cannot produce one within the request budget, execution stops with that earlier understanding and pending work preserved. The [architecture guide](architecture.md#bounded-model-context) defines generation and replacement.
 

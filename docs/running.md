@@ -48,9 +48,9 @@ Core and activity sessions use the same configured model and output-token limit.
 
 `MAX_PENDING_EVENTS` limits ordinary accepted events buffered for a session. Startup observations, passive activity expressions, and activity endings are excluded. Opening a focus and admitting its ending do not need space in the core's ordinary event queue. Correspondence and callback mail have independent intake allowances and stay in their durable sources when their destination is full. Focus messages use this ordinary allowance and return `focus_queue_full` when the recipient cannot accept them. Capacity and polling can delay scheduled work.
 
-Request byte limits cover the complete encoded payload, including the repeated runtime snapshot, history, tools, and images. They are not token estimates. Callback registrations have no separate count limit; a larger callback list or roster leaves less room for history and observations. These budgets also apply to an activity's inherited history. A generated handover has no separate byte limit, but the complete replacement request must fit.
+Request byte limits cover the complete encoded payload, including history, new events, tools, and images. They are not token estimates, and they also apply to an activity's inherited history. Handovers include the focus's pending callbacks and, for the core, existing activity references. These lists consume request space alongside the generated summary and subsequent exchanges. Callback registrations have no separate count limit. A handover has no separate byte limit, but the complete replacement request must fit.
 
-Compaction allows one further inference if the first handover has missing or blank text, includes tool calls, or leaves the replacement request over budget. If both attempts fail, or a summary request itself exceeds `CONTEXT_COMPACTION_BYTES`, the runtime stops with its earlier history and unadmitted observations intact. Input that still cannot fit after compaction fails with `ContextBudgetExhausted`. See [context budgets](architecture.md#bounded-model-context).
+Compaction allows one further inference if the first summary has missing or blank text, includes tool calls, or leaves the replacement request over budget. If both attempts fail, or a summary request itself exceeds `CONTEXT_COMPACTION_BYTES`, the runtime stops with its earlier history and unadmitted observations intact. Input that still cannot fit after compaction fails with `ContextBudgetExhausted`. See [context budgets](architecture.md#bounded-model-context).
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
@@ -168,7 +168,7 @@ When an incoming message fails admission with `ContextBudgetExhausted`, it remai
 
 Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
 
-The current history format preserves named focus and callback references alongside internal routing identities and includes the next command number in the checkpoint. Activity observations carry `from_focus`, timestamped `messages`, and `ended_at_unix_ms`; retained records and handovers identify their producing or receiving `focus_id`. Checkpoints or observations using earlier shapes are incompatible with this executable.
+The current handover format includes the state sampled for its summary inference and that sample's observation time. Earlier handover records without these fields are incompatible with this executable. See [persistent working history](architecture.md#persistent-working-history) for the stored representation.
 
 ## Data and retention
 
@@ -210,7 +210,7 @@ The latest checkpoint selects the histories needed to continue all registered se
 | `Ivenna History` | Latest checkpoint, selected session histories, and unread activity-report records |
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
-Forks store independent copies of inherited history; include these copies when sizing the mailbox. Compaction replaces only that session's selection, allowing its previous records to move to Trash while other sessions keep their own copies.
+Forks store independent copies of inherited history; include these copies when sizing the mailbox. Compaction replaces detailed observations and exchanges with a handover containing the generated summary and sampled runtime state. This changes only that session's selected history, allowing its previous records to move to Trash while other sessions keep their own copies.
 
 A sleeping activity retains its history even when its context is unloaded. When the session ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. Its unread reports remain selected independently of that session until the core admits them. Admitted reports belong to the core's history, and shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 

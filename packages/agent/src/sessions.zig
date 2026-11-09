@@ -29,27 +29,6 @@ pub const Session = struct {
 pub const Work = struct { session: *Session, activation: *Activation };
 pub const ForkPlan = struct { session: *Session };
 
-/// Current model input projected for admission candidates.
-pub const Snapshot = struct {
-    current: Input.Current,
-
-    /// Remove admitted callbacks from the projected current state without
-    /// changing this snapshot. Other current facts borrow the snapshot.
-    pub fn afterAdmission(self: Snapshot, a: Allocator, events: []const Input.Event, count: usize) !Input.Current {
-        std.debug.assert(count > 0 and count <= events.len);
-        var current = self.current;
-        var callbacks: std.ArrayList(Input.PendingCallback) = .empty;
-        for (self.current.callbacks) |callback| {
-            const admitted = for (events[0..count]) |event| {
-                if (event == .callback and std.mem.eql(u8, event.callback.callback_id, callback.callback_id)) break true;
-            } else false;
-            if (!admitted) try callbacks.append(a, callback);
-        }
-        current.callbacks = try callbacks.toOwnedSlice(a);
-        return current;
-    }
-};
-
 pub const Registry = struct {
     allocator: Allocator,
     io: std.Io,
@@ -342,9 +321,7 @@ pub const Registry = struct {
         errdefer completed.deinit();
         try completed.appendBatch(output, replies);
         for (plans) |plan| {
-            plan.session.context = try completed.clone(self.allocator);
-            plan.session.context.?.scope = .{ .session_id = plan.session.session_id, .epoch = 0 };
-            plan.session.context.?.focus_id = try plan.session.context.?.arena.allocator().dupe(u8, plan.session.focus_id);
+            plan.session.context = try Context.restore(self.allocator, .{ .session_id = plan.session.session_id, .epoch = 0 }, plan.session.focus_id, completed.records());
         }
         try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(plans.len));
         session.context.?.deinit();
@@ -435,27 +412,42 @@ pub const Registry = struct {
         session.epoch = replacement.scope.epoch;
     }
 
-    pub fn runtimeSnapshot(self: *Registry, a: Allocator, session: *Session) !Snapshot {
+    pub fn current(self: *Registry, a: Allocator, session: *Session) !Input.Current {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const directory = try a.alloc(Input.FocusInfo, self.sessions.count());
-        var sessions = self.sessions.valueIterator();
-        for (directory) |*info| info.* = self.sessionInfoLocked(sessions.next().?.*);
-        std.mem.sort(Input.FocusInfo, directory, {}, lessFocus);
+        return self.currentLocked(a, session);
+    }
+
+    pub fn compactionSnapshot(self: *Registry, a: Allocator, session: *Session) !Input.Snapshot {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var activities: std.ArrayList([]const u8) = .empty;
+        if (session == self.core) {
+            var sessions = self.sessions.valueIterator();
+            while (sessions.next()) |entry| {
+                const activity = entry.*;
+                if (activity == self.core) continue;
+                try activities.append(a, try a.dupe(u8, activity.focus_id));
+            }
+            std.mem.sort([]const u8, activities.items, {}, lessActivity);
+        }
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
         for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
             .callback_id = try a.dupe(u8, callback.reference),
             .source = try cloneSource(a, callback.source),
         });
-        // Snapshot strings outlive mutations and removal of their source sessions.
-        for (directory) |*info| info.focus_id = try a.dupe(u8, info.focus_id);
-        return .{ .current = .{
+        return .{
+            .current = try self.currentLocked(a, session),
+            .state = .{ .activities = try activities.toOwnedSlice(a), .callbacks = try own_callbacks.toOwnedSlice(a) },
+        };
+    }
+
+    fn currentLocked(self: *Registry, a: Allocator, session: *Session) !Input.Current {
+        return .{
             .focus_id = try a.dupe(u8, session.focus_id),
             .role = session.role,
             .observed_at_unix_ms = self.now(),
-            .callbacks = try own_callbacks.toOwnedSlice(a),
-            .focuses = directory,
-        } };
+        };
     }
 
     /// Finalize a response without tool calls when no queued input requires
@@ -744,22 +736,6 @@ pub const Registry = struct {
         return count;
     }
 
-    pub fn setToolWait(self: *Registry, work: Work, waiting: bool) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        assertWork(work);
-        if (work.activation.waiting_for_tools == waiting) return;
-        work.activation.waiting_for_tools = waiting;
-    }
-
-    fn sessionInfoLocked(self: *Registry, session: *Session) Input.FocusInfo {
-        return .{
-            .focus_id = session.focus_id,
-            .role = session.role,
-            .status = if (session.active) |activation| (if (activation.waiting_for_tools) .waiting_for_tools else .running) else if (self.hasWork(session)) .ready else .dormant,
-        };
-    }
-
     fn hasCapacity(self: *Registry, session: *Session) bool {
         const active_count = if (session.active) |activation| deliveryCount(activation.deliveries.items) else 0;
         return deliveryCount(session.pending.items) + active_count < self.max_pending;
@@ -797,8 +773,8 @@ fn isInternal(event: Input.Event) bool {
     };
 }
 
-fn lessFocus(_: void, left: Input.FocusInfo, right: Input.FocusInfo) bool {
-    return (contracts.Reference.sequence(left.focus_id) orelse unreachable) < (contracts.Reference.sequence(right.focus_id) orelse unreachable);
+fn lessActivity(_: void, left: []const u8, right: []const u8) bool {
+    return (contracts.Reference.sequence(left) orelse unreachable) < (contracts.Reference.sequence(right) orelse unreachable);
 }
 
 fn lessSessionId(_: void, left: *Session, right: *Session) bool {

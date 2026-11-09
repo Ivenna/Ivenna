@@ -26,14 +26,41 @@ pub const ActivityReport = struct {
     ended_at_unix_ms: ?i64,
 
     pub fn jsonStringify(self: ActivityReport, writer: anytype) !void {
-        const ended_at: ?Time.Instant = if (self.ended_at_unix_ms) |at| .{ .unix_ms = at } else null;
-        try writer.write(.{ .from_focus = self.from_focus, .messages = self.messages, .ended_at = ended_at });
+        try writer.beginObject();
+        try writer.objectField("from_focus");
+        try writer.write(self.from_focus);
+        if (self.messages.len != 0) {
+            try writer.objectField("messages");
+            try writer.write(self.messages);
+        }
+        if (self.ended_at_unix_ms) |at| {
+            try writer.objectField("ended_at");
+            try writer.write(Time.Instant{ .unix_ms = at });
+        }
+        try writer.endObject();
     }
 };
 
 pub const Handover = struct {
     focus_id: []const u8,
+    observed_at_unix_ms: i64,
     summary: []const u8,
+    state: State,
+
+    pub fn jsonStringify(self: Handover, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("focus_id");
+        try writer.write(self.focus_id);
+        try writer.objectField("observed_at");
+        try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
+        try writer.objectField("summary");
+        try writer.write(self.summary);
+        if (!self.state.isEmpty()) {
+            try writer.objectField("state");
+            try writer.write(self.state);
+        }
+        try writer.endObject();
+    }
 };
 
 pub const Startup = struct {
@@ -70,24 +97,68 @@ pub const Callback = struct {
     }
 };
 
-pub const FocusInfo = struct {
-    focus_id: []const u8,
-    role: Role,
-    status: enum { running, waiting_for_tools, ready, dormant },
-};
-
-/// Current focus and the circumstances visible for one inference; never retained.
+/// Identity and observation time accompanying one inference.
 pub const Current = struct {
     focus_id: []const u8,
     role: Role,
     observed_at_unix_ms: i64,
-    callbacks: []const PendingCallback,
-    focuses: []const FocusInfo,
 
     pub fn jsonStringify(self: Current, writer: anytype) !void {
-        try writer.write(.{ .focus_id = self.focus_id, .role = self.role, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms }, .callbacks = self.callbacks, .focuses = self.focuses });
+        try writer.write(.{ .focus_id = self.focus_id, .role = self.role, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms } });
     }
 };
+
+/// Focus identity, time, and runtime references sampled together for compaction.
+pub const Snapshot = struct {
+    current: Current,
+    state: State,
+};
+
+/// Existing activity references for the core and pending callbacks for the
+/// sampled focus.
+pub const State = struct {
+    activities: []const []const u8,
+    callbacks: []const PendingCallback,
+
+    pub fn isEmpty(self: State) bool {
+        return self.activities.len == 0 and self.callbacks.len == 0;
+    }
+
+    pub fn jsonStringify(self: State, writer: anytype) !void {
+        try writer.beginObject();
+        if (self.activities.len != 0) {
+            try writer.objectField("activities");
+            try writer.write(self.activities);
+        }
+        if (self.callbacks.len != 0) {
+            try writer.objectField("callbacks");
+            try writer.write(self.callbacks);
+        }
+        try writer.endObject();
+    }
+};
+
+pub fn cloneState(a: Allocator, state: State) !State {
+    return .{ .activities = try cloneIds(a, state.activities), .callbacks = try cloneCallbacks(a, state.callbacks) };
+}
+
+fn cloneCallbacks(a: Allocator, values: []const PendingCallback) ![]const PendingCallback {
+    const owned = try a.dupe(PendingCallback, values);
+    for (owned) |*callback| {
+        callback.callback_id = try a.dupe(u8, callback.callback_id);
+        callback.source = switch (callback.source) {
+            .wakeup => .wakeup,
+            .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
+        };
+    }
+    return owned;
+}
+
+fn cloneIds(a: Allocator, values: []const []const u8) ![]const []const u8 {
+    const owned = try a.alloc([]const u8, values.len);
+    for (values, owned) |value, *id| id.* = try a.dupe(u8, value);
+    return owned;
+}
 
 pub const Event = union(enum) {
     startup: Startup,
@@ -184,20 +255,45 @@ pub const EventGroup = struct {
     items: []const Event,
 };
 
-/// Delivered observations or compacted understanding retained in history.
+/// Observations and handovers retained in working history.
 pub const Record = union(enum) {
     events: EventGroup,
     handover: Handover,
 };
 
-/// Each turn supplies current runtime facts alongside exactly one purpose.
-/// Working understanding remains in the preceding LLM messages.
+/// Identity and time with new observations or a compaction request.
 pub const Turn = struct {
     current: Current,
     purpose: union(enum) {
-        work: struct { events: []const Event },
-        summarize: struct { instructions: []const u8 },
+        work: []const Event,
+        summarize: struct { instructions: []const u8, state: State },
     },
+
+    pub fn jsonStringify(self: Turn, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("current");
+        try writer.write(self.current);
+        switch (self.purpose) {
+            .work => |events| {
+                if (events.len != 0) {
+                    try writer.objectField("events");
+                    try writer.write(events);
+                }
+            },
+            .summarize => |summary| {
+                try writer.objectField("summarize");
+                try writer.beginObject();
+                try writer.objectField("instructions");
+                try writer.write(summary.instructions);
+                if (!summary.state.isEmpty()) {
+                    try writer.objectField("state");
+                    try writer.write(summary.state);
+                }
+                try writer.endObject();
+            },
+        }
+        try writer.endObject();
+    }
 };
 
 /// Render the model-facing record as YAML. Returned bytes belong to arena.

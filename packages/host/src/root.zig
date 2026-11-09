@@ -416,14 +416,13 @@ pub const Host = struct {
         defer arena.deinit();
         const a = arena.allocator();
         var observation = self.collect(a, job, .complete, job.args.max_output_bytes) catch |err| {
-            const failure = try self.outputFailureResult(a, job, job.command_id, null, err, .{
+            const failure = try self.outputFailureResult(a, job, null, null, err, .{
                 .code = "host_unavailable",
                 .message = "Could not read the command's final output.",
                 .effects = "The command's observed state and log paths are included below; inspect uncertain effects before repeating work.",
             });
             return self.publisher.send(a, .{ .id = id, .text = failure.parts[0].text });
         };
-        observation.command_id = job.command_id;
         observation.asynchronous = true;
         const result = try observation.render(a);
         try self.publisher.send(a, .{ .id = id, .text = result.parts[0].text });

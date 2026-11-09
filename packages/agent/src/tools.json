@@ -57,7 +57,7 @@
         "focus_id": {
           "type": "string",
           "minLength": 1,
-          "description": "A focus in the current roster, including your own."
+          "description": "Recipient focus, including your own."
         },
         "text": {
           "type": "string",

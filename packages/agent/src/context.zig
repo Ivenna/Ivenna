@@ -6,8 +6,8 @@ const Model = @import("agent_contracts").Model;
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
-/// Owned working history and the model-message view derived from it. Registry
-/// synchronizes mutation; instructions and current turns enter only requests.
+/// Owned working history and its model-message view. Registry synchronizes
+/// mutation; request assembly remains read-only.
 pub const Context = struct {
     /// Only a newly admitted group is presented as this turn's observations.
     /// Older groups remain in the LLM conversation, even after empty output.
@@ -15,7 +15,6 @@ pub const Context = struct {
 
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
-    /// This session's current history segment.
     scope: Scope,
     focus_id: []const u8,
     entries: std.ArrayList(Entry) = .empty,
@@ -45,7 +44,6 @@ pub const Context = struct {
         return self.entries.items;
     }
 
-    /// Return an independently owned snapshot of this session's retained history.
     pub fn clone(self: *const Context, allocator: Allocator) !Context {
         return restore(allocator, self.scope, self.focus_id, self.entries.items);
     }
@@ -54,9 +52,10 @@ pub const Context = struct {
         try self.append(.{ .record = record });
     }
 
-    /// Retain one complete exchange, preserving the adapter's opaque output.
+    /// Preserve the complete native exchange, including replies when model
+    /// output is empty.
     pub fn appendBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
-        if (output.len == 0) return;
+        if (output.len == 0 and replies.len == 0) return;
         const batch = try self.allocator.alloc(Model.Item, output.len + replies.len);
         defer self.allocator.free(batch);
         @memcpy(batch[0..output.len], output);
@@ -64,37 +63,34 @@ pub const Context = struct {
         try self.append(.{ .exchange = batch });
     }
 
-    /// The slice and rendered request belong to a; retained message payloads
-    /// borrow self.
+    /// Returned request data belongs to a; retained payloads borrow self.
     pub fn request(self: *const Context, a: Allocator, current: Input.Current, delivery: Delivery) ![]const Model.Item {
         const events = switch (delivery) {
             .none => &.{},
             .latest => self.entries.items[self.entries.items.len - 1].record.events.items,
         };
-        return self.buildRequest(a, self.messages.items.len - @intFromBool(delivery == .latest), .{
-            .current = current,
-            .purpose = .{ .work = .{ .events = events } },
-        });
+        return self.workRequest(a, current, self.messages.items.len - @intFromBool(delivery == .latest), events);
     }
 
-    /// Assemble an admission candidate without changing retained history.
-    /// As with request, retained message payloads borrow self.
+    /// Assemble candidate observations for measurement without retaining them.
     pub fn requestWithEvents(self: *const Context, a: Allocator, events: []const Input.Event, current: Input.Current) ![]const Model.Item {
+        return self.workRequest(a, current, self.messages.items.len, events);
+    }
+
+    fn workRequest(self: *const Context, a: Allocator, current: Input.Current, prefix_len: usize, events: []const Input.Event) ![]const Model.Item {
+        return self.buildRequest(a, prefix_len, .{ .current = current, .purpose = .{ .work = events } });
+    }
+
+    /// Assemble a summary request from retained history and sampled state;
+    /// pending events stay outside.
+    pub fn summaryRequest(self: *const Context, a: Allocator, snapshot: Input.Snapshot, instructions: []const u8) ![]const Model.Item {
         return self.buildRequest(a, self.messages.items.len, .{
-            .current = current,
-            .purpose = .{ .work = .{ .events = events } },
+            .current = snapshot.current,
+            .purpose = .{ .summarize = .{ .instructions = instructions, .state = snapshot.state } },
         });
     }
 
-    /// Summarization reads retained history without admitting pending events.
-    pub fn summaryRequest(self: *const Context, a: Allocator, current: Input.Current, instructions: []const u8) ![]const Model.Item {
-        return self.buildRequest(a, self.messages.items.len, .{
-            .current = current,
-            .purpose = .{ .summarize = .{ .instructions = instructions } },
-        });
-    }
-
-    fn buildRequest(self: *const Context, a: Allocator, prefix_len: usize, turn: Input.Turn) ![]const Model.Item {
+    fn buildRequest(self: *const Context, a: Allocator, prefix_len: usize, turn: Input.Turn) ![]Model.Item {
         const messages = try a.alloc(Model.Item, prefix_len + 2);
         messages[0] = .{ .message = .{ .role = .system, .text = @embedFile("system.md") } };
         @memcpy(messages[1 .. prefix_len + 1], self.messages.items[0..prefix_len]);
@@ -102,10 +98,9 @@ pub const Context = struct {
         return messages;
     }
 
-    pub fn withHandover(self: *const Context, allocator: Allocator, summary: []const u8) !Context {
+    pub fn withHandover(self: *const Context, allocator: Allocator, handover: Input.Handover) !Context {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
-        const record: Input.Record = .{ .handover = .{ .focus_id = self.focus_id, .summary = summary } };
-        return restore(allocator, scope, self.focus_id, &.{.{ .record = record }});
+        return restore(allocator, scope, self.focus_id, &.{.{ .record = .{ .handover = handover } }});
     }
 
     fn append(self: *Context, entry: Entry) !void {
@@ -116,16 +111,21 @@ pub const Context = struct {
                 try self.messages.ensureUnusedCapacity(self.allocator, 1);
                 const copy: Input.Record = switch (record) {
                     .events => |group| .{ .events = .{ .focus_id = try a.dupe(u8, group.focus_id), .items = try Input.cloneEvents(a, group.items) } },
-                    .handover => |handover| .{ .handover = .{ .focus_id = try a.dupe(u8, handover.focus_id), .summary = try a.dupe(u8, handover.summary) } },
+                    .handover => |handover| .{ .handover = .{
+                        .focus_id = try a.dupe(u8, handover.focus_id),
+                        .observed_at_unix_ms = handover.observed_at_unix_ms,
+                        .summary = try a.dupe(u8, handover.summary),
+                        .state = try Input.cloneState(a, handover.state),
+                    } },
                 };
                 const text = try Input.renderRecord(a, copy);
                 self.entries.appendAssumeCapacity(.{ .record = copy });
                 self.messages.appendAssumeCapacity(.{ .message = .{ .role = .user, .text = text } });
             },
-            .exchange => |items| {
-                try self.messages.ensureUnusedCapacity(self.allocator, items.len);
-                const batch = try a.alloc(Model.Item, items.len);
-                for (items, batch) |item, *copy| copy.* = try cloneItem(a, item);
+            .exchange => |exchange| {
+                try self.messages.ensureUnusedCapacity(self.allocator, exchange.len);
+                const batch = try a.alloc(Model.Item, exchange.len);
+                for (exchange, batch) |item, *item_copy| item_copy.* = try cloneItem(a, item);
                 self.entries.appendAssumeCapacity(.{ .exchange = batch });
                 self.messages.appendSliceAssumeCapacity(batch);
             },

@@ -8,7 +8,9 @@ Incoming correspondence enters the core. Both core and activity sessions can sen
 
 Each [incoming message](input.md#incoming-messages) records the correspondent IDs it came `from` and its free-form text. If `operator` relays Alice's words, `from` is `[operator]`; any attribution to Alice belongs in the text. Receiving a message does not require a response.
 
-Retained observations, sending exchanges, and handovers preserve correspondent IDs and their context. Outgoing arguments record chosen recipients and text; results record submission outcomes.
+Outgoing calls identify their chosen recipients; results record submission outcomes. Ivenna chooses what to retain about correspondence in its understanding and shared memory.
+
+The communication interface has no operation for searching past correspondence. Stored message copies follow the [communication-copy retention policy](running.md#communication-copies).
 
 ## Sending a message
 

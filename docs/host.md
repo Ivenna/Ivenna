@@ -94,7 +94,7 @@ Command observations contain state, elapsed time, full log paths, stream byte le
 
 | Result field | Meaning |
 | --- | --- |
-| `command_id` | Host command identity, returned for a handoff or continuation and included in a stored completion result; usable as a handle only in its originating runtime while retained |
+| `command_id` | Host command identity, returned for a handoff or continuation; usable as a handle only in its originating runtime while retained |
 | `callback_id` | Reference for the completion observation arranged by the initial call |
 | `state.running` | The command is still running |
 | `state.finished` | The final outcome: `completed` with an exit code or other OS termination status, `timed_out`, or `not_started` with a reason |
@@ -140,7 +140,7 @@ When `run_host_shell` returns the final result directly, it supplies a complete-
 
 Final complete stdout can supply an image or image URL reference through [content classification](content.md). The first final `continue_host_shell` observation of a retained handle can supply its complete native media once, independently of the text cursor. This stdout description has no `range` and advances the shared cursor to the end. If a command finishes before its initial handoff snapshot, that initial result can also carry native media without consuming the continuation's first-final allowance. Running output remains text or an unavailable-content diagnostic.
 
-A registered completion arrives as a [callback observation](input.md#focus-messages-and-callbacks) whose source identifies the command. Its text contains the final result with an independent complete-source preview or an output diagnostic. It reports the host outcome; Ivenna assesses whether the assigned task succeeded. The callback consumes neither the shared continuation cursors nor their first-final media observation. It carries media descriptions and log paths; `media_omission: "asynchronous_media_unavailable"` marks a native part that the text-only callback cannot carry.
+A registered completion arrives as a [callback observation](input.md#focus-messages-and-callbacks). Its `source.host.command_id` identifies the command; the result in `text` omits the `command_id` field. That result contains an independent complete-source preview or an output diagnostic. It reports the host outcome; Ivenna assesses whether the assigned task succeeded. The callback consumes neither the shared continuation cursors nor their first-final media observation. It carries media descriptions and log paths; `media_omission: "asynchronous_media_unavailable"` marks a native part that the text-only callback cannot carry.
 
 For incremental `content.unavailable`, its `byte_length` describes the unsupported range; the stream's `byte_length` describes the entire log snapshot. Without a range, the diagnostic concerns the complete source. Full logs remain at the returned paths under `<DATA_DIR>/host/` independently of handle retention, and can be read through another command to inspect omitted text or media.
 

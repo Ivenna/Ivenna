@@ -400,18 +400,20 @@ pub const Persistence = struct {
 };
 
 fn validateEntries(focus_id: []const u8, entries: []const Entry) !void {
-    for (entries) |entry| switch (entry) {
-        .record => |record| {
-            const source = switch (record) {
-                .events => |events| events.focus_id,
-                .handover => |handover| handover.focus_id,
-            };
-            // Only the core can fork. Its records retain their original
-            // attribution inside an activity's independently stored history.
-            if (!std.mem.eql(u8, source, focus_id) and !std.mem.eql(u8, source, "core-1")) return error.InvalidHistory;
-        },
-        .exchange => {},
-    };
+    for (entries) |entry| {
+        switch (entry) {
+            .record => |record| {
+                const owner = switch (record) {
+                    .events => |events| events.focus_id,
+                    .handover => |handover| handover.focus_id,
+                };
+                // Only the core can fork. Its records retain their original
+                // attribution inside an activity's independently stored history.
+                if (!std.mem.eql(u8, owner, focus_id) and !std.mem.eql(u8, owner, "core-1")) return error.InvalidHistory;
+            },
+            .exchange => {},
+        }
+    }
 }
 
 const Metadata = std.AutoHashMapUnmanaged(Key, Store.Reference);

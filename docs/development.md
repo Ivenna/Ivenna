@@ -47,7 +47,9 @@ Decode external protocols in their owning components and supply typed contracts 
 
 Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
 
-[Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Define this interface around focus identity, observations, and state that helps Ivenna choose its next action. Execution projects its internal session and delivery state into this interface. Keep named references intact across tool results, current state, observations, and handovers. Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
+[Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Execution projects internal session and delivery state into this interface, exposing facts that help Ivenna choose its next action. Keep runtime state and exact references under program ownership through persistence and compaction. Supply complete references in operation results and observations, and return invalid selections as operation outcomes.
+
+Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
 The agent selects tools and reasoning per request; the model adapter encodes and measures the complete payload with those settings. Use the same encoder for measurement and inference, including tool-result limiting, without mutating a shared provider.
 
@@ -85,7 +87,7 @@ Keep a session's identity independent of context residency, and retain its histo
 
 ### Working history
 
-Working history records what a session retains for continued reasoning. Context owns retained observations, complete model/tool exchanges, and handovers; current facts accompany them for one inference. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
+Context owns the observations, complete model/tool exchanges, and handovers retained for continued reasoning. Admission retains received observations; round commit retains complete exchanges. Candidate measurement leaves history unchanged. Compaction supplies retained history and sampled runtime state to the summary inference, then carries that same state into the handover independently of the generated text. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
 
 Persistence changes must keep the saved context, admitted observations, and pending registrations consistent, including when saving succeeds but acknowledgement does not. The agent owns history encoding and retention selection; `HistoryStore` adapters own native representation and protocol limits. The [history contract](architecture.md#persistent-working-history) explains publication, restoration, and retirement.
 
