@@ -1,7 +1,7 @@
 [
   {
     "name": "inspect_host_shell",
-    "description": "Inspect shell defaults and discover commands across activities, including work whose initial call is still waiting. Command handles remain usable until retirement or restart; full logs persist independently.",
+    "description": "Inspect shell defaults and commands shared across activities.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -14,7 +14,7 @@
           "type": "integer",
           "minimum": 0,
           "default": 0,
-          "description": "Position in the matching command list. Use the reply's next_offset to continue; null marks the end."
+          "description": "Position in the matching command list."
         }
       },
       "required": [],
@@ -23,7 +23,7 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. Return its outcome, or command_id and callback_id when it continues beyond the wait. A returned callback_id confirms one completion observation for this focus. Full output remains in logs.",
+    "description": "Run a command in a fresh shell. Returns its outcome, or a command handle and a completion callback for this focus when it continues beyond the wait.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -39,18 +39,16 @@
         "cwd": {
           "type": "string",
           "minLength": 1,
-          "description": "Working directory, relative to the startup directory when not absolute; omission uses that directory."
+          "description": "Relative paths and omission use the runtime's startup directory."
         },
         "shell": {
           "type": "string",
           "minLength": 1,
-          "default": "/bin/sh",
-          "description": "Shell executable accepting -c."
+          "default": "/bin/sh"
         },
         "login": {
           "type": "boolean",
-          "default": false,
-          "description": "Use the shell's -lc initialization."
+          "default": false
         },
         "mode": {
           "type": "string",
@@ -60,13 +58,13 @@
             "terminal"
           ],
           "default": "batch",
-          "description": "batch closes stdin; pipe accepts input; terminal merges stdout/stderr and applies terminal processing."
+          "description": "batch closes stdin."
         },
         "timeout_ms": {
           "type": "integer",
           "minimum": 1,
           "maximum": 4294967295,
-          "description": "Stop the command after this duration; omission leaves it without a deadline."
+          "description": "Omit for no execution deadline."
         },
         "max_output_bytes": {
           "type": "integer",
@@ -87,7 +85,7 @@
           "minimum": 0,
           "maximum": 4294967295,
           "default": 1000,
-          "description": "Wait for completion before returning control; zero returns immediately. This wait does not limit command duration."
+          "description": "Initial wait for completion; zero returns immediately."
         }
       },
       "required": [
@@ -99,14 +97,13 @@
   },
   {
     "name": "continue_host_shell",
-    "description": "Read more output or interact with a command. Reads advance shared stdout/stderr positions across activities, independently of initial previews and completion observations. Completion still goes to the focus that started the command. Draining a finished command retires its handle.",
+    "description": "Read more output or interact with a command. Reads advance shared stdout/stderr positions across activities, independently of initial previews and completion observations. Draining a finished command retires its handle.",
     "parameters": {
       "type": "object",
       "properties": {
         "command_id": {
           "type": "string",
-          "minLength": 1,
-          "description": "From run_host_shell or inspect_host_shell."
+          "minLength": 1
         },
         "action": {
           "type": "object",
@@ -146,7 +143,7 @@
                     "text"
                   ],
                   "additionalProperties": false,
-                  "description": "Only one write can be pending; stdin.pending and stdin.error report delivery."
+                  "description": "One pending write per command."
                 }
               },
               "required": [
@@ -202,8 +199,7 @@
                     "rows",
                     "cols"
                   ],
-                  "additionalProperties": false,
-                  "description": "Requires terminal mode."
+                  "additionalProperties": false
                 }
               },
               "required": [

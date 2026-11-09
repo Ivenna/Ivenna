@@ -115,7 +115,7 @@ pub const Context = struct {
             .record => |record| {
                 try self.messages.ensureUnusedCapacity(self.allocator, 1);
                 const copy: Input.Record = switch (record) {
-                    .events => |group| .{ .events = .{ .focus_id = try a.dupe(u8, group.focus_id), .items = try cloneEvents(a, group.items) } },
+                    .events => |group| .{ .events = .{ .focus_id = try a.dupe(u8, group.focus_id), .items = try Input.cloneEvents(a, group.items) } },
                     .handover => |handover| .{ .handover = .{ .focus_id = try a.dupe(u8, handover.focus_id), .summary = try a.dupe(u8, handover.summary) } },
                 };
                 const text = try Input.renderRecord(a, copy);
@@ -133,43 +133,6 @@ pub const Context = struct {
     }
 };
 
-fn cloneEvents(a: Allocator, events: []const Input.Event) ![]const Input.Event {
-    const owned = try a.alloc(Input.Event, events.len);
-    for (events, owned) |event, *copy| copy.* = switch (event) {
-        .startup => |startup| .{ .startup = startup },
-        .input => |input| blk: {
-            const from = try a.alloc([]const u8, input.from.len);
-            for (input.from, from) |id, *cloned| cloned.* = try a.dupe(u8, id);
-            break :blk .{ .input = .{ .from = from, .text = try a.dupe(u8, input.text), .observed_at_unix_ms = input.observed_at_unix_ms } };
-        },
-        .assignment => |assignment| .{ .assignment = .{ .task = try a.dupe(u8, assignment.task) } },
-        .activity => |report| blk: {
-            const messages = try a.alloc(Input.ActivityMessage, report.messages.len);
-            for (report.messages, messages) |message, *cloned| cloned.* = .{
-                .text = try a.dupe(u8, message.text),
-                .observed_at_unix_ms = message.observed_at_unix_ms,
-            };
-            break :blk .{ .activity = .{
-                .from_focus = try a.dupe(u8, report.from_focus),
-                .messages = messages,
-                .ended_at_unix_ms = report.ended_at_unix_ms,
-            } };
-        },
-        .focus_message => |message| .{ .focus_message = .{
-            .from_focus = try a.dupe(u8, message.from_focus),
-            .observed_at_unix_ms = message.observed_at_unix_ms,
-            .text = try a.dupe(u8, message.text),
-        } },
-        .callback => |callback| .{ .callback = .{
-            .callback_id = try a.dupe(u8, callback.callback_id),
-            .source = try cloneCallbackSource(a, callback.source),
-            .observed_at_unix_ms = callback.observed_at_unix_ms,
-            .text = try a.dupe(u8, callback.text),
-        } },
-    };
-    return owned;
-}
-
 fn cloneItem(a: Allocator, item: Model.Item) !Model.Item {
     return switch (item) {
         .message => |message| .{ .message = .{ .role = message.role, .text = try a.dupe(u8, message.text) } },
@@ -185,12 +148,5 @@ fn cloneItem(a: Allocator, item: Model.Item) !Model.Item {
             };
             break :blk .{ .tool_result = .{ .call_id = try a.dupe(u8, result.call_id), .content = .{ .parts = parts } } };
         },
-    };
-}
-
-fn cloneCallbackSource(a: Allocator, source: @import("agent_contracts").Callback.Source) !@import("agent_contracts").Callback.Source {
-    return switch (source) {
-        .wakeup => .wakeup,
-        .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
     };
 }

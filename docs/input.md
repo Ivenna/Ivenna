@@ -2,7 +2,7 @@
 
 This contract defines runtime-generated `role=user` messages within the LLM conversation: retained observations and handovers, current execution facts, and inference purpose. Native model output and tool replies retain their own roles and formats. See [message assembly](architecture.md#working-history-and-user-messages).
 
-The [Input definitions](../packages/agent/src/input.zig) define fields. All focuses use the same [system prompt](../packages/agent/src/system.md), which explains model interpretation; current state and available tools identify each focus's circumstances and possible actions.
+The [Input definitions and renderers](../packages/agent/src/input.zig) own the data and its model-facing presentation. All focuses use the same [system prompt](../packages/agent/src/system.md), which explains model interpretation; current state and available tools identify each focus's circumstances and possible actions.
 
 ## Records and turns
 
@@ -15,7 +15,7 @@ The interfaces have two lifetimes:
 
 A turn's `purpose` selects either `work`, containing newly delivered `events`, or `summarize`, containing summary `instructions`. Current state accompanies either purpose. Admitted observations are stored as records, separately from the turn's temporary state and purpose.
 
-`Text` denotes a free-form string. Tagged unions, including events, serialize as a mapping containing one branch name and its payload. Focus roles serialize as enum values, `core` or `activity`.
+`Text` denotes a free-form string. `Time` denotes a UTC RFC 3339 string with millisecond precision, such as `2026-11-06T12:00:01.000Z`. Tagged unions, including events, serialize as a mapping containing one branch name and its payload. Focus roles serialize as enum values, `core` or `activity`.
 
 Focus references remain stable across waiting, context unloading, and restart. Finished activities leave the roster, and their references are not reused. Records identify the focus that admitted observations or produced a handover; a turn's `current.focus_id` identifies the focus performing this inference. Inherited records keep their original focus references, which can differ from the focus now reading them.
 
@@ -48,13 +48,13 @@ Correspondence enters the core as an `input` observation of who said what; it im
 | --- | --- | --- |
 | `from` | `Text[]` | IDs of correspondents this message came from |
 | `text` | `Text` | Complete message text |
-| `observed_at_unix_ms` | `i64` | Runtime observation time in Unix milliseconds |
+| `observed_at` | `Time` | Runtime observation time |
 
 `from` contains readable [correspondent IDs](communication.md#correspondents-and-ids) accepted by `send_message`. The observation time is sampled during intake, rather than when the correspondent wrote or sent the message. Restoring history preserves that time.
 
 #### Startup and restart
 
-`Startup` carries `observed_at_unix_ms: i64`, the beginning of this runtime. The core and focuses with interrupted activations or unread internal observations receive startup immediately; dormant activities receive it when an event arrives. New activities start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
+`Startup` carries `observed_at: Time`, the beginning of this runtime. The core and focuses with interrupted activations or unread internal observations receive startup immediately; dormant activities receive it when an event arrives. New activities start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
 
 #### Assignments and reports
 
@@ -66,11 +66,11 @@ An `ActivityReport` groups newly admitted information from one activity:
 | --- | --- | --- |
 | `from_focus` | `Text` | Source activity focus |
 | `messages` | `ActivityMessage[]` | New assistant texts from this activity, in recorded order |
-| `ended_at_unix_ms` | `?i64` | Time the runtime established focus completion, or `null` when this report includes no ending |
+| `ended_at` | `?Time` | Time the runtime established focus completion, or `null` when this report includes no ending |
 
-Each `ActivityMessage` has `text: Text` and `observed_at_unix_ms: i64`. The time records when the runtime collected the complete model response, before its tools execute. It does not date the events described in the text. Message and ending times use Unix milliseconds.
+Each `ActivityMessage` has `text: Text` and `observed_at: Time`. The time records when the runtime collected the complete model response, before its tools execute. It does not date the events described in the text. Message and ending times use the same UTC calendar format.
 
-All three report fields are present. Messages and an ending can appear in the same report. An ending without further unread text has `messages: []` and a non-null `ended_at_unix_ms`; earlier admitted texts are not repeated. An explicitly empty assistant text remains a message with `text: ""`. A report with no messages and a null ending is omitted. A null ending means only that this report contains no ending; it does not establish that the source focus is still running.
+All three report fields are present. Messages and an ending can appear in the same report. An ending without further unread text has `messages: []` and a non-null `ended_at`; earlier admitted texts are not repeated. An explicitly empty assistant text remains a message with `text: ""`. Each report includes at least one message or an ending. A null ending means only that this report contains no ending; it does not establish that the source focus is still running.
 
 Each ordinary activity inference that returns assistant text produces one message. Absent text records no message. Reasoning, tool replies, compaction output, and inherited history do not produce new messages. The text records what the activity expressed, not whether its proposed actions took effect.
 
@@ -85,7 +85,7 @@ The core's `send_focus_message` produces a `FocusMessage`:
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `from_focus` | `Text` | Sending core focus, supplied by the runtime |
-| `observed_at_unix_ms` | `i64` | Time the runtime accepted the message |
+| `observed_at` | `Time` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
 
 A focus message preserves its actual sender and enters the selected recipient's ordinary event queue. It can resume a sleeping recipient. It does not create a callback registration or arrange a reply.
@@ -96,7 +96,7 @@ Registered observations arrive as `Callback` events for the focuses that arrange
 | --- | --- | --- |
 | `callback_id` | `Text` | Complete reference returned when the observation was arranged |
 | `source` | `Source` | `wakeup` or `host` with the originating `command_id` |
-| `observed_at_unix_ms` | `i64` | Time the runtime observed the callback |
+| `observed_at` | `Time` | Time the runtime observed the callback |
 | `text` | `Text` | Supplied wakeup text or serialized host result or diagnostic |
 
 A callback's observation time is sampled during intake, rather than at the wakeup deadline or host command's completion.
@@ -133,7 +133,7 @@ Each inference ends its input with a turn containing both fields:
 | `work` | `events: Event[]` | Continue ordinary work with these new observations |
 | `summarize` | `instructions: Text` | Generate a handover from the complete retained message sequence |
 
-`work.events` can be empty while continuing work after a tool exchange. The turn still supplies fresh current state. Activity text and runtime state changes do not independently schedule the core; a report with a non-null `ended_at_unix_ms` does.
+`work.events` can be empty while continuing work after a tool exchange. The turn still supplies fresh current state. Activity text and runtime state changes do not independently schedule the core; a report with a non-null `ended_at` does.
 
 ### Current focus and roster
 
@@ -143,7 +143,7 @@ Each inference ends its input with a turn containing both fields:
 | --- | --- | --- |
 | `focus_id` | `Text` | Complete reference of the focus performing this inference |
 | `role` | `Role` | Enum value `core` or `activity` |
-| `observed_at_unix_ms` | `i64` | Time of this snapshot in Unix milliseconds |
+| `observed_at` | `Time` | Time of this snapshot |
 | `callbacks` | `PendingCallback[]` | Observations arranged for this focus and awaiting admission |
 | `focuses` | `FocusInfo[]` | Roster of all currently addressable focuses |
 
@@ -154,10 +154,8 @@ The snapshot is complete for these fields. Its observation time dates the snapsh
 | `focus_id` | `Text` | Complete stable focus reference |
 | `role` | `Role` | `core` or `activity` |
 | `status` | `running`, `waiting_for_tools`, `ready`, or `dormant` | Advancing an activation, waiting for tool replies, ready for scheduling, or sleeping |
-| `queued_inputs` | `usize` | Queued events that require input for this focus, including activity endings for the core; excludes passive assistant reports |
-| `pending_callbacks` | `usize` | Observations awaiting admission to this focus's history |
 
-Queue counts exclude the current admission batch. A callback stays pending even after its result is published or queued; it leaves the list and count when its observation is admitted to history. Each `callbacks` item has `callback_id: Text` and `source: Source`. The complete reference links it to its arrangement in retained messages or a handover; the observation's text arrives separately as an event. A pending host source identifies the execution being observed; it does not imply that its process is still running or its handle remains available.
+A callback stays in `current.callbacks` until its observation is admitted to this focus's history, including after its result is published or queued. Each item has `callback_id: Text` and `source: Source`. The complete reference links it to its arrangement in retained messages or a handover; the observation's text arrives separately as an event. A pending host source identifies the execution being observed; it does not imply that its process is still running or its handle remains available.
 
 `ready` means work is waiting, subject to scheduling and capacity. Unread assistant reports alone do not make the core ready.
 
@@ -169,31 +167,29 @@ For example, an ordinary core inference can receive a new observation with its c
 current:
   focus_id: core-1
   role: core
-  observed_at_unix_ms: 1793966401000
+  observed_at: "2026-11-06T12:00:01.000Z"
   callbacks: []
   focuses:
     - focus_id: core-1
       role: core
       status: running
-      queued_inputs: 0
-      pending_callbacks: 0
 purpose:
   work:
     events:
       - input:
           from: [operator]
           text: Keep each practice session to 20 minutes.
-          observed_at_unix_ms: 1793966401000
+          observed_at: "2026-11-06T12:00:01.000Z"
       - activity:
           from_focus: practice-2
           messages:
             - text: The practice outline is ready.
-              observed_at_unix_ms: 1793966400000
-          ended_at_unix_ms: 1793966400500
+              observed_at: "2026-11-06T12:00:00.000Z"
+          ended_at: "2026-11-06T12:00:00.500Z"
       - activity:
           from_focus: vocabulary-3
           messages: []
-          ended_at_unix_ms: 1793966400600
+          ended_at: "2026-11-06T12:00:00.600Z"
 ```
 
 ## Handover generation and replacement

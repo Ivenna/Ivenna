@@ -3,6 +3,7 @@ const yaml = @import("yaml");
 const contracts = @import("agent_contracts");
 const Allocator = std.mem.Allocator;
 const IncomingMessage = contracts.Communication.IncomingMessage;
+const Time = @import("time.zig");
 
 pub const Role = enum { core, activity };
 
@@ -13,12 +14,21 @@ pub const Assignment = struct {
 pub const ActivityMessage = struct {
     text: []const u8,
     observed_at_unix_ms: i64,
+
+    pub fn jsonStringify(self: ActivityMessage, writer: anytype) !void {
+        try writer.write(.{ .text = self.text, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms } });
+    }
 };
 
 pub const ActivityReport = struct {
     from_focus: []const u8,
     messages: []const ActivityMessage,
     ended_at_unix_ms: ?i64,
+
+    pub fn jsonStringify(self: ActivityReport, writer: anytype) !void {
+        const ended_at: ?Time.Instant = if (self.ended_at_unix_ms) |at| .{ .unix_ms = at } else null;
+        try writer.write(.{ .from_focus = self.from_focus, .messages = self.messages, .ended_at = ended_at });
+    }
 };
 
 pub const Handover = struct {
@@ -28,12 +38,20 @@ pub const Handover = struct {
 
 pub const Startup = struct {
     observed_at_unix_ms: i64,
+
+    pub fn jsonStringify(self: Startup, writer: anytype) !void {
+        try writer.write(.{ .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms } });
+    }
 };
 
 pub const FocusMessage = struct {
     from_focus: []const u8,
     observed_at_unix_ms: i64,
     text: []const u8,
+
+    pub fn jsonStringify(self: FocusMessage, writer: anytype) !void {
+        try writer.write(.{ .from_focus = self.from_focus, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms }, .text = self.text });
+    }
 };
 
 pub const PendingCallback = struct {
@@ -46,14 +64,16 @@ pub const Callback = struct {
     source: contracts.Callback.Source,
     observed_at_unix_ms: i64,
     text: []const u8,
+
+    pub fn jsonStringify(self: Callback, writer: anytype) !void {
+        try writer.write(.{ .callback_id = self.callback_id, .source = self.source, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms }, .text = self.text });
+    }
 };
 
 pub const FocusInfo = struct {
     focus_id: []const u8,
     role: Role,
     status: enum { running, waiting_for_tools, ready, dormant },
-    queued_inputs: usize,
-    pending_callbacks: usize,
 };
 
 /// Current focus and the circumstances visible for one inference; never retained.
@@ -63,6 +83,10 @@ pub const Current = struct {
     observed_at_unix_ms: i64,
     callbacks: []const PendingCallback,
     focuses: []const FocusInfo,
+
+    pub fn jsonStringify(self: Current, writer: anytype) !void {
+        try writer.write(.{ .focus_id = self.focus_id, .role = self.role, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms }, .callbacks = self.callbacks, .focuses = self.focuses });
+    }
 };
 
 pub const Event = union(enum) {
@@ -72,7 +96,51 @@ pub const Event = union(enum) {
     activity: ActivityReport,
     focus_message: FocusMessage,
     callback: Callback,
+
+    pub fn jsonStringify(self: Event, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField(@tagName(self));
+        switch (self) {
+            .input => |message| try writer.write(.{ .from = message.from, .text = message.text, .observed_at = Time.Instant{ .unix_ms = message.observed_at_unix_ms } }),
+            inline else => |payload| try writer.write(payload),
+        }
+        try writer.endObject();
+    }
 };
+
+/// Copy retained observations without passing them through model presentation.
+pub fn cloneEvents(a: Allocator, events: []const Event) ![]const Event {
+    const owned = try a.alloc(Event, events.len);
+    for (events, owned) |event, *copy| copy.* = try cloneEvent(a, event);
+    return owned;
+}
+
+pub fn cloneEvent(a: Allocator, event: Event) !Event {
+    return switch (event) {
+        .startup => |startup| .{ .startup = startup },
+        .input => |input| blk: {
+            const from = try a.alloc([]const u8, input.from.len);
+            for (input.from, from) |id, *copy| copy.* = try a.dupe(u8, id);
+            break :blk .{ .input = .{ .from = from, .text = try a.dupe(u8, input.text), .observed_at_unix_ms = input.observed_at_unix_ms } };
+        },
+        .assignment => |assignment| .{ .assignment = .{ .task = try a.dupe(u8, assignment.task) } },
+        .activity => |report| blk: {
+            const messages = try a.alloc(ActivityMessage, report.messages.len);
+            for (report.messages, messages) |message, *copy| copy.* = .{ .text = try a.dupe(u8, message.text), .observed_at_unix_ms = message.observed_at_unix_ms };
+            break :blk .{ .activity = .{ .from_focus = try a.dupe(u8, report.from_focus), .messages = messages, .ended_at_unix_ms = report.ended_at_unix_ms } };
+        },
+        .focus_message => |message| .{ .focus_message = .{ .from_focus = try a.dupe(u8, message.from_focus), .observed_at_unix_ms = message.observed_at_unix_ms, .text = try a.dupe(u8, message.text) } },
+        .callback => |callback| .{ .callback = .{
+            .callback_id = try a.dupe(u8, callback.callback_id),
+            .source = switch (callback.source) {
+                .wakeup => .wakeup,
+                .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
+            },
+            .observed_at_unix_ms = callback.observed_at_unix_ms,
+            .text = try a.dupe(u8, callback.text),
+        } },
+    };
+}
 
 /// Group selected activity observations by their first appearance. Returned
 /// arrays belong to arena; text and other event payloads borrow events.
@@ -89,7 +157,6 @@ pub fn coalesceActivityReports(arena: Allocator, events: []const Event) ![]const
     try result.ensureTotalCapacity(arena, events.len);
     for (events) |event| switch (event) {
         .activity => |report| {
-            if (report.messages.len == 0 and report.ended_at_unix_ms == null) continue;
             const entry = try positions.getOrPut(arena, report.from_focus);
             const index = if (entry.found_existing) entry.value_ptr.* else new: {
                 const index = groups.items.len;
@@ -133,7 +200,7 @@ pub const Turn = struct {
     },
 };
 
-/// Render declared fields as YAML values. Returned bytes belong to arena.
+/// Render the model-facing record as YAML. Returned bytes belong to arena.
 pub fn renderRecord(arena: Allocator, record: Record) ![]const u8 {
     return render(arena, record);
 }

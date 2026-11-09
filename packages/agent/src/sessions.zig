@@ -33,16 +33,11 @@ pub const ForkPlan = struct { session: *Session };
 pub const Snapshot = struct {
     current: Input.Current,
 
-    /// Project the registry effects of admitting a prefix, without changing
-    /// this snapshot. Each candidate owns its arrays.
+    /// Remove admitted callbacks from the projected current state without
+    /// changing this snapshot. Other current facts borrow the snapshot.
     pub fn afterAdmission(self: Snapshot, a: Allocator, events: []const Input.Event, count: usize) !Input.Current {
         std.debug.assert(count > 0 and count <= events.len);
         var current = self.current;
-        var remaining: usize = 0;
-        for (events[count..]) |event| remaining += @intFromBool(isInput(event));
-        const directory = try a.dupe(Input.FocusInfo, self.current.focuses);
-        current.focuses = directory;
-
         var callbacks: std.ArrayList(Input.PendingCallback) = .empty;
         for (self.current.callbacks) |callback| {
             const admitted = for (events[0..count]) |event| {
@@ -51,11 +46,6 @@ pub const Snapshot = struct {
             if (!admitted) try callbacks.append(a, callback);
         }
         current.callbacks = try callbacks.toOwnedSlice(a);
-        for (directory) |*session| if (std.mem.eql(u8, session.focus_id, current.focus_id)) {
-            session.queued_inputs += remaining;
-            session.pending_callbacks = current.callbacks.len;
-            break;
-        };
         return current;
     }
 };
@@ -763,21 +753,10 @@ pub const Registry = struct {
     }
 
     fn sessionInfoLocked(self: *Registry, session: *Session) Input.FocusInfo {
-        var endings: usize = 0;
-        if (session == self.core) {
-            endings = self.reports.pendingEndings();
-            if (session.active) |activation| if (!activation.admitted) {
-                for (activation.deliveries.items) |delivery| if (delivery.event == .activity and delivery.event.activity.ended_at_unix_ms != null) {
-                    endings -= 1;
-                };
-            };
-        }
         return .{
             .focus_id = session.focus_id,
             .role = session.role,
             .status = if (session.active) |activation| (if (activation.waiting_for_tools) .waiting_for_tools else .running) else if (self.hasWork(session)) .ready else .dormant,
-            .queued_inputs = queuedOrdinary(session.pending.items) + endings,
-            .pending_callbacks = self.callbackCount(session.session_id),
         };
     }
 
@@ -804,19 +783,6 @@ fn deliveryCount(deliveries: []const *Delivery) usize {
     var count: usize = 0;
     for (deliveries) |delivery| count += @intFromBool(delivery.event != .startup and delivery.event != .activity);
     return count;
-}
-
-fn queuedOrdinary(deliveries: []const *Delivery) usize {
-    var count: usize = 0;
-    for (deliveries) |delivery| count += @intFromBool(delivery.event != .activity);
-    return count;
-}
-
-fn isInput(event: Input.Event) bool {
-    return switch (event) {
-        .activity => |report| report.ended_at_unix_ms != null,
-        else => true,
-    };
 }
 
 fn hasStartup(deliveries: []const *Delivery) bool {

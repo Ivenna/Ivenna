@@ -20,12 +20,8 @@ pub const Delivery = struct {
         };
         errdefer self.arena.deinit();
         const a = self.arena.allocator();
-        const Data = struct { event: Input.Event, receipt: ?[]const u8 };
-        const bytes = try std.json.Stringify.valueAlloc(allocator, Data{ .event = event, .receipt = receipt }, .{});
-        defer allocator.free(bytes);
-        const data = try std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always });
-        self.event = data.event;
-        self.receipt = data.receipt;
+        self.event = try Input.cloneEvent(a, event);
+        self.receipt = if (receipt) |value| try a.dupe(u8, value) else null;
         return self;
     }
 

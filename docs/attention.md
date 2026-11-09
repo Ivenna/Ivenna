@@ -42,7 +42,13 @@ The observation identifies the sending core as its source; attribution to an ear
 
 ## Returning later
 
-Call `schedule_attention` with a short `name`, an `at_unix_ms` deadline in Unix milliseconds, and nonempty `text` describing what to return to. The arrangement survives restart. Success returns its complete callback reference:
+Call `schedule_attention` with a short `name`, an `at` deadline in RFC 3339 form with an explicit UTC offset, and nonempty `text` describing what to return to. Use `Z` for UTC or an offset such as `+08:00`.
+
+```json
+{"name":"revisit-practice","at":"2026-11-10T18:00:00Z","text":"Revisit the French practice plan."}
+```
+
+The arrangement survives restart. Success returns its complete callback reference:
 
 ```json
 {"result":{"callback_id":"revisit-practice-5"}}

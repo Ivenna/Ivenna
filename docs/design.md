@@ -24,7 +24,7 @@ The repertoire connects four kinds of action: expression to people and programs,
 
 Correspondence and autonomous activity can both shape Ivenna's understanding, preferences, commitments, and working methods. Retained conversations, handovers, and shared memory support continuity as that understanding develops.
 
-Model-facing inputs describe current attention, observations, and possible actions. References connect earlier choices with their effects and later observations. Ivenna supplies brief names when opening a focus, starting a command, or arranging future attention; the runtime adds numeric suffixes for distinction. Names remain its own choice, while the complete references support exact addressing and association.
+Model-facing inputs describe current attention, observations, and possible actions. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect earlier choices with their effects and later observations. Ivenna supplies brief names when opening a focus, starting a command, or arranging future attention; the runtime adds numeric suffixes for distinction. Names remain its own choice, while the complete references support exact addressing and association.
 
 Reasoning can lose details, confuse references, or choose unsuccessful actions. Current state and discoverable command handles support recognition without requiring exact recall. The runtime owns delivery; Ivenna can reconsider an action from its outcome.
 

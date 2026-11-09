@@ -1,7 +1,7 @@
 [
   {
     "name": "send_message",
-    "description": "Send text to correspondents by ID. Returns a submission reference; recipient delivery remains unconfirmed.",
+    "description": "Submit text to correspondents by ID; returns a submission reference.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -27,7 +27,7 @@
   },
   {
     "name": "open_focus",
-    "description": "Open another focus of your attention around a task while the core continues. Returns its focus_id.",
+    "description": "Open another focus of your attention around a task while the core continues.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -73,7 +73,7 @@
   },
   {
     "name": "schedule_attention",
-    "description": "Leave yourself something to return to later. Registers an observation for the core and returns its callback_id; the arrangement survives restart.",
+    "description": "Leave yourself something to return to later. Arranges an observation for the core that survives restart.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -82,9 +82,10 @@
           "minLength": 1,
           "maxLength": 32
         },
-        "at_unix_ms": {
-          "type": "integer",
-          "description": "Past times are due immediately; inference can follow later."
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Past times are due immediately."
         },
         "text": {
           "type": "string",
@@ -93,7 +94,7 @@
       },
       "required": [
         "name",
-        "at_unix_ms",
+        "at",
         "text"
       ],
       "additionalProperties": false

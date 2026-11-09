@@ -1,6 +1,7 @@
 const std = @import("std");
 const contracts = @import("agent_contracts");
 const Input = @import("input.zig");
+const Time = @import("time.zig");
 const Allocator = std.mem.Allocator;
 
 /// Agent-owned actions share one definition for recognition, arguments, and role
@@ -9,7 +10,7 @@ pub const Request = union(enum) {
     send_message: contracts.Communication.Message,
     open_focus: struct { name: []const u8, task: []const u8 },
     send_focus_message: struct { focus_id: []const u8, text: []const u8 },
-    schedule_attention: struct { name: []const u8, at_unix_ms: i64, text: []const u8 },
+    schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
 
     /// Unknown names belong to other capabilities. A recognized action that is
     /// unavailable to this role must not fall through to another implementation.

@@ -12,14 +12,14 @@
         },
         "recursive_size": {
           "type": "boolean",
-          "description": "Also measure child rooms with their descendants; otherwise room size_bytes is null.",
+          "description": "Measure sizes of child rooms recursively.",
           "default": false
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Continue with the returned next_offset; null marks the end.",
+          "description": "Entry offset.",
           "default": 0
         },
         "max_results": {
@@ -63,7 +63,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Continue with the returned next_offset; null marks the end.",
+          "description": "Match offset.",
           "default": 0
         },
         "max_results": {
@@ -111,7 +111,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295,
-          "description": "Continue with the returned next_offset; null marks the end.",
+          "description": "Match offset.",
           "default": 0
         },
         "max_results": {
@@ -129,7 +129,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Revisit a memory. Read text in pages or receive a complete supported image. Replies distinguish unavailable content from an empty memory.",
+    "description": "Revisit a memory. Read text in pages or receive a complete supported image.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -147,7 +147,7 @@
         "offset": {
           "type": "integer",
           "minimum": 0,
-          "description": "Byte offset at a UTF-8 character boundary. Continue with next_offset; null marks the end. Images and image_url interpretation require offset 0.",
+          "description": "Byte offset at a UTF-8 character boundary. Images and image_url require offset 0.",
           "maximum": 9223372036854775807,
           "default": 0
         },
@@ -155,7 +155,7 @@
           "type": "integer",
           "minimum": 4,
           "maximum": 8192,
-          "description": "Text pages may be shorter at UTF-8 boundaries or the reply limit; media use separate limits.",
+          "description": "Text page budget; media use separate limits.",
           "default": 8192
         }
       },
@@ -217,7 +217,7 @@
         },
         "mode": {
           "type": "string",
-          "description": "create keeps a new memory at an unused address; append adds bytes without a separator; replace overwrites the memory. Append and replace also create a missing memory.",
+          "description": "create requires an unused address; append adds no separator. Append and replace also create a missing memory.",
           "enum": [
             "create",
             "append",
@@ -249,7 +249,7 @@
         },
         "new_text": {
           "type": "string",
-          "description": "Regex replacements expand captures such as ${1} and ${name}."
+          "description": "Regex capture references use ${number} or ${name}."
         },
         "replace_all": {
           "type": "boolean",
@@ -315,7 +315,7 @@
   },
   {
     "name": "forget_memory",
-    "description": "Let go of a memory or room you no longer want to keep. Remove a memory or an empty room.",
+    "description": "Let go of a memory or room you no longer want to keep.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -325,7 +325,6 @@
         },
         "recursive": {
           "type": "boolean",
-          "description": "Also remove a room's memories and child rooms.",
           "default": false
         }
       },

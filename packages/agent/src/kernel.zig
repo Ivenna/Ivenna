@@ -194,7 +194,7 @@ pub const Kernel = struct {
                     break :blk try runtimeResult(a, .{ .focus_id = message.focus_id });
                 },
                 .schedule_attention => |args| blk: {
-                    const id = self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at_unix_ms, args.text) catch |err| return try toolFailure(a, err);
+                    const id = self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text) catch |err| return try toolFailure(a, err);
                     break :blk try runtimeResult(a, .{ .callback_id = id });
                 },
                 .open_focus => |args| blk: {
@@ -272,21 +272,14 @@ pub const Kernel = struct {
                 snapshot = try self.sessions.runtimeSnapshot(a, work.session);
                 continue;
             }
-            // Grouping and state projection need not grow monotonically. Check
-            // prefix sizes after an overflow instead of stopping at the first failure.
+            // After an overflow, select the largest fitting prefix of the loaded
+            // deliveries using the current snapshot.
             var start: usize = 1;
             if (count != 0 and try self.eventsFit(&trial_arena, work.session.role, history, snapshot, events.items, count)) {
                 start = count + 1;
             } else count = 0;
             for (start..events.items.len) |end| {
                 if (try self.eventsFit(&trial_arena, work.session.role, history, snapshot, events.items, end)) count = end;
-            }
-            if (work.session.role == .core and
-                try self.extendedReportsCouldFit(&trial_arena, work.session.role, history, snapshot, events.items) and
-                try self.sessions.extendReports(work))
-            {
-                snapshot = try self.sessions.runtimeSnapshot(a, work.session);
-                continue;
             }
             break;
         }
@@ -303,24 +296,6 @@ pub const Kernel = struct {
         defer _ = scratch.reset(.retain_capacity);
         const current = try snapshot.afterAdmission(trial, events, count);
         const grouped = try Input.coalesceActivityReports(trial, events[0..count]);
-        const input = try history.requestWithEvents(trial, grouped, current);
-        return try self.engine.requestBytes(trial, input, role) <= self.limits.request_bytes;
-    }
-
-    /// An encoding-only lower bound permits looking beyond an overflowing page:
-    /// later endings can change timestamp and queue encodings, but cannot remove text.
-    /// This optimistic projection is never admitted or supplied to inference.
-    fn extendedReportsCouldFit(self: *Kernel, scratch: *std.heap.ArenaAllocator, role: Input.Role, history: *const Context, snapshot: Sessions.Snapshot, events: []const Input.Event) !bool {
-        const trial = scratch.allocator();
-        defer _ = scratch.reset(.retain_capacity);
-        var current = try snapshot.afterAdmission(trial, events, events.len);
-        const directory = try trial.dupe(Input.FocusInfo, current.focuses);
-        for (directory) |*session| session.queued_inputs = 0;
-        current.focuses = directory;
-        const grouped = try trial.dupe(Input.Event, try Input.coalesceActivityReports(trial, events));
-        for (grouped) |*event| if (event.* == .activity) {
-            event.activity.ended_at_unix_ms = 0;
-        };
         const input = try history.requestWithEvents(trial, grouped, current);
         return try self.engine.requestBytes(trial, input, role) <= self.limits.request_bytes;
     }
