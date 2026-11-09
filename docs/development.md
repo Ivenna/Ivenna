@@ -57,11 +57,13 @@ Treat prompts and tool descriptions as editable interfaces:
 
 | Resource | Purpose |
 | --- | --- |
-| [system.md](../packages/agent/src/system.md) | Identity, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
+| [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
 | [Agent tools](../packages/agent/src/tools.json) | External expression, opening and reaching focuses, and future attention |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | Understanding to carry into a handover |
+
+Follow the [design's prompt boundary](design.md#a-self-in-the-world) when editing model-facing resources. Keep the system prompt focused on the semantics needed to interpret inputs, use available actions, and continue across activations.
 
 Keep capability tool declarations with their implementation and register capabilities through `Tools`. The agent owns availability policy and must use the same role selection for declaration and invocation.
 
@@ -69,7 +71,7 @@ Keep agent-owned action recognition, typed arguments, and role selection togethe
 
 Follow the [capability principles](design.md#understanding-and-autonomy) when writing these resources. Read each tool declaration as one interface: names, structure, constraints, and descriptions appear together. Express value choices and bounds structurally, and mirror actual runtime defaults in schema annotations. Use descriptions for the action, its effects, and parameter or result semantics the structure cannot convey. Keep cues of ownership and continuity brief and open to Ivenna's judgment, leaving content, organization, and learned practices to its experience. Preserve precision about the operation behind a suggestive name.
 
-Allow for mistaken reasoning and incomplete recall in the interfaces and execution flow. Keep references discoverable where they are needed, and treat invalid selections as operation outcomes. Prompts explain meaning and invite judgment; they do not establish programmatic guarantees. Prefer small, local responses to model errors, including another inference where it can correct the result. Let unresolved execution failures follow the availability contract.
+Allow for mistaken reasoning and incomplete recall in the interfaces and execution flow. Keep references discoverable where they are needed, and treat invalid selections as operation outcomes. Prompts explain meaning and invite judgment. Enforce programmatic requirements at their owning runtime boundaries. Prefer small, local responses to model errors, including another inference where it can correct the result. Let unresolved execution failures follow the availability contract.
 
 Put task facts and observations in user input. Prompts and tool descriptions should explain decisions and interpretation; field references belong in the [input contract](input.md), mechanisms in the architecture guide, and procedures in the running guides. Update affected resources and interface documentation together.
 

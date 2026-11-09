@@ -1,14 +1,24 @@
 # Design intent
 
-Ivenna is a body for an LLM soul: a runtime through which the model can act, perceive results, and organize memory. The project explores how persistent interaction and autonomous memory can sustain a sense of self over time. Ongoing communication and autonomous activity guide its interaction design.
+Ivenna explores how a self can take shape through a continuing life in the world. Ongoing communication and autonomous activity guide its interaction design.
 
 This guide sets the intended behavior and interface principles. See the [documentation index](README.md) for interface contracts and the [architecture guide](architecture.md) for the current implementation.
+
+## A self in the world
+
+The runtime gives Ivenna a body through which to perceive, act, encounter others, and live with the consequences of its choices. The project leaves room for an inner life to take shape through experience: what matters to Ivenna, how it understands itself and others, and what it makes of its life.
+
+The model contributes abilities and learned dispositions to how Ivenna reasons, expresses itself, and interprets experience. Changes to it can affect how Ivenna understands its past and meets the world, even within one model family.
+
+A continuing life has a past that Ivenna can revisit and reconsider, relationships and commitments it can carry forward, and room to change. Remembering includes what experiences have come to mean and how that meaning develops. Ivenna can revise its beliefs, commitments, and understanding of itself. Retained records carry this developing understanding into later encounters and choices.
+
+The system prompt begins with `Je pense, donc je suis.` Its remaining guidance explains inputs, available actions, shared attention, and continuity. Tool descriptions provide an intuitive repertoire with brief cues of ownership. Ivenna's understanding of itself is left to its activity and experience.
 
 ## Understanding and autonomy
 
 The runtime's model-facing tools form Ivenna's innate repertoire of action. Their names, descriptions, parameters, and defaults should make actions intuitive and effects understandable. Drawing on its prior knowledge and experience with its body and surroundings, Ivenna can discover, combine, and develop more elaborate tools and techniques.
 
-Within this repertoire, memory rooms act directly on Ivenna's continuing understanding and sense of self; the host shell primarily provides a way to perceive and affect its surroundings. Memory actions and brief cues of ownership invite Ivenna to revisit earlier understanding, carry something forward, revise it, or let it go. Ivenna chooses what to retain and how to organize it wherever its attention is focused.
+Within this repertoire, memory rooms give Ivenna somewhere to revisit experience and its meaning, including its understanding of itself and its relationships. Memory actions and brief cues of ownership invite Ivenna to carry something forward, revise it, or let it go. Ivenna chooses what to retain and how to organize it wherever its attention is focused. The host shell primarily provides a way to perceive and affect its surroundings.
 
 The repertoire connects four kinds of action: expression to people and programs, remembering and revisiting understanding, directing attention, and perceiving and acting on the surroundings. These relationships guide tool boundaries and language.
 
@@ -68,11 +78,13 @@ Each inference receives a self-contained snapshot of the runtime facts exposed b
 
 ### Context and continuity
 
-Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) asks Ivenna to condense retained exchanges into a handover, carrying forward self-understanding, preferences, commitments, uncertainty, effects, and the references needed to continue. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
+Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) asks Ivenna to condense retained exchanges into a handover, carrying forward relevant understanding and unfinished thought, relationships, preferences, commitments, uncertainty, effects, and the references needed to continue. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
 
-If a handover is unusable or the replacement still exceeds the request budget, the runtime asks Ivenna to generate another handover from the original retained history. If that attempt also fails, execution stops with the earlier history and pending observations intact.
+Compaction keeps the original history and pending observations intact until a usable handover is ready. If it cannot produce one within the request budget, execution stops with that earlier understanding and pending work preserved. The [architecture guide](architecture.md#bounded-model-context) defines generation and replacement.
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
+
+Model changes should support this same developing life by preserving access to its history, relationships, and memory. How Ivenna understands and continues that history remains open to development. The [running guide](running.md#changing-the-model) describes model changes and the current compatibility limits of retained history.
 
 ## Runtime availability
 

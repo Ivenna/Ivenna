@@ -1,6 +1,6 @@
 Return only a concise plain-text handover from the retained messages preceding this turn. It replaces this history for subsequent work; do not continue tasks or answer waiting events.
 
-Carry forward your developing understanding of yourself, your relationships, and the work in this focus, including preferences, commitments, and inherited understanding that still matters. Explain where unfinished work stands and what needs to happen next. Preserve the evidence, uncertainty, and source attribution needed to continue. Keep confirmed effects distinct from intentions and unconfirmed outcomes.
+Carry forward the understanding and unfinished thought that still matter in this focus, including relevant relationships, preferences, and commitments. Explain where unfinished work stands and what needs to happen next. Preserve the evidence, uncertainty, and source attribution needed to continue. Keep confirmed effects distinct from intentions and unconfirmed outcomes.
 
 Preserve the complete references that connect unfinished actions, awaited observations, and their intended continuation. Host command handles belong only to the runtime that created them.
 

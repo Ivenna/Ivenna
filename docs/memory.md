@@ -110,7 +110,7 @@ All three modes create missing parent rooms after checking the proposed write. I
 
 Each new or updated entry is limited to 33554432 bytes (32 MiB), independently of the [shared capacity](#memory-space). A larger host source is rejected before transfer; an append whose resulting entry exceeds the limit is also rejected. Existing larger entries can still be listed, searched, read in text pages, moved, or removed.
 
-Recording and revision publish a complete new entry at the chosen address. A failed preparation preserves the previous entry. Replacing, appending, or revising one hard-linked name leaves its other names unchanged. Unpublished content is excluded from memory observations and logical capacity. Publication does not guarantee durability across a storage or power failure.
+Recording and revision publish a complete new entry at the chosen address. A failed preparation preserves the previous entry. Replacing, appending, or revising one hard-linked name leaves its other names unchanged. Unpublished content is excluded from memory observations and logical capacity. Published changes can be lost after a storage or power failure.
 
 For example, call `remember` to write a text entry, creating its room if needed:
 

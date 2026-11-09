@@ -54,6 +54,12 @@ Compaction allows one further inference if the first handover has missing or bla
 
 Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
+## Changing the model
+
+Retained history can include native model output and reasoning data in the format supplied by the model adapter. A replacement service and model must accept those items as well as the configured tools and reasoning settings. The runtime does not translate retained model output or verify in advance that a replacement model can consume it. Establish compatibility before resuming retained work with the replacement model.
+
+To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MODEL` and any changed service settings, then restart. Keep the existing mail account, `MAIL_ADDRESS`, and memory workspace to retain the material needed for continuation.
+
 ## Mail service
 
 Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks` and `Ivenna History` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
