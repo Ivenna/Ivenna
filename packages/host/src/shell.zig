@@ -21,7 +21,7 @@ pub const Shell = struct {
         login: bool = false,
         mode: Mode = .batch,
         timeout_ms: ?u32 = null,
-        yield_ms: u32 = 1000,
+        yield_ms: u32 = 10000,
         max_output_bytes: u32 = 16384,
         interpretation: ?content.Interpretation = null,
     };

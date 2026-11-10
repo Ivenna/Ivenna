@@ -9,12 +9,13 @@ const Value = std.json.Value;
 pub const Provider = struct {
     pub const default_base_url = "https://api.deepseek.com";
     pub const default_model = "deepseek-flash";
+    pub const default_max_output_tokens: u32 = 65536;
 
     client: *std.http.Client,
     base_url: []const u8 = default_base_url,
     api_key: []const u8 = "",
     model: []const u8 = default_model,
-    max_output_tokens: u32 = 8192,
+    max_output_tokens: u32 = default_max_output_tokens,
 
     pub fn port(self: *Provider) Model.Port {
         return .{ .context = self, .vtable = &.{
@@ -51,6 +52,15 @@ pub const Provider = struct {
             reply.tool_result.content.parts = parts;
             for (parts) |*part| {
                 if (part.* != .image) continue;
+                if (part.image == .url) {
+                    const url = part.image.url;
+                    if ((std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://")) and
+                        try std.unicode.utf8CountCodepoints(url) > 8192)
+                    {
+                        part.* = try contentLimitPart(arena, "Image omitted: the HTTP(S) image URL exceeds 8192 Unicode code points.");
+                        continue;
+                    }
+                }
                 if (count >= 600) {
                     part.* = try contentLimitPart(arena, "Image omitted: the model request would contain more than 600 images.");
                 } else {

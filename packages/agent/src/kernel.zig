@@ -28,8 +28,8 @@ pub const Kernel = struct {
     reception: std.atomic.Value(enum(u8) { starting, open, closed }) = .init(.starting),
 
     pub const Limits = struct {
-        request_bytes: u64 = 65536,
-        compaction_bytes: u64 = 131072,
+        request_bytes: u64 = 1024 * 1024,
+        compaction_bytes: u64 = 2 * 1024 * 1024,
     };
 
     pub const Dependencies = struct {

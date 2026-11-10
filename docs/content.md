@@ -14,7 +14,7 @@ Host stderr is text-only. Host [input modes](host.md#input-modes) determine whet
 
 Set `interpretation: "image_url"` on a memory read or host command to present the source's complete nonempty text as one image URL reference. For host commands, interpretation waits for final stdout. A reference has a 16 KiB byte limit; a larger source returns `reference_too_large`. Recognized image bytes retain their image-data representation, and empty output remains text.
 
-Ivenna supplies the text unchanged, without fetching or validating the URL or referenced media. The configured model service handles the reference. For example:
+Ivenna preserves the supplied text without validating URL syntax or fetching the referenced media. The [model request checks](#model-request-checks) can omit a reference before inference; references that pass are handled by the configured model service. For example:
 
 ```json
 {"name":"image-reference","command":"printf '%s' 'https://example.com/image.png'","interpretation":"image_url"}
@@ -49,12 +49,15 @@ At the end of each tool batch, the Responses adapter limits newly returned image
 
 | Check | Limit |
 | --- | --- |
+| HTTP(S) image URL length | 8192 Unicode code points |
 | Image count, including retained images and URL references | 600 |
 | Serialized request body, including history, tools, and base64 image data | 48 MiB |
 
-The adapter keeps new images in order up to the count limit. If the serialized request exceeds the byte limit, it omits new images from the end until the request fits or no new images remain. Each omitted image part becomes a text part containing an `error` with code `content_limit`. The operation description, source, and other parts remain available.
+Image references supplied as text first pass the [16 KiB source limit](#image-url-references). Data URL references remain subject to this source limit and the serialized request byte limit; the HTTP(S) code point limit does not apply to them.
 
-These checks only remove new images. Retained content or text can still leave the request above these limits. The kernel's separate [whole-request budget](architecture.md#bounded-model-context) checks the remaining request before inference and can require a handover or end execution.
+The adapter omits new HTTP(S) image URL parts that exceed the code point limit, then keeps new images in order up to the count limit. If the serialized request exceeds the byte limit, it omits new images from the end until the request fits or no new images remain. Each omitted image part becomes a text part containing an `error` with code `content_limit`. The operation description, source, and other parts remain available.
+
+These checks only remove new images. Retained content or text can still leave the request above these limits. Before inference, the kernel checks the remaining request against its configured [context budgets](running.md#model-and-context-budgets). A request over budget can require a handover or end execution.
 
 ## Context and continuity
 

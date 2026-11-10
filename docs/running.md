@@ -21,9 +21,11 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_API_KEY` | Model API key | Required |
 | `LLM_BASE_URL` | Model API base URL | `https://api.deepseek.com` |
 | `LLM_MODEL` | Model name | `deepseek-flash` |
-| `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `8192` |
+| `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `65536` |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
 | `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
+| `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `1048576` (1 MiB) |
+| `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `2097152` (2 MiB) |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | JMAP session URL | `http://127.0.0.1:8088/jmap/session` |
 | `MAIL_ADDRESS` | Kernel address and sending identity; its domain resolves correspondent IDs | Required |
@@ -34,25 +36,35 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session; excludes startup and activity reports | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
-| `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
-| `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
 | `DATA_DIR` | Persistent base directory for host command output in the kernel filesystem | Required |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
-`MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it. Numeric kernel settings must be positive.
+`MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it.
 
-Core and activity sessions use the same configured model and output-token limit. Reasoning effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the configured model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings. Reasoning tokens consume the output allowance; a response reported as incomplete fails model execution and stops the runtime.
+Numeric kernel settings must be positive. Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
+
+### Model and context budgets
+
+Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments. A response reported as incomplete fails model execution and stops the runtime.
+
+Ordinary reasoning effort is configured separately for each role. Accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings.
+
+`CONTEXT_REQUEST_BYTES` limits ordinary model requests, and `CONTEXT_COMPACTION_BYTES` limits summary requests. Both cover the complete encoded payload, including retained history, runtime state, tool declarations, and images. An activity's inherited history consumes the same request space as its subsequent exchanges.
+
+Choose both byte budgets and the output-token limit together for the configured model and workload. The ordinary budget controls how much history can accumulate before a handover; the larger compaction budget leaves room to summarize history after a complete model/tool round crosses that limit. Byte counts are not token estimates; input and output must also fit the model's token limits.
+
+Handovers carry pending callback references and, for the core, existing activity references alongside the generated summary. Callback registrations have no separate count limit, so pending work can consume a growing share of the budget. A handover has no separate byte limit; the complete continuation request must fit the ordinary budget.
+
+Individual tool results can meet their [content limits](content.md#model-request-checks) while a large batch or inline image exceeds the context budgets. Inline images include base64 encoding overhead. Reduce their size or use image URL references when that overhead would exceed the request budget.
+
+If a summary request exceeds its budget or compaction cannot produce a handover that fits the continuation request, the runtime stops with its earlier history and unadmitted observations intact. Input that still cannot fit after compaction fails with `ContextBudgetExhausted`. See the [compaction mechanism](architecture.md#bounded-model-context) for measurement and retry behavior.
+
+### Session and command capacity
 
 `MAX_SESSIONS` counts the core and all registered activities, including those asleep. Startup fails if saved identities exceed it; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a slot. Ready sessions can advance concurrently. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes). The session and command defaults are tuning starting points; size them for the workload and resources available.
 
 `MAX_PENDING_EVENTS` limits ordinary accepted events buffered for a session. Startup observations, passive activity expressions, and activity endings are excluded. Opening a focus and admitting its ending do not need space in the core's ordinary event queue. Correspondence and callback mail have independent intake allowances and stay in their durable sources when their destination is full. Focus messages use this ordinary allowance and return `focus_queue_full` when the recipient cannot accept them. Capacity and polling can delay scheduled work.
-
-Request byte limits cover the complete encoded payload, including history, new events, tools, and images. They are not token estimates, and they also apply to an activity's inherited history. Handovers include the focus's pending callbacks and, for the core, existing activity references. These lists consume request space alongside the generated summary and subsequent exchanges. Callback registrations have no separate count limit. A handover has no separate byte limit, but the complete replacement request must fit.
-
-Compaction allows one further inference if the first summary has missing or blank text, includes tool calls, or leaves the replacement request over budget. If both attempts fail, or a summary request itself exceeds `CONTEXT_COMPACTION_BYTES`, the runtime stops with its earlier history and unadmitted observations intact. Input that still cannot fit after compaction fails with `ContextBudgetExhausted`. See [context budgets](architecture.md#bounded-model-context).
-
-Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
 ## Changing the model
 

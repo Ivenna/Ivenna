@@ -16,7 +16,7 @@ Call `run_host_shell` to start a command:
 {"name":"build","command":"make -j4","cwd":"/path/to/project"}
 ```
 
-`yield_ms` bounds how long this call waits for completion: it defaults to `1000` milliseconds, and `0` returns an immediate observation. Returning from the wait leaves unfinished execution running. `timeout_ms` separately limits how long the command may execute before it is stopped.
+`yield_ms` bounds how long this call waits for completion: it defaults to `10000` milliseconds, and `0` returns an immediate observation. Returning from the wait leaves unfinished execution running. `timeout_ms` separately limits how long the command may execute before it is stopped.
 
 If execution and cleanup finish within the wait, the call returns the final outcome with a complete-source output preview. Otherwise it returns a complete `command_id` for interaction and a `callback_id` for one completion observation bound to the calling activity. Both use the supplied name as their prefix and have independently assigned numeric suffixes. The activity can continue reasoning without polling for completion. A returned `callback_id` confirms that registration even if the command has finished by the time its result snapshot is taken.
 
@@ -30,7 +30,7 @@ The tool wait retains the current activation and context while the core and othe
 | `shell` | Shell executable accepting `-c`; defaults to `/bin/sh` |
 | `login` | Use `-lc` for the selected shell's login initialization; defaults to `false` |
 | `mode` | `batch` (default), `pipe`, or `terminal`; see [input modes](#input-modes) |
-| `yield_ms` | This call's wait for completion in milliseconds, from `0` through `4294967295`; omit for `1000`, or use `0` to observe immediately |
+| `yield_ms` | This call's wait for completion in milliseconds, from `0` through `4294967295`; omit for `10000`, or use `0` to observe immediately |
 | `timeout_ms` | Optional positive execution deadline in milliseconds, up to `4294967295`; omitted means no execution deadline |
 | `max_output_bytes` | Combined encoded stdout/stderr preview budget, from `512` through `16384` bytes; defaults to `16384`; result metadata and log paths are additional |
 | `interpretation` | Optional `"image_url"` for presenting complete stdout as an [image reference](content.md#image-url-references) once the command has finished |
@@ -113,7 +113,7 @@ A running pipe command can return:
     "command_id": "build-17",
     "callback_id": "build-5",
     "state": {"running": {}},
-    "elapsed_ms": 1002,
+    "elapsed_ms": 10002,
     "mode": "pipe",
     "stdin": {"open": true, "pending": false},
     "stdout": {

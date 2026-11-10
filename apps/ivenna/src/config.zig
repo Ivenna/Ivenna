@@ -29,6 +29,7 @@ pub const Config = struct {
     pub fn load(env: *const std.process.Environ.Map) !Config {
         const mail_auth = env.get("MAIL_AUTHORIZATION");
         const default_reasoning: agent.Engine.Reasoning = .{};
+        const default_limits: agent.Kernel.Limits = .{};
         const config: Config = .{
             .service_address = try serviceAddress(env),
             .data_dir = try nonempty(env, "DATA_DIR", ""),
@@ -50,13 +51,13 @@ pub const Config = struct {
             .max_pending_events = try number(usize, env, "MAX_PENDING_EVENTS", 64),
             .max_host_commands = try number(usize, env, "MAX_HOST_COMMANDS", 8),
             .context_limits = .{
-                .request_bytes = try number(u64, env, "CONTEXT_REQUEST_BYTES", 65536),
-                .compaction_bytes = try number(u64, env, "CONTEXT_COMPACTION_BYTES", 131072),
+                .request_bytes = try number(u64, env, "CONTEXT_REQUEST_BYTES", default_limits.request_bytes),
+                .compaction_bytes = try number(u64, env, "CONTEXT_COMPACTION_BYTES", default_limits.compaction_bytes),
             },
             .llm_base_url = try nonempty(env, "LLM_BASE_URL", responses.Provider.default_base_url),
             .llm_api_key = try nonempty(env, "LLM_API_KEY", ""),
             .llm_model = try nonempty(env, "LLM_MODEL", responses.Provider.default_model),
-            .llm_max_output_tokens = try number(u32, env, "LLM_MAX_OUTPUT_TOKENS", 8192),
+            .llm_max_output_tokens = try number(u32, env, "LLM_MAX_OUTPUT_TOKENS", responses.Provider.default_max_output_tokens),
             .llm_reasoning = .{
                 .core = try reasoningEffort(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
                 .activity = try reasoningEffort(env, "LLM_ACTIVITY_REASONING_EFFORT", default_reasoning.activity),
