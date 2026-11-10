@@ -1,5 +1,4 @@
 .env
-.ivenna/
 .zig-cache/
 zig-out/
 zig-pkg/

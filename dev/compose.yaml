@@ -38,8 +38,8 @@ services:
       - "127.0.0.1:${MEMORY_SSH_PORT:-2222}:22"
     volumes:
       - memory:/memory
-      - ../.ivenna/dev-memory/id_ed25519.pub:/run/memory-client.pub:ro,Z
-      - ../.ivenna/dev-memory/ssh_host_ed25519_key:/run/memory-host-key:ro,Z
+      - "${DEV_INSTANCE_DIR:?Set DEV_INSTANCE_DIR to an absolute instance directory}/memory/id_ed25519.pub:/run/memory-client.pub:ro,Z"
+      - "${DEV_INSTANCE_DIR:?Set DEV_INSTANCE_DIR to an absolute instance directory}/memory/ssh_host_ed25519_key:/run/memory-host-key:ro,Z"
     healthcheck:
       test: [CMD, nc, -z, 127.0.0.1, "22"]
       interval: 2s

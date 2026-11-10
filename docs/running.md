@@ -14,7 +14,7 @@ The application uses the Responses adapter with DeepSeek as the default model se
 
 The kernel reads its process environment. Supply the settings through the deployment's launcher or service manager. To apply changes, stop the kernel and start it with the updated environment.
 
-Set connection addresses, identities, and paths for the chosen deployment. The table records the current executable's defaults.
+Set connection addresses, identities, and storage paths for the chosen deployment. The table lists required settings and the current executable's defaults.
 
 | Variable | Purpose | Default when unset |
 | --- | --- | --- |
@@ -36,7 +36,7 @@ Set connection addresses, identities, and paths for the chosen deployment. The t
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `65536` |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `131072` |
-| `DATA_DIR` | Base directory for host command output in the kernel filesystem | `.ivenna` |
+| `DATA_DIR` | Persistent base directory for host command output in the kernel filesystem | Required |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
@@ -116,10 +116,11 @@ The [local development setup](../dev/README.md#configuring-memory) packages this
 
 ## Starting the kernel
 
-Prepare the configured services and supply the kernel's environment, then run the built executable from the directory chosen for host work. For example, with the executable installed at `/path/to/ivenna`:
+Prepare the configured services and supply the required [environment settings](#configuration). For an executable installed at `/path/to/ivenna`, choose the host workspace and output storage when starting it:
 
 ```sh
 cd /path/to/workspace
+export DATA_DIR=/path/to/instance/data
 /path/to/ivenna
 ```
 
@@ -238,10 +239,10 @@ A mailbox backup preserves stored callbacks and wakeup arrangements, not running
 
 ### Host output and deployment files
 
-`DATA_DIR` selects the base directory for host output in the kernel's filesystem. Launching a command creates any missing output directories with private permissions. Changing it selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
-
-Use writable storage that supports ordinary files and subdirectories.
+Set `DATA_DIR` to writable storage that supports ordinary files and subdirectories. An absolute path keeps output storage stable across changes to the kernel's startup directory. Launching a command creates any missing output directories with private permissions.
 
 Host output files remain available after the command and activity session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
+
+Changing `DATA_DIR` selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
 
 Keep provisioning files, credentials, and SSH keys with the deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by the supplied setup.

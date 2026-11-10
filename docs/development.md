@@ -10,7 +10,7 @@ Leave behavior that needs further design as an unavailable or explicitly limited
 
 Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 
-During development, do not write tests in advance or introduce test frameworks. Use the [local development environment](../dev/README.md) to run the kernel on the host and middleware in containers.
+During development, do not write tests in advance or introduce test frameworks. The supplied [local development environment](../dev/README.md) runs the kernel on the host and middleware in containers for validation.
 
 ## Design and implementation
 
@@ -102,7 +102,7 @@ Storage failures must not silently replace history with an empty context. [Start
 | [apps/ivenna](../apps/ivenna) | Configuration, adapter assembly, HTTP status, application startup and shutdown |
 | [apps/memory](../apps/memory) | Remote memory handler, image, and SSH entry point |
 | [packages](../packages) | Runtime libraries and their resources; see the [architecture map](architecture.md#responsibilities) for each package's interface and responsibility |
-| [dev](../dev/README.md) | Local service orchestration, mail provisioning, and memory SSH preparation |
+| [dev](../dev/README.md) | Local service orchestration and instance preparation |
 
 Each Zig library declares its module and dependencies in `build.zig` and `build.zig.zon`, with public exports in `src/root.zig`. When adding or moving a unit, update its consuming build declarations, the [root package's exported source paths](../build.zig.zon), and the architecture map. `apps/ivenna` links the libraries into one executable. The memory app is a separate Nushell program; its Containerfile packages it for container use.
 

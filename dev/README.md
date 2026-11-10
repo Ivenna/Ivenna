@@ -1,6 +1,6 @@
 # Local development
 
-This setup runs the kernel from the source checkout, with mail and memory services managed by [compose.yaml](compose.yaml). Run the commands from the repository root. For runtime requirements and other service arrangements, see the [running guide](../docs/running.md).
+This setup runs the kernel from the source checkout, with mail and memory services managed by [compose.yaml](compose.yaml). A private instance directory holds configuration and SSH keys; external service volumes hold mail and memory. Run the commands from the repository root. For runtime requirements and other service arrangements, see the [running guide](../docs/running.md).
 
 ## Prerequisites
 
@@ -10,25 +10,29 @@ Use [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https
 
 ## Configuration
 
-Create the configuration file:
+Choose an absolute path for the private instance directory and prepare it. This example keeps it outside the source checkout:
 
 ```sh
-cp -n .env.example .env
+export DEV_INSTANCE_DIR="$HOME/ivenna-dev"
+dev/prepare.sh
 ```
 
-Set `LLM_API_KEY` and configure the mail and memory connections. The sample settings match the local services below. To use another [mail service](../docs/running.md#mail-service) or [memory workspace](../docs/running.md#memory-service), configure those connections and prepare only the services you run locally.
+The preparation script copies [.env.example](../.env.example) to `$DEV_INSTANCE_DIR/.env` and the [mail plan example](mail/provision.example.ndjson) to `$DEV_INSTANCE_DIR/mail/provision.ndjson`. Running it again preserves existing private files.
 
-The kernel authenticates with `MAIL_*`; the [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`. Keep local account credentials aligned with the private [mail provisioning plan](#configuring-mail).
+Edit the instance's `.env` to set `LLM_API_KEY` and configure the mail and memory connections. Set matching account credentials in `.env` and the private mail plan as described in [mail setup](#configuring-mail). The kernel authenticates with `MAIL_*`; the [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`.
 
-The kernel, Compose, and memory preparation script use the exported configuration. Load `.env` in each terminal used for these commands, and reload it after editing its values:
+The kernel requires `DATA_DIR`; the example sets it to `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. The sample connections match the local services below. To use another [mail service](../docs/running.md#mail-service) or [memory workspace](../docs/running.md#memory-service), configure those connections and prepare only the services you run locally.
+
+In each terminal used for development commands, export your chosen `DEV_INSTANCE_DIR` and load its `.env` file. Reload it after editing its values:
 
 ```sh
+export DEV_INSTANCE_DIR="$HOME/ivenna-dev"
 set -a
-. ./.env
+. "$DEV_INSTANCE_DIR/.env"
 set +a
 ```
 
-Git ignores `.env`, `dev/mail/provision.ndjson`, and the default `.ivenna/` directory. The kernel reads the exported environment; it does not load `.env` itself. See [kernel settings](../docs/running.md#configuration) and [local middleware settings](#service-settings) for defaults and how to apply changes.
+The kernel and memory preparation script use the exported environment. The Compose commands also select the instance configuration explicitly with `--env-file`. See [kernel settings](../docs/running.md#configuration) and [local service settings](#service-settings) for defaults and how to apply changes.
 
 ## Preparing service storage
 
@@ -43,14 +47,7 @@ Create only the corresponding volume when using one local service. Existing setu
 
 ## Configuring mail
 
-Stalwart stores accounts, receiving rules, and retention settings in its data volume. Prepare a private provisioning plan from [provision.example.ndjson](mail/provision.example.ndjson) before first use:
-
-```sh
-cp -n dev/mail/provision.example.ndjson dev/mail/provision.ndjson
-chmod 600 dev/mail/provision.ndjson
-```
-
-Set the account credentials in the plan and put the matching kernel and operator credentials in `.env`. The example defines three accounts:
+Stalwart stores accounts, receiving rules, and retention settings in its data volume. The private plan at `$DEV_INSTANCE_DIR/mail/provision.ndjson` defines them. Keep its kernel and operator credentials aligned with the instance's `.env`. The example defines three accounts:
 
 | Address | Role | Example password |
 | --- | --- | --- |
@@ -68,11 +65,11 @@ Use the SMTP submission path for correspondence. Direct JMAP imports into the ke
 
 For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days), applying to Trash and Junk across all accounts. See Stalwart's [mail retention](https://stalw.art/docs/email/settings/maintenance/) and [storage maintenance](https://stalw.art/docs/storage/maintenance/) documentation for policy and space reclamation.
 
-For an existing service, incorporate changes from the example into its private plan, keeping the deployment's credentials, addresses, and readiness URL. To apply the initial plan or later edits, stop the kernel, load the updated `.env`, and run:
+To apply the initial plan or later edits, stop the kernel, [load the instance configuration](#configuration), and run:
 
 ```sh
-podman compose -f dev/compose.yaml -f dev/mail/setup.yaml up -d --wait mail
-podman compose -f dev/compose.yaml -f dev/mail/setup.yaml run --rm --no-deps provision
+podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml -f dev/mail/setup.yaml up -d --wait mail
+podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml -f dev/mail/setup.yaml run --rm --no-deps provision
 ```
 
 The [setup override](mail/setup.yaml) starts Stalwart in recovery mode for the official CLI to apply the plan. `MAIL_SETUP_PASSWORD` controls the temporary setup credential; the administrator account in the plan supplies normal administration credentials. Applying the plan can replace account passwords.
@@ -87,30 +84,27 @@ The default local endpoints are:
 | Authenticated SMTP submission | `127.0.0.1:2525` |
 | Stalwart administration | `http://127.0.0.1:8088/admin` |
 
-Published ports bind to loopback. Mail, accounts, and configuration persist in the external volume after the Compose containers are removed.
+Published ports bind to loopback.
 
 ## Configuring memory
 
-Prepare the SSH connection and build the memory image from the current source:
+The memory preparation script creates or reuses the client and host keys under `$DEV_INSTANCE_DIR/memory/` and writes the `ivenna-memory` SSH target to its `config` file, matching the sample `MEMORY_SSH_CONFIG`. It pins the generated host key for verification. The default endpoint is `127.0.0.1:2222`.
+
+With the [instance configuration loaded](#configuration), prepare the SSH connection and build the memory image from the current source:
 
 ```sh
 dev/memory/prepare.sh
-podman compose -f dev/compose.yaml build memory
+podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml build memory
 ```
 
-The preparation script creates or reuses the client and host keys under `.ivenna/dev-memory/` and writes the `ivenna-memory` SSH target to its `config` file, matching the sample `MEMORY_SSH_CONFIG`. It pins the generated host key for verification. The default endpoint is `127.0.0.1:2222`.
-
-Later starts reuse this image and connection. After changing the handler or container sources, follow the [memory rebuild steps](#updating-the-kernel-and-middleware). Changes to the local port or capacity follow the [middleware settings](#service-settings).
+Later starts reuse this image and connection. After changing the handler or container sources, follow the [memory rebuild steps](#memory). Changes to the local port or capacity follow the [service settings](#service-settings).
 
 ## Starting the kernel
 
-After preparing the services, load the configuration and start them with the kernel. The commands below start both local services. If only one is local, name it (`mail` or `memory`) in the Compose command; if both are external, skip that command.
+After preparing the services, use a terminal with the [instance configuration loaded](#configuration) to start them with the kernel. The commands below start both local services. If only one is local, name it (`mail` or `memory`) in the Compose command; if both are external, skip that command.
 
 ```sh
-set -a
-. ./.env
-set +a
-podman compose -f dev/compose.yaml up -d --wait
+podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml up -d --wait
 zig build run
 ```
 
@@ -126,12 +120,9 @@ Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the U
 
 ## Sending a message
 
-The operator account provides the `operator` correspondent ID for the local mailbox. Its sender address must use the domain of `MAIL_ADDRESS`; see [supported addressing](../docs/communication.md#current-email-addressing). With reception open, load the configuration in a second terminal and submit through the local SMTP endpoint:
+The operator account provides the `operator` correspondent ID for the local mailbox. Its sender address must use the domain of `MAIL_ADDRESS`; see [supported addressing](../docs/communication.md#current-email-addressing). With reception open, [load the instance configuration](#configuration) in a second terminal and submit through the local SMTP endpoint:
 
 ```sh
-set -a
-. ./.env
-set +a
 curl --url "smtp://127.0.0.1:${MAIL_SMTP_PORT:-2525}" --crlf \
   --user "$OPERATOR_MAIL_ADDRESS:$OPERATOR_MAIL_PASSWORD" \
   --mail-from "$OPERATOR_MAIL_ADDRESS" \
@@ -154,35 +145,39 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how running host commands stop, and how Ivenna continues interrupted work.
 
-To remove the local middleware containers while retaining mail, memory, and SSH keys:
+To remove the local middleware containers:
 
 ```sh
-podman compose -f dev/compose.yaml down
+podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml down
 ```
 
-Use the [startup steps](#starting-the-kernel) to recreate the services and run the kernel again.
+The external volumes and private instance files remain in place. Use the [startup steps](#starting-the-kernel) to recreate the services and run the kernel again.
 
 ## Updating the kernel and middleware
+
+Keep the same instance directory and [load its configuration](#configuration) for the commands below. Preparation preserves private copies of the examples; incorporate relevant changes from [.env.example](../.env.example) into the instance's `.env` and reload it.
 
 ### Kernel
 
 The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Before running an updated executable against an existing mailbox, check the [history-format requirements](../docs/running.md#updating-the-executable). After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild and restart it.
+
+To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Check history compatibility before resuming and rebuild memory if its sources changed. The new checkout becomes the default directory for host commands.
 
 ### Memory
 
 The memory [Containerfile](../apps/memory/Containerfile) installs [memory.nu](../apps/memory/src/memory.nu). After changing the handler, container contents, or SSH entry point, stop the kernel, rebuild the image, and recreate the memory service:
 
 ```sh
-podman compose -f dev/compose.yaml build --pull --no-cache memory
-podman compose -f dev/compose.yaml up -d --wait memory
+podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml build --pull --no-cache memory
+podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml up -d --wait memory
 zig build run
 ```
 
-This retains the external memory volume and SSH keys. The build context includes only the image sources selected by [`.dockerignore`](../.dockerignore). For another workspace, update its handler and entry point as described in [memory service setup](../docs/running.md#memory-service).
+For another memory deployment, update its handler and entry point as described in [memory service setup](../docs/running.md#memory-service).
 
 ### Mail
 
-Stalwart's account and policy configuration lives in its data store; [config.json](mail/config.json) selects that store. Apply provisioning-plan changes through [mail setup](#configuring-mail), then return to normal startup. Container recreation retains the stored configuration and mail.
+Incorporate changes from the [mail plan example](mail/provision.example.ndjson) into the private plan, keeping the deployment's credentials, addresses, and readiness URL. Apply the plan through [mail setup](#configuring-mail), then return to normal startup. Stalwart retains its account and policy configuration in the data volume; [config.json](mail/config.json) selects that store.
 
 ## Service settings
 
@@ -190,6 +185,7 @@ These settings configure the supplied local services in [dev/compose.yaml](compo
 
 | Variable | Purpose | Default when unset |
 | --- | --- | --- |
+| `DEV_INSTANCE_DIR` | Absolute directory for private development configuration and SSH files | Required |
 | `MAIL_CONTAINER_NAME` | Stalwart container name | `ivenna-mail` |
 | `MAIL_VOLUME_NAME` | Existing external Stalwart volume | `ivenna-mail` |
 | `MAIL_HTTP_PORT` | Loopback HTTP/JMAP port | `8088` |
@@ -203,9 +199,11 @@ These settings configure the supplied local services in [dev/compose.yaml](compo
 
 If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Account and server policy changes belong in the private provisioning plan; apply them through [local mail setup](#configuring-mail).
 
-After changing service settings, reload `.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed. For mail transfers, follow the [history preservation requirements](../docs/running.md#backups-and-transfers).
+After changing service settings, reload `$DEV_INSTANCE_DIR/.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed. For mail transfers, follow the [history preservation requirements](../docs/running.md#backups-and-transfers).
 
-Source changes inside the memory image require a [rebuild](#updating-the-kernel-and-middleware). For another memory deployment, configure capacity at its [service entry point](../docs/running.md#memory-service).
+Choosing another `DEV_INSTANCE_DIR` selects separate private files. The Compose project name remains `ivenna`; container names, ports, image names, and service volumes follow the settings above. Concurrent local deployments need distinct Compose project names, container names, ports, and data volumes.
+
+For another memory deployment, configure capacity at its [service entry point](../docs/running.md#memory-service).
 
 ## Development data
 
@@ -213,9 +211,9 @@ Source changes inside the memory image require a [rebuild](#updating-the-kernel-
 | --- | --- |
 | Stalwart volume, `ivenna-mail` by default | Correspondence, callback inbox, working-history records, checkpoints, Trash, accounts, and Stalwart configuration |
 | Memory volume, `ivenna-memory` by default | Shared memory rooms and entries |
-| `.env` | Kernel and local service settings and credentials |
-| `dev/mail/provision.ndjson` | Private mail configuration plan |
-| `.ivenna/dev-memory/` | Local memory SSH configuration and keys |
+| `$DEV_INSTANCE_DIR/.env` | Kernel and local service settings and credentials |
+| `$DEV_INSTANCE_DIR/mail/provision.ndjson` | Private mail configuration plan |
+| `$DEV_INSTANCE_DIR/memory/` | Local memory SSH configuration and keys |
 | `<DATA_DIR>/host/` | Full host command output |
 
-The preparation script and Compose use `.ivenna/dev-memory/` under the repository root independently of `DATA_DIR`. Changing `DATA_DIR` leaves these files and the middleware volumes in place. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.
+The example places host output under `$DEV_INSTANCE_DIR/data/`; `DATA_DIR` can select another location. Changing it leaves SSH files and middleware volumes in place. Container removal and recreation preserve the external volumes and private instance files. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.

@@ -1,8 +1,13 @@
 #!/bin/sh
 set -eu
 
-repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-state_dir="$repo_dir/.ivenna/dev-memory"
+: "${DEV_INSTANCE_DIR:?Set DEV_INSTANCE_DIR to an absolute instance directory}"
+case $DEV_INSTANCE_DIR in
+    /*) ;;
+    *) printf '%s\n' 'DEV_INSTANCE_DIR must be an absolute path.' >&2; exit 1 ;;
+esac
+
+state_dir="$DEV_INSTANCE_DIR/memory"
 ssh_port=${MEMORY_SSH_PORT:-2222}
 
 umask 077

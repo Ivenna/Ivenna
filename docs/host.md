@@ -117,13 +117,13 @@ A running pipe command can return:
     "mode": "pipe",
     "stdin": {"open": true, "pending": false},
     "stdout": {
-      "path": "/path/to/deployment/.ivenna/host/2/example.stdout.log",
+      "path": "/path/to/instance/data/host/2/example.stdout.log",
       "byte_length": 6,
       "range": {"offset": 0, "next_offset": 6},
       "content": {"text": {"text": "ready\n", "truncated": false}}
     },
     "stderr": {
-      "path": "/path/to/deployment/.ivenna/host/2/example.stderr.log",
+      "path": "/path/to/instance/data/host/2/example.stderr.log",
       "byte_length": 0,
       "range": {"offset": 0, "next_offset": 0},
       "content": {"text": {"text": "", "truncated": false}}

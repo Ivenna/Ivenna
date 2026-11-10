@@ -19,5 +19,5 @@ services:
       STALWART_USER: admin
       STALWART_PASSWORD: "${MAIL_SETUP_PASSWORD:-local-setup-password}"
     volumes:
-      - ./mail/provision.ndjson:/work/provision.ndjson:ro,z
+      - "${DEV_INSTANCE_DIR:?Set DEV_INSTANCE_DIR to an absolute instance directory}/mail/provision.ndjson:/work/provision.ndjson:ro,z"
     command: [apply, --file, /work/provision.ndjson]
