@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Read Zig version
+        id: zig-version
+        run: echo "version=$(cat .zig-version)" >> "$GITHUB_OUTPUT"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+      - name: Check Zig formatting
+        run: git ls-files -z '*.zig' '*.zig.zon' | xargs -0 zig fmt --check
+      - name: Build Ivenna
+        run: zig build
+      - name: Run Zig regression tests
+        run: zig build test --summary all
+      - uses: hustcer/setup-nu@v3
+        with:
+          version: '0.116.1' # Match apps/memory/Containerfile.
+      - name: Run memory protocol tests
+        run: nu --no-config-file --no-history apps/memory/tests.nu

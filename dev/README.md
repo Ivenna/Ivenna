@@ -6,7 +6,7 @@ This setup runs the kernel from the source checkout, with mail and memory servic
 
 Install the Zig version in [`.zig-version`](../.zig-version), an OpenSSH client, and `curl`.
 
-Use [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html) for the middleware. The commands below use Podman. The [development guide](../docs/development.md) covers build conventions and validation.
+Use [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html) for the middleware. The commands below use Podman. See the [development guide](../docs/development.md) for build conventions and the [testing guide](../docs/testing.md) for automated checks that run directly on the host.
 
 ## Configuration
 

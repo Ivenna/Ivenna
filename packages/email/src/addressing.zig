@@ -59,3 +59,19 @@ fn validDomain(domain: []const u8) bool {
     }
     return true;
 }
+
+test "correspondent IDs preserve local case and stay in the configured domain" {
+    const addressing = try Addressing.init("Ivenna@ivenna.test");
+    const address = try addressing.address(std.testing.allocator, "Alice.work+notes");
+    defer std.testing.allocator.free(address);
+
+    try std.testing.expectEqualStrings("Alice.work+notes@ivenna.test", address);
+    try std.testing.expectEqualStrings("Alice.work+notes", addressing.id(address).?);
+    try std.testing.expectEqualStrings("Alice.work+notes", addressing.id("Alice.work+notes@IVENNA.TEST").?);
+    try std.testing.expect(addressing.isSelf("Ivenna@IVENNA.TEST"));
+    try std.testing.expect(!addressing.isSelf("ivenna@ivenna.test"));
+
+    try std.testing.expectEqual(null, addressing.id("Alice@elsewhere.test"));
+    try std.testing.expectEqual(null, addressing.id("Alice..work@ivenna.test"));
+    try std.testing.expectError(error.InvalidRecipientId, addressing.address(std.testing.allocator, "Alice@elsewhere.test"));
+}

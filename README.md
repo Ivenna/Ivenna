@@ -19,4 +19,4 @@ Once Ivenna is ready to receive mail, follow [Corresponding with Ivenna](docs/us
 
 ## Development
 
-The monorepo contains the Ivenna application, the remote memory service, and runtime libraries for execution, shared contracts, and concrete capabilities. The [development guide](docs/development.md) covers conventions, builds, and validation; the [architecture guide](docs/architecture.md) explains package boundaries, dependencies, and execution ownership. See the [documentation index](docs/README.md) for interface and operational references.
+The monorepo contains the Ivenna application, the remote memory service, and runtime libraries for execution, shared contracts, and concrete capabilities. The [development guide](docs/development.md) covers conventions, builds, and validation; the [architecture guide](docs/architecture.md) explains package boundaries, dependencies, and execution ownership. The [testing guide](docs/testing.md) covers test selection, execution, and maintenance. See the [documentation index](docs/README.md) for interface and operational references.

@@ -10,8 +10,6 @@ Leave behavior that needs further design as an unavailable or explicitly limited
 
 Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 
-During development, do not write tests in advance or introduce test frameworks. The supplied [local development environment](../dev/README.md) runs the kernel on the host and middleware in containers for validation.
-
 ## Design and implementation
 
 Start with the intended behavior and its reason, then establish responsibilities and interfaces. Explain design changes through their effects on Ivenna, its correspondents, or the deployment user. Implementation experience can inform these choices; a current code path or service limitation alone does not establish a design requirement.
@@ -22,6 +20,7 @@ Keep each document focused on its role:
 | --- | --- |
 | Design guide | Goals, behavioral choices, interface principles, and their reasons |
 | Development guide | Change conventions, implementation boundaries, builds, and validation |
+| Testing guide | Test selection, execution, and maintenance |
 | Interface guides | Operations, fields, formats, and outcomes |
 | Model-facing resources | Semantics needed to choose actions and interpret observations |
 | Architecture guide | The current implementation's package ownership, dependencies, algorithms, synchronization, storage representation, and service protocols |
@@ -116,7 +115,9 @@ The executable is installed at `zig-out/bin/ivenna` and embeds the [model-facing
 
 ## Validation
 
-Build the application and exercise the affected behavior through communication and model/tool work. Choose checks from the contract being changed: establish what Ivenna or its correspondents should observe, then follow that outcome across the components that produce, deliver, and retain it. A boundary change needs evidence from its producers and consumers together.
+Use the [testing guide](testing.md) to select, run, and maintain automated checks.
+
+Build the application. For changes across runtime boundaries, exercise the affected behavior through communication and model/tool work in the [local development environment](../dev/README.md). Choose checks from the contract being changed: establish what Ivenna or its correspondents should observe, then follow that outcome across the components that produce, deliver, and retain it. A boundary change needs evidence from its producers and consumers together.
 
 Exercise failure and interruption where they can separate an external effect from its recorded outcome. Confirm that the resulting observation exposes known effects and uncertainty. Where state or tasks survive a call, verify their restoration and cleanup through the owning component's contract. Scale these checks to the changed behavior and affected boundaries.
 

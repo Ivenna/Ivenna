@@ -6,6 +6,10 @@ const EmailTransport = @import("email_transport.zig").EmailTransport;
 const History = @import("history.zig").History;
 const Allocator = std.mem.Allocator;
 
+test {
+    _ = @import("addressing.zig");
+}
+
 pub const Config = struct {
     session_url: []const u8,
     authorization: []const u8,

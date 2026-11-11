@@ -313,3 +313,24 @@ fn render(arena: Allocator, value: anytype) ![]const u8 {
     try yaml.emit(&output.writer, document, .{});
     return output.toOwnedSlice();
 }
+
+test "activity grouping retains each source's message order, times, and silent endings" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const grouped = try coalesceActivityReports(arena.allocator(), &.{
+        .{ .activity = .{ .from_focus = "practice-2", .messages = &.{.{ .text = "first", .observed_at_unix_ms = 10 }}, .ended_at_unix_ms = null } },
+        .{ .input = .{ .from = &.{"operator"}, .text = "Continue.", .observed_at_unix_ms = 11 } },
+        .{ .activity = .{ .from_focus = "research-3", .messages = &.{}, .ended_at_unix_ms = 12 } },
+        .{ .activity = .{ .from_focus = "practice-2", .messages = &.{.{ .text = "second", .observed_at_unix_ms = 13 }}, .ended_at_unix_ms = null } },
+        .{ .activity = .{ .from_focus = "practice-2", .messages = &.{}, .ended_at_unix_ms = 14 } },
+    });
+    const expected: []const Event = &.{
+        .{ .activity = .{ .from_focus = "practice-2", .messages = &.{
+            .{ .text = "first", .observed_at_unix_ms = 10 },
+            .{ .text = "second", .observed_at_unix_ms = 13 },
+        }, .ended_at_unix_ms = 14 } },
+        .{ .input = .{ .from = &.{"operator"}, .text = "Continue.", .observed_at_unix_ms = 11 } },
+        .{ .activity = .{ .from_focus = "research-3", .messages = &.{}, .ended_at_unix_ms = 12 } },
+    };
+    try std.testing.expectEqualDeep(expected, grouped);
+}

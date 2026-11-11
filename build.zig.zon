@@ -5,6 +5,9 @@
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .app = .{ .path = "apps/ivenna" },
+        .agent = .{ .path = "packages/agent" },
+        .email = .{ .path = "packages/email" },
+        .content = .{ .path = "packages/content" },
     },
     .paths = .{
         ".zig-version",

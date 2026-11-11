@@ -150,3 +150,95 @@ fn cloneItem(a: Allocator, item: Model.Item) !Model.Item {
         },
     };
 }
+
+test "candidate requests leave history intact and latest observations appear once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var context = try Context.init(std.testing.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+    defer context.deinit();
+    try context.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .startup = .{ .observed_at_unix_ms = 0 } }} } });
+    const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
+    const before = try context.request(a, current, .none);
+    const events: []const Input.Event = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Remember our plan.", .observed_at_unix_ms = 900 } }};
+
+    const candidate = try context.requestWithEvents(a, events, current);
+    try std.testing.expectEqual(@as(usize, 1), context.records().len);
+    try std.testing.expectEqualDeep(before, try context.request(a, current, .none));
+
+    try context.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = events } });
+    try std.testing.expectEqualDeep(candidate, try context.request(a, current, .latest));
+    try std.testing.expectEqual(@as(usize, 2), context.records().len);
+}
+
+test "encoded native exchanges restore independently of their source buffers" {
+    const restored = blk: {
+        var source = try Context.init(std.testing.allocator, .{ .session_id = 2, .epoch = 0 }, "practice-2");
+        defer source.deinit();
+        var continuation = [_]u8{ 0, 255, '"', '\\', '\n' };
+        var result_text = "observed".*;
+        var image_bytes = [_]u8{ 137, 'P', 'N', 'G', 0, 255 };
+        try source.appendBatch(&.{.{ .continuation = &continuation }}, &.{.{ .tool_result = .{
+            .call_id = "inspect-1",
+            .content = .{ .parts = &.{
+                .{ .text = &result_text },
+                .{ .image = .{ .data = .{ .format = .png, .bytes = &image_bytes } } },
+            } },
+        } }});
+        @memset(&continuation, 0);
+        @memset(&result_text, 0);
+        @memset(&image_bytes, 0);
+
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const codec = @import("record_codec.zig");
+        const encoded = try codec.encode(arena.allocator(), source.records());
+        const entries = try codec.decode([]const Entry, arena.allocator(), encoded);
+        break :blk try Context.restore(std.testing.allocator, source.scope, source.focus_id, entries);
+    };
+    var context = restored;
+    defer context.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const request = try context.request(arena.allocator(), .{ .focus_id = "practice-2", .role = .activity, .observed_at_unix_ms = 1000 }, .none);
+    try std.testing.expectEqual(@as(usize, 4), request.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 255, '"', '\\', '\n' }, request[1].continuation);
+    const reply = request[2].tool_result;
+    try std.testing.expectEqualStrings("inspect-1", reply.call_id);
+    try std.testing.expectEqualStrings("observed", reply.content.parts[0].text);
+    try std.testing.expectEqual(.png, reply.content.parts[1].image.data.format);
+    try std.testing.expectEqualSlices(u8, &.{ 137, 'P', 'N', 'G', 0, 255 }, reply.content.parts[1].image.data.bytes);
+}
+
+test "candidate handover retains sampled references and leaves earlier history available" {
+    var original = try Context.init(std.testing.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+    defer original.deinit();
+    try original.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Keep working on our plan.", .observed_at_unix_ms = 100 } }} } });
+    var activity_id = "practice-2".*;
+    var command_id = "inspect-7".*;
+    const handover: Input.Handover = .{
+        .focus_id = "core-1",
+        .observed_at_unix_ms = 900,
+        .summary = "A command is still awaiting observation.",
+        .state = .{
+            .activities = &.{&activity_id},
+            .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = &command_id } } }},
+        },
+    };
+    var replacement = try original.withHandover(std.testing.allocator, handover);
+    defer replacement.deinit();
+    @memset(&activity_id, 0);
+    @memset(&command_id, 0);
+
+    try std.testing.expectEqual(@as(usize, 1), original.records().len);
+    try std.testing.expectEqualStrings("Keep working on our plan.", original.records()[0].record.events.items[0].input.text);
+    try std.testing.expectEqual(@as(usize, 1), replacement.records().len);
+    const retained = replacement.records()[0].record.handover;
+    try std.testing.expectEqual(handover.observed_at_unix_ms, retained.observed_at_unix_ms);
+    try std.testing.expectEqualStrings(handover.summary, retained.summary);
+    const expected_state: Input.State = .{
+        .activities = &.{"practice-2"},
+        .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = "inspect-7" } } }},
+    };
+    try std.testing.expectEqualDeep(expected_state, retained.state);
+}

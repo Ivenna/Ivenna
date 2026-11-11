@@ -120,3 +120,33 @@ pub fn textPrefixLength(bytes: []const u8, allow_partial: bool) ?usize {
     }
     return index;
 }
+
+test "image references require explicit interpretation and preserve source representation" {
+    const source = "https://example.com/image.png\n";
+    try std.testing.expectEqualStrings(source, classify(source).text);
+    try std.testing.expectEqualStrings(source, interpret(source, .image_url).image.url);
+    try std.testing.expectEqualStrings("", interpret("", .image_url).text);
+
+    const png = "\x89PNG\r\n\x1a\n";
+    const image = interpret(png, .image_url).image.data;
+    try std.testing.expectEqual(Image.Format.png, image.format);
+    try std.testing.expectEqualSlices(u8, png, image.bytes);
+
+    const oversized = try std.testing.allocator.alloc(u8, reference_size_limit + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'a');
+    const unavailable = interpret(oversized, .image_url).unavailable;
+    try std.testing.expectEqual(.reference_too_large, unavailable.reason);
+    try std.testing.expectEqual(oversized.len, unavailable.byte_length);
+}
+
+test "streaming text leaves incomplete UTF-8 for the next observation" {
+    const incomplete = "hi \xf0\x9f";
+    try std.testing.expectEqual(@as(?usize, 3), textPrefixLength(incomplete, true));
+    try std.testing.expectEqual(null, textPrefixLength(incomplete, false));
+
+    const complete = incomplete ++ "\x90\xbe";
+    try std.testing.expectEqual(@as(?usize, complete.len), textPrefixLength(complete, false));
+    try std.testing.expectEqual(null, textPrefixLength("hi \xf0A", true));
+    try std.testing.expectEqual(null, textPrefixLength("hi \x00", true));
+}
