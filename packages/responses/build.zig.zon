@@ -6,6 +6,10 @@
     .dependencies = .{
         .agent_contracts = .{ .path = "../agent_contracts" },
         .content = .{ .path = "../content" },
+        .zdt = .{
+            .url = "git+https://codeberg.org/FObersteiner/zdt#ebe3bc6b25aa343b2d0d2349b006e0c813bc17db",
+            .hash = "zdt-0.10.6-xr0_vC7eEQAzzfPqoENCUw638bBnPK60xs9y0LXWcKhd",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

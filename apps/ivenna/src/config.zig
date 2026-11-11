@@ -23,6 +23,8 @@ pub const Config = struct {
     llm_api_key: []const u8,
     llm_model: []const u8,
     llm_max_output_tokens: u32,
+    llm_max_attempts: u32,
+    llm_request_timeout_ms: u32,
     llm_reasoning: agent.Engine.Reasoning,
 
     /// Text borrows the process environment, which outlives the application.
@@ -58,6 +60,8 @@ pub const Config = struct {
             .llm_api_key = try nonempty(env, "LLM_API_KEY", ""),
             .llm_model = try nonempty(env, "LLM_MODEL", responses.Provider.default_model),
             .llm_max_output_tokens = try number(u32, env, "LLM_MAX_OUTPUT_TOKENS", responses.Provider.default_max_output_tokens),
+            .llm_max_attempts = try number(u32, env, "LLM_MAX_ATTEMPTS", responses.Provider.default_max_attempts),
+            .llm_request_timeout_ms = try number(u32, env, "LLM_REQUEST_TIMEOUT_MS", responses.Provider.default_request_timeout_ms),
             .llm_reasoning = .{
                 .core = try reasoningEffort(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
                 .activity = try reasoningEffort(env, "LLM_ACTIVITY_REASONING_EFFORT", default_reasoning.activity),

@@ -88,7 +88,7 @@ Model changes should support this same developing life by preserving access to i
 
 ## Runtime availability
 
-Communication and autonomous memory are required for Ivenna to operate. Infrastructure, model-service, and session-execution failures end the runtime and its concurrent work. Defined tool outcomes, including mistaken references and unsuccessful or uncertain actions, remain observations from which Ivenna decides how to continue.
+Communication and autonomous memory are required for Ivenna to operate. Bounded recovery from transient model-service failures lets ongoing work continue through brief outages. Unrecovered infrastructure, model-service, and session-execution failures end the runtime and its concurrent work. Defined tool outcomes, including mistaken references and unsuccessful or uncertain actions, remain observations from which Ivenna decides how to continue.
 
 The receiving boundary checks Ivenna's reception status before accepting correspondence. Reception closes during startup, shutdown, or failure; sender retry and queuing belong to the sender. See [reception readiness](running.md#service-status-and-reception) for the precheck's limits.
 

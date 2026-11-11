@@ -32,6 +32,6 @@ The script uses Nushell's standard assertions, sends JSON requests directly to t
 
 ## Automation and validation limits
 
-The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. The checks run directly with Zig and Nushell and require no running services or model credentials. Extend or replace automated checks when the evidence they provide justifies their execution and maintenance cost.
+The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. The checks run directly with Zig and Nushell and require no deployed services or model credentials. Extend or replace automated checks when the evidence they provide justifies their execution and maintenance cost.
 
-The supplied checks do not exercise live model, mail, SSH, or runtime restart behavior. Follow the [development guide's validation guidance](development.md#validation) for changes across runtime boundaries; the [local development guide](../dev/README.md) covers preparing and running the services.
+Tests for the Responses and email adapters use local HTTP servers to exercise model retries and both adapters' handling of truncated responses, timeouts, and cancellation. These tests do not exercise deployed model, mail, or SSH services, or runtime restart behavior. Follow the [development guide's validation guidance](development.md#validation) for changes across runtime boundaries; the [local development guide](../dev/README.md) covers preparing and running the services.

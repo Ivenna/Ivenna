@@ -22,6 +22,8 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_BASE_URL` | Model API base URL | `https://api.deepseek.com` |
 | `LLM_MODEL` | Model name | `deepseek-flash` |
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `65536` |
+| `LLM_MAX_ATTEMPTS` | Maximum HTTP attempts per inference, including the first; `1` disables retries | `3` |
+| `LLM_REQUEST_TIMEOUT_MS` | Total HTTP time limit per inference, including all attempts and retry delays | `600000` (10 minutes) |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
 | `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `1048576` (1 MiB) |
@@ -44,11 +46,17 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 
 Numeric kernel settings must be positive. Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
 
-### Model and context budgets
+### Model requests
 
 Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments. A response reported as incomplete fails model execution and stops the runtime.
 
 Ordinary reasoning effort is configured separately for each role. Accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings.
+
+`LLM_MAX_ATTEMPTS` limits HTTP attempts for each ordinary or compaction inference. `LLM_REQUEST_TIMEOUT_MS` bounds their total time, including retry delays. The adapter applies its [transport policy](architecture.md#model-transport) to network failures, server errors, request timeouts, and rate limits. Exhausting either limit stops the runtime. Cancellation stops the active exchange or retry wait. HTTP errors outside the retry policy fail when their status arrives; diagnostics record the status code without reading the error body.
+
+The adapter receives and validates a complete response before returning tool calls for execution. Transport retries do not repeat tool execution, though a generation whose response was lost may still incur model-service charges.
+
+### Context budgets
 
 `CONTEXT_REQUEST_BYTES` limits ordinary model requests, and `CONTEXT_COMPACTION_BYTES` limits summary requests. Both cover the complete encoded payload, including retained history, runtime state, tool declarations, and images. An activity's inherited history consumes the same request space as its subsequent exchanges.
 
@@ -77,6 +85,8 @@ To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MO
 Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks` and `Ivenna History` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
 
 Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
+
+Each JMAP HTTP exchange has a fixed 60-second time limit covering connection, request writing, and response reading. Timeout or cancellation stops the exchange; requests are not automatically retried. An interrupted mailbox mutation or message submission may already have taken effect, so its effects can remain uncertain when the runtime stops.
 
 Use the [supported email addresses](communication.md#current-email-addressing). Changing `MAIL_ADDRESS` to another domain changes how retained correspondent IDs resolve.
 

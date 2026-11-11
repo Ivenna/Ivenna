@@ -13,7 +13,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [packages/agent](../packages/agent/src/root.zig) | Coordinate focuses, sessions, activations, and retained history; own model-input rendering, execution policy, session prompts, and expression and attention actions |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
-| [packages/responses](../packages/responses/src/root.zig) | Encode and measure model requests, decode Responses output, and apply model content limits |
+| [packages/responses](../packages/responses/src/root.zig) | Own model HTTP exchanges and transport retries, encode and measure requests, decode Responses output, and apply model content limits |
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, incremental interaction, process cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result text and image content, classify source bytes, and interpret image references |
@@ -43,6 +43,7 @@ flowchart TD
     Content --> Zignal[Zignal]
     Agent --> YAML[YAML]
     Agent --> Zdt[zdt]
+    Responses --> Zdt
 ```
 
 The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer. Session scheduling, owned deliveries, activations, and retained context remain internal to the agent. `Kernel.Config` and `Kernel.Limits` describe execution policy; `Engine.Reasoning` selects ordinary reasoning effort for core and activity roles. Connection settings and protocol encoding belong to their capability packages; the application loads environment values and owns HTTP listener settings.
@@ -180,7 +181,15 @@ Appending clones each entry into the Context's arena and updates its cached mode
 
 Kernel calls inference and tool execution separately. The activation remains owned by the same worker through the returned batch. Engine retains the prepared request through tool execution so the provider can apply content limits to the complete result batch.
 
-Sessions share the configured model and output-token limit; Engine selects ordinary reasoning effort by role using the [model settings](running.md#model-and-context-budgets). The [Responses adapter](../packages/responses/src/provider.zig) encodes these settings and uses the same payload encoder for measurement and inference. It decodes and validates the complete response before any calls execute; incomplete output fails execution. Engine invokes the returned calls in order, while other sessions can run their own tool batches concurrently. Unknown tools and invalid arguments become ordinary tool errors.
+Sessions share the configured model and output-token limit; Engine selects ordinary reasoning effort by role using the [model settings](running.md#model-requests). The [Responses adapter](../packages/responses/src/provider.zig) encodes these settings and uses the same payload encoder for measurement and inference. Engine invokes the returned calls in order, while other sessions can run their own tool batches concurrently. Unknown tools and invalid arguments become ordinary tool errors.
+
+### Model transport
+
+The adapter serializes each ordinary or compaction inference once and sends it with `stream: false`. It owns HTTP retries under the configured [attempt limit and total time limit](running.md#model-requests). One monotonic deadline covers connection, request writing, response reading, and retry waits.
+
+The adapter's bounded retry policy covers HTTP server errors, request timeouts, and rate limits. Retryable network failures, including interrupted response transfers, share the same limits. Retry waits use exponential backoff with jitter. A valid `Retry-After` value in seconds or IMF-fixdate format supplies the delay instead. Other HTTP errors fail on receipt of their status, without waiting for a diagnostic body. Cancellation propagates without retry.
+
+Each attempt owns its temporary response bytes. Failed or rejected exchanges close their unfinished connections. On timeout or cancellation, the adapter cancels and joins the exchange before the caller can release request data. Fixed-length response bodies must reach their declared length. The adapter validates every output item before returning text or tool calls. A fully received invalid response or unfinished generation fails without another HTTP attempt.
 
 The adapter distinguishes absent assistant text from empty text by whether message content contains an `output_text` part. An activity response with absent text records no assistant fact; explicitly empty text is retained as a timestamped message with empty text in the model report.
 
@@ -196,7 +205,7 @@ For each compaction attempt, `Registry.compactionSnapshot` copies current identi
 
 The generated summary must contain nonempty text after trimming and no tool calls. The runtime pairs it with the same state and observation time supplied to that inference to form the handover. Before installation, the kernel measures the complete replacement ordinary request or admission candidate against `CONTEXT_REQUEST_BYTES`; the handover has no separate byte limit. Successful replacement leaves the handover record as working history. The next request adds the same system prompt and an ordinary turn with any newly admitted events; earlier message storage follows [retention](#history-retention).
 
-Compaction permits one further summary inference if the first summary is missing or blank, includes tool calls, or leaves the replacement request over budget. The retry samples state anew, retains the original history, and carries brief factual feedback in `summarize.instructions`. Rejected output never becomes working history. A summary request already above `CONTEXT_COMPACTION_BYTES` fails before model invocation. Model-service, cancellation, and storage failures propagate without a summary retry.
+Compaction permits one further summary inference if the first summary is missing or blank, includes tool calls, or leaves the replacement request over budget. The retry samples state anew, retains the original history, and carries brief factual feedback in `summarize.instructions`. Rejected output never becomes working history. A summary request already above `CONTEXT_COMPACTION_BYTES` fails before model invocation. Failures returned by the model adapter, cancellation, and storage failures propagate without another summary inference.
 
 Exhausted summary attempts and requests that cannot meet their bounds fail explicitly, preserving the selected history and unadmitted deliveries. Admission measures complete candidate requests with a reusable trial arena; byte counts are not token estimates.
 
@@ -254,6 +263,8 @@ Use one kernel per account. Host effects, memory writes, mail submission, acknow
 ## Email boundary
 
 The [mail service](running.md#mail-service) owns sender checks; the email adapter relies on that guarantee when projecting message From addresses into correspondent IDs.
+
+The mail adapter bounds each HTTP exchange by one 60-second monotonic deadline, including connection, request writing, and response reading. On timeout or cancellation, it cancels and joins the exchange; cleanup closes unfinished connections. JMAP requests are not automatically retried: mailbox mutation, submission, or history publication may have succeeded before its acknowledgement was lost, and the resulting infrastructure failure propagates to runtime supervision.
 
 [Addressing](../packages/email/src/addressing.zig) derives the correspondent domain from `MAIL_ADDRESS`. It projects a same-domain address's local part into a readable ID and resolves an outgoing ID back into that domain. Domain comparisons ignore case; IDs preserve case. The supported ASCII ID and domain forms are described in [communication](communication.md#current-email-addressing).
 

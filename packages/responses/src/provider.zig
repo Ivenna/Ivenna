@@ -1,21 +1,28 @@
 const std = @import("std");
+const zdt = @import("zdt");
 const Model = @import("agent_contracts").Model;
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
 /// Responses wire encoding and HTTP transport. Tool selection and execution
-/// belong to the agent; every operation uses the caller's cancelable Io.
+/// belong to the agent; HTTP exchanges use the client's cancelable Io.
 pub const Provider = struct {
     pub const default_base_url = "https://api.deepseek.com";
     pub const default_model = "deepseek-flash";
     pub const default_max_output_tokens: u32 = 65536;
+    pub const default_max_attempts: u32 = 3;
+    pub const default_request_timeout_ms: u32 = 600000;
 
     client: *std.http.Client,
     base_url: []const u8 = default_base_url,
     api_key: []const u8 = "",
     model: []const u8 = default_model,
     max_output_tokens: u32 = default_max_output_tokens,
+    /// Maximum HTTP attempts per inference, including the initial request.
+    max_attempts: u32 = default_max_attempts,
+    /// Milliseconds available for all HTTP attempts and retry waits.
+    request_timeout_ms: u32 = default_request_timeout_ms,
 
     pub fn port(self: *Provider) Model.Port {
         return .{ .context = self, .vtable = &.{
@@ -123,13 +130,71 @@ pub const Provider = struct {
     }
 
     fn send(self: Provider, arena: Allocator, request_payload: Payload) !Model.Response {
-        try self.client.io.checkCancel();
-
+        const io = self.client.io;
+        try io.checkCancel();
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = .fromMilliseconds(self.request_timeout_ms),
+            .clock = .awake,
+        });
         const payload = try std.json.Stringify.valueAlloc(arena, request_payload, .{});
         const url = try std.fmt.allocPrint(arena, "{s}/responses", .{std.mem.trimEnd(u8, self.base_url, "/")});
         const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{self.api_key});
-        var output = std.Io.Writer.Allocating.init(arena);
-        defer output.deinit();
+
+        const Result = union(enum) { response: anyerror!Model.Response, timeout: std.Io.Cancelable!void };
+        var buffer: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(io, &buffer);
+        // Join the exchange before the caller can release its request arena.
+        defer select.cancelDiscard();
+        try select.concurrent(.response, sendWithRetries, .{ self, arena, payload, url, authorization });
+        try select.concurrent(.timeout, waitForDeadline, .{ io, deadline });
+        return switch (try select.await()) {
+            .response => |result| try result,
+            .timeout => |result| blk: {
+                try result;
+                break :blk error.ModelRequestTimedOut;
+            },
+        };
+    }
+
+    const Attempt = union(enum) {
+        response: Model.Response,
+        retry: struct { status: std.http.Status, after_ms: ?i64 },
+    };
+
+    fn sendWithRetries(self: Provider, arena: Allocator, payload: []const u8, url: []const u8, authorization: []const u8) !Model.Response {
+        const io = self.client.io;
+        var attempt: u32 = 1;
+        while (true) : (attempt += 1) {
+            try io.checkCancel();
+            var after_ms: ?i64 = null;
+            if (self.sendAttempt(arena, payload, url, authorization)) |result| {
+                switch (result) {
+                    .response => |response| return response,
+                    .retry => |retry| {
+                        if (attempt >= self.max_attempts) {
+                            std.log.warn("model endpoint returned HTTP {d}; exhausted {d} attempts", .{ @backingInt(retry.status), attempt });
+                            return error.ModelHttpFailure;
+                        }
+                        after_ms = retry.after_ms;
+                        std.log.warn("model endpoint returned HTTP {d}; retrying after attempt {d}/{d}", .{ @backingInt(retry.status), attempt, self.max_attempts });
+                    },
+                }
+            } else |err| {
+                if (!retryableTransport(err) or attempt >= self.max_attempts) return err;
+                std.log.warn("model transport failed ({s}); retrying after attempt {d}/{d}", .{ @errorName(err), attempt, self.max_attempts });
+            }
+            var random: [2]u8 = undefined;
+            io.random(&random);
+            const delay_ms = after_ms orelse retryDelay(attempt, std.mem.readInt(u16, &random, .little));
+            try io.sleep(.fromMilliseconds(delay_ms), .awake);
+        }
+    }
+
+    fn sendAttempt(self: Provider, arena: Allocator, payload: []const u8, url: []const u8, authorization: []const u8) !Attempt {
+        // Response bytes are temporary; decoded output belongs to the caller.
+        var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
+        defer scratch.deinit();
+        const temporary = scratch.allocator();
         var request = try self.client.request(.POST, try std.Uri.parse(url), .{
             .headers = .{
                 .content_type = .{ .override = "application/json" },
@@ -139,26 +204,39 @@ pub const Provider = struct {
             .redirect_behavior = .unhandled,
         });
         defer request.deinit();
-        request.sendBodyComplete(payload) catch |err| return transportError(&request, err);
+        // Closing skips Request.deinit's unread-body drain, which could block
+        // again after cancellation has already been delivered.
+        errdefer if (request.connection) |connection| {
+            connection.closing = true;
+        };
+        sendPayload(&request, payload) catch |err| return transportError(&request, err);
         var response = request.receiveHead(&.{}) catch |err| return transportError(&request, err);
+        if (retryableStatus(response.head.status)) {
+            const after_ms = retryAfter(response.head, self.client.io);
+            request.connection.?.closing = true;
+            return .{ .retry = .{ .status = response.head.status, .after_ms = after_ms } };
+        }
         if (response.head.status != .ok) {
-            std.log.err("model endpoint returned HTTP {d}", .{@backingInt(response.head.status)});
-            _ = response.reader(&.{}).streamRemaining(&output.writer) catch |err| return transportError(&request, err);
-            const failure = std.json.parseFromSliceLeaky(struct {
-                @"error": struct { message: []const u8 },
-            }, arena, output.written(), .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => return error.ModelHttpFailure,
-            };
-            const detail = failure.@"error".message;
-            const message = if (self.api_key.len == 0) detail else try std.mem.replaceOwned(u8, arena, detail, self.api_key, "[redacted]");
-            std.log.err("model endpoint: {s}", .{message});
+            std.log.warn("model endpoint returned HTTP {d}", .{@backingInt(response.head.status)});
             return error.ModelHttpFailure;
         }
         if (response.head.content_encoding != .identity) return error.UnsupportedModelEncoding;
+        const content_length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
         const reader = response.reader(&.{});
-        _ = reader.streamRemaining(&output.writer) catch |err| return transportError(&request, err);
-        return decodeResponse(arena, output.written());
+        var output = std.Io.Writer.Allocating.init(temporary);
+        defer output.deinit();
+        if (content_length) |length| {
+            reader.streamExact64(&output.writer, length) catch |err| {
+                if (err == error.WriteFailed) return error.OutOfMemory;
+                return transportError(&request, err);
+            };
+        } else {
+            _ = reader.streamRemaining(&output.writer) catch |err| {
+                if (err == error.WriteFailed) return error.OutOfMemory;
+                return transportError(&request, err);
+            };
+        }
+        return .{ .response = try decodeResponse(arena, output.written()) };
     }
 
     /// Decode every output item before returning calls for execution. Check
@@ -288,8 +366,110 @@ fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {
     if (request.connection) |connection| {
         if (connection.stream_reader.err) |cause| if (cause == error.Canceled) return cause;
         if (connection.stream_writer.err) |cause| if (cause == error.Canceled) return cause;
+        if (err == error.ReadFailed) {
+            if (request.reader.body_err) |cause| return cause;
+            return connection.getReadError() orelse err;
+        }
+        if (err == error.WriteFailed) {
+            if (connection.stream_writer.err) |cause| return cause;
+        }
     }
     return err;
+}
+
+fn sendPayload(request: *std.http.Client.Request, payload: []const u8) std.Io.Writer.Error!void {
+    // sendBodyComplete uses its input as a mutable buffer and can shift it
+    // after partial writes. Keep the serialized payload intact for retries.
+    request.transfer_encoding = .{ .content_length = payload.len };
+    var body = try request.sendBodyUnflushed(&.{});
+    try body.writer.writeAll(payload);
+    try body.end();
+}
+
+fn waitForDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
+    try deadline.wait(io);
+}
+
+fn retryableStatus(status: std.http.Status) bool {
+    return status.class() == .server_error or status == .request_timeout or status == .too_many_requests;
+}
+
+fn retryableTransport(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionAborted,
+        error.BrokenPipe,
+        error.SocketUnconnected,
+        error.NetworkDown,
+        error.NetworkUnreachable,
+        error.HostUnreachable,
+        error.Timeout,
+        error.ConnectionTimedOut,
+        error.NameServerFailure,
+        error.HttpConnectionClosing,
+        error.HttpRequestTruncated,
+        error.EndOfStream,
+        error.HttpChunkTruncated,
+        error.TlsConnectionTruncated,
+        => true,
+        else => false,
+    };
+}
+
+fn retryDelay(attempt: u32, random: u16) i64 {
+    const base: i64 = @as(i64, 500) << @intCast(@min(attempt - 1, 4));
+    // Equal jitter spreads concurrent sessions over half to all of the delay.
+    return @divTrunc(base, 2) + @divTrunc(@divTrunc(base, 2) * random, std.math.maxInt(u16));
+}
+
+fn retryAfter(head: std.http.Client.Response.Head, io: std.Io) ?i64 {
+    var headers = head.iterateHeaders();
+    while (headers.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "retry-after"))
+            return retryAfterMilliseconds(header.value, std.Io.Clock.real.now(io).toMilliseconds());
+    }
+    return null;
+}
+
+fn retryAfterMilliseconds(raw: []const u8, now_ms: i64) ?i64 {
+    const value = std.mem.trim(u8, raw, " \t");
+    if (value.len == 0) return null;
+    if (for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) break false;
+    } else true) {
+        const seconds = std.fmt.parseInt(i64, value, 10) catch return std.math.maxInt(i64);
+        return seconds *| 1000;
+    }
+
+    // IMF-fixdate uses English names and UTC.
+    if (value.len != 29 or !std.mem.eql(u8, value[3..5], ", ") or value[7] != ' ' or
+        value[11] != ' ' or value[16] != ' ' or value[19] != ':' or value[22] != ':' or
+        !std.mem.eql(u8, value[25..], " GMT")) return null;
+    _ = zdt.Datetime.Weekday.nameShortToInt(value[0..3]) catch return null;
+    const date = zdt.Datetime.fromFields(.{
+        .year = std.fmt.parseUnsigned(i16, value[12..16], 10) catch return null,
+        .month = zdt.Datetime.Month.nameShortToInt(value[8..11]) catch return null,
+        .day = std.fmt.parseUnsigned(u8, value[5..7], 10) catch return null,
+        .hour = std.fmt.parseUnsigned(u8, value[17..19], 10) catch return null,
+        .minute = std.fmt.parseUnsigned(u8, value[20..22], 10) catch return null,
+        .second = std.fmt.parseUnsigned(u8, value[23..25], 10) catch return null,
+        .tz_options = .{ .tz = &zdt.Timezone.UTC },
+    }) catch return null;
+    const timestamp_ms: i64 = @intCast(date.toUnix(.millisecond));
+    return @max(0, timestamp_ms -| now_ms);
+}
+
+test "Retry-After preserves server timing and ignores invalid dates" {
+    const testing = std.testing;
+    try testing.expectEqual(@as(?i64, 2000), retryAfterMilliseconds(" 2 ", 0));
+    try testing.expectEqual(@as(?i64, 0), retryAfterMilliseconds("0", 0));
+    try testing.expectEqual(@as(?i64, 1500), retryAfterMilliseconds("Thu, 01 Jan 1970 00:00:02 GMT", 500));
+    try testing.expectEqual(@as(?i64, 0), retryAfterMilliseconds("Thu, 01 Jan 1970 00:00:02 GMT", 3000));
+    try testing.expectEqual(@as(?i64, 500), retryAfterMilliseconds("Wed, 21 Oct 2015 07:28:00 GMT", 1445412479500));
+    try testing.expectEqual(null, retryAfterMilliseconds("-1", 0));
+    try testing.expectEqual(null, retryAfterMilliseconds("tomorrow", 0));
+    try testing.expectEqual(null, retryAfterMilliseconds("Fri, 30 Feb 2024 00:00:00 GMT", 0));
 }
 
 fn field(value: Value, name: []const u8) error{InvalidModelResponse}!Value {

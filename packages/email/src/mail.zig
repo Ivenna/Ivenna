@@ -1040,6 +1040,31 @@ pub const Mailbox = struct {
     }
 
     fn http(self: Mailbox, a: Allocator, method: std.http.Method, url: []const u8, payload: ?[]u8) !Value {
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.client.io, .{ .raw = .fromSeconds(60), .clock = .awake });
+        return self.httpBefore(a, method, url, payload, deadline);
+    }
+
+    fn httpBefore(self: Mailbox, a: Allocator, method: std.http.Method, url: []const u8, payload: ?[]u8, deadline: std.Io.Clock.Timestamp) !Value {
+        const io = self.client.io;
+        try io.checkCancel();
+        const Result = union(enum) { response: anyerror!Value, timeout: std.Io.Cancelable!void };
+        var buffer: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(io, &buffer);
+        defer select.cancelDiscard();
+        // JMAP mutations can take effect before a connection fails. Bound one
+        // exchange, then propagate failure without replaying the request.
+        try select.concurrent(.response, httpExchange, .{ self, a, method, url, payload });
+        try select.concurrent(.timeout, waitForDeadline, .{ io, deadline });
+        return switch (try select.await()) {
+            .response => |result| try result,
+            .timeout => |result| blk: {
+                try result;
+                break :blk error.MailRequestTimedOut;
+            },
+        };
+    }
+
+    fn httpExchange(self: Mailbox, a: Allocator, method: std.http.Method, url: []const u8, payload: ?[]u8) !Value {
         try self.client.io.checkCancel();
         var output = std.Io.Writer.Allocating.init(a);
         defer output.deinit();
@@ -1052,6 +1077,11 @@ pub const Mailbox = struct {
             .redirect_behavior = if (method == .GET) .init(3) else .unhandled,
         });
         defer request.deinit();
+        // Closing skips Request.deinit's unread-body drain, which could block
+        // again after cancellation has already been delivered.
+        errdefer if (request.connection) |connection| {
+            connection.closing = true;
+        };
         if (payload) |bytes| {
             request.sendBodyComplete(bytes) catch |err| return transportError(&request, err);
         } else {
@@ -1064,13 +1094,29 @@ pub const Mailbox = struct {
             return error.MailHttpFailure;
         }
         if (response.head.content_encoding != .identity) return error.UnsupportedMailEncoding;
-        _ = response.reader(&.{}).streamRemaining(&output.writer) catch |err| return transportError(&request, err);
+        const content_length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
+        const reader = response.reader(&.{});
+        if (content_length) |length| {
+            reader.streamExact64(&output.writer, length) catch |err| {
+                if (err == error.WriteFailed) return error.OutOfMemory;
+                return transportError(&request, err);
+            };
+        } else {
+            _ = reader.streamRemaining(&output.writer) catch |err| {
+                if (err == error.WriteFailed) return error.OutOfMemory;
+                return transportError(&request, err);
+            };
+        }
         return std.json.parseFromSliceLeaky(Value, a, output.written(), .{ .allocate = .alloc_always }) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.InvalidMailReply,
         };
     }
 };
+
+fn waitForDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
+    try deadline.wait(io);
+}
 
 fn objectLimit(record: Value, name: []const u8) !usize {
     const item = try field(record, name);
@@ -1264,4 +1310,131 @@ fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {
         if (connection.stream_writer.err) |cause| if (cause == error.Canceled) return cause;
     }
     return err;
+}
+
+const TestHttpServer = struct {
+    io: std.Io,
+    listener: std.Io.net.Server,
+    response: []const u8,
+    close_after_response: bool = false,
+    received: std.Io.Event = .unset,
+
+    fn init(io: std.Io, response: []const u8) !TestHttpServer {
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+        return .{ .io = io, .listener = try address.listen(io, .{}), .response = response };
+    }
+
+    fn url(self: *TestHttpServer, a: Allocator) ![]const u8 {
+        return std.fmt.allocPrint(a, "http://{f}/jmap", .{self.listener.socket.address});
+    }
+
+    fn serve(self: *TestHttpServer) !void {
+        const connection = try self.listener.accept(self.io);
+        defer connection.close(self.io);
+        var read_buffer: [4096]u8 = undefined;
+        var write_buffer: [1024]u8 = undefined;
+        var reader = connection.reader(self.io, &read_buffer);
+        var writer = connection.writer(self.io, &write_buffer);
+        var server = std.http.Server.init(&reader.interface, &writer.interface);
+        var request = try server.receiveHead();
+        _ = try request.readerExpectNone(&.{}).discardRemaining();
+        try writer.interface.writeAll(self.response);
+        try writer.interface.flush();
+        self.received.set(self.io);
+        if (self.close_after_response) return;
+        // Keep an incomplete response open until the client closes it.
+        var buffer: [1]u8 = undefined;
+        var buffers = [_][]u8{&buffer};
+        if (try connection.read(self.io, &buffers) != 0) return error.UnexpectedRequestReplay;
+    }
+};
+
+fn testMailbox(client: *std.http.Client) !Mailbox {
+    return .{
+        .client = client,
+        .session_url = "",
+        .authorization = "test",
+        .address = "ivenna@example.com",
+        .addressing = try Addressing.init("ivenna@example.com"),
+    };
+}
+
+test "mail HTTP deadline closes connections stalled on response headers or body" {
+    const io = std.testing.io;
+    for ([_][]const u8{
+        "",
+        "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{",
+    }) |response| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var server = try TestHttpServer.init(io, response);
+        defer server.listener.deinit(io);
+        var serving = try io.concurrent(TestHttpServer.serve, .{&server});
+        defer serving.cancel(io) catch {};
+        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+        defer client.deinit();
+        const mailbox = try testMailbox(&client);
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .awake });
+        try std.testing.expectError(error.MailRequestTimedOut, mailbox.httpBefore(a, .POST, try server.url(a), try a.dupe(u8, "{}"), deadline));
+        try serving.await(io);
+    }
+}
+
+test "mail HTTP cancellation closes connections stalled on response headers or body" {
+    const io = std.testing.io;
+    for ([_][]const u8{
+        "",
+        "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{",
+    }) |response| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var server = try TestHttpServer.init(io, response);
+        defer server.listener.deinit(io);
+        var serving = try io.concurrent(TestHttpServer.serve, .{&server});
+        defer serving.cancel(io) catch {};
+        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+        defer client.deinit();
+        const mailbox = try testMailbox(&client);
+        var request = try io.concurrent(Mailbox.http, .{ mailbox, a, std.http.Method.POST, try server.url(a), try a.dupe(u8, "{}") });
+        defer _ = request.cancel(io) catch {};
+        try server.received.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+        try std.testing.expectError(error.Canceled, request.cancel(io));
+        try serving.await(io);
+    }
+}
+
+test "mail HTTP rejects encoding without reading the response body" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var server = try TestHttpServer.init(io, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 100\r\n\r\n");
+    defer server.listener.deinit(io);
+    var serving = try io.concurrent(TestHttpServer.serve, .{&server});
+    defer serving.cancel(io) catch {};
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    defer client.deinit();
+    const mailbox = try testMailbox(&client);
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake });
+    try std.testing.expectError(error.UnsupportedMailEncoding, mailbox.httpBefore(a, .POST, try server.url(a), try a.dupe(u8, "{}"), deadline));
+    try serving.await(io);
+}
+
+test "mail HTTP rejects complete JSON in a truncated response" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var server = try TestHttpServer.init(io, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"methodResponses\":[]}");
+    server.close_after_response = true;
+    defer server.listener.deinit(io);
+    var serving = try io.concurrent(TestHttpServer.serve, .{&server});
+    defer serving.cancel(io) catch {};
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    defer client.deinit();
+    const mailbox = try testMailbox(&client);
+    try std.testing.expectError(error.EndOfStream, mailbox.http(a, .POST, try server.url(a), try a.dupe(u8, "{}")));
+    try serving.await(io);
 }

@@ -40,6 +40,8 @@ pub fn main(init: std.process.Init) !void {
         .api_key = config.llm_api_key,
         .model = config.llm_model,
         .max_output_tokens = config.llm_max_output_tokens,
+        .max_attempts = config.llm_max_attempts,
+        .request_timeout_ms = config.llm_request_timeout_ms,
     };
     const shared_tools = [_]contracts.Tools{try memory_client.tools(a)};
     const activity_tools = [_]contracts.Tools{try host_tools.tools(a)};

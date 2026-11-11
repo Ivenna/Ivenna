@@ -57,7 +57,7 @@ Image references supplied as text first pass the [16 KiB source limit](#image-ur
 
 The adapter omits new HTTP(S) image URL parts that exceed the code point limit, then keeps new images in order up to the count limit. If the serialized request exceeds the byte limit, it omits new images from the end until the request fits or no new images remain. Each omitted image part becomes a text part containing an `error` with code `content_limit`. The operation description, source, and other parts remain available.
 
-These checks only remove new images. Retained content or text can still leave the request above these limits. Before inference, the kernel checks the remaining request against its configured [context budgets](running.md#model-and-context-budgets). A request over budget can require a handover or end execution.
+These checks only remove new images. Retained content or text can still leave the request above these limits. Before inference, the kernel checks the remaining request against its configured [context budgets](running.md#context-budgets). A request over budget can require a handover or end execution.
 
 ## Context and continuity
 

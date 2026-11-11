@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 
 test {
     _ = @import("addressing.zig");
+    _ = @import("mail.zig");
 }
 
 pub const Config = struct {

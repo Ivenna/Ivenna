@@ -8,6 +8,7 @@
         .agent = .{ .path = "packages/agent" },
         .email = .{ .path = "packages/email" },
         .content = .{ .path = "packages/content" },
+        .responses = .{ .path = "packages/responses" },
     },
     .paths = .{
         ".zig-version",
