@@ -138,9 +138,21 @@ The initial `run_host_shell` handoff has an independent prefix preview starting 
 
 When `run_host_shell` returns the final result directly, it supplies a complete-source preview without `command_id` or incremental ranges, independently of output another activity may have read. A large text preview includes the source's beginning and end with an omitted-byte count. For example, exit code `7` appears as `"state":{"finished":{"completed":{"exited":7}}}`.
 
-Final complete stdout can supply an image or image URL reference through [content classification](content.md). The first final `continue_host_shell` observation of a retained handle can supply its complete native media once, independently of the text cursor. This stdout description has no `range` and advances the shared cursor to the end. If a command finishes before its initial handoff snapshot, that initial result can also carry native media without consuming the continuation's first-final allowance. Running output remains text or an unavailable-content diagnostic.
+Completed stdout can return an image or complete file under the shared [content rules and limits](content.md). Native content is additional to the `max_output_bytes` text budget. Running output and stderr remain text or unavailable-content diagnostics. Use `batch` or `pipe` to preserve file bytes; for example:
 
-A registered completion arrives as a [callback observation](input.md#focus-messages-and-callbacks). Its `source.host.command_id` identifies the command; the result in `text` omits the `command_id` field. That result contains an independent complete-source preview or an output diagnostic. It reports the host outcome; Ivenna assesses whether the assigned task succeeded. The callback consumes neither the shared continuation cursors nor their first-final media observation. It carries media descriptions and log paths; `media_omission: "asynchronous_media_unavailable"` marks a native part that the text-only callback cannot carry.
+```json
+{"name":"report","command":"cat /path/to/report.pdf"}
+```
+
+To present complete stdout text as an image URL instead, set `interpretation: "image_url"`:
+
+```json
+{"name":"image-reference","command":"printf '%s' 'https://example.com/image.png'","interpretation":"image_url"}
+```
+
+After completion, `continue_host_shell` can return a retained command's complete native stdout once, independently of text already read. Earlier text-only observations do not prevent a later read from supplying the whole file when it encounters binary content. A native result or complete-source diagnostic has no stdout `range` and advances the shared cursor to the end. If the command has already finished at its initial handoff, that result can contain native media and a continuation can still return it.
+
+A registered completion arrives as a [callback observation](input.md#focus-messages-and-callbacks). Its `source.host.command_id` identifies the command; the result in `text` omits the `command_id` field. This independent complete-source preview or diagnostic reports the host outcome; Ivenna assesses whether the assigned task succeeded. The callback does not advance continuation cursors or prevent a later native return. It carries media descriptions and log paths; `media_omission: "asynchronous_media_unavailable"` identifies native content that the text-only callback cannot carry.
 
 For incremental `content.unavailable`, its `byte_length` describes the unsupported range; the stream's `byte_length` describes the entire log snapshot. Without a range, the diagnostic concerns the complete source. Full logs remain at the returned paths under `<DATA_DIR>/host/` independently of handle retention, and can be read through another command to inspect omitted text or media.
 

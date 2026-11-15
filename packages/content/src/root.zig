@@ -9,6 +9,7 @@ pub const Content = struct {
     pub const Part = union(enum) {
         text: []const u8,
         image: ImageContent,
+        file: File,
     };
 
     pub fn fromText(allocator: std.mem.Allocator, text: []const u8) !Content {
@@ -39,7 +40,20 @@ pub const ImageContent = union(enum) {
 
 pub const Image = @import("image.zig").Image;
 
+/// Complete opaque file bytes. The model service owns format recognition.
+pub const File = struct {
+    bytes: []const u8,
+    reference: ?[]const u8 = null,
+
+    pub const Description = struct { byte_length: u64 };
+
+    pub fn describe(self: File) Description {
+        return .{ .byte_length = self.bytes.len };
+    }
+};
+
 pub const image_size_limit = 32 * 1024 * 1024;
+pub const file_size_limit = 32 * 1024 * 1024;
 pub const reference_size_limit = 16 * 1024;
 
 /// Explicit interpretation of a complete text source as a resource reference.
@@ -47,13 +61,13 @@ pub const Interpretation = enum { image_url };
 
 pub const Unavailable = struct {
     byte_length: u64,
-    reason: enum { unsupported_binary, image_too_large, reference_too_large },
+    reason: enum { unsupported_binary, image_too_large, file_too_large, reference_too_large },
 };
 
 pub const Classified = union(enum) {
     text: []const u8,
     image: ImageContent,
-    unavailable: Unavailable,
+    file: File,
 };
 
 /// Recognize encoded image signatures without decoding pixels.
@@ -67,24 +81,30 @@ pub fn detectFormat(bytes: []const u8) ?Image.Format {
     };
 }
 
-/// Classify bytes by image signature or UTF-8 text. A textual address stays text.
+/// A partial UTF-8 character at the end of a prefix is still possible text.
+/// ASCII PDF headers need complete-file delivery even when all bytes are text.
+pub fn requiresCompleteSource(prefix: []const u8, complete: bool) bool {
+    return detectFormat(prefix) != null or hasPdfHeader(prefix) or textPrefixLength(prefix, !complete) == null;
+}
+
+fn hasPdfHeader(bytes: []const u8) bool {
+    return bytes.len >= 8 and std.mem.startsWith(u8, bytes, "%PDF-") and
+        std.ascii.isDigit(bytes[5]) and bytes[6] == '.' and std.ascii.isDigit(bytes[7]);
+}
+
+/// Preserve ordinary text and images; pass other complete sources as files.
 pub fn classify(bytes: []const u8) Classified {
-    if (detectFormat(bytes)) |format| {
-        if (bytes.len > image_size_limit)
-            return .{ .unavailable = .{ .byte_length = bytes.len, .reason = .image_too_large } };
+    if (detectFormat(bytes)) |format|
         return .{ .image = .{ .data = .{ .format = format, .bytes = bytes } } };
-    }
-    if (!isText(bytes))
-        return .{ .unavailable = .{ .byte_length = bytes.len, .reason = .unsupported_binary } };
+    if (hasPdfHeader(bytes) or !isText(bytes))
+        return .{ .file = .{ .bytes = bytes } };
     return .{ .text = bytes };
 }
 
 /// Present a caller-declared image reference without fetching or validating it.
-/// Recognized image bytes keep their data representation; empty text stays text.
+/// Recognized media keep their data representation; empty text stays text.
 pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Classified {
     const classified = classify(bytes);
-    if (interpretation == .image_url and classified == .text and bytes.len > reference_size_limit)
-        return .{ .unavailable = .{ .byte_length = bytes.len, .reason = .reference_too_large } };
     if (interpretation == .image_url and classified == .text and bytes.len != 0)
         return .{ .image = .{ .url = bytes } };
     return classified;
@@ -97,28 +117,30 @@ pub fn isText(bytes: []const u8) bool {
 /// Length of the UTF-8 text prefix, excluding a still-valid incomplete tail
 /// when allowed. Null means NUL or a sequence that cannot become valid text.
 pub fn textPrefixLength(bytes: []const u8, allow_partial: bool) ?usize {
-    var index: usize = 0;
-    while (index < bytes.len) {
-        const first = bytes[index];
-        if (first == 0 or (first >= 0xc0 and first < 0xc2) or first > 0xf4) return null;
-        const length = std.unicode.utf8ByteSequenceLength(first) catch return null;
-        if (length > bytes.len - index) {
-            if (!allow_partial) return null;
-            const rest = bytes[index..];
-            for (rest[1..]) |byte| if (byte & 0xc0 != 0x80) return null;
-            if (rest.len > 1) {
-                const second = rest[1];
-                if ((first == 0xe0 and second < 0xa0) or
-                    (first == 0xed and second >= 0xa0) or
-                    (first == 0xf0 and second < 0x90) or
-                    (first == 0xf4 and second >= 0x90)) return null;
-            }
-            return index;
-        }
-        _ = std.unicode.utf8Decode(bytes[index..][0..length]) catch return null;
-        index += length;
+    if (std.mem.indexOfScalar(u8, bytes, 0) != null) return null;
+    if (std.unicode.utf8ValidateSlice(bytes)) return bytes.len;
+    if (!allow_partial) return null;
+
+    // An incomplete codepoint has at most three bytes. Walking backward also
+    // establishes that every byte after its leading byte is a continuation.
+    var start = bytes.len - 1;
+    while (bytes[start] & 0xc0 == 0x80) {
+        if (start == 0 or bytes.len - start == 3) return null;
+        start -= 1;
     }
-    return index;
+    const tail = bytes[start..];
+    const first = tail[0];
+    if (first < 0xc2 or first > 0xf4) return null;
+    const length = std.unicode.utf8ByteSequenceLength(first) catch return null;
+    if (length <= tail.len) return null;
+    if (tail.len > 1) {
+        const second = tail[1];
+        if ((first == 0xe0 and second < 0xa0) or
+            (first == 0xed and second >= 0xa0) or
+            (first == 0xf0 and second < 0x90) or
+            (first == 0xf4 and second >= 0x90)) return null;
+    }
+    return if (std.unicode.utf8ValidateSlice(bytes[0..start])) start else null;
 }
 
 test "image references require explicit interpretation and preserve source representation" {
@@ -131,22 +153,44 @@ test "image references require explicit interpretation and preserve source repre
     const image = interpret(png, .image_url).image.data;
     try std.testing.expectEqual(Image.Format.png, image.format);
     try std.testing.expectEqualSlices(u8, png, image.bytes);
-
-    const oversized = try std.testing.allocator.alloc(u8, reference_size_limit + 1);
-    defer std.testing.allocator.free(oversized);
-    @memset(oversized, 'a');
-    const unavailable = interpret(oversized, .image_url).unavailable;
-    try std.testing.expectEqual(.reference_too_large, unavailable.reason);
-    try std.testing.expectEqual(oversized.len, unavailable.byte_length);
 }
 
-test "streaming text leaves incomplete UTF-8 for the next observation" {
-    const incomplete = "hi \xf0\x9f";
-    try std.testing.expectEqual(@as(?usize, 3), textPrefixLength(incomplete, true));
-    try std.testing.expectEqual(null, textPrefixLength(incomplete, false));
+test "complete binary files pass through without local format recognition" {
+    for ([_][]const u8{ "%PDF-1.7\nall ASCII", "\x00\xff\x01", "PK\x03\x04\x00unknown package" }) |bytes| {
+        const file = classify(bytes).file;
+        try std.testing.expectEqualSlices(u8, bytes, file.bytes);
+        try std.testing.expectEqual(null, file.reference);
+        try std.testing.expectEqualSlices(u8, bytes, interpret(bytes, .image_url).file.bytes);
+    }
+    try std.testing.expectEqualStrings("ordinary text", classify("ordinary text").text);
+    try std.testing.expect(!requiresCompleteSource("UTF-8 \xf0\x9f", false));
+    try std.testing.expect(requiresCompleteSource("UTF-8 \xf0\x9f", true));
+    try std.testing.expect(requiresCompleteSource("binary \x00", false));
+}
 
-    const complete = incomplete ++ "\x90\xbe";
+test "streaming text preserves valid codepoint prefixes at encoding boundaries" {
+    const prefix = "context ";
+    for ([_]u21{ 0x80, 0x800, 0xd7ff, 0x10000, 0x10ffff }) |codepoint| {
+        var bytes: [prefix.len + 4]u8 = undefined;
+        @memcpy(bytes[0..prefix.len], prefix);
+        const length = try std.unicode.utf8Encode(codepoint, bytes[prefix.len..]);
+        for (1..@as(usize, length)) |selected| {
+            const source = bytes[0 .. prefix.len + selected];
+            try std.testing.expectEqual(@as(?usize, prefix.len), textPrefixLength(source, true));
+            try std.testing.expectEqual(null, textPrefixLength(source, false));
+        }
+    }
+    try std.testing.expectEqual(@as(?usize, 0), textPrefixLength("", true));
+    const complete = "hi \xf0\x9f\x90\xbe";
     try std.testing.expectEqual(@as(?usize, complete.len), textPrefixLength(complete, false));
-    try std.testing.expectEqual(null, textPrefixLength("hi \xf0A", true));
-    try std.testing.expectEqual(null, textPrefixLength("hi \x00", true));
+}
+
+test "streaming text rejects malformed bytes rather than retaining them as an incomplete tail" {
+    for ([_][]const u8{
+        "text\x00tail", "\x80", "\xc0",      "\xe0\x80",     "\xed\xa0",         "\xf0\x80",
+        "\xf4\x90",     "\xf5", "\xe2\x82A", "\xff\xe2\x82", "\xe2\x82\xac\x80",
+    }) |bytes| {
+        try std.testing.expectEqual(null, textPrefixLength(bytes, true));
+        try std.testing.expectEqual(null, textPrefixLength(bytes, false));
+    }
 }

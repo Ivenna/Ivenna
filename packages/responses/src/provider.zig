@@ -2,6 +2,7 @@ const std = @import("std");
 const zdt = @import("zdt");
 const Model = @import("agent_contracts").Model;
 const Content = @import("content").Content;
+const File = @import("content").File;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
@@ -47,17 +48,42 @@ pub const Provider = struct {
         return counter.fullCount();
     }
 
-    /// Preserve prior history and all non-image parts. Only the new reply
-    /// parts are copied and changed, keeping the caller's other observations.
+    /// Prepare file input and apply request limits only to the new reply parts.
+    /// Retained history and the caller's other observations remain unchanged.
     fn limitToolReplies(context: *anyopaque, arena: Allocator, request: Model.Request, replies: []Model.Item) anyerror!void {
+        const self: *Provider = @ptrCast(@alignCast(context));
         const earlier = request.history[0 .. request.history.len - replies.len];
         var count = imageCount(earlier);
+        var files = fileCount(earlier);
         var has_image = false;
         for (replies) |*reply| {
             if (reply.* != .tool_result) continue;
             const parts = try arena.dupe(Content.Part, reply.tool_result.content.parts);
             reply.tool_result.content.parts = parts;
             for (parts) |*part| {
+                if (part.* == .file) {
+                    if (files >= 20) {
+                        part.* = try contentLimitPart(arena, "File omitted: adding it would exceed the limit of 20 files per request.");
+                        continue;
+                    }
+                    if (part.file.reference == null) {
+                        switch (try self.uploadFile(arena, part.file)) {
+                            .reference => |reference| part.file.reference = reference,
+                            .rejected => |status| {
+                                part.* = .{ .text = try std.json.Stringify.valueAlloc(arena, .{
+                                    .@"error" = .{
+                                        .code = "file_upload_failed",
+                                        .message = "The model service rejected the file upload, so the file contents were not attached.",
+                                        .http_status = @backingInt(status),
+                                    },
+                                }, .{}) };
+                                continue;
+                            },
+                        }
+                    }
+                    files += 1;
+                    continue;
+                }
                 if (part.* != .image) continue;
                 if (part.image == .url) {
                     const url = part.image.url;
@@ -111,8 +137,40 @@ pub const Provider = struct {
     };
 
     fn requestPayload(self: Provider, arena: Allocator, request: Model.Request) !Payload {
-        const input = try arena.alloc(Value, request.history.len);
-        for (request.history, input) |item, *encoded| encoded.* = try encodeItem(arena, item);
+        var input: std.ArrayList(Value) = .empty;
+        defer input.deinit(arena);
+        var attachments: std.ArrayList(Value) = .empty;
+        defer attachments.deinit(arena);
+        for (request.history) |item| {
+            if (item != .tool_result) {
+                try input.appendSlice(arena, attachments.items);
+                attachments.clearRetainingCapacity();
+            }
+            try input.append(arena, try encodeItem(arena, item));
+            if (item != .tool_result) continue;
+            var files: std.ArrayList(Value) = .empty;
+            defer files.deinit(arena);
+            for (item.tool_result.content.parts) |part| {
+                if (part != .file) continue;
+                try files.append(arena, try encodeContentPart(arena, .{
+                    .text = try std.json.Stringify.valueAlloc(arena, .{
+                        .source = .{ .tool_call_id = item.tool_result.call_id },
+                        .file = part.file.describe(),
+                    }, .{}),
+                }));
+                var fields: std.json.ObjectMap = .empty;
+                try fields.put(arena, "type", .{ .string = "input_file" });
+                try fields.put(arena, "file_id", .{ .string = part.file.reference orelse return error.UnpreparedModelFile });
+                try files.append(arena, .{ .object = fields });
+            }
+            if (files.items.len != 0) {
+                var fields: std.json.ObjectMap = .empty;
+                try fields.put(arena, "role", .{ .string = "user" });
+                try fields.put(arena, "content", .{ .array = std.array_list.Managed(Value).fromOwnedSlice(arena, try files.toOwnedSlice(arena)) });
+                try attachments.append(arena, .{ .object = fields });
+            }
+        }
+        try input.appendSlice(arena, attachments.items);
         const tools = try arena.alloc(WireTool, request.tools.len);
         for (request.tools, tools) |tool, *encoded| encoded.* = .{
             .name = tool.name,
@@ -121,12 +179,103 @@ pub const Provider = struct {
         };
         return .{
             .model = self.model,
-            .input = input,
+            .input = try input.toOwnedSlice(arena),
             .tools = tools,
             .tool_choice = if (tools.len == 0) "none" else "auto",
             .max_output_tokens = self.max_output_tokens,
             .reasoning = .{ .effort = request.reasoning_effort },
         };
+    }
+
+    const Upload = union(enum) { reference: []const u8, rejected: std.http.Status };
+
+    fn uploadFile(self: Provider, arena: Allocator, file: File) !Upload {
+        const io = self.client.io;
+        try io.checkCancel();
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = .fromMilliseconds(self.request_timeout_ms),
+            .clock = .awake,
+        });
+        const Result = union(enum) { upload: anyerror!Upload, timeout: std.Io.Cancelable!void };
+        var buffer: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(io, &buffer);
+        defer select.cancelDiscard();
+        // Both purposes share one deadline. A lost response is never replayed:
+        // it may follow successful, billable parsing and storage.
+        try select.concurrent(.upload, uploadFileNegotiated, .{ self, arena, file });
+        try select.concurrent(.timeout, waitForDeadline, .{ io, deadline });
+        return switch (try select.await()) {
+            .upload => |result| try result,
+            .timeout => |result| blk: {
+                try result;
+                break :blk error.ModelFileUploadTimedOut;
+            },
+        };
+    }
+
+    fn uploadFileNegotiated(self: Provider, arena: Allocator, file: File) !Upload {
+        const result = try self.uploadFileOnce(arena, file, "rich_layout_recognition");
+        // The service rejects some formats for one purpose and accepts them
+        // for the other. A definite 400 is a failed upload, which the service
+        // does not store or bill; it need not identify the rejection's cause.
+        if (result == .rejected and result.rejected == .bad_request)
+            return self.uploadFileOnce(arena, file, "user_data");
+        return result;
+    }
+
+    fn uploadFileOnce(self: Provider, arena: Allocator, file: File, purpose: []const u8) !Upload {
+        var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
+        defer scratch.deinit();
+        const temporary = scratch.allocator();
+        var random: [16]u8 = undefined;
+        self.client.io.random(&random);
+        const hex = std.fmt.bytesToHex(random, .lower);
+        const boundary = try std.fmt.allocPrint(temporary, "ivenna-{s}", .{hex});
+        const prefix = try std.fmt.allocPrint(temporary, "--{s}\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\n{s}\r\n" ++
+            "--{s}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"document.bin\"\r\n" ++
+            "Content-Type: application/octet-stream\r\n\r\n", .{ boundary, purpose, boundary });
+        const suffix = try std.fmt.allocPrint(temporary, "\r\n--{s}--\r\n", .{boundary});
+        var payload = [_][]const u8{ prefix, file.bytes, suffix };
+        const base_url = std.mem.trimEnd(u8, self.base_url, "/");
+        const url = try std.fmt.allocPrint(temporary, "{s}/files", .{base_url});
+        const authorization = try std.fmt.allocPrint(temporary, "Bearer {s}", .{self.api_key});
+        const content_type = try std.fmt.allocPrint(temporary, "multipart/form-data; boundary={s}", .{boundary});
+        var request = try self.client.request(.POST, try std.Uri.parse(url), .{
+            .headers = .{
+                .content_type = .{ .override = content_type },
+                .authorization = .{ .override = authorization },
+                .accept_encoding = .{ .override = "identity" },
+            },
+            .redirect_behavior = .unhandled,
+        });
+        defer request.deinit();
+        errdefer if (request.connection) |connection| {
+            connection.closing = true;
+        };
+        sendPayload(&request, &payload) catch |err| return transportError(&request, err);
+        var response = request.receiveHead(&.{}) catch |err| return transportError(&request, err);
+        const status = response.head.status;
+        if (status.class() == .client_error) {
+            request.connection.?.closing = true;
+            return .{ .rejected = status };
+        }
+        if (status != .ok) {
+            std.log.warn("model file endpoint returned HTTP {d}", .{@backingInt(status)});
+            return error.ModelHttpFailure;
+        }
+        if (response.head.content_encoding != .identity) return error.UnsupportedModelEncoding;
+        const content_length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
+        const reader = response.reader(&.{});
+        const bytes = if (content_length) |length|
+            reader.readAllocAll(temporary, std.math.cast(usize, length) orelse return error.OutOfMemory) catch |err| return transportError(&request, err)
+        else
+            reader.allocRemaining(temporary, .unlimited) catch |err| return transportError(&request, err);
+        const uploaded = std.json.parseFromSliceLeaky(struct { id: []const u8 }, temporary, bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidModelResponse,
+        };
+        if (uploaded.id.len == 0) return error.InvalidModelResponse;
+        return .{ .reference = try arena.dupe(u8, uploaded.id) };
     }
 
     fn send(self: Provider, arena: Allocator, request_payload: Payload) !Model.Response {
@@ -209,7 +358,8 @@ pub const Provider = struct {
         errdefer if (request.connection) |connection| {
             connection.closing = true;
         };
-        sendPayload(&request, payload) catch |err| return transportError(&request, err);
+        var parts = [_][]const u8{payload};
+        sendPayload(&request, &parts) catch |err| return transportError(&request, err);
         var response = request.receiveHead(&.{}) catch |err| return transportError(&request, err);
         if (retryableStatus(response.head.status)) {
             const after_ms = retryAfter(response.head, self.client.io);
@@ -339,6 +489,12 @@ fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
             try encoded.put(arena, "type", .{ .string = "input_image" });
             try encoded.put(arena, "image_url", .{ .string = url });
         },
+        .file => |file| {
+            try encoded.put(arena, "type", .{ .string = "input_text" });
+            try encoded.put(arena, "text", .{ .string = try std.json.Stringify.valueAlloc(arena, .{
+                .file = file.describe(),
+            }, .{}) });
+        },
     }
     return .{ .object = encoded };
 }
@@ -355,6 +511,17 @@ fn imageCount(history: []const Model.Item) usize {
         if (item != .tool_result) continue;
         for (item.tool_result.content.parts) |part| {
             if (part == .image) count += 1;
+        }
+    }
+    return count;
+}
+
+fn fileCount(history: []const Model.Item) usize {
+    var count: usize = 0;
+    for (history) |item| {
+        if (item != .tool_result) continue;
+        for (item.tool_result.content.parts) |part| {
+            if (part == .file) count += 1;
         }
     }
     return count;
@@ -377,12 +544,15 @@ fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {
     return err;
 }
 
-fn sendPayload(request: *std.http.Client.Request, payload: []const u8) std.Io.Writer.Error!void {
+fn sendPayload(request: *std.http.Client.Request, parts: [][]const u8) std.Io.Writer.Error!void {
     // sendBodyComplete uses its input as a mutable buffer and can shift it
-    // after partial writes. Keep the serialized payload intact for retries.
-    request.transfer_encoding = .{ .content_length = payload.len };
+    // after partial writes. writeVecAll only updates and restores slice
+    // headers, preserving the serialized request and borrowed file bytes.
+    var length: usize = 0;
+    for (parts) |part| length += part.len;
+    request.transfer_encoding = .{ .content_length = length };
     var body = try request.sendBodyUnflushed(&.{});
-    try body.writer.writeAll(payload);
+    try body.writer.writeVecAll(parts);
     try body.end();
 }
 

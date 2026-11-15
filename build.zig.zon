@@ -9,6 +9,8 @@
         .email = .{ .path = "packages/email" },
         .content = .{ .path = "packages/content" },
         .responses = .{ .path = "packages/responses" },
+        .host = .{ .path = "packages/host" },
+        .memory = .{ .path = "packages/memory" },
     },
     .paths = .{
         ".zig-version",

@@ -95,7 +95,7 @@ pub const Host = struct {
         elapsed_ms: u64 = 0,
         completed_sequence: u64 = 0,
         cursors: [2]u64 = .{ 0, 0 }, // Protected by operations, not the registry lock.
-        final_stdout_collected: bool = false,
+        final_media_collected: bool = false,
         input_pending: bool = false,
         input_error: ?anyerror = null,
         input_open: bool,
@@ -134,7 +134,7 @@ pub const Host = struct {
                 .stdin = self.snapshot.stdin,
                 .stdout = self.streams.stdout.describe(),
                 .stderr = self.streams.stderr.describe(),
-                .media_omission = if (self.asynchronous and self.streams.stdout.content == .image) @as(?[]const u8, "asynchronous_media_unavailable") else null,
+                .media_omission = if (self.asynchronous and (self.streams.stdout.content == .image or self.streams.stdout.content == .file)) @as(?[]const u8, "asynchronous_media_unavailable") else null,
             };
             const text = if (failure) |err|
                 try std.json.Stringify.valueAlloc(a, .{ .@"error" = err, .result = result }, .{ .emit_null_optional_fields = false })
@@ -142,6 +142,8 @@ pub const Host = struct {
                 try success(a, result);
             if (!self.asynchronous and self.streams.stdout.content == .image)
                 return Content.fromParts(a, &.{ .{ .text = text }, .{ .image = self.streams.stdout.content.image } });
+            if (!self.asynchronous and self.streams.stdout.content == .file)
+                return Content.fromParts(a, &.{ .{ .text = text }, .{ .file = self.streams.stdout.content.file } });
             return Content.fromText(a, text);
         }
     };
@@ -445,10 +447,10 @@ pub const Host = struct {
                     // The starting call observes its own prefix without waiting
                     // behind another activity or consuming its shared cursor.
                     var cursors: [2]u64 = .{ 0, 0 };
-                    var final_stdout_collected = false;
-                    break :blk try job.invocation.collect(a, &cursors, &final_stdout_collected, current.state != .running, job.args.interpretation, budget);
+                    var final_media_collected = false;
+                    break :blk try job.invocation.collect(a, &cursors, &final_media_collected, current.state != .running, job.args.interpretation, budget);
                 },
-                .incremental => try job.invocation.collect(a, &job.cursors, &job.final_stdout_collected, current.state != .running, job.args.interpretation, budget),
+                .incremental => try job.invocation.collect(a, &job.cursors, &job.final_media_collected, current.state != .running, job.args.interpretation, budget),
             },
         };
     }
@@ -652,4 +654,32 @@ fn encodedLength(value: anytype) usize {
     var discard: std.Io.Writer.Discarding = .init(&buffer);
     std.json.Stringify.value(value, .{}, &discard.writer) catch unreachable;
     return @intCast(discard.fullCount());
+}
+
+test "file results preserve source descriptions and asynchronous omissions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const file: @import("content").File = .{ .bytes = "%PDF-1.7\n\x00\xfforiginal" };
+    var observation: Host.Observation = .{
+        .command_id = "read-1",
+        .snapshot = .{ .state = .{ .finished = .{ .completed = .{ .exited = 0 } } }, .elapsed_ms = 1, .stdin = .{ .open = false, .pending = false, .@"error" = null } },
+        .mode = .batch,
+        .streams = .{
+            .stdout = .{ .path = "/logs/stdout", .byte_length = file.bytes.len, .content = .{ .file = file } },
+            .stderr = .{ .path = "/logs/stderr", .byte_length = 0, .content = .{ .text = .{ .text = "", .truncated = false } } },
+        },
+    };
+    const result = try observation.render(a);
+    try std.testing.expectEqual(@as(usize, 2), result.parts.len);
+    try std.testing.expectEqualSlices(u8, file.bytes, result.parts[1].file.bytes);
+    const source = try std.json.parseFromSliceLeaky(std.json.Value, a, result.parts[0].text, .{});
+    const stdout = source.object.get("result").?.object.get("stdout").?.object;
+    try std.testing.expectEqualStrings("/logs/stdout", stdout.get("path").?.string);
+    try std.testing.expectEqual(@as(i64, @intCast(file.bytes.len)), stdout.get("content").?.object.get("file").?.object.get("byte_length").?.integer);
+    observation.asynchronous = true;
+    const callback = try observation.render(a);
+    try std.testing.expectEqual(@as(usize, 1), callback.parts.len);
+    const diagnostic = try std.json.parseFromSliceLeaky(std.json.Value, a, callback.parts[0].text, .{});
+    try std.testing.expectEqualStrings("asynchronous_media_unavailable", diagnostic.object.get("result").?.object.get("media_omission").?.string);
 }

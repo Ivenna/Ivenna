@@ -129,7 +129,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Revisit a memory. Read text in pages or receive a complete supported image.",
+    "description": "Revisit a memory. Read text in pages or receive a complete image or file.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -142,12 +142,12 @@
           "enum": [
             "image_url"
           ],
-          "description": "Use the memory's complete text as the image URL."
+          "description": "Use the memory's complete text, up to 16 KiB, as an image URL; requires offset 0."
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
-          "description": "Byte offset at a UTF-8 character boundary. Images and image_url require offset 0.",
+          "description": "Byte offset at a UTF-8 character boundary; applies to text pages.",
           "maximum": 9223372036854775807,
           "default": 0
         },
@@ -155,7 +155,7 @@
           "type": "integer",
           "minimum": 4,
           "maximum": 8192,
-          "description": "Text page budget; media use separate limits.",
+          "description": "Maximum source bytes in a text page.",
           "default": 8192
         }
       },

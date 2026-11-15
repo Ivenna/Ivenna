@@ -83,9 +83,23 @@ Text reads return a byte page. `offset` defaults to `0` and must be at a UTF-8 c
 
 The encoded text reply is at most 32768 bytes. Escaping control characters or a long address can shorten a page further.
 
-Image entries require `offset: 0` and return a complete `content.image` description, total `byte_length`, and native image content, subject to the shared image limit. Text pagination does not split images. The optional `interpretation: "image_url"` requires `offset: 0` and presents the entry's complete nonempty text as an [image reference](content.md#image-url-references), subject to the shared reference size limit.
+The shared [content rules](content.md#automatic-classification) determine whether a read returns text, an image, or a file. `offset` and `max_bytes` select text pages; native images and files contain the complete entry. A page can therefore return text while a later page reveals binary content and returns the whole file. Omitted text bytes have not necessarily been classified.
 
-Content that cannot be supplied returns `content.unavailable` with its `byte_length` and `reason`. The shared [content guide](content.md) defines detection, supported formats, image descriptions, and unavailable-content diagnostics.
+Media results retain the entry's `address` and total `byte_length`. An image adds a `content.image` description and native image part. A file adds `content.file` with its `byte_length` and a native file part. For example, read a stored report through the ordinary operation:
+
+```json
+{"address":"reports/annual.pdf"}
+```
+
+Set `interpretation: "image_url"` with `offset: 0` to present the complete entry text as an [image reference](content.md#image-url-references):
+
+```json
+{"address":"references/chart","interpretation":"image_url"}
+```
+
+Each result describes the content observed by that call. If an entry changes while a read is being completed, a resulting text page uses the requested offset and budget; an offset beyond the observed end returns `invalid_range`. Media remain complete entries, regardless of the text offset.
+
+Content that cannot be supplied returns `content.unavailable` with `byte_length` and `reason`. The shared [content guide](content.md#content-and-results) defines media descriptions, source limits, and unavailable-content diagnostics.
 
 ## Recording
 

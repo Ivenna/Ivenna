@@ -145,6 +145,10 @@ fn cloneItem(a: Allocator, item: Model.Item) !Model.Item {
                     .url => |url| .{ .url = try a.dupe(u8, url) },
                     .data => |data| .{ .data = .{ .format = data.format, .bytes = try a.dupe(u8, data.bytes) } },
                 } },
+                .file => |file| .{ .file = .{
+                    .bytes = try a.dupe(u8, file.bytes),
+                    .reference = if (file.reference) |reference| try a.dupe(u8, reference) else null,
+                } },
             };
             break :blk .{ .tool_result = .{ .call_id = try a.dupe(u8, result.call_id), .content = .{ .parts = parts } } };
         },
@@ -178,16 +182,21 @@ test "encoded native exchanges restore independently of their source buffers" {
         var continuation = [_]u8{ 0, 255, '"', '\\', '\n' };
         var result_text = "observed".*;
         var image_bytes = [_]u8{ 137, 'P', 'N', 'G', 0, 255 };
+        var file_bytes = [_]u8{ '%', 'P', 'D', 'F', 0, 255 };
+        var file_reference = [_]u8{ 0, 255, '"', '\\', '\n' };
         try source.appendBatch(&.{.{ .continuation = &continuation }}, &.{.{ .tool_result = .{
             .call_id = "inspect-1",
             .content = .{ .parts = &.{
                 .{ .text = &result_text },
                 .{ .image = .{ .data = .{ .format = .png, .bytes = &image_bytes } } },
+                .{ .file = .{ .bytes = &file_bytes, .reference = &file_reference } },
             } },
         } }});
         @memset(&continuation, 0);
         @memset(&result_text, 0);
         @memset(&image_bytes, 0);
+        @memset(&file_bytes, 0);
+        @memset(&file_reference, 0);
 
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -208,6 +217,9 @@ test "encoded native exchanges restore independently of their source buffers" {
     try std.testing.expectEqualStrings("observed", reply.content.parts[0].text);
     try std.testing.expectEqual(.png, reply.content.parts[1].image.data.format);
     try std.testing.expectEqualSlices(u8, &.{ 137, 'P', 'N', 'G', 0, 255 }, reply.content.parts[1].image.data.bytes);
+    const file = reply.content.parts[2].file;
+    try std.testing.expectEqualSlices(u8, &.{ '%', 'P', 'D', 'F', 0, 255 }, file.bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 255, '"', '\\', '\n' }, file.reference.?);
 }
 
 test "candidate handover retains sampled references and leaves earlier history available" {

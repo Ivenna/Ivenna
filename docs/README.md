@@ -28,4 +28,4 @@ Choose a guide for your task:
 | Open and coordinate focuses and arrange later attention | [Attention](attention.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |
 | Run commands and interact with host processes | [Host shell](host.md) |
-| Interpret text, media, and omitted content | [Tool content](content.md) |
+| Interpret text, images, files, and omitted content | [Tool content](content.md) |

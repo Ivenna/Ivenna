@@ -23,7 +23,7 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. Returns its outcome, or a command handle and a completion callback for this focus when it continues beyond the wait.",
+    "description": "Run a command in a fresh shell. Returns its outcome, or a command handle and a completion callback for this focus when execution outlasts the wait. Text output is previewed; final stdout can include complete images or files.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -58,7 +58,7 @@
             "terminal"
           ],
           "default": "batch",
-          "description": "batch closes stdin."
+          "description": "batch closes stdin; pipe accepts input; terminal merges stdout/stderr and can alter bytes."
         },
         "timeout_ms": {
           "type": "integer",
@@ -71,14 +71,14 @@
           "minimum": 512,
           "maximum": 16384,
           "default": 16384,
-          "description": "Budget shared by stdout and stderr after JSON encoding; metadata and native media are additional."
+          "description": "Combined byte budget for JSON-encoded stdout/stderr text; metadata, images, and files are additional."
         },
         "interpretation": {
           "type": "string",
           "enum": [
             "image_url"
           ],
-          "description": "Treat complete stdout text of up to 16 KiB as an image URL. Image bytes are recognized automatically."
+          "description": "Treat complete final stdout text of up to 16 KiB as an image URL."
         },
         "yield_ms": {
           "type": "integer",
@@ -97,7 +97,7 @@
   },
   {
     "name": "continue_host_shell",
-    "description": "Read more output or interact with a command. Reads advance shared stdout/stderr positions across activities, independently of initial previews and completion observations. Draining a finished command retires its handle.",
+    "description": "Read more output or interact with a command. Reads advance shared stdout/stderr positions across activities, independently of initial previews and completion observations. Final stdout can supply a complete image or file once across continuations. Draining a finished command retires its handle.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -225,7 +225,7 @@
           "minimum": 512,
           "maximum": 16384,
           "default": 16384,
-          "description": "Budget shared by stdout and stderr after JSON encoding; metadata and native media are additional."
+          "description": "Combined byte budget for JSON-encoded stdout/stderr text; metadata, images, and files are additional."
         }
       },
       "required": [

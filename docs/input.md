@@ -1,6 +1,6 @@
 # Runtime user messages
 
-This contract defines runtime-generated `role=user` messages within the LLM conversation: retained events, handovers, and inference turns. Native model output and tool replies retain their own roles and formats. See [message assembly](architecture.md#working-history-and-user-messages).
+This contract defines the agent's runtime-generated `role=user` messages: retained events, handovers, and inference turns. Native model output and tool replies are encoded separately by the model adapter; [tool content](content.md) describes the text, images, and files returned by tools. See [message assembly](architecture.md#working-history-and-user-messages).
 
 The [Input definitions and renderers](../packages/agent/src/input.zig) own the data and its model-facing presentation. All focuses use the same [system prompt](../packages/agent/src/system.md), which explains model interpretation; current identity, observations, and available tools identify each focus's circumstances and possible actions.
 

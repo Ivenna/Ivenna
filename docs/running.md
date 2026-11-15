@@ -8,11 +8,11 @@ Use a built `ivenna` executable, `/bin/sh`, and an OpenSSH client in the kernel'
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, readable `/proc`, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. These facilities establish the controlling terminal and allow cleanup of its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
-The application uses the Responses adapter with DeepSeek as the default model service. Supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`. The kernel also needs access to the [mail service](#mail-service) and [memory service](#memory-service). The mail receiving boundary needs access to the kernel's [reception status](#service-status-and-reception).
+The application uses the Responses adapter with DeepSeek as the default model service. Supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`. [File input](content.md#complete-files) additionally requires DeepSeek-compatible Files API parsing and `input_file` references; the default `deepseek-flash` supports them. The kernel also needs access to the [mail service](#mail-service) and [memory service](#memory-service). The mail receiving boundary needs access to the kernel's [reception status](#service-status-and-reception).
 
 ## Configuration
 
-The kernel reads its process environment. Supply the settings through the deployment's launcher or service manager. To apply changes, stop the kernel and start it with the updated environment.
+The kernel reads its process environment at startup. Supply settings through the deployment's launcher or service manager. To use an environment file, export its values before launching, as shown in the [local configuration steps](../dev/README.md#configuration). Apply changes by restarting the kernel with the updated environment.
 
 Set connection addresses, identities, and storage paths for the chosen deployment. The table lists required settings and the current executable's defaults.
 
@@ -23,7 +23,7 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_MODEL` | Model name | `deepseek-flash` |
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `65536` |
 | `LLM_MAX_ATTEMPTS` | Maximum HTTP attempts per inference, including the first; `1` disables retries | `3` |
-| `LLM_REQUEST_TIMEOUT_MS` | Total HTTP time limit per inference, including all attempts and retry delays | `600000` (10 minutes) |
+| `LLM_REQUEST_TIMEOUT_MS` | Total time limit per inference, including retries; a separate limit for each file upload | `600000` (10 minutes) |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
 | `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `1048576` (1 MiB) |
@@ -52,19 +52,21 @@ Core and activity sessions share the configured model and output-token limit. `L
 
 Ordinary reasoning effort is configured separately for each role. Accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings.
 
-`LLM_MAX_ATTEMPTS` limits HTTP attempts for each ordinary or compaction inference. `LLM_REQUEST_TIMEOUT_MS` bounds their total time, including retry delays. The adapter applies its [transport policy](architecture.md#model-transport) to network failures, server errors, request timeouts, and rate limits. Exhausting either limit stops the runtime. Cancellation stops the active exchange or retry wait. HTTP errors outside the retry policy fail when their status arrives; diagnostics record the status code without reading the error body.
+Each ordinary or compaction inference has one `LLM_REQUEST_TIMEOUT_MS` limit covering all `LLM_MAX_ATTEMPTS` attempts and retry delays. The [transport policy](architecture.md#model-transport) determines which failures can be retried; exhausting either limit stops the runtime. The adapter validates a complete response before returning tool calls, so retries repeat inference without repeating tool execution. A generation whose response was lost may still incur model-service charges.
 
-The adapter receives and validates a complete response before returning tool calls for execution. Transport retries do not repeat tool execution, though a generation whose response was lost may still incur model-service charges.
+Files are uploaded before the next inference, with a separate `LLM_REQUEST_TIMEOUT_MS` limit for each file's [upload negotiation](architecture.md#tool-results). A service rejection becomes a `file_upload_failed` tool-content error. Failures in transport or the model service, including an incomplete successful response, stop the runtime; cancellation stops active work and joins it. See [uploaded model files](#uploaded-model-files) for their retention lifecycle.
 
 ### Context budgets
 
-`CONTEXT_REQUEST_BYTES` limits ordinary model requests, and `CONTEXT_COMPACTION_BYTES` limits summary requests. Both cover the complete encoded payload, including retained history, runtime state, tool declarations, and images. An activity's inherited history consumes the same request space as its subsequent exchanges.
+`CONTEXT_REQUEST_BYTES` limits ordinary model requests, and `CONTEXT_COMPACTION_BYTES` limits summary requests. Both cover the complete encoded payload, including retained history, runtime state, tool declarations, inline images, and file references. An activity's inherited history consumes the same request space as its subsequent exchanges.
 
 Choose both byte budgets and the output-token limit together for the configured model and workload. The ordinary budget controls how much history can accumulate before a handover; the larger compaction budget leaves room to summarize history after a complete model/tool round crosses that limit. Byte counts are not token estimates; input and output must also fit the model's token limits.
 
 Handovers carry pending callback references and, for the core, existing activity references alongside the generated summary. Callback registrations have no separate count limit, so pending work can consume a growing share of the budget. A handover has no separate byte limit; the complete continuation request must fit the ordinary budget.
 
 Individual tool results can meet their [content limits](content.md#model-request-checks) while a large batch or inline image exceeds the context budgets. Inline images include base64 encoding overhead. Reduce their size or use image URL references when that overhead would exceed the request budget.
+
+For files, the byte budgets measure identifiers and source descriptions. They do not measure the content expanded by the model service, so a request within Ivenna's budget may still exceed the service's context limits. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for its limits. Service rejections follow the [model-request policy](#model-requests).
 
 If a summary request exceeds its budget or compaction cannot produce a handover that fits the continuation request, the runtime stops with its earlier history and unadmitted observations intact. Input that still cannot fit after compaction fails with `ContextBudgetExhausted`. See the [compaction mechanism](architecture.md#bounded-model-context) for measurement and retry behavior.
 
@@ -76,7 +78,7 @@ If a summary request exceeds its budget or compaction cannot produce a handover 
 
 ## Changing the model
 
-Retained history can include native model output and reasoning data in the format supplied by the model adapter. A replacement service and model must accept those items as well as the configured tools and reasoning settings. The runtime does not translate retained model output or verify in advance that a replacement model can consume it. Establish compatibility before resuming retained work with the replacement model.
+Retained history can include native model output and reasoning data supplied by the model adapter, plus file identifiers supplied by the model service. A replacement service and model must accept those items as well as the configured tools and reasoning settings. File identifiers also require access to the account that owns the uploads. The runtime does not translate retained model output, transfer uploaded files between services, or verify in advance that a replacement model can consume them. Establish compatibility before resuming retained work with the replacement model.
 
 To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MODEL` and any changed service settings, then restart. Keep the existing mail account, `MAIL_ADDRESS`, and memory workspace to retain the material needed for continuation.
 
@@ -195,13 +197,14 @@ The current handover format includes the state sampled for its summary inference
 
 ## Data and retention
 
-The deployment chooses storage for the mail account, the memory workspace, and the kernel's local data directory independently:
+The deployment chooses storage for the mail account, the memory workspace, and the kernel's local data directory independently. File input also creates uploads in the configured model-service account:
 
 | Location | Contents |
 | --- | --- |
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
+| Configured model-service account | Uploaded files and their service-side parsing results |
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
 
@@ -233,11 +236,21 @@ The latest checkpoint selects the histories needed to continue all registered se
 | `Ivenna History` | Latest checkpoint, selected session histories, and unread activity-report records |
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
 
-Forks store independent copies of inherited history; include these copies when sizing the mailbox. Compaction replaces detailed observations and exchanges with a handover containing the generated summary and sampled runtime state. This changes only that session's selected history, allowing its previous records to move to Trash while other sessions keep their own copies.
+Forks store independent copies of inherited history; include these copies when sizing runtime memory and the mailbox. Compaction replaces detailed observations and exchanges with a handover containing the generated summary and sampled runtime state. This changes only that session's selected history, allowing its previous records to move to Trash while other sessions keep their own copies.
+
+Each complete model/tool round must fit the mail service's advertised `maxSizeRequest` when saved. File bytes and encoding overhead count toward that history request, so meeting the [source limits](content.md#automatic-classification) does not guarantee that a file or batch can be saved. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`; any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See the [history storage protocol](architecture.md#history-storage) for the encoding and batching mechanism.
 
 A sleeping activity retains its history even when its context is unloaded. When the session ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. Its unread reports remain selected independently of that session until the core admits them. Admitted reports belong to the core's history, and shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
 Unread activity expressions retain every new text in order with its original observation time; they are not replaced with the latest text. Ending times are also retained. The core admits reports within its ordinary request budget. Unread reference metadata grows with the backlog, and all unread bodies occupy mailbox storage. Activity messages and endings are outside `MAX_PENDING_EVENTS`, so size runtime memory and mailbox capacity for work that can accumulate before the core next reads it. See [activity reports](architecture.md#activity-reports) for reading and admission behavior.
+
+### Uploaded model files
+
+Saved working history includes the original bytes and service identifiers of uploaded files. Later inferences and restart reuse those identifiers. The [working-history limits](#working-history) also apply to these original bytes.
+
+Uploads live at `LLM_BASE_URL` in the account authenticated by `LLM_API_KEY`. Ivenna does not request an upload expiration or delete uploads during compaction or history retirement. Manage them separately under the service's retention policy; see DeepSeek's [Files API](https://api-docs.deepseek.com/guides/files_api/). Deleting an upload still referenced by retained contexts prevents later requests from using that identifier; retained originals are not automatically reuploaded.
+
+Preserve the host artifact or memory entry when it needs to outlive selected working history. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for service behavior and billing.
 
 ### Backups and transfers
 

@@ -112,8 +112,9 @@ pub const Memory = struct {
                 .recall_memory => |args| if (args.max_results == 0 or args.max_results > 1000) {
                     return error.InvalidToolArguments;
                 },
-                .read_memory => |args| if (args.max_bytes < 4 or args.max_bytes > text_page_limit or args.offset > std.math.maxInt(i64) or (args.interpretation != null and args.offset != 0)) {
-                    return error.InvalidToolArguments;
+                .read_memory => |args| {
+                    if (args.max_bytes < 4 or args.max_bytes > text_page_limit or args.offset > std.math.maxInt(i64) or (args.interpretation != null and args.offset != 0))
+                        return error.InvalidToolArguments;
                 },
                 else => {},
             }
@@ -126,7 +127,7 @@ pub const Memory = struct {
         @"error": struct { code: []const u8, message: []const u8 },
     };
 
-    /// Returned content and image bytes belong to allocator, independently of
+    /// Returned content and media bytes belong to allocator, independently of
     /// the temporary SSH request and response buffers.
     pub fn invoke(self: Memory, allocator: Allocator, request: Request) !Content {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -138,11 +139,10 @@ pub const Memory = struct {
         var reply = try self.exchange(scratch, remote_request);
         if (request == .read_memory and reply == .result) {
             var read = try Read.parse(scratch, reply.result, remote_request.read_memory);
-            if (content.detectFormat(read.header) != null and read.byte_length <= entry_size_limit and read.offset == 0 and read.bytes.len < read.byte_length) {
-                // Only images need a whole-entry transfer. The second request
-                // owns its own snapshot; classify and bound that result again
-                // in case another session replaced the source in between.
-                remote_request.read_memory.max_bytes = entry_size_limit;
+            if (read.completeRequest(remote_request.read_memory)) |complete| {
+                // A page can reveal binary after an earlier text prefix. Fetch
+                // from byte zero and classify this new snapshot independently.
+                remote_request.read_memory = complete;
                 reply = try self.exchange(scratch, remote_request);
                 if (reply == .result) read = try Read.parse(scratch, reply.result, remote_request.read_memory);
             }
@@ -292,64 +292,78 @@ const Read = struct {
             error.OutOfMemory => return err,
             else => return error.InvalidMemoryReply,
         };
-        const bytes = try decode(a, encoded.data);
-        const header = try decode(a, encoded.header);
         if (encoded.offset != args.offset or encoded.offset > encoded.byte_length) return error.InvalidMemoryReply;
         const expected = @min(args.max_bytes, encoded.byte_length - encoded.offset);
-        if (bytes.len != expected or header.len != @min(32, encoded.byte_length)) return error.InvalidMemoryReply;
+        const bytes = try decode(a, encoded.data, expected);
+        const header = try decode(a, encoded.header, @min(32, encoded.byte_length));
         if (encoded.offset == 0 and !std.mem.eql(u8, bytes[0..@min(header.len, bytes.len)], header[0..@min(header.len, bytes.len)]))
             return error.InvalidMemoryReply;
         return .{ .address = encoded.address, .bytes = bytes, .header = header, .byte_length = encoded.byte_length, .offset = encoded.offset };
     }
 
-    fn decode(a: Allocator, data: []const u8) ![]const u8 {
+    fn decode(a: Allocator, data: []const u8, expected: u64) ![]const u8 {
         const decoder = std.base64.standard.Decoder;
         const size = decoder.calcSizeForSlice(data) catch return error.InvalidMemoryReply;
-        if (size > entry_size_limit) return error.InvalidMemoryReply;
+        if (size != expected) return error.InvalidMemoryReply;
         const bytes = try a.alloc(u8, size);
         decoder.decode(bytes, data) catch return error.InvalidMemoryReply;
         return bytes;
     }
 
+    fn needsCompleteSource(self: Read) bool {
+        return content.requiresCompleteSource(self.header, self.header.len == self.byte_length) or
+            content.requiresCompleteSource(self.bytes, self.offset + self.bytes.len == self.byte_length);
+    }
+
+    fn completeRequest(self: Read, args: @FieldType(Memory.Request, "read_memory")) ?@FieldType(Memory.Request, "read_memory") {
+        if (!self.needsCompleteSource() or self.byte_length > entry_size_limit or
+            (self.offset == 0 and self.bytes.len == self.byte_length)) return null;
+        var complete = args;
+        complete.offset = 0;
+        complete.max_bytes = entry_size_limit;
+        return complete;
+    }
+
     fn render(self: Read, a: Allocator, args: @FieldType(Memory.Request, "read_memory")) !Content {
-        if (content.detectFormat(self.header) != null) {
-            if (self.offset != 0)
-                return toolError(a, "invalid_range", "Image entries are read as complete images; use offset 0.");
-            if (self.byte_length > content.image_size_limit)
-                return self.unavailable(a, .image_too_large);
-            if (self.bytes.len != self.byte_length) return error.InvalidMemoryReply;
+        if (self.needsCompleteSource()) {
+            const image = content.detectFormat(self.header) != null;
+            const limit: u64 = if (image) content.image_size_limit else content.file_size_limit;
+            if (self.byte_length > limit)
+                return self.unavailable(a, if (image) .image_too_large else .file_too_large);
             return self.classified(a, content.classify(self.bytes));
         }
         if (args.interpretation != null) {
             if (self.byte_length > content.reference_size_limit)
                 return self.unavailable(a, .reference_too_large);
-            if (self.bytes.len != self.byte_length) return error.InvalidMemoryReply;
             return self.classified(a, content.interpret(self.bytes, args.interpretation));
         }
-        if (self.offset != 0 and self.bytes.len > 0 and self.bytes[0] & 0xc0 == 0x80)
+        if (args.offset > self.byte_length)
+            return toolError(a, "invalid_range", "The byte offset is beyond the end of this entry.");
+        const bytes = self.bytes[@intCast(args.offset - self.offset)..];
+        if (args.offset != 0 and bytes.len > 0 and bytes[0] & 0xc0 == 0x80)
             return toolError(a, "invalid_range", "The byte offset is inside a UTF-8 character. Resume with a next_offset returned by read_memory.");
-        const maximum = @min(self.bytes.len, args.max_bytes);
-        var end = content.textPrefixLength(self.bytes[0..maximum], self.offset + maximum < self.byte_length) orelse
-            return self.unavailable(a, .unsupported_binary);
+        const maximum = @min(bytes.len, args.max_bytes);
+        var end = content.textPrefixLength(bytes[0..maximum], args.offset + maximum < self.byte_length).?;
         while (true) {
-            const next = self.offset + end;
+            const next = args.offset + end;
             const json = try std.json.Stringify.valueAlloc(a, .{ .result = .{
                 .address = self.address,
-                .content = self.bytes[0..end],
+                .content = bytes[0..end],
                 .byte_length = self.byte_length,
-                .offset = self.offset,
+                .offset = args.offset,
                 .next_offset = if (next < self.byte_length) @as(?u64, next) else null,
             } }, .{});
             if (json.len <= reply_size_limit) return Content.fromText(a, json);
             a.free(json);
             if (end == 0) return toolError(a, "result_too_large", "This entry's address exceeds the result size limit.");
             end /= 2;
-            while (end > 0 and self.bytes[end] & 0xc0 == 0x80) end -= 1;
+            while (end > 0 and bytes[end] & 0xc0 == 0x80) end -= 1;
         }
     }
 
     fn unavailable(self: Read, a: Allocator, reason: @FieldType(content.Unavailable, "reason")) !Content {
-        return self.classified(a, .{ .unavailable = .{ .byte_length = self.byte_length, .reason = reason } });
+        const diagnostic: content.Unavailable = .{ .byte_length = self.byte_length, .reason = reason };
+        return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = self.address, .content = .{ .unavailable = diagnostic } } }, .{}));
     }
 
     fn classified(self: Read, a: Allocator, value: content.Classified) !Content {
@@ -365,7 +379,15 @@ const Read = struct {
                     .{ .image = image },
                 });
             },
-            .unavailable => |diagnostic| Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = self.address, .content = .{ .unavailable = diagnostic } } }, .{})),
+            .file => |raw_file| blk: {
+                const file: content.File = .{
+                    .bytes = try a.dupe(u8, raw_file.bytes),
+                };
+                break :blk Content.fromParts(a, &.{
+                    .{ .text = try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = self.address, .content = .{ .file = file.describe() }, .byte_length = self.byte_length } }, .{}) },
+                    .{ .file = file },
+                });
+            },
         };
     }
 };
@@ -394,4 +416,88 @@ fn waitForDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) std.Io.Cancelab
 fn writeRequest(io: std.Io, file: std.Io.File, payload: []const u8) std.Io.File.Writer.Error!void {
     defer file.close(io);
     try file.writeStreamingAll(io, payload);
+}
+
+test "memory supplies complete opaque files with owned bytes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var long_pdf: [text_page_limit + 1]u8 = @splat('a');
+    @memcpy(long_pdf[0..8], "%PDF-1.7");
+    for ([_][]const u8{ &long_pdf, "\x00\xffunknown binary" }) |source| {
+        var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        const temporary = scratch.allocator();
+        const bytes = try temporary.dupe(u8, source);
+        const encoder = std.base64.standard.Encoder;
+        const data = try temporary.alloc(u8, encoder.calcSize(bytes.len));
+        _ = encoder.encode(data, bytes);
+        const header = bytes[0..@min(bytes.len, 32)];
+        const header_data = try temporary.alloc(u8, encoder.calcSize(header.len));
+        _ = encoder.encode(header_data, header);
+        const json = try std.json.Stringify.valueAlloc(temporary, .{ .address = "files/original", .data = data, .header = header_data, .byte_length = bytes.len, .offset = 0 }, .{});
+        const encoded = try std.json.parseFromSliceLeaky(Value, temporary, json, .{});
+        const read = try Read.parse(temporary, encoded, .{ .address = "files/original", .max_bytes = entry_size_limit });
+        const result = try read.render(a, .{ .address = read.address, .max_bytes = 4 });
+        @memset(bytes, 0);
+        @memset(@constCast(read.bytes), 0);
+        scratch.deinit();
+        try std.testing.expectEqual(@as(usize, 2), result.parts.len);
+        const file = result.parts[1].file;
+        try std.testing.expectEqualSlices(u8, source, file.bytes);
+        try std.testing.expectEqual(null, file.reference);
+    }
+    const incomplete = try std.json.parseFromSliceLeaky(Value, a, "{\"address\":\"files/partial\",\"data\":\"JVBERg==\",\"header\":\"JVBERi0xLjc=\",\"byte_length\":8,\"offset\":0}", .{});
+    try std.testing.expectError(error.InvalidMemoryReply, Read.parse(a, incomplete, .{ .address = "files/partial", .max_bytes = entry_size_limit }));
+
+    var header: [32]u8 = @splat('a');
+    @memcpy(header[0..8], "%PDF-1.7");
+    const encoder = std.base64.standard.Encoder;
+    const header_data = try a.alloc(u8, encoder.calcSize(header.len));
+    _ = encoder.encode(header_data, &header);
+    const oversized_reply = try std.json.Stringify.valueAlloc(a, .{ .address = "files/large", .data = "JVBERg==", .header = header_data, .byte_length = content.file_size_limit + 1, .offset = 0 }, .{});
+    const oversized_args: @FieldType(Memory.Request, "read_memory") = .{ .address = "files/large", .max_bytes = 4 };
+    const oversized = try Read.parse(a, try std.json.parseFromSliceLeaky(Value, a, oversized_reply, .{}), oversized_args);
+    try std.testing.expectEqual(null, oversized.completeRequest(oversized_args));
+    const result = try oversized.render(a, oversized_args);
+    const json = try std.json.parseFromSliceLeaky(Value, a, result.parts[0].text, .{});
+    try std.testing.expectEqualStrings("file_too_large", json.object.get("result").?.object.get("content").?.object.get("unavailable").?.object.get("reason").?.string);
+}
+
+test "memory keeps text pagination" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = "ordinary text";
+    const text: Read = .{ .address = "names/do-not-select-format.pdf", .bytes = source, .header = source, .byte_length = source.len, .offset = 0 };
+    const result = try text.render(a, .{ .address = text.address, .max_bytes = 4 });
+    try std.testing.expectEqual(@as(usize, 1), result.parts.len);
+    const value = (try std.json.parseFromSliceLeaky(Value, a, result.parts[0].text, .{})).object.get("result").?.object;
+    try std.testing.expectEqualStrings(source[0..4], value.get("content").?.string);
+    try std.testing.expectEqual(@as(i64, 4), value.get("next_offset").?.integer);
+}
+
+test "binary discovered on a later page is fetched from zero and source replacement is reprojected" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = try a.alloc(u8, text_page_limit + 4);
+    @memset(source, 'a');
+    source[text_page_limit] = 0;
+    const args: @FieldType(Memory.Request, "read_memory") = .{ .address = "files/source", .offset = text_page_limit, .max_bytes = 4 };
+    const page: Read = .{ .address = args.address, .bytes = source[text_page_limit..], .header = source[0..32], .byte_length = source.len, .offset = text_page_limit };
+    const complete = page.completeRequest(args).?;
+    try std.testing.expectEqual(@as(u64, 0), complete.offset);
+    try std.testing.expectEqual(entry_size_limit, complete.max_bytes);
+    const snapshot: Read = .{ .address = args.address, .bytes = source, .header = source[0..32], .byte_length = source.len, .offset = 0 };
+    const result = try snapshot.render(a, args);
+    try std.testing.expectEqualSlices(u8, source, result.parts[1].file.bytes);
+
+    const replacement: Read = .{ .address = args.address, .bytes = "new", .header = "new", .byte_length = 3, .offset = 0 };
+    const invalid = try replacement.render(a, args);
+    const diagnostic = try std.json.parseFromSliceLeaky(Value, a, invalid.parts[0].text, .{});
+    try std.testing.expectEqualStrings("invalid_range", diagnostic.object.get("error").?.object.get("code").?.string);
+    const text: Read = .{ .address = args.address, .bytes = "prefix page", .header = "prefix page", .byte_length = 11, .offset = 0 };
+    const projected = try text.render(a, .{ .address = args.address, .offset = 7, .max_bytes = 4 });
+    const value = try std.json.parseFromSliceLeaky(Value, a, projected.parts[0].text, .{});
+    try std.testing.expectEqualStrings("page", value.object.get("result").?.object.get("content").?.string);
 }

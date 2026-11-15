@@ -63,8 +63,9 @@ pub const Port = struct {
         return self.vtable.requestBytes(self.context, a, request);
     }
 
-    /// Apply model content limits to a complete tool batch. replies aliases
-    /// the mutable tail of request.history; newly allocated content uses a.
+    /// Prepare a complete tool batch for model input and apply content limits.
+    /// replies aliases the mutable tail of request.history; newly allocated
+    /// content uses a.
     pub fn limitToolReplies(self: Port, a: Allocator, request: Request, replies: []Item) !void {
         return self.vtable.limitToolReplies(self.context, a, request, replies);
     }

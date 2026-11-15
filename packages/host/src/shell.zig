@@ -35,12 +35,13 @@ pub const Shell = struct {
             path: []const u8,
             byte_length: u64,
             range: ?Range,
-            content: union(enum) { text: output.Preview, image: content.ImageContent.Description, unavailable: content.Unavailable },
+            content: union(enum) { text: output.Preview, image: content.ImageContent.Description, file: content.File.Description, unavailable: content.Unavailable },
         };
         pub fn describe(self: Stream) Description {
             return .{ .path = self.path, .byte_length = self.byte_length, .range = self.range, .content = switch (self.content) {
                 .text => |text| .{ .text = text },
                 .image => |image| .{ .image = image.describe() },
+                .file => |file| .{ .file = file.describe() },
                 .unavailable => |diagnostic| .{ .unavailable = diagnostic },
             } };
         }
@@ -89,17 +90,17 @@ pub const Shell = struct {
             return try output.readable(self.io, self.stdout, cursors[0]) or try output.readable(self.io, self.stderr, cursors[1]);
         }
 
-        /// The first terminal observation classifies complete stdout even if
-        /// earlier incremental reads have already consumed its bytes.
-        pub fn collect(self: Invocation, a: Allocator, cursors: *[2]u64, final_stdout_collected: *bool, finished: bool, interpretation: ?content.Interpretation, budget: usize) !Streams {
+        /// Final observations deliver native media once from complete stdout,
+        /// independently of text already consumed by earlier observations.
+        pub fn collect(self: Invocation, a: Allocator, cursors: *[2]u64, final_media_collected: *bool, finished: bool, interpretation: ?content.Interpretation, budget: usize) !Streams {
             var streams = try self.incremental(a, cursors, finished, budget);
-            if (finished and !final_stdout_collected.*) {
+            if (finished and !final_media_collected.*) {
                 const reader: Reader = .{ .io = self.io };
-                if (try reader.readMedia(a, self.stdout, interpretation)) |media| {
+                if (try reader.readMedia(a, self.stdout, interpretation, streams.stdout.content == .unavailable)) |media| {
                     streams.stdout = .{ .path = self.stdout_path, .byte_length = try self.stdout.length(self.io), .content = media };
                     cursors[0] = streams.stdout.byte_length;
+                    final_media_collected.* = true;
                 }
-                final_stdout_collected.* = true;
             }
             return streams;
         }
@@ -162,4 +163,61 @@ fn chunkStream(path: []const u8, chunk: output.Chunk) Shell.Stream {
         .text => |text| .{ .text = text },
         .unavailable => |diagnostic| .{ .unavailable = .{ .byte_length = diagnostic.byte_length, .reason = .unsupported_binary } },
     } };
+}
+
+test "final observation supplies the complete file after incremental output" {
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const bytes = "%PDF-1.7\n\x00\xffcomplete file\n";
+    try temporary.dir.writeFile(io, .{ .sub_path = "stdout", .data = bytes });
+    try temporary.dir.writeFile(io, .{ .sub_path = "stderr", .data = "" });
+    var invocation: Shell.Invocation = .{
+        .io = io,
+        .backend = .{ .not_started = "test fixture" },
+        .started = .now(io, .awake),
+        .stdout = try temporary.dir.openFile(io, "stdout", .{ .mode = .read_write }),
+        .stderr = try temporary.dir.openFile(io, "stderr", .{}),
+        .stdout_path = "stdout",
+        .stderr_path = "stderr",
+    };
+    defer invocation.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cursors: [2]u64 = .{ 0, 0 };
+    var collected = false;
+    const running = try invocation.collect(a, &cursors, &collected, false, null, 512);
+    try std.testing.expect(running.stdout.content != .file);
+    try std.testing.expectEqual(bytes.len, cursors[0]);
+    const final = try invocation.collect(a, &cursors, &collected, true, null, 512);
+    try std.testing.expectEqualSlices(u8, bytes, final.stdout.content.file.bytes);
+    try std.testing.expectEqual(null, final.stdout.range);
+    const drained = try invocation.collect(a, &cursors, &collected, true, null, 512);
+    try std.testing.expect(drained.stdout.content != .file);
+
+    try invocation.stdout.setLength(io, content.file_size_limit + 1);
+    const too_large = try (Reader{ .io = io }).readMedia(a, invocation.stdout, null, false);
+    try std.testing.expectEqual(.file_too_large, too_large.?.unavailable.reason);
+
+    // A later binary chunk must still deliver the complete file after earlier
+    // text observations, rather than exposing that chunk as a file fragment.
+    var mixed: [2052]u8 = @splat('a');
+    @memcpy(mixed[2048..], "\x00\xffend"[0..4]);
+    try temporary.dir.writeFile(io, .{ .sub_path = "stdout", .data = &mixed });
+    try temporary.dir.writeFile(io, .{ .sub_path = "stderr", .data = &mixed });
+    cursors = .{ 0, 0 };
+    collected = false;
+    const prefix = try invocation.collect(a, &cursors, &collected, true, null, 512);
+    try std.testing.expect(prefix.stdout.content == .text);
+    try std.testing.expect(!collected);
+    const complete = while (cursors[0] < mixed.len) {
+        const previous = cursors[0];
+        const next = try invocation.collect(a, &cursors, &collected, true, null, 512);
+        if (next.stdout.content == .file) break next;
+        try std.testing.expect(cursors[0] > previous);
+    } else return error.ExpectedCompleteFile;
+    try std.testing.expectEqualSlices(u8, &mixed, complete.stdout.content.file.bytes);
+    try std.testing.expect(complete.stderr.content == .unavailable);
+    try std.testing.expect(collected);
 }
