@@ -15,6 +15,8 @@ pub const Config = struct {
         credentials: struct { username: []const u8, password: []const u8 },
     },
     mail_poll_interval_ms: u32,
+    /// Optional directory transport. Absent or empty keeps the email-only inbox.
+    spool_inbox_dir: ?[]const u8,
     max_sessions: usize,
     max_pending_events: usize,
     max_host_commands: usize,
@@ -48,6 +50,7 @@ pub const Config = struct {
                 break :blk .{ .credentials = .{ .username = username, .password = password } };
             },
             .mail_poll_interval_ms = try number(u32, env, "MAIL_POLL_INTERVAL_MS", 2000),
+            .spool_inbox_dir = optionalNonempty(env, "INBOX_SPOOL_DIR"),
             .max_sessions = try number(usize, env, "MAX_SESSIONS", 128),
             .max_pending_events = try number(usize, env, "MAX_PENDING_EVENTS", 64),
             .max_host_commands = try number(usize, env, "MAX_HOST_COMMANDS", 8),
@@ -99,6 +102,12 @@ fn serviceAddress(env: *const std.process.Environ.Map) !std.Io.net.IpAddress {
 fn nonempty(env: *const std.process.Environ.Map, key: []const u8, default: []const u8) ![]const u8 {
     const value = env.get(key) orelse default;
     if (value.len == 0) return error.MissingConfiguration;
+    return value;
+}
+
+fn optionalNonempty(env: *const std.process.Environ.Map, key: []const u8) ?[]const u8 {
+    const value = env.get(key) orelse return null;
+    if (value.len == 0) return null;
     return value;
 }
 

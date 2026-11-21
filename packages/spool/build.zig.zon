@@ -1,0 +1,10 @@
+.{
+    .name = .spool,
+    .fingerprint = 0xf6851b98247003eb,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .agent_contracts = .{ .path = "../agent_contracts" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

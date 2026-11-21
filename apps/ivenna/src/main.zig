@@ -5,6 +5,7 @@ const email = @import("email");
 const responses = @import("responses");
 const host = @import("host");
 const memory = @import("memory");
+const spool = @import("spool");
 const Config = @import("config.zig").Config;
 const Service = @import("service.zig").Service;
 
@@ -54,9 +55,20 @@ pub fn main(init: std.process.Init) !void {
         .activity_tools = &activity_tools,
         .reasoning = config.llm_reasoning,
     };
+    var spool_inbox: ?spool.Spool = if (config.spool_inbox_dir) |directory|
+        try spool.Spool.openPath(io, directory)
+    else
+        null;
+    defer if (spool_inbox) |*spooled| spooled.deinit();
+    var composite: spool.Composite = undefined;
+    var inbox: contracts.Inbox = mail.inbox();
+    if (spool_inbox) |*spooled| {
+        composite = .{ .primary = mail.inbox(), .secondary = spooled.inbox() };
+        inbox = composite.inbox();
+    }
     var kernel = try agent.Kernel.init(init.gpa, io, .{
         .engine = &engine,
-        .inbox = mail.inbox(),
+        .inbox = inbox,
         .sender = mail.sender(),
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),

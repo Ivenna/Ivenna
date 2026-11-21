@@ -10,6 +10,7 @@
         .responses = .{ .path = "../../packages/responses" },
         .host = .{ .path = "../../packages/host" },
         .memory = .{ .path = "../../packages/memory" },
+        .spool = .{ .path = "../../packages/spool" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }
