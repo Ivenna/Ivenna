@@ -1,0 +1,10 @@
+.{
+    .name = .agent_contracts,
+    .fingerprint = 0xfe042f3748aac3ec,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .content = .{ .path = "../content" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

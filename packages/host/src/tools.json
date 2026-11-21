@@ -1,0 +1,237 @@
+[
+  {
+    "name": "inspect_host_shell",
+    "description": "Inspect shell defaults and commands shared across activities.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Select one command; omit to list current commands."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Position in the matching command list."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "run_host_shell",
+    "description": "Run a command in a fresh shell. Returns its outcome, or a command handle and a completion callback for this focus when execution outlasts the wait. Text output is previewed; final stdout can include complete images or files.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative paths and omission use the runtime's startup directory."
+        },
+        "shell": {
+          "type": "string",
+          "minLength": 1,
+          "default": "/bin/sh"
+        },
+        "login": {
+          "type": "boolean",
+          "default": false
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "batch",
+            "pipe",
+            "terminal"
+          ],
+          "default": "batch",
+          "description": "batch closes stdin; pipe accepts input; terminal merges stdout/stderr and can alter bytes."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Omit for no execution deadline."
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 16384,
+          "default": 16384,
+          "description": "Combined byte budget for JSON-encoded stdout/stderr text; metadata, images, and files are additional."
+        },
+        "interpretation": {
+          "type": "string",
+          "enum": [
+            "image_url"
+          ],
+          "description": "Treat complete final stdout text of up to 16 KiB as an image URL."
+        },
+        "yield_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "default": 10000,
+          "description": "Initial wait for completion; zero returns immediately."
+        }
+      },
+      "required": [
+        "name",
+        "command"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "continue_host_shell",
+    "description": "Read more output or interact with a command. Reads advance shared stdout/stderr positions across activities, independently of initial previews and completion observations. Final stdout can supply a complete image or file once across continuations. Draining a finished command retires its handle.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "object",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "read": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "read"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "write": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "eof": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Close pipe stdin after this text, or send Ctrl-D to a terminal without closing its input."
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ],
+                  "additionalProperties": false,
+                  "description": "One pending write per command."
+                }
+              },
+              "required": [
+                "write"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "signal": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "enum": [
+                        "interrupt",
+                        "terminate",
+                        "kill"
+                      ],
+                      "description": "Interrupt reaches the terminal foreground group; terminate and kill reach its original session. Without a terminal, signals reach the command's process group."
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "signal"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resize": {
+                  "type": "object",
+                  "properties": {
+                    "rows": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "cols": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    }
+                  },
+                  "required": [
+                    "rows",
+                    "cols"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "resize"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "default": {
+            "read": {}
+          },
+          "description": "Apply input or control before observing output, even while another call waits."
+        },
+        "yield_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "default": 1000,
+          "description": "Wait for unread output or completion; zero returns the current state."
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 16384,
+          "default": 16384,
+          "description": "Combined byte budget for JSON-encoded stdout/stderr text; metadata, images, and files are additional."
+        }
+      },
+      "required": [
+        "command_id"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

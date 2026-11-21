@@ -1,0 +1,23 @@
+services:
+  mail:
+    environment:
+      STALWART_RECOVERY_MODE: "1"
+      STALWART_RECOVERY_ADMIN: "admin:${MAIL_SETUP_PASSWORD:-local-setup-password}"
+      STALWART_PUBLIC_URL: http://mail:8080
+
+  provision:
+    image: docker.io/stalwartlabs/cli:1.0.14
+    # Read the owner-only provisioning plan as container root.
+    user: "0:0"
+    depends_on:
+      mail:
+        condition: service_healthy
+    environment:
+      NO_PROXY: mail
+      no_proxy: mail
+      STALWART_URL: http://mail:8080
+      STALWART_USER: admin
+      STALWART_PASSWORD: "${MAIL_SETUP_PASSWORD:-local-setup-password}"
+    volumes:
+      - "${DEV_INSTANCE_DIR:?Set DEV_INSTANCE_DIR to an absolute instance directory}/mail/provision.ndjson:/work/provision.ndjson:ro,z"
+    command: [apply, --file, /work/provision.ndjson]

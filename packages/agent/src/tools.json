@@ -1,0 +1,103 @@
+[
+  {
+    "name": "send_message",
+    "description": "Submit text to correspondents by ID; returns a submission reference.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "recipients": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "recipients",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "open_focus",
+    "description": "Open another focus of your attention around a task while the core continues.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "task": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "name",
+        "task"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "send_focus_message",
+    "description": "Share a thought or update with a focus. Queues an observation and makes a sleeping recipient ready.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "focus_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Recipient focus, including your own."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "focus_id",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "schedule_attention",
+    "description": "Leave yourself something to return to later. Arranges an observation for the core that survives restart.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Past times are due immediately."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "name",
+        "at",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  }
+]
