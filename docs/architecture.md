@@ -101,7 +101,7 @@ The registry stores each session's internal numeric ID, stable named `focus_id`,
 
 ### Scheduling and capacity
 
-Each ready session can claim its own worker. The registry allows one activation at a time per session, preserving its model/tool order, while other sessions advance concurrently. A tool batch keeps its activation and context alive. New observations can queue during a round and enter working history at the next admission boundary. After finalization, a worker retains its session borrow until saving finishes.
+Each ready session can claim its own worker. The registry allows one activation at a time per session, preserving its model/tool order while other sessions advance concurrently. The worker holds its own copy of the session context through each round. Observations that arrive during inference or tool execution can enter working history at the [next admission](#activation-admission).
 
 Separate [limits](running.md#configuration) bound registered identities, ordinary accepted events buffered per session, and live host commands. Startup, activity reports, and runtime observations of activity interruption are outside the ordinary event allowance. Existing sessions remain addressable at the identity limit; activity completion releases a registered-session slot. Forks and activity resumption do not depend on space in the core's ordinary event queue.
 
@@ -123,11 +123,11 @@ The kernel selects the longest prefix of pending deliveries that fits a complete
 
 Selection and ordinary inference use the same retained history, focus identity, observation time, and grouped events. The registry returns the unselected suffix to the front of the queue, ahead of concurrent arrivals. If no prefix fits, the kernel can compact retained history and try selection again. An input that still cannot fit [interrupts the activation](#interrupted-activations) and stays queued. See [bounded model context](#bounded-model-context) for compaction and request limits.
 
-The kernel saves the admitted events and any replacement handover before acknowledging their receipts. After each tool round it checks for more deliveries, so the next inference can see new observations alongside saved tool replies. Acknowledgement means working history now owns the observation. The task can still be in progress.
+The worker renders the selected observations in the current turn, then appends them to its copy of the context for later rounds. The admission checkpoint selects an independent copy of that history, including any replacement handover. It also records which activity reports remain unread and which callbacks remain pending. Once publication succeeds, the kernel acknowledges the corresponding inbox receipts and starts inference. This ordering lets a restart recover an acknowledged observation even if inference never finishes.
 
 ## Activity forks
 
-Only the core can invoke `open_focus`. Each call reserves a new identity and prepares an assignment. At round commit, the registry appends complete model output and one reply per tool call to a candidate core context. It independently clones that context for each prepared activity, then publishes the completed core context and all new activities together. Publication leaves the core's activation running. A round can fork several activities, subject to identity capacity.
+Only the core can invoke `open_focus`. Each call reserves an identity and prepares an assignment. When all tool calls in the round have returned, the worker appends the model output and the tool replies to its own context. The registry copies that completed context for each new activity and publishes the core's updated history and all new activities in one checkpoint. The core continues its activation.
 
 Each copy includes retained events, complete native model/tool exchanges, and any existing handover followed by later history. All replies from the calling round are included, even those produced after the fork call. Forking generates no extra summary. Original record focus references remain intact as provenance; historical tool calls are not replayed.
 
@@ -135,21 +135,24 @@ The activity restores this history under its own `Context.scope` and `focus_id`.
 
 ## Activity reports
 
-After an ordinary activity inference returns successfully, Kernel persists its non-null `Response.text` as an assistant fact in the activity journal before invoking tools. The source focus reference and the time the runtime collected the complete response accompany the text. The adapter returns text when the response contains an `output_text` part, including an explicitly empty string. Reasoning, tool replies, compaction responses, and inherited exchanges produce no new assistant fact. The complete native model/tool round is committed separately after execution. A restart can therefore preserve a reported expression even when its source round was interrupted before commit; that expression does not establish tool effects.
+An ordinary activity response contributes one assistant message when it contains `output_text`, including an explicitly empty string. The registry records the source focus and the time it collected the response. If the response calls tools, the registry publishes the message before the first tool runs. The core can therefore receive the activity's stated intention even if execution stops before a tool result is saved. For a response without tool calls, the registry publishes the text at [round completion](#activation-and-session-completion).
 
-The registry appends single assistant and ending facts to one ordered durable outbox owned by [reports.zig](../packages/agent/src/reports.zig). Its `Entry` represents an internal fact independently of the model-facing `Input.ActivityReport`. An ending carries the time the runtime established session completion. Bodies are separate immutable history records linked by predecessor keys. Its checkpoint selects the unread suffix through a storage group, head key, unread count, and ending count. The runtime retains the selected record metadata and loads bodies in internal pages of 64 facts. Assistant text does not schedule the core. An ending both records the source session's completion and supplies a reason for core work, including when no assistant text was produced.
+The [activity outbox](../packages/agent/src/reports.zig) stores each message and ending as a separate immutable record linked to its predecessor. An ending records when the runtime closed the activity and requests core attention even if the activity produced no text. Messages alone wait for the core's next ordinary input. The checkpoint selects unread records by storage group, head key, unread count, and ending count.
 
-At [admission](#activation-admission), the selected facts enter the core's retained history with their original message and ending times. The same checkpoint advances the outbox by the raw fact and ending counts, independently of the number of displayed groups. Unselected facts remain in the journal, including those whose source activity has already left the registry. Measurement and compaction neither consume unread facts nor produce new activity expressions.
-
-I/O pages limit the number of facts requested in each read, while the encoded request budget bounds the grouped observations selected for an inference. Staging can span pages and retain an unselected suffix between core activations. Passive staged text does not make the core ready. Neither messages nor endings consume the ordinary event allowance. Metadata grows with unread references, and storage retains all unread text rather than replacing it with the latest expression. The [running guide](running.md#working-history) describes the resulting storage and memory considerations.
+At [admission](#activation-admission), the registry reads bodies in pages of 64 records. The encoded request budget determines how many fit after grouping them by activity. The admission checkpoint retains those groups with their original observation times and advances the outbox by the number of individual records and endings consumed. The remaining records stay available even after their source activity ends. See [working history](running.md#working-history) for the storage cost of unread reports.
 
 ## Activation and session completion
 
-The registry retains each complete model/tool exchange before its arena ends. Tool replies lead to another round. Without tool calls, the registry checks queued incoming events and callback registrations under the same lock used for finalization. Incoming events can continue the activation; passive assistant reports alone do not require another core round.
+Tool replies lead to another round. For a response without tool calls, the registry checks pending work under its lock and commits the response's effects on history, reports, and session membership together.
 
-When an activity activation completes, pending callback registrations keep the activity dormant and available for resumption. With none remaining, the registry appends an ending fact and removes the activity. The kernel saves a checkpoint covering both changes. The ending response's assistant text has already followed the ordinary report path and is not copied into the ending. The core sleeps between activations without being removed, and its final text remains internal. External sending occurs only through `send_message`; an ending does not certify task success.
+| State after the response | Result for the focus |
+| --- | --- |
+| A queued observation requests attention | The focus retains the response and continues its activation. |
+| The core has no work requesting attention | The core retains the response for its next activation. Going idle needs no separate checkpoint because the core receives startup on every [restart](#startup-and-interruption). |
+| An activity has an empty queue and a pending callback | The activity sleeps with its updated history and callback registration. |
+| An activity has an empty queue and no pending callbacks | The activity ends. One checkpoint drops the session from saved history and selects the outbox records for its final message (if present) and its ending, in that order. |
 
-After the checkpoint is confirmed and worker borrows end, a sleeping activity can unload its context. A completed activity's in-memory state can be released. Unread report records remain selected independently of the source activity's context, and Host retains its own command state.
+For a retained focus, the registry takes ownership of the worker's updated context. A sleeping activity can unload that context after checkpoint confirmation. The registry frees an ended activity's remaining state when its last worker releases it.
 
 ### Interrupted activations
 
@@ -175,8 +178,6 @@ Context prepends the embedded [system.md](../packages/agent/src/system.md) as on
 
 An ordinary request presents the selected events in its current turn after the complete retained prefix. A continuation without newly selected events omits the turn's `events` field. [Compaction](#bounded-model-context) uses the complete retained prefix and adds sampled state for recollection.
 
-Appending clones each entry into the Context's arena and updates its cached model-message view. The registry supplies an independent Context copy for each request, and the worker retains that copy through the complete model/tool round.
-
 ## Model requests and tools
 
 [Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). [tools.zig](../packages/agent/src/tools.zig) selects agent declarations and parses their arguments using one explicit role rule. Memory joins through `shared_tools` and, for activity sessions, Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection. Runtime action effects remain in Kernel's calling round, including focus preparation and atomic publication with the completed round.
@@ -187,7 +188,7 @@ Sessions share the configured model and output-token limit; Engine selects ordin
 
 ### Model transport
 
-Each call to `Model.Port.next` makes one non-streaming HTTP attempt under a monotonic deadline. Before returning tool calls, the Responses adapter checks any declared body length and validates the complete output. It joins a timed-out or canceled exchange before releasing borrowed data.
+Each call to `Model.Port.next` makes one non-streaming HTTP attempt under a monotonic deadline. Inference and file uploads share a request writer. It finishes the HTTP body and flushes the connection, including any buffered TLS records, before waiting for response headers. The adapter checks any declared response length and validates the complete model output before returning tool calls. On timeout or cancellation, it joins the exchange before releasing borrowed data.
 
 | Evidence from the inference endpoint | Adapter outcome and runtime action |
 | --- | --- |
@@ -238,7 +239,7 @@ Each entry contains a retained `Input.Record` or an exchange of `Model.Item[]`. 
 
 Working history and the activity outbox share a [record codec](../packages/agent/src/record_codec.zig) for compact UTF-8 ZON bodies and content keys. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. The storage group and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal observations are stored together in a separate immutable observation-array record in the session's current group.
 
-The checkpoint contains the next numeric session, callback, and command identifiers, pending callback registrations with their complete references, sources, and bound destinations, scheduled wakeups with their deadlines and text, and the [activity outbox's unread selection](#activity-reports). For each registered session it records the internal ID, `focus_id`, role, interrupted-execution state, epoch, current group, committed head, and entry count. An optional key selects the unread observation array in that group. Retained model/tool exchanges and admitted observations remain in the selected records.
+One checkpoint covers all registered sessions. For each session it records the internal ID, `focus_id`, role, epoch, storage group, committed head, and entry count. An optional key selects the unread internal observations in that group. The `was_running` flag helps determine which activities receive a [startup observation](#startup-and-interruption) immediately. Across sessions the checkpoint retains the next session, callback, and command numbers, callback registrations with their references, sources and destinations, scheduled wakeups with their deadlines and text, and the [unread activity reports](#activity-reports).
 
 Appending advances the head and count without adding a per-entry reference to the checkpoint. A sleeping session can retain this confirmed selection without materialized context entries. The latest confirmed checkpoint selects the records kept by [history maintenance](#history-retention) and available for subsequent restoration.
 
@@ -246,7 +247,9 @@ Appending advances the head and count without adding a per-entry reference to th
 
 `HistoryStore` exposes checkpoint publication, grouped records, and retention maintenance. History persistence and the activity outbox own their record schemas, chain selection, validation, and retention references. The shared record codec supplies encoding, decoding, and content-key functions; adapters own native representation, locators, placement, and protocol limits.
 
-Saves follow assistant report collection, admission, complete rounds, compaction, forks, interruption, completion, command-number allocation, and unread-input or source changes. Materialized records are encoded and hashed against the cached committed chain; cold sessions reuse their confirmed selection. Required creates must succeed before checkpoint publication. Unconfirmed writes remain outside selected paths. Unchanged checkpoints skip publication; a publication error invalidates that comparison digest because storage may already have accepted it.
+The registry holds its lock through checkpoint publication at [admission](#activation-admission) and [round completion](#activation-and-session-completion). A tool can also change what a restart must recover before the round finishes. For example, the registry saves a host command's callback registration before returning its reference.
+
+Persistence encodes and hashes entries from loaded contexts against their confirmed chains. Unloaded contexts reuse their confirmed selections. It first writes any new records, then publishes the checkpoint that selects them. If record creation stops partway through, the previous checkpoint still selects the history to restore. A checkpoint whose digest matches the last confirmed publication needs no new revision. If checkpoint publication itself returns an error, the store may already have accepted it. Persistence discards the cached digest so the next save must confirm its selection before maintenance can retire records.
 
 Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Complete focus references identifying the owner of retained event and handover records must identify either the restoring focus or the core (`core-1`). Matching physical duplicates can supply one logical occurrence. Missing or inconsistent committed records fail restoration.
 
@@ -264,7 +267,7 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 Startup discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, activity outbox references, callbacks, and wakeups. Requests receive the common system prompt independently of restored history. Communication-copy and history maintenance complete before reception opens.
 
-The core and sessions with unfinished activations or unread internal observations queue startup immediately. The checkpoint's `was_running` flag records a running or interrupted activation or a pending startup observation. Other activity sessions prepend startup when a real event first arrives; newly created sessions begin with an assignment. Unread assistant reports retain their passive status and accompany the core's next ordinary input; unread endings still request its activation.
+On every restart the core receives a fresh `startup` observation. For an activity, `was_running` records whether it had a running or interrupted activation or a startup observation waiting in its queue. The registry queues startup immediately for activities with that flag or unread internal observations. Other restored activities receive startup with their next event. A newly opened activity begins with its assignment.
 
 Before dispatch, Kernel publishes an interruption observation for each restored host registration through the first-result-preserving publisher. An identifiable stored result for that ID takes precedence. Wakeups publish when due. Processes and historical tool calls are not replayed, and source command IDs from the earlier runtime are not restored handles.
 

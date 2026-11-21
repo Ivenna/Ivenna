@@ -38,8 +38,8 @@ pub const History = struct {
         session_id: u64,
         focus_id: []const u8,
         role: Input.Role,
-        /// An unfinished activation, including one waiting for a new input,
-        /// gets a startup observation when the runtime next starts.
+        /// When true, an activity receives startup on restore even with no
+        /// pending observations. The core always receives startup.
         was_running: bool,
         epoch: u64,
         /// Null when unloaded; the confirmed checkpoint retains its selection.

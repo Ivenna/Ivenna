@@ -174,9 +174,9 @@ An accepted letter can wait in the mailbox if a focus is busy or the kernel stop
 
 ### When model work stalls
 
-Look for `retrying inference` or `interrupted` in the kernel's standard error. Both messages identify the affected focus.
+To follow a focus, look for its ID in the kernel's standard error. `retrying inference` gives the wait before its next attempt. `inference resumed` means a retry returned a model response. An `interrupted` message gives the reason the focus paused. A retry alone leaves the [checkpoint revision](#working-history) unchanged. Other focuses can advance it while this one waits.
 
-- **Temporary outage.** The kernel retries the same inference, including a request for a compaction summary. Each retry logs its delay. The first wait is 250–500 milliseconds. The range doubles after each failure up to 2.5–5 minutes. A longer delay requested by the service in `Retry-After` takes precedence. Retries reuse completed tool results. A lost model response can still incur charges.
+- **Temporary outage.** The kernel retries the same inference, including a request for a compaction summary. The first wait is 250–500 milliseconds. The range doubles after each failure up to 2.5–5 minutes. A longer delay requested by the service in `Retry-After` takes precedence. Retries reuse completed tool results. A lost model response can still incur charges.
 - **Interrupted focus.** A rejected request or an incomplete or invalid generation leaves that focus's history intact. Another observation can resume its work, and the core receives a notice if an activity was interrupted. A 403 or 404 can refer to a resource used by one request. If either status recurs across focuses, check model access and `LLM_BASE_URL`.
 - **Kernel exit.** A shared failure on the inference endpoint, such as HTTP 401, exhausted account quota, or an incompatible protocol, closes reception and stops the kernel. Correct the reported problem before restarting. When the file service returns 401, the kernel records the rejected upload in the tool result and can continue to the next inference. See [model transport](architecture.md#model-transport) and [file outcomes](content.md#complete-files).
 
@@ -192,7 +192,7 @@ Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception
 
 Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
 
-The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other activity sessions remain asleep until an event arrives. If the kernel saved a letter just before stopping and its acknowledgement is still pending, the letter can appear again.
+The core receives a fresh startup observation on every restart. A restored activity receives one immediately if it had an unfinished activation or unread internal observations. Other restored activities receive startup with their next event. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
 Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose deadlines passed while the runtime was unavailable become due. Host completions without stored results receive interruption observations with unknown effects; already stored results are preserved.
 
@@ -240,9 +240,13 @@ The mail account is not a permanent transcript: original copies expire under the
 
 ### Working history
 
-The latest checkpoint selects the histories needed to continue all registered sessions, including sleeping sessions whose contexts are unloaded, and retains callback registrations with their sources, scheduled wakeups, and the unread activity-report outbox. Ivenna classifies its saved history at startup and periodically during operation, placing records according to that checkpoint:
+A message with the subject `Ivenna history checkpoint` lists the state the kernel uses to resume its sessions. For each session, `head` points to the latest retained history record and `count` gives the number of records in that chain. Admitted observations and model/tool exchanges live in those separate records, so a whole new exchange can change just a few fields in the checkpoint. The checkpoint also tracks scheduled wakeups, callback registrations and unread activity reports.
 
-| Location | Contents |
+Suppose the core receives a letter and the model returns text without calling tools. In an otherwise idle kernel, this normally produces two revisions. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response in the core's history. Sending a reply to the correspondent requires a `send_message` call.
+
+Ivenna cleans up the history folder at startup and periodically while it runs. Between maintenance passes, several checkpoints can still appear in `Ivenna History`. The current one has the highest numeric `X-Ivenna-History-Revision` among the candidates marked `ivenna-current` in that folder.
+
+| Location | Contents after maintenance |
 | --- | --- |
 | `Ivenna History` | Latest checkpoint, selected session histories, and unread activity-report records |
 | Trash | Records not selected by the latest checkpoint, and older checkpoints |
@@ -277,7 +281,7 @@ History and callback mail are JMAP Email objects. A backup or transfer used for 
 
 The callback keyword and header contain the internal numeric delivery ID; the checkpoint registration preserves its complete named reference.
 
-If an interrupted save leaves several current checkpoint candidates, the runtime selects the highest numeric revision. Native `Email.id` values may change because restoration uses logical groups, record keys, and callback IDs. An import that preserves bodies alone is insufficient. See [updating the executable](#updating-the-executable) for storage-format compatibility.
+Native `Email.id` values may change because restoration uses logical groups, record keys, and callback IDs. See [working history](#working-history) to identify the current checkpoint and [updating the executable](#updating-the-executable) for storage-format compatibility.
 
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 
