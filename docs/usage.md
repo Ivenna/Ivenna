@@ -41,14 +41,12 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 Ivenna can pursue work while receiving further messages and may consider several waiting messages together. Its activities can keep working or sleep while host commands run, then continue when results arrive. Their intermediate expressions accompany the core's ordinary inputs; their endings request its attention. The core can also arrange later attention without a new message from you. See [Attention](attention.md) for how these focuses coordinate. Processing depends on runtime availability and capacity; a scheduled time does not guarantee a reply at that time.
 
-Continued work uses retained understanding and [autonomous memory](memory.md). Ivenna chooses what to retain, revisit, and revise as its understanding develops. Working histories can be condensed, so include relevant context in follow-up messages when detail may no longer be available.
-
-Ivenna moves its incoming copy to Trash after saving the complete observation, before working on that input. This does not indicate that the task is finished. Its outgoing copies enter Trash after confirmed submission. The mail service controls their eventual deletion; your received copies stay in your own account. See [data and retention](running.md#data-and-retention) for storage and cleanup.
+Continued work uses retained understanding and [autonomous memory](memory.md). Ivenna chooses what to retain, revisit, and revise as its understanding develops. Include relevant context when following up, since Ivenna can condense its working history. Keep your own copy if you need the exact wording after [Ivenna's mail copies expire](running.md#communication-copies).
 
 ## After interruption
 
 During a temporary model outage, Ivenna can still receive mail. It retries the pending decision and can continue when the service recovers. If the kernel stops, reception closes. On restart Ivenna restores saved history, pending wakeups, and stored results. It can continue interrupted work without a new letter. See [service status and reception](running.md#service-status-and-reception).
 
-Host commands are not resumed or automatically repeated. For a command whose completion was still awaited, Ivenna receives its stored result or is told that the outcome is unknown. Files or other external state may already have changed without a saved result. Include any known changes when corresponding about interrupted work.
+If the kernel stopped after saving your letter but before acknowledging its copy, Ivenna can see the same letter again. You can also receive a reply even if Ivenna lost confirmation while sending it.
 
-A message can also appear again if interruption occurred between saving its observation and acknowledging the original. The [restart guide](running.md#stopping-and-restarting) explains these limits.
+The kernel does not resume or replay host commands. Ivenna receives a stored completion it was waiting for, or learns that the outcome is unknown. If you follow up, mention which replies reached you and any changes you observed, such as a file the command wrote before the interruption. See [stopping and restarting](running.md#stopping-and-restarting).

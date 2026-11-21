@@ -188,7 +188,9 @@ pub const Kernel = struct {
             return switch (request) {
                 .send_message => |message| switch (try self.kernel.sender.send(a, message)) {
                     .submitted => |submission| try runtimeResult(a, submission),
-                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "The recipient ID is invalid."),
+                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "At least one recipient ID is unsupported. No message was submitted."),
+                    .not_submitted => try runtimeError(a, "not_submitted", "Preparation stopped before any attempt to submit this message."),
+                    .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
                 },
                 .send_focus_message => |message| blk: {
                     self.kernel.sessions.sendFocusMessage(self.work, message.focus_id, message.text) catch |err| return try toolFailure(a, err);

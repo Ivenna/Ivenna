@@ -1,27 +1,16 @@
 # Communication
 
-Correspondence connects Ivenna with people and programs through correspondent IDs. This guide covers incoming observations and explicit sending through `send_message`. Internal focus coordination belongs to [Attention](attention.md); for sending messages to Ivenna, see the [usage guide](usage.md).
-
-Incoming correspondence enters the core. Both core and activity sessions can send messages through `send_message`. Assistant text and activity reports remain internal unless Ivenna chooses to send them.
+Incoming correspondence from people and programs enters Ivenna's core. Both the core and its activities can write to correspondents through `send_message`. Assistant text and activity reports stay internal unless Ivenna chooses to send them. See the [usage guide](usage.md) for writing to Ivenna and [Attention](attention.md) for communication between focuses.
 
 ## Correspondents and IDs
 
-Each [incoming message](input.md#incoming-messages) records the correspondent IDs it came `from` and its free-form text. If `operator` relays Alice's words, `from` is `[operator]`; any attribution to Alice belongs in the text. Receiving a message does not require a response.
+Each [incoming message](input.md#incoming-messages) records the correspondent IDs it came `from` and its free-form text. If `operator` relays Alice's words, `from` contains only `operator`. The text can identify Alice as the original speaker. Receiving a message does not require a response.
 
-Outgoing calls identify their chosen recipients; results record submission outcomes. Ivenna chooses what to retain about correspondence in its understanding and shared memory.
-
-The communication interface has no operation for searching past correspondence. Stored message copies follow the [communication-copy retention policy](running.md#communication-copies).
+Ivenna chooses what to retain about correspondence in its understanding and shared memory. The communication interface has no operation for searching past correspondence. Stored copies follow the [communication-copy retention policy](running.md#communication-copies).
 
 ## Sending a message
 
-The `send_message` [declaration](../packages/agent/src/tools.json) defines two required arguments:
-
-| Argument | Meaning |
-| --- | --- |
-| `recipients` | Nonempty array of correspondent IDs |
-| `text` | Nonempty message text |
-
-For example:
+Call `send_message` with one or more correspondent IDs in `recipients` and nonempty `text`. The email adapter prepares one standalone message addressed to everyone listed, with subject `Ivenna` and the supplied text as its body. See the [tool declaration](../packages/agent/src/tools.json).
 
 ```json
 {
@@ -30,17 +19,22 @@ For example:
 }
 ```
 
-With the current email adapter, each successful invocation submits one standalone message to the specified recipients, with subject `Ivenna` and the supplied `text` as its body.
-
-Success returns a submission reference:
+The tool returns a reference when it can confirm that the mail service accepted the message for delivery. Delivery to a recipient can still fail afterward.
 
 ```json
 {"result":{"reference":"<submission-reference>"}}
 ```
 
-The email adapter returns this reference after confirming submission and moving its sending copy to Trash. The result does not establish final recipient delivery. See [communication-copy retention](running.md#communication-copies) for the copy's lifetime.
+Tool errors carry an `error.code` and a human-readable `error.message`.
 
-An unsupported recipient ID returns an `invalid_recipient` tool error; invalid argument structure returns `invalid_arguments`. Communication infrastructure, submission, or retirement failures end the runtime under the [availability contract](design.md#runtime-availability).
+| `error.code` | Meaning |
+| --- | --- |
+| `invalid_arguments` | The call could not be parsed, the recipient list was empty, or the message text was empty. |
+| `invalid_recipient` | At least one recipient ID was unsupported. The tool submitted no message. |
+| `not_submitted` | Preparation stopped before the tool attempted submission. |
+| `submission_unknown` | The tool attempted submission and could not confirm the outcome. The service may already have accepted the message, so sending it again could produce a duplicate. |
+
+If the runtime loses required mail access, it closes reception and stops. See [runtime availability](design.md#runtime-availability).
 
 ## Current email addressing
 

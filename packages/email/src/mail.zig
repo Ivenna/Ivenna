@@ -1,4 +1,5 @@
 const std = @import("std");
+const Jmap = @import("jmap.zig").Jmap;
 const HistoryStore = @import("agent_contracts").HistoryStore;
 const Callback = @import("agent_contracts").Callback;
 const Inbox = @import("agent_contracts").Inbox;
@@ -39,9 +40,6 @@ pub const StateRecord = struct {
     revision: u64,
 };
 
-const core_capability = "urn:ietf:params:jmap:core";
-const mail_capability = "urn:ietf:params:jmap:mail";
-const submission_capability = "urn:ietf:params:jmap:submission";
 const handled_keyword = "ivenna-handled";
 const outbound_keyword = "ivenna-outbound";
 const state_keyword = "ivenna-state";
@@ -70,17 +68,18 @@ const message_properties: []const []const u8 = &.{
 const correspondence_properties: []const []const u8 = &.{ "id", "mailboxIds", "from", "to", "keywords", callback_property };
 
 const HistoryKind = enum { record, checkpoint };
-const EmailUpdate = struct { id: []const u8, patch: Value };
+const Retirement = struct {
+    id: []const u8,
+    marker: enum { none, handled, clear_current } = .none,
+};
 
 /// JMAP access for communication records, submissions, and working history.
 /// Discover once using an allocator that outlives every operation and worker.
 pub const Mailbox = struct {
-    client: *std.http.Client,
+    jmap: *Jmap,
     session_url: []const u8,
-    authorization: []const u8,
     address: []const u8,
     addressing: Addressing,
-    api_url: []const u8 = "",
     account_id: []const u8 = "",
     identity_id: []const u8 = "",
     drafts_id: []const u8 = "",
@@ -88,24 +87,22 @@ pub const Mailbox = struct {
     callback_id: []const u8 = "",
     trash_id: []const u8 = "",
     junk_id: []const u8 = "",
-    excluded_ids: []const []const u8 = &.{},
     max_get: usize = 32,
     max_set: usize = 32,
-    max_request: usize = 0,
 
     pub fn discover(self: *Mailbox, a: Allocator) !void {
-        const session = try self.http(a, .GET, self.session_url, null);
-        self.api_url = try textField(session, "apiUrl");
-        self.account_id = try textField(try field(session, "primaryAccounts"), mail_capability);
+        const session = try self.jmap.session(a, self.session_url);
+        self.jmap.api_url = try textField(session, "apiUrl");
+        self.account_id = try textField(try field(session, "primaryAccounts"), Jmap.mail_capability);
         const capabilities = try field(session, "capabilities");
-        if (capabilities != .object or !capabilities.object.contains(mail_capability) or
-            !capabilities.object.contains(submission_capability))
+        if (capabilities != .object or !capabilities.object.contains(Jmap.mail_capability) or
+            !capabilities.object.contains(Jmap.submission_capability))
             return error.MailCapabilityUnavailable;
-        const core = try field(capabilities, core_capability);
+        const core = try field(capabilities, Jmap.core_capability);
         self.max_get = @min(try objectLimit(core, "maxObjectsInGet"), 32);
         self.max_set = @min(try objectLimit(core, "maxObjectsInSet"), 32);
-        self.max_request = try objectLimit(core, "maxSizeRequest");
-        const identities = try self.call(a, "Identity/get", .{ .accountId = self.account_id });
+        self.jmap.max_request = try objectLimit(core, "maxSizeRequest");
+        const identities = try self.jmap.call(a, .@"Identity/get", .{ .accountId = self.account_id });
         for (try arrayField(identities, "list")) |identity| {
             if (self.addressing.isSelf(try textField(identity, "email"))) {
                 self.identity_id = try textField(identity, "id");
@@ -114,54 +111,52 @@ pub const Mailbox = struct {
         }
         if (self.identity_id.len == 0) return error.MailIdentityNotFound;
 
-        var excluded: std.ArrayList([]const u8) = .empty;
-        const folders = try self.call(a, "Mailbox/get", .{
+        const list = try self.listFolders(a);
+        self.drafts_id = try folderId(list, .{ .role = "drafts" }) orelse return error.MailFoldersNotFound;
+        self.junk_id = try folderId(list, .{ .role = "junk" }) orelse "";
+        self.history_id = try self.ensureFolder(a, list, history_mailbox_name, null);
+        self.callback_id = try self.ensureFolder(a, list, callback_mailbox_name, null);
+        self.trash_id = try self.ensureFolder(a, list, "Trash", "trash");
+    }
+
+    fn listFolders(self: Mailbox, a: Allocator) ![]const Value {
+        const reply = try self.jmap.call(a, .@"Mailbox/get", .{
             .accountId = self.account_id,
             .properties = &[_][]const u8{ "id", "name", "parentId", "role" },
         });
-        for (try arrayField(folders, "list")) |folder| {
-            const id = try textField(folder, "id");
-            const role = optionalText(folder, "role") orelse {
-                if (optionalText(folder, "parentId") == null and
-                    std.mem.eql(u8, try textField(folder, "name"), history_mailbox_name))
-                    self.history_id = id;
-                if (optionalText(folder, "parentId") == null and
-                    std.mem.eql(u8, try textField(folder, "name"), callback_mailbox_name))
-                    self.callback_id = id;
-                continue;
+        return arrayField(reply, "list");
+    }
+
+    const FolderSelector = union(enum) { role: []const u8, top_level_name: []const u8 };
+
+    fn folderId(list: []const Value, selector: FolderSelector) !?[]const u8 {
+        for (list) |item| {
+            const role = optionalText(item, "role");
+            const matches = switch (selector) {
+                .role => |wanted| std.mem.eql(u8, role orelse continue, wanted),
+                .top_level_name => |name| role == null and optionalText(item, "parentId") == null and
+                    std.mem.eql(u8, try textField(item, "name"), name),
             };
-            if (std.mem.eql(u8, role, "drafts")) self.drafts_id = id;
-            if (std.mem.eql(u8, role, "trash")) self.trash_id = id;
-            if (std.mem.eql(u8, role, "junk")) self.junk_id = id;
-            if (std.mem.eql(u8, role, "drafts") or std.mem.eql(u8, role, "trash") or std.mem.eql(u8, role, "junk"))
-                try excluded.append(a, id);
+            if (matches) return try textField(item, "id");
         }
-        if (self.drafts_id.len == 0)
-            return error.MailFoldersNotFound;
-        if (self.history_id.len == 0) {
-            const created = try self.call(a, "Mailbox/set", .{
-                .accountId = self.account_id,
-                .create = .{ .history = .{ .name = history_mailbox_name, .parentId = null, .role = null } },
-            });
-            self.history_id = try createdId(created, "history");
-        }
-        if (self.callback_id.len == 0) {
-            const created = try self.call(a, "Mailbox/set", .{
-                .accountId = self.account_id,
-                .create = .{ .callbacks = .{ .name = callback_mailbox_name, .parentId = null, .role = null } },
-            });
-            self.callback_id = try createdId(created, "callbacks");
-        }
-        if (self.trash_id.len == 0) {
-            const created = try self.call(a, "Mailbox/set", .{
-                .accountId = self.account_id,
-                .create = .{ .trash = .{ .name = "Trash", .parentId = null, .role = "trash" } },
-            });
-            self.trash_id = try createdId(created, "trash");
-            try excluded.append(a, self.trash_id);
-        }
-        try excluded.append(a, self.history_id);
-        self.excluded_ids = try excluded.toOwnedSlice(a);
+        return null;
+    }
+
+    fn ensureFolder(self: Mailbox, a: Allocator, list: []const Value, name: []const u8, role: ?[]const u8) ![]const u8 {
+        const selector: FolderSelector = if (role) |r| .{ .role = r } else .{ .top_level_name = name };
+        if (try folderId(list, selector)) |id| return id;
+        return self.createFolder(a, name, role) catch |err| switch (err) {
+            error.MailMutationUnconfirmed => try folderId(try self.listFolders(a), selector) orelse err,
+            else => err,
+        };
+    }
+
+    fn createFolder(self: Mailbox, a: Allocator, name: []const u8, role: ?[]const u8) ![]const u8 {
+        const reply = try self.jmap.call(a, .@"Mailbox/set", .{
+            .accountId = self.account_id,
+            .create = .{ .folder = .{ .name = name, .parentId = null, .role = role } },
+        });
+        return createdId(reply, "folder");
     }
 
     const IntakeKind = enum { message, callback };
@@ -243,8 +238,17 @@ pub const Mailbox = struct {
     /// availability cannot justify replacing a result that already exists.
     pub fn publishCallback(self: Mailbox, a: Allocator, message: Callback.Message) !void {
         if (message.id == 0) return error.InvalidCallback;
-        const id_text = try std.fmt.allocPrint(a, "{d}", .{message.id});
         const index_keyword = try callbackKeyword(a, message.id);
+        if (try self.hasCallback(a, message.id, index_keyword)) return;
+        self.createCallback(a, message, index_keyword) catch |err| switch (err) {
+            error.MailMutationUnconfirmed => {
+                if (!try self.hasCallback(a, message.id, index_keyword)) return err;
+            },
+            else => return err,
+        };
+    }
+
+    fn hasCallback(self: Mailbox, a: Allocator, id: u64, index_keyword: []const u8) !bool {
         const filter = try value(a, .{
             .operator = "AND",
             .conditions = .{
@@ -263,10 +267,15 @@ pub const Mailbox = struct {
                 };
                 // The keyword locates candidates; the native header and its
                 // matching index establish callback identity.
-                if (previous == message.id) return;
+                if (previous == id) return true;
             }
             position += ids.len;
         }
+        return false;
+    }
+
+    fn createCallback(self: Mailbox, a: Allocator, message: Callback.Message, index_keyword: []const u8) !void {
+        const id_text = try std.fmt.allocPrint(a, "{d}", .{message.id});
         var folders: std.json.ObjectMap = .empty;
         try folders.put(a, self.callback_id, .{ .bool = true });
         var keywords: std.json.ObjectMap = .empty;
@@ -282,7 +291,7 @@ pub const Mailbox = struct {
             .bodyValues = .{ .text = .{ .value = message.text } },
         });
         try record.object.put(a, callback_property, .{ .string = id_text });
-        const created = try self.call(a, "Email/set", .{
+        const created = try self.jmap.call(a, .@"Email/set", .{
             .accountId = self.account_id,
             .create = .{ .callback = record },
         });
@@ -291,12 +300,10 @@ pub const Mailbox = struct {
 
     /// The caller has durably admitted this input into working history.
     pub fn acknowledge(self: Mailbox, a: Allocator, id: []const u8) !void {
-        var patch = (try self.trashPatch(a)).object;
-        try patch.put(a, "keywords/" ++ handled_keyword, .{ .bool = true });
-        try self.updateEmails(a, &.{.{ .id = id, .patch = .{ .object = patch } }});
+        try self.retireEmails(a, &.{.{ .id = id, .marker = .handled }});
     }
 
-    /// Retire acknowledged input and abandoned outbound copies. The caller
+    /// Retire acknowledged input and released outbound copies. The caller
     /// serializes this pass with submission so live drafts cannot be selected.
     pub fn maintainCorrespondence(self: Mailbox, a: Allocator) !void {
         var conditions: std.ArrayList(Value) = .empty;
@@ -312,12 +319,12 @@ pub const Mailbox = struct {
         const filter = try value(a, .{ .operator = "AND", .conditions = conditions.items });
         var position: usize = 0;
         while (true) {
-            var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
+            var scratch = std.heap.ArenaAllocator.init(self.jmap.allocator());
             defer scratch.deinit();
             const temporary = scratch.allocator();
             const ids = try self.queryIds(temporary, filter, true, position, self.max_get);
             if (ids.len == 0) break;
-            var retired: std.ArrayList(EmailUpdate) = .empty;
+            var retired: std.ArrayList(Retirement) = .empty;
             for (try self.getRecords(temporary, ids, false)) |record| {
                 const keywords = try field(record, "keywords");
                 if (!boolean(keywords, handled_keyword)) {
@@ -328,22 +335,24 @@ pub const Mailbox = struct {
                     const from = try addresses(temporary, record, "from");
                     if (from.len != 1 or !self.addressing.isSelf(from[0].email)) continue;
                 }
-                try retired.append(temporary, .{
-                    .id = try textField(record, "id"),
-                    .patch = try self.trashPatch(temporary),
-                });
+                try retired.append(temporary, .{ .id = try textField(record, "id") });
             }
-            try self.updateEmails(temporary, retired.items);
+            try self.retireEmails(temporary, retired.items);
             position += ids.len - retired.items.len;
         }
     }
 
-    fn trashPatch(self: Mailbox, a: Allocator) !Value {
+    fn trashPatch(self: Mailbox, a: Allocator, retirement: Retirement) !Value {
         var folders: std.json.ObjectMap = .empty;
         try folders.put(a, self.trash_id, .{ .bool = true });
         var patch: std.json.ObjectMap = .empty;
         try patch.put(a, "mailboxIds", .{ .object = folders });
         try patch.put(a, "keywords/$draft", .null);
+        switch (retirement.marker) {
+            .none => {},
+            .handled => try patch.put(a, "keywords/" ++ handled_keyword, .{ .bool = true }),
+            .clear_current => try patch.put(a, "keywords/" ++ current_keyword, .null),
+        }
         return .{ .object = patch };
     }
 
@@ -361,7 +370,7 @@ pub const Mailbox = struct {
         var records: std.ArrayList(StateRecord) = .empty;
         var position: usize = 0;
         while (true) {
-            var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+            var scratch: std.heap.ArenaAllocator = .init(self.jmap.allocator());
             defer scratch.deinit();
             const temporary = scratch.allocator();
             const ids = try self.historyQueryIds(temporary, filter, position);
@@ -384,7 +393,7 @@ pub const Mailbox = struct {
     }
 
     pub fn historyCheckpoint(self: Mailbox, a: Allocator, id: []const u8) ![]const u8 {
-        var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+        var scratch: std.heap.ArenaAllocator = .init(self.jmap.allocator());
         defer scratch.deinit();
         const temporary = scratch.allocator();
         const record = (try self.getHistoryRecords(temporary, &.{id}, true))[0];
@@ -395,7 +404,7 @@ pub const Mailbox = struct {
 
     pub fn allocateHistoryGroup(self: Mailbox, a: Allocator) ![]const u8 {
         var random: [16]u8 = undefined;
-        try self.client.io.randomSecure(&random);
+        try self.jmap.io().randomSecure(&random);
         const token = std.fmt.bytesToHex(random, .lower);
         return a.dupe(u8, &token);
     }
@@ -416,14 +425,14 @@ pub const Mailbox = struct {
         defer seen.deinit(a);
         var group_offset: usize = 0;
         while (group_offset < requested.items.len) {
-            var query_arena: std.heap.ArenaAllocator = .init(self.client.allocator);
+            var query_arena: std.heap.ArenaAllocator = .init(self.jmap.allocator());
             defer query_arena.deinit();
             const query_allocator = query_arena.allocator();
             var count: usize = 0;
             var selected: Value = undefined;
             while (count < @min(history_query_groups, requested.items.len - group_offset)) {
                 const candidate = try self.historyGroupFilter(query_allocator, requested.items[group_offset..][0 .. count + 1]);
-                if (try requestSize("Email/query", self.historyQuery(candidate, std.math.maxInt(usize))) > self.max_request) break;
+                if (try Jmap.requestSize(.@"Email/query", self.historyQuery(candidate, std.math.maxInt(usize))) > self.jmap.max_request) break;
                 selected = candidate;
                 count += 1;
             }
@@ -431,7 +440,7 @@ pub const Mailbox = struct {
             const selected_groups = requested.items[group_offset..][0..count];
             var position: usize = 0;
             while (true) {
-                var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+                var scratch: std.heap.ArenaAllocator = .init(self.jmap.allocator());
                 defer scratch.deinit();
                 const temporary = scratch.allocator();
                 const ids = try self.historyQueryIds(temporary, selected, position);
@@ -466,7 +475,7 @@ pub const Mailbox = struct {
         const data = try a.alloc([]const u8, references.len);
         var offset: usize = 0;
         while (offset < ids.len) {
-            var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+            var scratch: std.heap.ArenaAllocator = .init(self.jmap.allocator());
             defer scratch.deinit();
             const temporary = scratch.allocator();
             const count = try self.historyGetCount(ids[offset..], true);
@@ -481,16 +490,6 @@ pub const Mailbox = struct {
             offset += count;
         }
         return data;
-    }
-
-    pub fn createHistoryRecords(self: Mailbox, a: Allocator, records: []const HistoryStore.Record) !void {
-        const writes = try a.alloc(HistoryWrite, records.len);
-        for (records, writes) |record, *write| write.* = .{ .record = record };
-        _ = try self.createHistory(a, writes);
-    }
-
-    pub fn createCheckpoint(self: Mailbox, a: Allocator, body: []const u8, revision: u64) ![]const u8 {
-        return (try self.createHistory(a, &.{.{ .checkpoint = .{ .body = body, .revision = revision } }}))[0];
     }
 
     const HistoryInventoryItem = struct {
@@ -528,18 +527,16 @@ pub const Mailbox = struct {
         var found_records = retained.valueIterator();
         while (found_records.next()) |found| if (!found.*) return error.InvalidHistory;
 
-        var updates: std.ArrayList(EmailUpdate) = .empty;
+        var updates: std.ArrayList(Retirement) = .empty;
         for (inventory) |item| {
             const keep = switch (item.contents) {
                 .record => |record| retained.contains(try historyRecordIdentity(a, record)),
                 .checkpoint => |stored_revision| item.current and stored_revision == revision,
             };
             if (keep) continue;
-            var patch = (try self.trashPatch(a)).object;
-            if (item.current) try patch.put(a, "keywords/" ++ current_keyword, .null);
-            try updates.append(a, .{ .id = item.id, .patch = .{ .object = patch } });
+            try updates.append(a, .{ .id = item.id, .marker = if (item.current) .clear_current else .none });
         }
-        try self.updateEmails(a, updates.items);
+        try self.retireEmails(a, updates.items);
     }
 
     fn historyInventory(self: Mailbox, a: Allocator) ![]const HistoryInventoryItem {
@@ -552,7 +549,7 @@ pub const Mailbox = struct {
         defer seen.deinit(a);
         var position: usize = 0;
         while (true) {
-            var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+            var scratch: std.heap.ArenaAllocator = .init(self.jmap.allocator());
             defer scratch.deinit();
             const temporary = scratch.allocator();
             const ids = try self.historyQueryIds(temporary, filter, position);
@@ -596,22 +593,25 @@ pub const Mailbox = struct {
         return inventory.toOwnedSlice(a);
     }
 
-    fn updateEmails(self: Mailbox, a: Allocator, updates: []const EmailUpdate) !void {
+    fn retireEmails(self: Mailbox, a: Allocator, updates: []const Retirement) !void {
         var offset: usize = 0;
         while (offset < updates.len) {
             var batch: std.json.ObjectMap = .empty;
             var count: usize = 0;
             while (count < @min(self.max_set, updates.len - offset)) {
                 const update = updates[offset + count];
-                try batch.put(a, update.id, update.patch);
-                if (try requestSize("Email/set", .{ .accountId = self.account_id, .update = Value{ .object = batch } }) > self.max_request) {
+                try batch.put(a, update.id, try self.trashPatch(a, update));
+                if (try Jmap.requestSize(.assign_email_properties, .{ .accountId = self.account_id, .update = Value{ .object = batch } }) > self.jmap.max_request) {
                     _ = batch.swapRemove(update.id);
                     break;
                 }
                 count += 1;
             }
             if (count == 0) return error.MailRequestTooLarge;
-            _ = try self.call(a, "Email/set", .{ .accountId = self.account_id, .update = Value{ .object = batch } });
+            const reply = try self.jmap.call(a, .assign_email_properties, .{ .accountId = self.account_id, .update = Value{ .object = batch } });
+            const updated = optionalField(reply, "updated") orelse return error.MailMutationUnconfirmed;
+            if (updated != .object) return error.MailMutationUnconfirmed;
+            for (batch.keys()) |id| if (!updated.object.contains(id)) return error.MailMutationUnconfirmed;
             offset += count;
         }
     }
@@ -621,34 +621,61 @@ pub const Mailbox = struct {
         checkpoint: struct { body: []const u8, revision: u64 },
     };
 
-    /// Correlate each successful create by its creation ID. JMAP owns native ID
-    /// allocation; failed batches may leave unconfirmed objects in storage.
-    fn createHistory(self: Mailbox, a: Allocator, writes: []const HistoryWrite) ![]const []const u8 {
-        const ids = try a.alloc([]const u8, writes.len);
+    pub fn createHistoryRecords(self: Mailbox, a: Allocator, records: []const HistoryStore.Record) !void {
         var offset: usize = 0;
-        while (offset < writes.len) {
-            var scratch: std.heap.ArenaAllocator = .init(self.client.allocator);
+        while (offset < records.len) {
+            var scratch: std.heap.ArenaAllocator = .init(a);
             defer scratch.deinit();
             const temporary = scratch.allocator();
             var creates: std.json.ObjectMap = .empty;
             var count: usize = 0;
-            while (count < @min(self.max_set, writes.len - offset)) {
+            while (count < @min(self.max_set, records.len - offset)) {
                 const creation_id = try std.fmt.allocPrint(temporary, "record-{d}", .{count});
-                try creates.put(temporary, creation_id, try self.historyMessage(temporary, writes[offset + count]));
-                if (try requestSize("Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } }) > self.max_request) {
+                try creates.put(temporary, creation_id, try self.historyMessage(temporary, .{ .record = records[offset + count] }));
+                if (try Jmap.requestSize(.@"Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } }) > self.jmap.max_request) {
                     _ = creates.swapRemove(creation_id);
                     if (count == 0) return error.HistoryRecordTooLarge;
                     break;
                 }
                 count += 1;
             }
-            const response = try self.call(temporary, "Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } });
-            for (creates.keys(), ids[offset..][0..count]) |creation_id, *id| {
-                id.* = try a.dupe(u8, try createdId(response, creation_id));
-            }
+            self.createHistoryBatch(temporary, creates) catch |err| switch (err) {
+                error.MailMutationUnconfirmed => try self.confirmHistoryRecords(temporary, records[offset..][0..count]),
+                else => return err,
+            };
             offset += count;
         }
-        return ids;
+    }
+
+    pub fn createCheckpoint(self: Mailbox, a: Allocator, body: []const u8, revision: u64) !void {
+        var creates: std.json.ObjectMap = .empty;
+        try creates.put(a, "checkpoint", try self.historyMessage(a, .{ .checkpoint = .{ .body = body, .revision = revision } }));
+        self.createHistoryBatch(a, creates) catch |err| switch (err) {
+            error.MailRequestTooLarge => return error.HistoryRecordTooLarge,
+            else => return err,
+        };
+    }
+
+    fn createHistoryBatch(self: Mailbox, a: Allocator, creates: std.json.ObjectMap) !void {
+        const response = try self.jmap.call(a, .@"Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } });
+        for (creates.keys()) |creation_id| _ = try createdId(response, creation_id);
+    }
+
+    /// Each create stores the content key and predecessor with the immutable
+    /// body, so their presence in the group can confirm the write for that record.
+    fn confirmHistoryRecords(self: Mailbox, a: Allocator, records: []const HistoryStore.Record) !void {
+        const groups = try a.alloc([]const u8, records.len);
+        for (records, groups) |record, *group| group.* = record.group;
+        const candidates = try self.queryHistory(a, groups);
+        for (records) |record| {
+            var found = false;
+            for (candidates) |candidate| {
+                if (!std.mem.eql(u8, candidate.group, record.group) or !std.mem.eql(u8, &candidate.key, &record.key)) continue;
+                if (!std.meta.eql(candidate.previous, record.previous)) return error.InvalidHistory;
+                found = true;
+            }
+            if (!found) return error.MailMutationUnconfirmed;
+        }
     }
 
     fn historyMessage(self: Mailbox, a: Allocator, write: HistoryWrite) !Value {
@@ -726,7 +753,7 @@ pub const Mailbox = struct {
     }
 
     fn historyQueryIds(self: Mailbox, a: Allocator, filter: Value, position: usize) ![]const []const u8 {
-        const result = try self.call(a, "Email/query", self.historyQuery(filter, position));
+        const result = try self.jmap.call(a, .@"Email/query", self.historyQuery(filter, position));
         return strings(a, try field(result, "ids"));
     }
 
@@ -778,7 +805,7 @@ pub const Mailbox = struct {
     fn historyGetCount(self: Mailbox, ids: []const []const u8, body: bool) !usize {
         var count: usize = 0;
         while (count < @min(ids.len, self.max_get)) {
-            if (try requestSize("Email/get", self.historyGet(ids[0 .. count + 1], body)) > self.max_request) break;
+            if (try Jmap.requestSize(.@"Email/get", self.historyGet(ids[0 .. count + 1], body)) > self.jmap.max_request) break;
             count += 1;
         }
         if (count == 0) return error.MailRequestTooLarge;
@@ -788,7 +815,7 @@ pub const Mailbox = struct {
     /// Return one record per requested ID, preserving input order and repeats,
     /// or fail if any requested record is missing.
     fn getHistoryRecords(self: Mailbox, a: Allocator, ids: []const []const u8, body: bool) ![]const Value {
-        const response = try self.call(a, "Email/get", self.historyGet(ids, body));
+        const response = try self.jmap.call(a, .@"Email/get", self.historyGet(ids, body));
         var records: std.StringHashMapUnmanaged(Value) = .empty;
         defer records.deinit(a);
         for (try arrayField(response, "list")) |record|
@@ -827,22 +854,33 @@ pub const Mailbox = struct {
         return true;
     }
 
-    /// Confirm submission and retirement of the outgoing copy, returning its
-    /// native Email ID. Submission does not confirm final recipient delivery.
-    pub fn send(self: Mailbox, a: Allocator, outgoing: Outgoing) ![]const u8 {
-        const id = try self.create(a, outgoing);
-        const submitted = try self.invoke(a, "EmailSubmission/set", .{
+    /// A matching submission confirms acceptance. A false result leaves it unknown.
+    pub fn submissionConfirmed(self: Mailbox, a: Allocator, id: []const u8) !bool {
+        const query = self.jmap.call(a, .@"EmailSubmission/query", .{
             .accountId = self.account_id,
-            .create = .{ .submission = .{ .identityId = self.identity_id, .emailId = id } },
-            .onSuccessUpdateEmail = .{ .@"#submission" = try self.trashPatch(a) },
-        });
-        _ = try createdId(submitted.result, "submission");
-        const updated = submitted.email_update orelse return error.InvalidMailReply;
-        if (!hasKey(updated, "updated", id)) return error.InvalidMailReply;
-        return id;
+            .filter = .{ .emailIds = &.{id}, .identityIds = &.{self.identity_id} },
+            .limit = 1,
+        }) catch |err| switch (err) {
+            error.Canceled, error.OutOfMemory => return err,
+            else => return false,
+        };
+        const matches = arrayField(query, "ids") catch return false;
+        return matches.len == 1 and matches[0] == .string and matches[0].string.len != 0;
     }
 
-    fn create(self: Mailbox, a: Allocator, outgoing: Outgoing) ![]const u8 {
+    pub fn submitDraft(self: Mailbox, a: Allocator, id: []const u8) !void {
+        const result = self.jmap.call(a, .@"EmailSubmission/set", .{
+            .accountId = self.account_id,
+            .create = .{ .submission = .{ .identityId = self.identity_id, .emailId = id } },
+        }) catch |err| switch (err) {
+            // Stalwart can queue delivery before storing the EmailSubmission.
+            error.MailMethodUnavailable => return error.MailMutationUnconfirmed,
+            else => return err,
+        };
+        _ = try createdId(result, "submission");
+    }
+
+    pub fn createDraft(self: Mailbox, a: Allocator, outgoing: Outgoing) ![]const u8 {
         var folders: std.json.ObjectMap = .empty;
         try folders.put(a, self.drafts_id, .{ .bool = true });
         var keywords: std.json.ObjectMap = .empty;
@@ -858,7 +896,7 @@ pub const Mailbox = struct {
             .textBody = &.{.{ .partId = "text", .type = "text/plain" }},
             .bodyValues = .{ .text = .{ .value = outgoing.body } },
         });
-        const result = try self.call(a, "Email/set", .{
+        const result = try self.jmap.call(a, .@"Email/set", .{
             .accountId = self.account_id,
             .create = .{ .letter = message },
         });
@@ -867,7 +905,7 @@ pub const Mailbox = struct {
 
     fn queryIds(self: Mailbox, a: Allocator, filter: Value, oldest_first: bool, position: usize, limit: usize) ![]const []const u8 {
         const sort = try value(a, .{.{ .property = "receivedAt", .isAscending = oldest_first }});
-        const query = try self.call(a, "Email/query", .{
+        const query = try self.jmap.call(a, .@"Email/query", .{
             .accountId = self.account_id,
             .filter = filter,
             .sort = sort,
@@ -894,7 +932,8 @@ pub const Mailbox = struct {
                 try conditions.append(a, try value(a, .{ .operator = "NOT", .conditions = &.{.{ .inMailbox = self.callback_id }} }));
             },
         }
-        for (self.excluded_ids) |id| {
+        for ([_][]const u8{ self.drafts_id, self.junk_id, self.trash_id, self.history_id }) |id| {
+            if (id.len == 0) continue;
             try conditions.append(a, try value(a, .{
                 .operator = "NOT",
                 .conditions = &.{.{ .inMailbox = id }},
@@ -911,11 +950,11 @@ pub const Mailbox = struct {
         while (offset < ids.len) {
             var count: usize = 0;
             while (count < @min(self.max_get, ids.len - offset)) {
-                if (try requestSize("Email/get", self.correspondenceGet(ids[offset .. offset + count + 1], body)) > self.max_request) break;
+                if (try Jmap.requestSize(.@"Email/get", self.correspondenceGet(ids[offset .. offset + count + 1], body)) > self.jmap.max_request) break;
                 count += 1;
             }
             if (count == 0) return error.MailRequestTooLarge;
-            const result = try self.call(a, "Email/get", self.correspondenceGet(ids[offset..][0..count], body));
+            const result = try self.jmap.call(a, .@"Email/get", self.correspondenceGet(ids[offset..][0..count], body));
             for (try arrayField(result, "list")) |record|
                 try records.put(a, try textField(record, "id"), record);
             offset += count;
@@ -999,143 +1038,12 @@ pub const Mailbox = struct {
             if (self.addressing.id(address.email) == null) return false;
         return true;
     }
-
-    /// Keep the submission and its implicit retirement response together.
-    const Invocation = struct { result: Value, email_update: ?Value };
-
-    fn call(self: Mailbox, a: Allocator, method: []const u8, arguments: anytype) !Value {
-        return (try self.invoke(a, method, arguments)).result;
-    }
-
-    fn invoke(self: Mailbox, a: Allocator, method: []const u8, arguments: anytype) !Invocation {
-        var output: std.Io.Writer.Allocating = .init(a);
-        defer output.deinit();
-        try writeRequest(method, arguments, &output.writer);
-        const payload = output.written();
-        if (payload.len > self.max_request) return error.MailRequestTooLarge;
-        const reply = try self.http(a, .POST, self.api_url, payload);
-        var matched: ?Value = null;
-        var email_update: ?Value = null;
-        for (try arrayField(reply, "methodResponses")) |invocation| {
-            if (invocation != .array or invocation.array.items.len != 3) return error.InvalidMailReply;
-            const parts = invocation.array.items;
-            if (parts[0] != .string or parts[2] != .string or !std.mem.eql(u8, parts[2].string, "0"))
-                return error.InvalidMailReply;
-            if (std.mem.eql(u8, parts[0].string, "error")) {
-                return error.MailMethodFailed;
-            }
-            if (std.mem.eql(u8, parts[0].string, method)) {
-                if (matched != null) return error.InvalidMailReply;
-                try checkObjectErrors(parts[1]);
-                matched = parts[1];
-            } else if (std.mem.eql(u8, method, "EmailSubmission/set") and
-                std.mem.eql(u8, parts[0].string, "Email/set"))
-            {
-                if (email_update != null) return error.InvalidMailReply;
-                try checkObjectErrors(parts[1]);
-                email_update = parts[1];
-            } else return error.InvalidMailReply;
-        }
-        return .{ .result = matched orelse return error.InvalidMailReply, .email_update = email_update };
-    }
-
-    fn http(self: Mailbox, a: Allocator, method: std.http.Method, url: []const u8, payload: ?[]u8) !Value {
-        const deadline = std.Io.Clock.Timestamp.fromNow(self.client.io, .{ .raw = .fromSeconds(60), .clock = .awake });
-        return self.httpBefore(a, method, url, payload, deadline);
-    }
-
-    fn httpBefore(self: Mailbox, a: Allocator, method: std.http.Method, url: []const u8, payload: ?[]u8, deadline: std.Io.Clock.Timestamp) !Value {
-        const io = self.client.io;
-        try io.checkCancel();
-        const Result = union(enum) { response: anyerror!Value, timeout: std.Io.Cancelable!void };
-        var buffer: [2]Result = undefined;
-        var select = std.Io.Select(Result).init(io, &buffer);
-        defer select.cancelDiscard();
-        // JMAP mutations can take effect before a connection fails. Bound one
-        // exchange, then propagate failure without replaying the request.
-        try select.concurrent(.response, httpExchange, .{ self, a, method, url, payload });
-        try select.concurrent(.timeout, waitForDeadline, .{ io, deadline });
-        return switch (try select.await()) {
-            .response => |result| try result,
-            .timeout => |result| blk: {
-                try result;
-                break :blk error.MailRequestTimedOut;
-            },
-        };
-    }
-
-    fn httpExchange(self: Mailbox, a: Allocator, method: std.http.Method, url: []const u8, payload: ?[]u8) !Value {
-        try self.client.io.checkCancel();
-        var output = std.Io.Writer.Allocating.init(a);
-        defer output.deinit();
-        var request = try self.client.request(method, try std.Uri.parse(url), .{
-            .headers = .{
-                .authorization = .{ .override = self.authorization },
-                .content_type = if (payload != null) .{ .override = "application/json" } else .omit,
-                .accept_encoding = .{ .override = "identity" },
-            },
-            .redirect_behavior = if (method == .GET) .init(3) else .unhandled,
-        });
-        defer request.deinit();
-        // Closing skips Request.deinit's unread-body drain, which could block
-        // again after cancellation has already been delivered.
-        errdefer if (request.connection) |connection| {
-            connection.closing = true;
-        };
-        if (payload) |bytes| {
-            request.sendBodyComplete(bytes) catch |err| return transportError(&request, err);
-        } else {
-            request.sendBodiless() catch |err| return transportError(&request, err);
-        }
-        var redirect_buffer: [8192]u8 = undefined;
-        var response = request.receiveHead(&redirect_buffer) catch |err| return transportError(&request, err);
-        if (response.head.status != .ok) {
-            std.log.err("mail endpoint returned HTTP {d}", .{@backingInt(response.head.status)});
-            return error.MailHttpFailure;
-        }
-        if (response.head.content_encoding != .identity) return error.UnsupportedMailEncoding;
-        const content_length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
-        const reader = response.reader(&.{});
-        if (content_length) |length| {
-            reader.streamExact64(&output.writer, length) catch |err| {
-                if (err == error.WriteFailed) return error.OutOfMemory;
-                return transportError(&request, err);
-            };
-        } else {
-            _ = reader.streamRemaining(&output.writer) catch |err| {
-                if (err == error.WriteFailed) return error.OutOfMemory;
-                return transportError(&request, err);
-            };
-        }
-        return std.json.parseFromSliceLeaky(Value, a, output.written(), .{ .allocate = .alloc_always }) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return error.InvalidMailReply,
-        };
-    }
 };
-
-fn waitForDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
-    try deadline.wait(io);
-}
 
 fn objectLimit(record: Value, name: []const u8) !usize {
     const item = try field(record, name);
     if (item != .integer or item.integer <= 0) return error.InvalidMailReply;
     return std.math.cast(usize, item.integer) orelse error.InvalidMailReply;
-}
-
-fn writeRequest(method: []const u8, arguments: anytype, writer: *std.Io.Writer) !void {
-    try std.json.Stringify.value(.{
-        .using = &[_][]const u8{ core_capability, mail_capability, submission_capability },
-        .methodCalls = .{.{ method, arguments, "0" }},
-    }, .{}, writer);
-}
-
-fn requestSize(method: []const u8, arguments: anytype) !u64 {
-    var buffer: [256]u8 = undefined;
-    var output: std.Io.Writer.Discarding = .init(&buffer);
-    try writeRequest(method, arguments, &output.writer);
-    return output.fullCount();
 }
 
 fn historyRevision(record: Value) !u64 {
@@ -1246,12 +1154,11 @@ fn strings(a: Allocator, items: Value) ![]const []const u8 {
 }
 
 fn createdId(result: Value, key: []const u8) ![]const u8 {
-    return textField(try field(try field(result, "created"), key), "id");
-}
-
-fn hasKey(record: Value, name: []const u8, key: []const u8) bool {
-    const container = optionalField(record, name) orelse return false;
-    return container == .object and container.object.contains(key);
+    const created = optionalField(result, "created") orelse return error.MailMutationUnconfirmed;
+    const object = optionalField(created, key) orelse return error.MailMutationUnconfirmed;
+    const id = optionalText(object, "id") orelse return error.MailMutationUnconfirmed;
+    if (id.len == 0) return error.MailMutationUnconfirmed;
+    return id;
 }
 
 fn boolean(record: Value, name: []const u8) bool {
@@ -1291,150 +1198,61 @@ fn value(a: Allocator, item: anytype) !Value {
     return std.json.parseFromSliceLeaky(Value, a, try std.json.Stringify.valueAlloc(a, item, .{}), .{});
 }
 
-fn checkObjectErrors(record: Value) !void {
-    for ([_][]const u8{ "notCreated", "notUpdated", "notDestroyed" }) |name| {
-        const failures = optionalField(record, name) orelse continue;
-        if (failures != .object) return error.InvalidMailReply;
-        if (failures.object.count() == 0) continue;
-        for (failures.object.values()) |failure| {
-            if (optionalText(failure, "type")) |kind|
-                if (std.mem.eql(u8, kind, "notFound")) return error.MailNotFound;
-        }
-        return error.MailObjectFailed;
-    }
+test "an unconfirmed folder create discovers the intended top-level folder" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    var fixture = try Fixture.init(&.{
+        .{ .method = "Mailbox/set", .result = null },
+        .{ .method = "Mailbox/get", .result =
+        \\{"list":[{"id":"nested","name":"Ivenna History","parentId":"other","role":null},
+        \\{"id":"owned","name":"Ivenna History","parentId":null,"role":null}]}
+        },
+    });
+    defer fixture.deinit();
+    const mailbox = try fixture.start();
+    const id = try mailbox.ensureFolder(fixture.arena.allocator(), &.{}, history_mailbox_name, null);
+    try std.testing.expectEqualStrings("owned", id);
+    try fixture.finish();
 }
 
-fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {
-    if (request.connection) |connection| {
-        if (connection.stream_reader.err) |cause| if (cause == error.Canceled) return cause;
-        if (connection.stream_writer.err) |cause| if (cause == error.Canceled) return cause;
-    }
-    return err;
-}
-
-const TestHttpServer = struct {
-    io: std.Io,
-    listener: std.Io.net.Server,
-    response: []const u8,
-    close_after_response: bool = false,
-    received: std.Io.Event = .unset,
-
-    fn init(io: std.Io, response: []const u8) !TestHttpServer {
-        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
-        return .{ .io = io, .listener = try address.listen(io, .{}), .response = response };
-    }
-
-    fn url(self: *TestHttpServer, a: Allocator) ![]const u8 {
-        return std.fmt.allocPrint(a, "http://{f}/jmap", .{self.listener.socket.address});
-    }
-
-    fn serve(self: *TestHttpServer) !void {
-        const connection = try self.listener.accept(self.io);
-        defer connection.close(self.io);
-        var read_buffer: [4096]u8 = undefined;
-        var write_buffer: [1024]u8 = undefined;
-        var reader = connection.reader(self.io, &read_buffer);
-        var writer = connection.writer(self.io, &write_buffer);
-        var server = std.http.Server.init(&reader.interface, &writer.interface);
-        var request = try server.receiveHead();
-        _ = try request.readerExpectNone(&.{}).discardRemaining();
-        try writer.interface.writeAll(self.response);
-        try writer.interface.flush();
-        self.received.set(self.io);
-        if (self.close_after_response) return;
-        // Keep an incomplete response open until the client closes it.
-        var buffer: [1]u8 = undefined;
-        var buffers = [_][]u8{&buffer};
-        if (try connection.read(self.io, &buffers) != 0) return error.UnexpectedRequestReplay;
-    }
-};
-
-fn testMailbox(client: *std.http.Client) !Mailbox {
-    return .{
-        .client = client,
-        .session_url = "",
-        .authorization = "test",
-        .address = "ivenna@example.com",
-        .addressing = try Addressing.init("ivenna@example.com"),
+test "acknowledgement retries a lost response and reports a rejected update" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    const update: []const @import("test_jmap.zig").Property = &.{
+        .{ .path = &.{ "update", "received", "mailboxIds", "trash" }, .json = "true" },
+        .{ .path = &.{ "update", "received", "keywords/ivenna-handled" }, .json = "true" },
     };
-}
-
-test "mail HTTP deadline closes connections stalled on response headers or body" {
-    const io = std.testing.io;
-    for ([_][]const u8{
-        "",
-        "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{",
-    }) |response| {
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var server = try TestHttpServer.init(io, response);
-        defer server.listener.deinit(io);
-        var serving = try io.concurrent(TestHttpServer.serve, .{&server});
-        defer serving.cancel(io) catch {};
-        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
-        defer client.deinit();
-        const mailbox = try testMailbox(&client);
-        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .awake });
-        try std.testing.expectError(error.MailRequestTimedOut, mailbox.httpBefore(a, .POST, try server.url(a), try a.dupe(u8, "{}"), deadline));
-        try serving.await(io);
+    {
+        var fixture = try Fixture.init(&.{
+            .{ .method = "Email/set", .properties = update, .result = null },
+            .{ .method = "Email/set", .properties = update, .result = "{\"updated\":{\"received\":null}}" },
+        });
+        defer fixture.deinit();
+        const mailbox = try fixture.start();
+        try mailbox.acknowledge(fixture.arena.allocator(), "received");
+        try fixture.finish();
     }
+    var fixture = try Fixture.init(&.{
+        .{ .method = "Email/set", .properties = update, .result = "{\"notUpdated\":{\"received\":{\"type\":\"forbidden\"}}}" },
+    });
+    defer fixture.deinit();
+    const mailbox = try fixture.start();
+    try std.testing.expectError(error.MailObjectFailed, mailbox.acknowledge(fixture.arena.allocator(), "received"));
+    try fixture.finish();
 }
 
-test "mail HTTP cancellation closes connections stalled on response headers or body" {
-    const io = std.testing.io;
-    for ([_][]const u8{
-        "",
-        "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{",
-    }) |response| {
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var server = try TestHttpServer.init(io, response);
-        defer server.listener.deinit(io);
-        var serving = try io.concurrent(TestHttpServer.serve, .{&server});
-        defer serving.cancel(io) catch {};
-        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
-        defer client.deinit();
-        const mailbox = try testMailbox(&client);
-        var request = try io.concurrent(Mailbox.http, .{ mailbox, a, std.http.Method.POST, try server.url(a), try a.dupe(u8, "{}") });
-        defer _ = request.cancel(io) catch {};
-        try server.received.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
-        try std.testing.expectError(error.Canceled, request.cancel(io));
-        try serving.await(io);
-    }
-}
-
-test "mail HTTP rejects encoding without reading the response body" {
-    const io = std.testing.io;
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var server = try TestHttpServer.init(io, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 100\r\n\r\n");
-    defer server.listener.deinit(io);
-    var serving = try io.concurrent(TestHttpServer.serve, .{&server});
-    defer serving.cancel(io) catch {};
-    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
-    defer client.deinit();
-    const mailbox = try testMailbox(&client);
-    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake });
-    try std.testing.expectError(error.UnsupportedMailEncoding, mailbox.httpBefore(a, .POST, try server.url(a), try a.dupe(u8, "{}"), deadline));
-    try serving.await(io);
-}
-
-test "mail HTTP rejects complete JSON in a truncated response" {
-    const io = std.testing.io;
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var server = try TestHttpServer.init(io, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"methodResponses\":[]}");
-    server.close_after_response = true;
-    defer server.listener.deinit(io);
-    var serving = try io.concurrent(TestHttpServer.serve, .{&server});
-    defer serving.cancel(io) catch {};
-    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
-    defer client.deinit();
-    const mailbox = try testMailbox(&client);
-    try std.testing.expectError(error.EndOfStream, mailbox.http(a, .POST, try server.url(a), try a.dupe(u8, "{}")));
-    try serving.await(io);
+test "callback publication finds the stored callback in Trash after a lost response" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    const stored =
+        \\{"list":[{"id":"saved","mailboxIds":{"trash":true},"keywords":{"ivenna-callback":true,"ivenna-callback-7":true},
+        \\"from":[{"email":"ivenna@example.com"}],"to":[{"email":"ivenna@example.com"}],"header:X-Ivenna-Callback-Id:asText":"7"}]}
+    ;
+    var fixture = try Fixture.init(&.{
+        .{ .method = "Email/query", .result = "{\"ids\":[]}" },
+        .{ .method = "Email/set", .result = null },
+        .{ .method = "Email/query", .result = "{\"ids\":[\"saved\"]}" },
+        .{ .method = "Email/get", .result = stored },
+    });
+    defer fixture.deinit();
+    const mailbox = try fixture.start();
+    try mailbox.publishCallback(fixture.arena.allocator(), .{ .id = 7, .text = "command completed" });
+    try fixture.finish();
 }

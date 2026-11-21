@@ -83,11 +83,7 @@ To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MO
 
 Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks` and `Ivenna History` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
 
-Set the account's `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. The adapter uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. Use separate correspondent accounts in that same domain to send messages to Ivenna and receive its outgoing mail. For `MAIL_ADDRESS=ivenna@ivenna.test`, the correspondent address `operator@ivenna.test` supplies the ID `operator`. Choose the domain for your deployment.
-
-Each JMAP HTTP exchange has a fixed 60-second time limit covering connection, request writing, and response reading. Timeout or cancellation stops the exchange; requests are not automatically retried. An interrupted mailbox mutation or message submission may already have taken effect, so its effects can remain uncertain when the runtime stops.
-
-Use the [supported email addresses](communication.md#current-email-addressing). Changing `MAIL_ADDRESS` to another domain changes how retained correspondent IDs resolve.
+Set `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. Give correspondents separate accounts in the same domain as `MAIL_ADDRESS`. For example, with `MAIL_ADDRESS=ivenna@ivenna.test`, the ID `operator` resolves to `operator@ivenna.test`. Changing the domain changes where messages to retained IDs are sent. See [supported email addresses](communication.md#current-email-addressing).
 
 For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks when presenting correspondent IDs. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
@@ -172,6 +168,14 @@ Configure the mail receiving boundary to check the readiness header at an addres
 
 An accepted letter can wait in the mailbox if a focus is busy or the kernel stops after delivery. On restart the kernel reads [pending correspondence](#mail-intake) already in its account.
 
+### When a mail request fails
+
+Look for `JMAP` on the kernel's standard error. A failed request logs its method, stage, and error. A warning ending in `Retrying on a fresh connection` means another attempt is underway. Check `/readyz` for the current reception state. See [JMAP requests](architecture.md#jmap-requests) for which operations can retry.
+
+Reception can stay open even if Ivenna loses confirmation while sending a reply. To see what Ivenna learned about submission, look for the reply's `send_message` result in [working history](#working-history). Trash can contain both submitted messages and abandoned drafts. See [sending outcomes](communication.md#sending-a-message).
+
+If the kernel cannot read or confirm required mailbox state, it closes reception and exits. For a `connect` failure, check whether the kernel can reach the mail endpoint. For HTTP 401, check the credentials configured for the [mail account](#mail-service).
+
 ### When model work stalls
 
 To follow a focus, look for its ID in the kernel's standard error. `retrying inference` gives the wait before its next attempt. `inference resumed` means a retry returned a model response. An `interrupted` message gives the reason the focus paused. A retry alone leaves the [checkpoint revision](#working-history) unchanged. Other focuses can advance it while this one waits.
@@ -223,20 +227,17 @@ Ivenna does not monitor quota or evict live records in response to account capac
 
 ### Communication copies
 
-Ivenna releases a communication copy when its observation has been durably admitted or submission no longer needs the copy:
-
-| Copy | Retirement |
+| Copy in Ivenna's account | When Ivenna moves it to Trash |
 | --- | --- |
-| Incoming message | After its complete observation and checkpoint are saved, acknowledgement moves Ivenna's incoming copy to Trash |
-| Internal callback | After durable admission of the registered observation, acknowledgement moves its mail copy to Trash |
-| Outgoing message | Created in Drafts; confirmed submission moves the copy to Trash without cancelling delivery |
-| Interrupted outgoing copy | Initialization or the next poll moves the runtime's leftover outgoing copy to Trash |
+| Incoming message | After saving its complete observation and checkpoint, before reasoning about the request |
+| Internal callback | After saving the registered observation in the receiving session's history |
+| Outgoing message | At startup or before a mail poll, once the draft is no longer in use for sending. This includes drafts left by interrupted sends. |
 
-Acknowledgement confirms durable admission, not completion of the requested work. Pending supported input remains available for admission. Internal assignments are saved with session work. Activity reports are retained as outbox history records until core admission; they are not separate correspondence copies.
+Pending input stays available for admission. Internal assignments and unread [activity reports](architecture.md#activity-reports) are kept in working history.
 
-Publisher first-result preservation lasts while an identifiable callback copy remains, including in Trash. Losing that copy permits new publication, but saved [admission deduplication](architecture.md#event-sources-and-callback-admission) still prevents another observation for a consumed ID.
+An identifiable callback copy, including one in Trash, preserves the first result for that callback ID. Once the copy expires, a publisher can create another. If the receiving session has already admitted that ID, the kernel acknowledges the new copy without presenting the observation again. See [callback admission](architecture.md#event-sources-and-callback-admission).
 
-The mail account is not a permanent transcript: original copies expire under the Trash policy, and compaction can replace detailed observations and tool exchanges with a handover. Preserve original correspondence separately when it needs a longer lifetime. A correspondent's own account and received copies remain outside Ivenna's copy management.
+Keep original correspondence separately if you need it beyond the Trash retention period. Compaction can replace detailed observations and tool exchanges with a handover. Correspondents manage their own copies.
 
 ### Working history
 
@@ -244,7 +245,7 @@ A message with the subject `Ivenna history checkpoint` lists the state the kerne
 
 Suppose the core receives a letter and the model returns text without calling tools. In an otherwise idle kernel, this normally produces two revisions. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response in the core's history. Sending a reply to the correspondent requires a `send_message` call.
 
-Ivenna cleans up the history folder at startup and periodically while it runs. Between maintenance passes, several checkpoints can still appear in `Ivenna History`. The current one has the highest numeric `X-Ivenna-History-Revision` among the candidates marked `ivenna-current` in that folder.
+Ivenna cleans up the history folder at startup and periodically while it runs. Between maintenance passes, several checkpoints can still appear in `Ivenna History`. The kernel selects the candidate marked `ivenna-current` with the highest numeric `X-Ivenna-History-Revision`. If two candidates share that highest revision, restoration fails.
 
 | Location | Contents after maintenance |
 | --- | --- |
