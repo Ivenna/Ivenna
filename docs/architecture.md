@@ -77,37 +77,33 @@ The email integration uses the configured mail account for correspondence, callb
 
 ## Service and reception
 
-The application owns service, kernel, host supervision, and shutdown tasks. The [kernel](../packages/agent/src/kernel.zig) owns intake and session execution tasks; Host supervises commands independently of those sessions. Task failures close reception and cancel and join concurrent work before shared dependencies are released.
+The application reserves `SERVICE_ADDRESS` before it accesses the mail account. If the address is already in use, startup stops there. After mail initialization, the memory check, and session restoration, the application starts serving probes and running the kernel and host supervisor. The kernel reconciles restored host registrations and completes initial history maintenance before opening reception. It then dispatches startup activations. [Startup and interruption](#startup-and-interruption) describes how work resumes.
 
-The application initializes the mail integration, checks memory, and [restores sessions](#startup-and-interruption) before binding `SERVICE_ADDRESS` and starting kernel tasks. The kernel completes initial history maintenance before opening reception and dispatching startup activations. Readiness does not wait for their model work to finish.
+The listener handles probes independently of intake and model work. A health probe observes the listener. A readiness probe reads the kernel's reception state, which stays open while an individual focus waits for inference. The deployment's mail service uses readiness to decide whether to accept correspondence. Shutdown can follow a successful check, leaving accepted mail in the account. See the [reception contract](running.md#service-status-and-reception) and [local SMTP example](../dev/README.md#configuring-mail).
 
-While the listener is running, `GET /healthz` reports that the HTTP service is responding. `GET /readyz` returns success with `X-Ivenna-Ready: true` only while reception is open; otherwise it returns `503`. Closing is terminal for that kernel instance. The status endpoint reads this lifecycle state; it does not perform fresh dependency checks or reserve processing capacity.
-
-The receiving boundary checks reception status before accepting correspondence. This is a precheck: shutdown can follow a successful check, and an already accepted message can remain in the account's mail storage. The receiving policy is configured in the deployment's mail infrastructure. The [running guide](running.md#service-status-and-reception) describes the reception contract and HTTP status interface; the [local mail setup](../dev/README.md#configuring-mail) provides an SMTP example.
-
-Reception status belongs to the service boundary. Model reasoning and tools do not manage transport availability, offline queues, or sender retries.
+Each probe handler owns its connection, the kernel owns intake and session workers, and Host supervises commands independently of the session that launched them. A failed probe ends its connection. A listener failure or an unrecovered kernel or host error closes reception for this instance. The application cancels and joins concurrent work before releasing shared dependencies.
 
 ## Sessions, work, and communication
 
 | Concept | Role and lifetime |
 | --- | --- |
 | Task | Work to be accomplished; it may continue across activations |
-| Core session | Coordinating session with saved history, its own runtime queue, and a serial worker |
+| Core session | Persistent coordinating session with its own history and input queue |
 | Activity session | Session forked by the core with inherited context, an assignment, and its own subsequent history and queue |
 | `input` event | Correspondence observation with `from` IDs, text, and observation time |
 | Delivery | An owned observation retained through durable admission and any transport receipt acknowledgement |
-| Activation | One session continuing work through model and tool rounds, including admitted observations, until completion |
+| Activation | One worker running a session through model and tool rounds until the activation completes or is interrupted |
 | Model round | One model response followed by all tools it invoked |
 
 The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes. A worker retains its inference output and context while the tool batch executes, then commits the complete round before its model-round arena ends.
 
-The registry stores each session's internal numeric ID, stable named `focus_id`, and `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Sleeping sessions retain their identities and roles through context unloading and restart. Completed activities leave the registry; session IDs increase monotonically and are not reused. The core remains registered.
+The registry stores each session's internal numeric ID, stable named `focus_id`, and `Input.Role` enum, `core` or `activity`. The role determines tool availability and automatic report delivery. Sleeping and interrupted sessions retain their identities and roles through context unloading and restart. Completed activities leave the registry; session IDs increase monotonically and are not reused. The core remains registered.
 
 ### Scheduling and capacity
 
 Each ready session can claim its own worker. The registry allows one activation at a time per session, preserving its model/tool order, while other sessions advance concurrently. A tool batch keeps its activation and context alive. New observations can queue during a round and enter working history at the next admission boundary. After finalization, a worker retains its session borrow until saving finishes.
 
-Separate [limits](running.md#configuration) bound registered identities, ordinary accepted events buffered per session, and live host commands. The event allowance excludes startup observations and all activity-report facts, including endings. Existing sessions remain addressable at the identity limit; activity completion releases a registered-session slot. Forks and activity resumption do not depend on space in the core's ordinary event queue.
+Separate [limits](running.md#configuration) bound registered identities, ordinary accepted events buffered per session, and live host commands. Startup, activity reports, and runtime observations of activity interruption are outside the ordinary event allowance. Existing sessions remain addressable at the identity limit; activity completion releases a registered-session slot. Forks and activity resumption do not depend on space in the core's ordinary event queue.
 
 Correspondence and callback mail stay in their durable sources when their destination's buffer cannot accept them. Callback registrations and unread activity facts have no separate count limit; their storage and request costs grow with pending work.
 
@@ -115,19 +111,19 @@ Correspondence and callback mail stay in their durable sources when their destin
 
 Correspondence enters the core's FIFO queue independently of mail threads. Both roles expose external communication and shared memory. The core exposes `open_focus`, `send_focus_message`, and `schedule_attention`; activities expose host tools. [Agent actions](../packages/agent/src/tools.zig) own typed arguments, recognition, and a single role rule used by declaration selection and invocation. Engine records the inference's role and uses it again for execution; Kernel receives parsed actions and owns their effects. Inherited tool calls do not establish current availability. Saved wakeup registrations retain their destinations during restoration and delivery.
 
-`send_focus_message` uses the registry's durable session-message queue with a target chosen by the core. The registry records the calling core's complete reference as `from_focus`. Messages consume ordinary event capacity and can make a sleeping recipient ready. They do not register an awaited reply. Activity expressions remain in their separate outbox and accompany the core's ordinary inputs without activating it.
+`send_focus_message` uses the registry's durable session-message queue with a target chosen by the core. The registry records the calling core's complete reference as `from_focus`. Messages consume ordinary event capacity and can make a sleeping or interrupted recipient ready. They do not register an awaited reply. Activity expressions remain in their separate outbox and accompany the core's ordinary inputs without activating it.
 
-Unknown focus selections remain ordinary tool errors. Unread assistant messages do not make the core ready; an activity's ending does. Ordinary tool replies can continue an already active core session.
+Unknown focus selections remain ordinary tool errors. Activity endings and interruptions request the core's attention. An ordinary tool reply can continue an already active core session.
 
 ## Activation admission
 
 The email adapter supplies typed correspondence or callbacks with optional opaque receipts. The agent routes correspondence to the core and callbacks through their registration. [Work](../packages/agent/src/work.zig) owns each accepted observation through durable admission and receipt acknowledgement. In-process events have no transport receipts.
 
-The kernel builds a candidate from pending deliveries and the oldest unread activity facts. Outbox I/O is paged, but admission can extend one fitting candidate across several pages without invoking the model between them. Before measurement, `Input.coalesceActivityReports` groups activity information by source session, orders groups by first appearance, appends each session's messages in recorded order, and combines its ending information. Ordinary events and several activity groups can share the same request. The encoded grouped payload determines which raw delivery prefix fits; a page or session boundary does not end selection. After an overflow, the selector measures the loaded delivery prefixes and selects the largest one whose complete request fits the budget.
+The kernel selects the longest prefix of pending deliveries that fits a complete encoded request. For the core, the candidate also includes the oldest unread activity facts and can span several outbox pages. Before measurement, `Input.coalesceActivityReports` groups facts by source focus in order of first appearance. Each group keeps that focus's messages in recorded order and includes its ending if present. Grouping preserves order within a focus. The ordinary queue and the activity journal have independent arrival orders.
 
-The entire unselected suffix, including loaded activity deliveries, returns to the pending queue's front ahead of concurrent arrivals. Later candidates retain that prefix and load additional facts only beyond it. Ordinary arrivals and the activity journal do not share a global arrival order, and model grouping does not preserve cross-session interleaving. If old history prevents the first event from fitting, [compaction](#bounded-model-context) summarizes that history and selection retries. A first event that still cannot fit after the allowed summary attempts fails with `ContextBudgetExhausted` and remains pending.
+Selection and ordinary inference use the same retained history, focus identity, observation time, and grouped events. The registry returns the unselected suffix to the front of the queue, ahead of concurrent arrivals. If no prefix fits, the kernel can compact retained history and try selection again. An input that still cannot fit [interrupts the activation](#interrupted-activations) and stays queued. See [bounded model context](#bounded-model-context) for compaction and request limits.
 
-The selected group and checkpoint are saved before receipts are acknowledged and deliveries released. Ordinary assembly presents the group with current identity and time; a later budget check can instead carry it through a handover. Unadmitted events stay outside summary input. After committing a model/tool round, the kernel selects the next fitting delivery prefix before ordinary inference, so admitted observations accompany the saved tool replies. Acknowledgement transfers responsibility to working history independently of task completion.
+The kernel saves the admitted events and any replacement handover before acknowledging their receipts. After each tool round it checks for more deliveries, so the next inference can see new observations alongside saved tool replies. Acknowledgement means working history now owns the observation. The task can still be in progress.
 
 ## Activity forks
 
@@ -139,7 +135,7 @@ The activity restores this history under its own `Context.scope` and `focus_id`.
 
 ## Activity reports
 
-After an ordinary activity inference returns successfully, Kernel persists its non-null `Response.text` as an assistant fact in the activity journal before invoking tools. The source focus reference and the time the runtime collected the complete response accompany the text. This collection copies new text once; it excludes reasoning, tool replies, compaction responses, and inherited exchanges. The complete native model/tool round is committed separately after execution. A restart can therefore preserve a reported expression even when its source round was interrupted before commit; that expression does not establish tool effects.
+After an ordinary activity inference returns successfully, Kernel persists its non-null `Response.text` as an assistant fact in the activity journal before invoking tools. The source focus reference and the time the runtime collected the complete response accompany the text. The adapter returns text when the response contains an `output_text` part, including an explicitly empty string. Reasoning, tool replies, compaction responses, and inherited exchanges produce no new assistant fact. The complete native model/tool round is committed separately after execution. A restart can therefore preserve a reported expression even when its source round was interrupted before commit; that expression does not establish tool effects.
 
 The registry appends single assistant and ending facts to one ordered durable outbox owned by [reports.zig](../packages/agent/src/reports.zig). Its `Entry` represents an internal fact independently of the model-facing `Input.ActivityReport`. An ending carries the time the runtime established session completion. Bodies are separate immutable history records linked by predecessor keys. Its checkpoint selects the unread suffix through a storage group, head key, unread count, and ending count. The runtime retains the selected record metadata and loads bodies in internal pages of 64 facts. Assistant text does not schedule the core. An ending both records the source session's completion and supplies a reason for core work, including when no assistant text was produced.
 
@@ -153,7 +149,13 @@ The registry retains each complete model/tool exchange before its arena ends. To
 
 When an activity activation completes, pending callback registrations keep the activity dormant and available for resumption. With none remaining, the registry appends an ending fact and removes the activity. The kernel saves a checkpoint covering both changes. The ending response's assistant text has already followed the ordinary report path and is not copied into the ending. The core sleeps between activations without being removed, and its final text remains internal. External sending occurs only through `send_message`; an ending does not certify task success.
 
-After the checkpoint is confirmed and worker borrows end, a sleeping activity can unload its context and later restore its selected history. A completed activity's in-memory state can instead be released. Unread report records remain selected independently of the source activity's context; retained host commands remain in the host runtime's scope.
+After the checkpoint is confirmed and worker borrows end, a sleeping activity can unload its context. A completed activity's in-memory state can be released. Unread report records remain selected independently of the source activity's context, and Host retains its own command state.
+
+### Interrupted activations
+
+A rejected request, an unusable response, or an input that cannot fit the context budget ends the current activation. The registry keeps the focus, its selected history, and its pending callback registrations. It returns any unadmitted deliveries to the front of the queue with their receipts. For an activity it also queues a runtime-authored `focus_interrupted` observation for the core. A single checkpoint records the interruption notice and the unfinished activity. The worker releases the focus. An interrupted activity can unload its context until more work arrives. See [interrupted reasoning](attention.md#interrupted-reasoning) for the core's view.
+
+A new observation that requests attention can start another activation, including one that arrived while the worker was busy. If the interrupted activation already admitted its input, queued work that follows it can also start the next activation. Otherwise the focus waits for new work or a restart. Polling the same receipt again or collecting passive assistant text leaves the focus waiting.
 
 ## Event sources and callback admission
 
@@ -171,7 +173,7 @@ Context prepends the embedded [system.md](../packages/agent/src/system.md) as on
 
 [Input](../packages/agent/src/input.zig) renders retained `Record` values and temporary `Turn` values as YAML user messages. `Registry.current` supplies the current focus's identity, role, and time for each ordinary turn. Presentation methods format internal Unix milliseconds as UTC RFC 3339 `observed_at` and `ended_at` strings; retained ZON records preserve numeric times and complete typed values. The [input contract](input.md) defines the fields and omission semantics of these agent-generated messages. The model adapter separately encodes native exchanges and [tool content](#tool-results). The private [time adapter](../packages/agent/src/time.zig) uses [zdt](https://codeberg.org/FObersteiner/zdt) to format observation times and parse attention deadlines.
 
-For ordinary work, `Context.Delivery.latest` moves the newest event record from the history prefix into the turn's `events`, leaving retained Context unchanged. `Context.Delivery.none` keeps the full history prefix and omits new events. Admission candidates use the same shape without changing retained history. [Compaction](#bounded-model-context) uses the complete retained prefix and adds sampled state for recollection.
+An ordinary request presents the selected events in its current turn after the complete retained prefix. A continuation without newly selected events omits the turn's `events` field. [Compaction](#bounded-model-context) uses the complete retained prefix and adds sampled state for recollection.
 
 Appending clones each entry into the Context's arena and updates its cached model-message view. The registry supplies an independent Context copy for each request, and the worker retains that copy through the complete model/tool round.
 
@@ -185,13 +187,15 @@ Sessions share the configured model and output-token limit; Engine selects ordin
 
 ### Model transport
 
-The adapter serializes each ordinary or compaction inference once and sends it with `stream: false`. It owns HTTP retries under the configured [attempt limit and total time limit](running.md#model-requests). One monotonic deadline covers connection, request writing, response reading, and retry waits.
+Each call to `Model.Port.next` makes one non-streaming HTTP attempt under a monotonic deadline. Before returning tool calls, the Responses adapter checks any declared body length and validates the complete output. It joins a timed-out or canceled exchange before releasing borrowed data.
 
-The adapter's bounded retry policy covers HTTP server errors, request timeouts, and rate limits. Retryable network failures, including interrupted response transfers, share the same limits. Retry waits use exponential backoff with jitter. A valid `Retry-After` value in seconds or IMF-fixdate format supplies the delay instead. Other HTTP errors fail on receipt of their status, without waiting for a diagnostic body. Cancellation propagates without retry.
+| Evidence from the inference endpoint | Adapter outcome and runtime action |
+| --- | --- |
+| Shared authentication or protocol failure, or exhausted account quota | The error reaches process supervision. HTTP 402 or an explicit `insufficient_quota` diagnostic in a complete, bounded HTTP 429 body establishes quota exhaustion. |
+| Timeout, interrupted transfer, HTTP 408, rate limiting (429), or most 5xx responses | Temporary unavailability. Engine waits and repeats the inference. A schedulable `Retry-After` delay sets the earliest retry. An explicit `x-should-retry: false` on these statuses rejects the inference. |
+| Request-specific refusal, including HTTP 403 or 404, malformed response, or a generation the service reports as incomplete | Rejection. The kernel [interrupts this activation](#interrupted-activations). |
 
-Each attempt owns its temporary response bytes. Failed or rejected exchanges close their unfinished connections. On timeout or cancellation, the adapter cancels and joins the exchange before the caller can release request data. Fixed-length response bodies must reach their declared length. The adapter validates every output item before returning text or tool calls. A fully received invalid response or unfinished generation fails without another HTTP attempt.
-
-The adapter distinguishes absent assistant text from empty text by whether message content contains an `output_text` part. An activity response with absent text records no assistant fact; explicitly empty text is retained as a timestamped message with empty text in the model report.
+Engine owns the retry schedule for ordinary and summary inference. The worker keeps the request, tools, and original observation time, releases the attempt's temporary allocations, and sleeps without holding the registry lock. Cancellation interrupts either the exchange or the wait. Tools execute once the inference returns a validated response. See [when model work stalls](running.md#when-model-work-stalls) for the schedule and its operational effects.
 
 ### Tool results
 
@@ -199,7 +203,7 @@ Capabilities return [Content](../packages/content/src/root.zig) parts owned by t
 
 The adapter copies the new reply parts and applies the [model request checks](content.md#model-request-checks) against the complete request, preserving retained history and operation descriptions. It omits files beyond the count limit before uploading them. Each file part holds complete bytes and an optional opaque upload reference.
 
-For a file without a reference, the adapter uploads through the [Files API](https://api-docs.deepseek.com/guides/files_api/) with a generic filename. It first uses `rich_layout_recognition`; an HTTP `400` rejection permits one attempt with `user_data`. Both attempts share one per-file deadline. Client-error statuses are handled from the response head. A final rejection replaces that file part with a `file_upload_failed` text part; transport and model-service failures propagate to runtime supervision without replaying an uncertain upload.
+For a file without a reference, the adapter sends a generic filename and the purpose `rich_layout_recognition`. A definite HTTP 400 rejection permits one attempt with `user_data` under the same per-file deadline. If the file cannot be sent, the endpoint refuses it, or its storage outcome is uncertain, the adapter replaces that file part with the observed outcome. The kernel can then commit the complete tool round, including its other results. See the provider's [Files API](https://api-docs.deepseek.com/guides/files_api/) and the [file result contract](content.md#complete-files).
 
 On success, the adapter retains the service file identifier as an opaque reference alongside the original bytes. Measurement and inference use the same encoder and reuse prepared references. The function-call result carries the file description and other content parts. After the complete tool-result batch, the adapter appends user-message items with `input_file` references and their originating call IDs.
 
@@ -207,19 +211,17 @@ At round commit, Context copies the prepared parts into its retained arena; [his
 
 ## Bounded model context
 
-`CONTEXT_REQUEST_BYTES` bounds the complete encoded ordinary request, including history, handover state, new events, tools, reasoning settings, inline images, and file references. The kernel checks before each ordinary inference. `LLM_MAX_OUTPUT_TOKENS` independently bounds output, including reasoning.
+`CONTEXT_REQUEST_BYTES` bounds the complete encoded ordinary request, including retained or inherited history, handover state, new events, tools, reasoning settings, inline images, and file references. The kernel checks before each ordinary inference. `LLM_MAX_OUTPUT_TOKENS` independently bounds output, including reasoning.
 
 The model service expands file references after receiving the encoded request. The [running guide](running.md#context-budgets) explains the consequences for context sizing.
 
 For each compaction attempt, `Registry.compactionSnapshot` copies current identity, time, and `Input.State` under one lock. The state contains existing activity references for the core and pending callback references and sources for the receiving focus. `Context.summaryRequest` combines that sample with the common system prompt, complete retained history, and instructions from [compaction.md](../packages/agent/src/compaction.md). Earlier handovers keep their stored state in this history. The summary inference uses no tools and `high` reasoning, bounded by `CONTEXT_COMPACTION_BYTES`; waiting events and unread activity reports remain outside the request.
 
-The generated summary must contain nonempty text after trimming and no tool calls. The runtime pairs it with the same state and observation time supplied to that inference to form the handover. Before installation, the kernel measures the complete replacement ordinary request or admission candidate against `CONTEXT_REQUEST_BYTES`; the handover has no separate byte limit. Successful replacement leaves the handover record as working history. The next request adds the same system prompt and an ordinary turn with any newly admitted events; earlier message storage follows [retention](#history-retention).
+The generated summary must contain nonempty text after trimming and no tool calls. The runtime pairs it with the sampled state and time to form the handover. The kernel measures the complete replacement ordinary request, including any selected events, against `CONTEXT_REQUEST_BYTES`. When it fits, the new epoch starts with the handover followed by the admitted events. Earlier message storage follows [retention](#history-retention).
 
-Compaction permits one further summary inference if the first summary is missing or blank, includes tool calls, or leaves the replacement request over budget. The retry samples state anew, retains the original history, and carries brief factual feedback in `summarize.instructions`. Rejected output never becomes working history. A summary request already above `CONTEXT_COMPACTION_BYTES` fails before model invocation. Failures returned by the model adapter, cancellation, and storage failures propagate without another summary inference.
+The kernel requests one more summary if the first response lacks usable text, includes tool calls, or leaves the ordinary request too large. It samples state again and supplies the original history and a brief explanation in `summarize.instructions`. Only a fitting handover replaces the selected history. An oversized summary request, request-specific rejection, or unsuccessful second summary [interrupts the activation](#interrupted-activations).
 
-Exhausted summary attempts and requests that cannot meet their bounds fail explicitly, preserving the selected history and unadmitted deliveries. Admission measures complete candidate requests with a reusable trial arena; byte counts are not token estimates.
-
-An activity's inherited history is included in its encoded requests under these same budgets. Forking itself generates no summary; ordinary budget checks can still require compaction before further inference.
+If the model is temporarily unavailable, Engine retries the same summary request with the same sampled state. The kernel requests a new summary only after it evaluates the first one. See [model transport](#model-transport) for inference outcomes.
 
 ## Persistent working history
 
@@ -244,7 +246,7 @@ Appending advances the head and count without adding a per-entry reference to th
 
 `HistoryStore` exposes checkpoint publication, grouped records, and retention maintenance. History persistence and the activity outbox own their record schemas, chain selection, validation, and retention references. The shared record codec supplies encoding, decoding, and content-key functions; adapters own native representation, locators, placement, and protocol limits.
 
-Saves follow assistant report collection, admission, complete rounds, compaction, forks, completion, command-number allocation, and unread-input or source changes. Materialized records are encoded and hashed against the cached committed chain; cold sessions reuse their confirmed selection. Required creates must succeed before checkpoint publication. Unconfirmed writes remain outside selected paths. Unchanged checkpoints skip publication; a publication error invalidates that comparison digest because storage may already have accepted it.
+Saves follow assistant report collection, admission, complete rounds, compaction, forks, interruption, completion, command-number allocation, and unread-input or source changes. Materialized records are encoded and hashed against the cached committed chain; cold sessions reuse their confirmed selection. Required creates must succeed before checkpoint publication. Unconfirmed writes remain outside selected paths. Unchanged checkpoints skip publication; a publication error invalidates that comparison digest because storage may already have accepted it.
 
 Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Complete focus references identifying the owner of retained event and handover records must identify either the restoring focus or the core (`core-1`). Matching physical duplicates can supply one logical occurrence. Missing or inconsistent committed records fail restoration.
 
@@ -262,13 +264,13 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 Startup discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, activity outbox references, callbacks, and wakeups. Requests receive the common system prompt independently of restored history. Communication-copy and history maintenance complete before reception opens.
 
-The core and sessions with interrupted activations or unread incoming events queue startup immediately. Other activity sessions prepend startup when a real event first arrives; newly created sessions begin with an assignment. Unread assistant reports retain their passive status and accompany the core's next ordinary input; unread endings still request its activation.
+The core and sessions with unfinished activations or unread internal observations queue startup immediately. The checkpoint's `was_running` flag records a running or interrupted activation or a pending startup observation. Other activity sessions prepend startup when a real event first arrives; newly created sessions begin with an assignment. Unread assistant reports retain their passive status and accompany the core's next ordinary input; unread endings still request its activation.
 
 Before dispatch, Kernel publishes an interruption observation for each restored host registration through the first-result-preserving publisher. An identifiable stored result for that ID takes precedence. Wakeups publish when due. Processes and historical tool calls are not replayed, and source command IDs from the earlier runtime are not restored handles.
 
 Unacknowledged correspondence remains eligible and can appear again after a crash between persistence and acknowledgement; callback IDs instead retain durable admission deduplication. Fresh startup observations identify this runtime; earlier records remain evidence of their original observations and outcomes.
 
-Use one kernel per account. Host effects, memory writes, mail submission, acknowledgement, and history publication share no transaction: effects may precede their saved results, and repeating uncertain actions can duplicate them. An incomplete model/tool round is outside confirmed working history. Infrastructure, execution, compaction, and storage failures end the runtime and join concurrent work; defined tool outcomes remain observations.
+Use one kernel per account. Host effects, memory writes, mail submission, acknowledgement, and history publication share no transaction. Effects may precede their saved results, and repeating uncertain actions can duplicate them. An incomplete model/tool round is outside confirmed working history. The [availability contract](design.md#runtime-availability) determines when execution can continue.
 
 ## Email boundary
 

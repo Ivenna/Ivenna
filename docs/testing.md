@@ -34,4 +34,6 @@ The script uses Nushell's standard assertions, sends JSON requests directly to t
 
 The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. The checks run directly with Zig and Nushell and require no deployed services or model credentials. Extend or replace automated checks when the evidence they provide justifies their execution and maintenance cost.
 
-Tests for the Responses and email adapters use local HTTP servers to exercise model retries and both adapters' handling of truncated responses, timeouts, and cancellation. These tests do not exercise deployed model, mail, or SSH services, or runtime restart behavior. Follow the [development guide's validation guidance](development.md#validation) for changes across runtime boundaries; the [local development guide](../dev/README.md) covers preparing and running the services.
+The Responses and email adapter tests use local HTTP servers to interrupt transfers and cancel requests. The Responses tests also check what remains of a tool result when a file upload fails. The agent tests simulate a retry delay to verify that inference resumes with its original request. They also check which deliveries survive an interruption and which arrivals wake the focus.
+
+Restoring a focus after a process restart and communicating with configured services require checking the running application. See [validation across runtime boundaries](development.md#validation) and the [local development guide](../dev/README.md).

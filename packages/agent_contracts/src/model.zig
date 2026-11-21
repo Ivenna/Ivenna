@@ -26,6 +26,16 @@ pub const Response = struct {
     text: ?[]const u8,
 };
 
+/// Outcome of one inference attempt. Only a complete response exposes calls.
+/// The caller owns scheduling and the lifetime of the affected focus.
+pub const Outcome = union(enum) {
+    response: Response,
+    unavailable: struct { retry_after_ms: ?i64 = null },
+    rejected: Rejection,
+};
+
+pub const Rejection = enum { request_rejected, invalid_response, incomplete_response };
+
 pub const Tool = struct {
     name: []const u8,
     description: []const u8,
@@ -48,13 +58,13 @@ pub const Port = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        next: *const fn (*anyopaque, Allocator, Request) anyerror!Response,
+        next: *const fn (*anyopaque, Allocator, Request) anyerror!Outcome,
         requestBytes: *const fn (*anyopaque, Allocator, Request) anyerror!u64,
         limitToolReplies: *const fn (*anyopaque, Allocator, Request, []Item) anyerror!void,
     };
 
     /// Returned output, calls, and text belong to a.
-    pub fn next(self: Port, a: Allocator, request: Request) !Response {
+    pub fn next(self: Port, a: Allocator, request: Request) !Outcome {
         return self.vtable.next(self.context, a, request);
     }
 

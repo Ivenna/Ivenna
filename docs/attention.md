@@ -32,13 +32,13 @@ Malformed arguments or an empty task return `invalid_arguments`. Exhausted focus
 
 ## Reaching an existing focus
 
-Call `send_focus_message` with a complete `focus_id` and nonempty `text`. References are available in tool results, [activity reports](input.md#assignments-and-reports), and handovers; `current.focus_id` identifies the core itself. The core can address any existing focus. Success confirms durable queue acceptance:
+Call `send_focus_message` with a complete `focus_id` and nonempty `text`. The core can address any existing focus, including itself at `current.focus_id`. Tool results, activity reports, interruption notices, and handovers carry focus references. A successful call saves the message in the recipient's queue and returns its reference.
 
 ```json
 {"result":{"focus_id":"practice-2"}}
 ```
 
-The observation identifies the sending core as its source; attribution to an earlier source belongs in the text. A sleeping recipient becomes ready, while an active recipient admits the message between complete model/tool rounds, including after a long tool call finishes. Acceptance does not confirm that the recipient has read or acted on the message.
+The observation identifies the sending core as its source. When relaying someone else's words, include their attribution in the text. The message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds, so a long tool call can delay delivery.
 
 ## Returning later
 
@@ -58,7 +58,7 @@ The text later reaches the core as a callback observation with source `wakeup`. 
 
 ## Results and errors
 
-These actions return a JSON text part containing either `result` or an operation `error` with `code` and `message`. Defined failures do not end the runtime:
+These actions return a JSON text part containing either `result` or an operation `error` with `code` and `message`.
 
 | Code | Meaning |
 | --- | --- |
@@ -85,6 +85,10 @@ New assistant text from ordinary activity inferences is collected in order for t
 These texts do not activate the core. They accompany ordinary core inputs, including continuations after tools, within the request budget. Information that has not been admitted remains available in recorded order. Admitted reports become retained observations in the core's history; they remain attributed to their source activity.
 
 One input can carry reports from several activities alongside other observations. An ending can accompany new text or arrive later without repeating admitted messages. The [input contract](input.md#assignments-and-reports) defines grouping and the observation times preserved through waiting and restart.
+
+## Interrupted reasoning
+
+A rejected request, an unusable model response, or an input that cannot fit the context budget can interrupt an activity. The runtime alerts the core with a [`focus_interrupted` observation](input.md#activity-interruptions) giving the reason. The activity keeps its working history, queued observations, and callback registrations. A message from the core or a fresh observation such as a command completion can resume it.
 
 ## Activity completion
 

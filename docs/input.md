@@ -27,7 +27,7 @@ Retained records render as YAML user messages. Together with complete native mod
 
 ### Event groups
 
-An `events` record has `focus_id: Text` and `items: Event[]`. Each admission retains one group. When delivered directly in an ordinary turn, its items appear in `events` without duplicating the record in that request's prefix. Later requests keep the group in history. Compaction can summarize an admitted group before the next ordinary inference. See [admission](architecture.md#activation-admission).
+An `events` record has `focus_id: Text` and `items: Event[]`. Each admission retains one group. Its first ordinary turn presents the new observations in `events`. Later requests carry that group in history. If earlier history needs compaction during admission, the handover represents that history and the new observations still appear in the turn. See [admission](architecture.md#activation-admission).
 
 `Event` selects one branch:
 
@@ -38,6 +38,7 @@ An `events` record has `focus_id: Text` and `items: Event[]`. Each admission ret
 | `assignment` | `Assignment` | Initial work for a newly opened activity focus |
 | `activity` | `ActivityReport` | One activity's newly admitted messages and ending information |
 | `focus_message` | `FocusMessage` | Observation sent directly by the core |
+| `focus_interrupted` | `FocusInterrupted` | Runtime observation that an activity could not continue reasoning |
 | `callback` | `Callback` | A registered wakeup or host completion observation |
 
 #### Incoming messages
@@ -54,7 +55,7 @@ Correspondence enters the core as an `input` observation of who said what; it im
 
 #### Startup and restart
 
-`Startup` carries `observed_at: Time`, the beginning of this runtime. The core and focuses with interrupted activations or unread internal observations receive startup immediately; dormant activities receive it when an event arrives. New activities start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
+`Startup` carries `observed_at: Time`, the beginning of this runtime. On restart, the runtime queues this event for the core and for each activity with an unfinished activation or unread internal observations. Other restored activities receive it with their next event. Newly opened activities start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
 
 #### Assignments and reports
 
@@ -76,7 +77,19 @@ Each ordinary activity inference that returns assistant text produces one messag
 
 One ordinary core input, including a tool continuation, can contain ordinary events and reports from several activities. Newly admitted messages for the same focus are grouped once, and groups follow the focus's first appearance in the selected observations. Each focus's message order and recorded times are preserved; the grouping does not encode the order between focuses. Persistence, restart, and later admission preserve the original message and ending times. The encoded request budget determines how much can enter one input.
 
-Text alone does not activate the core. An ending does, even without new text, and establishes [focus completion](attention.md#activity-completion), not task success. Admission retains these observations in the core's history. Unadmitted information remains available for later admission.
+The attention guide explains when the core reads these messages and what an ending means. See [activity expressions](attention.md#activity-expressions) and [activity completion](attention.md#activity-completion).
+
+#### Activity interruptions
+
+The runtime sends the core a `focus_interrupted` event when an activity has to pause reasoning.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `focus_id` | `Text` | Activity whose reasoning was interrupted |
+| `observed_at` | `Time` | Time the runtime recorded the interruption |
+| `reason` | `Text` | Runtime explanation of why the activity could not continue |
+
+The activity may have resumed or even ended by the time the core reads the event. See [interrupted reasoning](attention.md#interrupted-reasoning) for how an activity resumes.
 
 #### Focus messages and callbacks
 
@@ -88,7 +101,7 @@ The core's `send_focus_message` produces a `FocusMessage`:
 | `observed_at` | `Time` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
 
-A focus message preserves its actual sender and enters the selected recipient's ordinary event queue. It can resume a sleeping recipient. It does not create a callback registration or arrange a reply.
+A focus message enters the selected recipient's ordinary event queue. See [reaching an existing focus](attention.md#reaching-an-existing-focus) for when the recipient can read it.
 
 Registered observations arrive as `Callback` events for the focuses that arranged them:
 
@@ -160,7 +173,7 @@ Each inference ends its input with a turn:
 
 `Current` contains `focus_id: Text`, `role: Role`, and `observed_at: Time`. Its time dates the current inference input. Events and handovers keep their own observation times and sources. A historical record's focus can differ from the focus identified by `current`.
 
-An ordinary turn with no new events contains only `current`, continuing from the preceding history. Operation results and admitted events supply changes as they occur: `open_focus` returns a new reference, activity reports carry what that focus said, and an `ended_at` establishes its ending. Assistant text alone does not independently schedule the core; an activity ending does.
+An ordinary turn with no new events contains only `current` and continues from the preceding history.
 
 `summarize` contains `instructions: Text` and, when nonempty, complete `state: State`. It asks for condensed understanding with current state available for recollection. Events waiting for admission remain outside this request.
 
@@ -184,8 +197,8 @@ The callback event connects the arriving observation with the earlier registrati
 
 ## Handover generation and replacement
 
-A compaction inference receives the common system prompt, complete retained history, and a turn with `current` and `summarize.instructions`, plus sampled `summarize.state` when nonempty. Tools are disabled. The instructions come from [compaction.md](../packages/agent/src/compaction.md). Waiting events and unread activity reports remain outside the request.
+A compaction inference receives the common system prompt, complete retained history, and a turn with `current` and `summarize`. Tools are disabled. Waiting events and unread activity reports remain outside the request. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary of the understanding and unfinished work worth carrying forward.
 
-A summary is accepted when it contains nonblank text without tool calls and the resulting handover's ordinary request or admission candidate fits the request budget. If the first attempt fails these checks, the runtime makes one further summary inference over the original retained history. Retry feedback appears in `summarize.instructions`. Rejected output never becomes retained history.
+When the runtime asks for a revised summary, `summarize.instructions` explains what needs to change. The model sees the original history again. Only an accepted summary enters history, paired with the state and observation time supplied to that inference. The next ordinary turn adds its own identity, time, and newly admitted events.
 
-The runtime pairs the accepted summary with the same state and observation time supplied to that inference. The next ordinary request adds current identity, time, and any newly admitted events. If both attempts fail, the earlier history and unadmitted observations remain intact and execution stops. See [bounded model context](architecture.md#bounded-model-context) for generation, replacement, and admission budgets.
+See [bounded model context](architecture.md#bounded-model-context) for the acceptance checks, retry conditions, and handling of an input that still cannot fit.

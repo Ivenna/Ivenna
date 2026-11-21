@@ -7,9 +7,16 @@ const AgentTools = @import("tools.zig");
 const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
+/// A focus can retain its work when reasoning cannot proceed with this input.
+/// Shared-service and runtime errors propagate through the error union.
+pub fn FocusResult(comptime T: type) type {
+    return union(enum) { ready: T, interrupted: []const u8 };
+}
+
 /// One model request and its complete tool batch. Kernel owns attention,
 /// context lifetime, communication, and when another round starts.
 pub const Engine = struct {
+    allocator: Allocator,
     io: std.Io,
     model: Model.Port,
     shared_tools: []const Tools,
@@ -29,30 +36,74 @@ pub const Engine = struct {
     };
 
     pub const Inference = struct {
-        request: Model.Request,
+        arena: std.heap.ArenaAllocator,
         response: Model.Response,
-        role: Input.Role,
+
+        pub fn deinit(self: *Inference) void {
+            self.arena.deinit();
+            self.* = undefined;
+        }
     };
 
-    /// Declarations and response data belong to a. Request history borrows the
-    /// caller's slice through tool execution.
-    pub fn infer(self: *Engine, a: Allocator, history: []const Model.Item, role: Input.Role) !Inference {
-        try self.io.checkCancel();
+    pub const Round = struct {
+        role: Input.Role,
+        request: Model.Request,
+        inference: Inference,
+    };
+
+    pub fn beginRound(self: *Engine, a: Allocator, focus_id: []const u8, history: []const Model.Item, role: Input.Role) !FocusResult(Round) {
         const request = try self.modelRequest(a, history, role);
-        return .{ .request = request, .response = try self.model.next(a, request), .role = role };
+        return switch (try self.infer(focus_id, request)) {
+            .ready => |inference| .{ .ready = .{ .role = role, .request = request, .inference = inference } },
+            .interrupted => |reason| .{ .interrupted = reason },
+        };
+    }
+
+    /// Retry only inference, with its original input and sampling time.
+    pub fn infer(self: *Engine, focus_id: []const u8, request: Model.Request) !FocusResult(Inference) {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const initial_ms = 500;
+        var backoff_ms: i64 = initial_ms;
+        const random: std.Random.IoSource = .{ .io = self.io };
+        while (true) {
+            try self.io.checkCancel();
+            switch (try self.model.next(arena.allocator(), request)) {
+                .response => |response| {
+                    if (backoff_ms != initial_ms) std.log.info("model inference resumed for {s}", .{focus_id});
+                    return .{ .ready = .{ .arena = arena, .response = response } };
+                },
+                .rejected => |rejection| {
+                    arena.deinit();
+                    return .{ .interrupted = switch (rejection) {
+                        .request_rejected => "The model service rejected the inference request.",
+                        .invalid_response => "The runtime could not read the model response.",
+                        .incomplete_response => "The model service did not report a completed response.",
+                    } };
+                },
+                .unavailable => |outage| {
+                    _ = arena.reset(.free_all);
+                    const local_delay = random.interface().intRangeAtMostBiased(i64, @divExact(backoff_ms, 2), backoff_ms);
+                    const delay_ms = @max(local_delay, outage.retry_after_ms orelse 0);
+                    std.log.warn("model unavailable for {s}; retrying inference in {d} ms", .{ focus_id, delay_ms });
+                    try self.io.sleep(.fromMilliseconds(delay_ms), .awake);
+                    backoff_ms = @min(backoff_ms * 2, 300_000);
+                },
+            }
+        }
     }
 
     /// Execute the decoded batch in order, retaining its complete request for
     /// the provider's tool-content limits. Replies belong to a.
-    pub fn executeTools(self: *Engine, a: Allocator, invocation: Tools.Invocation, inference: Inference, runtime_tools: ?RuntimeTools) ![]const Model.Item {
-        var request = inference.request;
-        const response = inference.response;
+    pub fn executeTools(self: *Engine, a: Allocator, invocation: Tools.Invocation, round: *const Round, runtime_tools: ?RuntimeTools) ![]const Model.Item {
+        var request = round.request;
+        const response = round.inference.response;
         var messages: std.ArrayList(Model.Item) = .empty;
         try messages.appendSlice(a, request.history);
         try messages.appendSlice(a, response.output);
         const reply_start = messages.items.len;
         for (response.calls) |call| {
-            const content = self.invoke(a, invocation, call.name, call.arguments, runtime_tools, inference.role) catch |err| switch (err) {
+            const content = self.invoke(a, invocation, call.name, call.arguments, runtime_tools, round.role) catch |err| switch (err) {
                 error.InvalidToolArguments, error.UnknownTool => try Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
                     .@"error" = .{
                         .code = if (err == error.UnknownTool) "unknown_tool" else "invalid_arguments",

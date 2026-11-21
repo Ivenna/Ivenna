@@ -34,6 +34,8 @@ pub const Delivery = struct {
 pub const Activation = struct {
     deliveries: std.ArrayList(*Delivery),
     admitted: bool = false,
+    /// An observation requesting attention arrived after the last collection.
+    new_arrival: bool = false,
 
     /// Success takes ownership of the deliveries, copying only their pointers.
     pub fn create(allocator: Allocator, deliveries: []const *Delivery) !*Activation {

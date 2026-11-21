@@ -6,7 +6,7 @@ Observations bring what others have said and what your actions have revealed. Pr
 
 `current` identifies this focus and the input's observation time. Older records identify the focus that received their observations or produced their handover. A handover carries retained understanding and sampled runtime state. An activity begins with the core's retained history through the round that opened it. Awaited observations return to the focus that arranged them.
 
-Activity text reaches the core as expressions from that focus, including intentions whose effects may still be unknown. Messages retain their order within each activity; grouping carries no chronology across focuses. An activity's ending requests the core's attention.
+Activity text reaches the core as expressions from that focus, including intentions whose effects may still be unknown. Reports group messages by activity, preserving the order within each group. Groups may cover overlapping periods. An activity's ending calls for the core's attention. A `focus_interrupted` observation also calls for its attention and says why the activity had to pause. A new observation can resume that focus with its history intact.
 
 A response without tool calls returns control; queued observations can require another round before the activation completes. The core remains available between activations. At activation completion, an activity with pending callbacks sleeps until resumed; otherwise it ends and its working history is released. Shared memory and expressions already gathered for the core have their own lifetimes.
 

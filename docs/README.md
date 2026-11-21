@@ -7,7 +7,7 @@ Choose a guide for your task:
 | Task | Guide |
 | --- | --- |
 | Prepare, run, and update the supplied local development environment | [Local development](../dev/README.md) |
-| Configure services, run Ivenna, and manage retained data | [Running guide](running.md) |
+| Run Ivenna, diagnose stalled work, and manage services and retained data | [Running guide](running.md) |
 | Send messages and understand reception and responses | [Usage guide](usage.md) |
 
 ## Design and development

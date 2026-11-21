@@ -21,9 +21,18 @@ pub const Session = struct {
     epoch: u64 = 0,
     context: ?Context = null,
     needs_startup: bool = false,
-    active: ?*Activation = null,
+    state: union(enum) { idle, running: *Activation, interrupted } = .idle,
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
+
+    /// Only genuinely new work makes an interrupted focus eligible again.
+    fn notify(self: *Session) void {
+        switch (self.state) {
+            .running => |activation| activation.new_arrival = true,
+            .interrupted => self.state = .idle,
+            .idle => {},
+        }
+    }
 };
 
 pub const Work = struct { session: *Session, activation: *Activation };
@@ -182,6 +191,7 @@ pub const Registry = struct {
         if (delivery.callback_id) |id| try self.queued_callbacks.put(self.allocator, id, {});
         if (notice_key) |key| try self.noticed.put(self.allocator, key, .scheduled);
         session.pending.appendAssumeCapacity(delivery);
+        session.notify();
         return .accepted;
     }
 
@@ -206,7 +216,7 @@ pub const Registry = struct {
     }
 
     /// Move arrivals into a new, initially unadmitted batch in this activation.
-    pub fn collectPending(self: *Registry, work: Work) !bool {
+    pub fn collectPending(self: *Registry, work: Work) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
@@ -215,13 +225,13 @@ pub const Registry = struct {
         defer self.allocator.free(reports);
         errdefer for (reports) |report| report.destroy(self.allocator);
         const count = work.session.pending.items.len + reports.len;
-        if (count == 0) return false;
+        if (count == 0) return;
         try work.activation.deliveries.ensureUnusedCapacity(self.allocator, count);
         work.activation.deliveries.appendSliceAssumeCapacity(work.session.pending.items);
         work.activation.deliveries.appendSliceAssumeCapacity(reports);
         work.session.pending.clearRetainingCapacity();
         work.activation.admitted = false;
-        return true;
+        work.activation.new_arrival = false;
     }
 
     /// Extend an unadmitted core batch by one I/O page without invoking the model.
@@ -379,16 +389,16 @@ pub const Registry = struct {
         while (sessions.next()) |entry| {
             const session = entry.*;
             var observations: std.ArrayList(Input.Event) = .empty;
-            if (session.active) |activation| if (!activation.admitted) {
-                for (activation.deliveries.items) |delivery| if (isInternal(delivery.event)) try observations.append(a, delivery.event);
-            };
+            if (session.state == .running and !session.state.running.admitted) {
+                for (session.state.running.deliveries.items) |delivery| if (isInternal(delivery.event)) try observations.append(a, delivery.event);
+            }
             for (session.pending.items) |delivery| if (isInternal(delivery.event)) try observations.append(a, delivery.event);
             try retained.append(a, .{
                 .session_id = session.session_id,
                 .focus_id = session.focus_id,
                 .role = session.role,
                 .epoch = session.epoch,
-                .was_running = session.active != null or hasStartup(session.pending.items),
+                .was_running = session.state != .idle or hasStartup(session.pending.items),
                 .entries = if (session.context) |*context| context.records() else null,
                 .observations = observations.items,
             });
@@ -462,13 +472,41 @@ pub const Registry = struct {
         const completed_activity = session != self.core and self.callbackCount(session.session_id) == 0;
         const finished_at = self.now();
         if (completed_activity) try self.recordCompletionLocked(session, finished_at);
-        session.active = null;
+        session.state = .idle;
         work.activation.destroy(self.allocator);
         if (completed_activity) {
             const removed = self.sessions.remove(session.session_id);
             std.debug.assert(removed);
         }
         return true;
+    }
+
+    /// The current inference could not proceed. Put its unadmitted observations
+    /// back ahead of later arrivals, leaving mail receipts and callbacks owned
+    /// by their original deliveries. Restart also revisits unfinished work.
+    pub fn interrupt(self: *Registry, work: Work, reason: []const u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        const session = work.session;
+        const activation = work.activation;
+        // A reasoning failure can occur during admission or after admission
+        // and acknowledgement have both finished.
+        std.debug.assert(!activation.admitted or activation.deliveries.items.len == 0);
+        try session.pending.ensureUnusedCapacity(self.allocator, activation.deliveries.items.len);
+        if (session != self.core) try self.enqueueLocked(self.core, .{ .focus_interrupted = .{
+            .focus_id = session.focus_id,
+            .observed_at_unix_ms = self.now(),
+            .reason = reason,
+        } });
+        // After successful admission the queued suffix can supply a fresh
+        // input. During admission the same held prefix must wait for a change.
+        const ready = activation.new_arrival or (activation.admitted and self.hasWork(session));
+        session.pending.insertSliceAssumeCapacity(0, activation.deliveries.items);
+        activation.deliveries.clearRetainingCapacity();
+        session.state = if (ready) .idle else .interrupted;
+        activation.destroy(self.allocator);
+        try self.saveLocked();
     }
 
     /// Release a worker borrow after saving. Waiting contexts can be unloaded;
@@ -480,7 +518,7 @@ pub const Registry = struct {
         if (session.borrowed_workers != 0) return;
         if (!self.sessions.contains(session.session_id)) {
             self.destroySession(session);
-        } else if (session != self.core and session.active == null) {
+        } else if (session != self.core and session.state != .running) {
             if (session.context) |*context| context.deinit();
             session.context = null;
         }
@@ -650,10 +688,11 @@ pub const Registry = struct {
             .observed_at_unix_ms = ended_at,
             .content = .ended,
         });
+        self.core.notify();
     }
 
     fn takeReady(self: *Registry, session: *Session) !?Work {
-        if (session.active != null or !self.hasWork(session)) return null;
+        if (session.state != .idle or !self.hasWork(session)) return null;
         try self.restoreContextLocked(session);
         const reports = try self.reportDeliveriesLocked(session);
         defer self.allocator.free(reports);
@@ -665,7 +704,7 @@ pub const Registry = struct {
         const activation = try Activation.create(self.allocator, deliveries.items);
         activation.admitted = deliveries.items.len == 0;
         session.pending.clearRetainingCapacity();
-        session.active = activation;
+        session.state = .{ .running = activation };
         session.borrowed_workers += 1;
         return .{ .session = session, .activation = activation };
     }
@@ -723,6 +762,7 @@ pub const Registry = struct {
         try self.ensureStartupLocked(session);
         try session.pending.ensureUnusedCapacity(self.allocator, 1);
         session.pending.appendAssumeCapacity(delivery);
+        session.notify();
     }
 
     fn hasWork(self: *const Registry, session: *const Session) bool {
@@ -737,12 +777,12 @@ pub const Registry = struct {
     }
 
     fn hasCapacity(self: *Registry, session: *Session) bool {
-        const active_count = if (session.active) |activation| deliveryCount(activation.deliveries.items) else 0;
+        const active_count = if (session.state == .running) deliveryCount(session.state.running.deliveries.items) else 0;
         return deliveryCount(session.pending.items) + active_count < self.max_pending;
     }
 
     fn destroySession(self: *Registry, session: *Session) void {
-        if (session.active) |activation| activation.destroy(self.allocator);
+        if (session.state == .running) session.state.running.destroy(self.allocator);
         for (session.pending.items) |delivery| delivery.destroy(self.allocator);
         session.pending.deinit(self.allocator);
         if (session.context) |*context| context.deinit();
@@ -757,7 +797,10 @@ pub const Registry = struct {
 
 fn deliveryCount(deliveries: []const *Delivery) usize {
     var count: usize = 0;
-    for (deliveries) |delivery| count += @intFromBool(delivery.event != .startup and delivery.event != .activity);
+    for (deliveries) |delivery| switch (delivery.event) {
+        .input, .assignment, .focus_message, .callback => count += 1,
+        .startup, .activity, .focus_interrupted => {},
+    };
     return count;
 }
 
@@ -768,7 +811,7 @@ fn hasStartup(deliveries: []const *Delivery) bool {
 
 fn isInternal(event: Input.Event) bool {
     return switch (event) {
-        .assignment, .focus_message => true,
+        .assignment, .focus_message, .focus_interrupted => true,
         .startup, .input, .callback, .activity => false,
     };
 }
@@ -782,7 +825,7 @@ fn lessSessionId(_: void, left: *Session, right: *Session) bool {
 }
 
 fn assertWork(work: Work) void {
-    std.debug.assert(work.session.active == work.activation);
+    std.debug.assert(work.session.state == .running and work.session.state.running == work.activation);
 }
 
 fn cloneSource(a: Allocator, source: contracts.Callback.Source) !contracts.Callback.Source {
@@ -794,4 +837,71 @@ fn cloneSource(a: Allocator, source: contracts.Callback.Source) !contracts.Callb
 
 fn freeSource(a: Allocator, source: contracts.Callback.Source) void {
     if (source == .host) a.free(source.host.command_id);
+}
+
+test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
+    // This case starts with an empty mailbox history and never admits a round.
+    const Store = contracts.HistoryStore;
+    const Storage = struct {
+        fn load(_: *anyopaque, _: Allocator) anyerror!?[]const u8 {
+            return null;
+        }
+        fn allocateGroup(_: *anyopaque, a: Allocator) anyerror![]const u8 {
+            return a.dupe(u8, "core");
+        }
+        fn save(_: *anyopaque, _: []const u8) anyerror!void {}
+        fn query(_: *anyopaque, _: Allocator, _: []const []const u8) anyerror![]const Store.Reference {
+            return error.UnexpectedQuery;
+        }
+        fn read(_: *anyopaque, _: Allocator, _: []const Store.Reference) anyerror![]const []const u8 {
+            return error.UnexpectedRead;
+        }
+        fn create(_: *anyopaque, _: Allocator, _: []const Store.Record) anyerror!void {
+            return error.UnexpectedRecord;
+        }
+        fn maintain(_: *anyopaque, _: Allocator, _: Store.Retention) anyerror!void {
+            return error.UnexpectedMaintenance;
+        }
+    };
+    var storage: Storage = .{};
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, .{
+        .context = &storage,
+        .vtable = &.{ .load = Storage.load, .allocateGroup = Storage.allocateGroup, .save = Storage.save, .query = Storage.query, .read = Storage.read, .create = Storage.create, .maintain = Storage.maintain },
+    });
+    defer registry.deinit();
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const first: Incoming = .{
+        .receipt = "mail-1",
+        .content = .{ .message = .{ .from = &.{"visitor"}, .text = "First", .observed_at_unix_ms = 10 } },
+    };
+    const second: Incoming = .{
+        .receipt = "mail-2",
+        .content = .{ .message = .{ .from = &.{"visitor"}, .text = "Second", .observed_at_unix_ms = 20 } },
+    };
+    try std.testing.expectEqual(Registry.Intake.accepted, try registry.accept(first));
+    const initial = (try registry.takeReadyBatch(a))[0];
+    try std.testing.expectEqual(Registry.Intake.accepted, try registry.accept(second));
+    try registry.interrupt(initial, "An observation could not be admitted.");
+    registry.endWorker(initial.session);
+
+    // The second letter arrived while the old batch was in use.
+    const resumed = (try registry.takeReadyBatch(a))[0];
+    const held = resumed.activation.deliveries.items;
+    try std.testing.expectEqual(3, held.len);
+    try std.testing.expect(held[0].event == .startup);
+    try std.testing.expectEqualStrings("mail-1", held[1].receipt.?);
+    try std.testing.expectEqualStrings("mail-2", held[2].receipt.?);
+    try registry.interrupt(resumed, "An observation could not be admitted.");
+    registry.endWorker(resumed.session);
+
+    try std.testing.expectEqual(Registry.Intake.deferred, try registry.accept(second));
+    try std.testing.expectEqual(0, (try registry.takeReadyBatch(a)).len);
+    var third = second;
+    third.receipt = "mail-3";
+    try std.testing.expectEqual(Registry.Intake.accepted, try registry.accept(third));
+    const retry = (try registry.takeReadyBatch(a))[0];
+    try std.testing.expectEqual(4, retry.activation.deliveries.items.len);
+    registry.endWorker(retry.session);
 }

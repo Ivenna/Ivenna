@@ -48,9 +48,9 @@ Core and activity focuses use the same system prompt. Each receives observations
 
 The core can [open an activity focus](attention.md#opening-a-focus) with a free-form assignment. It carries the core's retained understanding, relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
 
-New assistant text from activities is collected for the core's ordinary inputs, allowing it to follow concurrent work without reasoning on every update. One input can present several activities while preserving each source's message order and observation times. The core interprets these expressions as what an activity said; they do not establish the effects of its tools.
+The runtime collects what activities say for the core's next ordinary input. This lets the core follow concurrent work without waking for each update. One input can present messages from several activities while preserving each activity's message order and observation times. To establish what an activity's tools did, the core needs evidence of their effects.
 
-An activity's ending always requests the core's attention, whether or not it produced text. Intermediate expressions and runtime state changes do not independently activate the core. Core attention must remain responsive while activities pursue their work. See [Attention](attention.md) for these actions and [scheduling and capacity](architecture.md#scheduling-and-capacity) for current dispatch and limits.
+An activity that ends calls for the core's attention even if it said nothing. When an activity's reasoning is interrupted, the core receives the reason and can reach the activity again while it exists. The core remains free to pursue its own work. See [how focuses coordinate](attention.md) and [how the runtime schedules them](architecture.md#scheduling-and-capacity).
 
 ## Communication with people and programs
 
@@ -80,7 +80,7 @@ Working contexts retain observations, model output, and tool results across inte
 
 A handover combines generated understanding with sampled runtime state. The runtime makes the sample available during compaction and carries it forward unchanged alongside the summary. Ivenna chooses what experiences and relationships mean and what to retain about them.
 
-Compaction keeps the original history and pending observations intact until a usable handover is ready. If it cannot produce one within the request budget, execution stops with that earlier understanding and pending work preserved. The [architecture guide](architecture.md#bounded-model-context) defines generation and replacement.
+The original history stays in place until the focus can continue with the proposed handover. Observations still awaiting admission remain available even if compaction cannot make room for them. See [how the runtime selects a handover](architecture.md#bounded-model-context).
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 
@@ -88,9 +88,11 @@ Model changes should support this same developing life by preserving access to i
 
 ## Runtime availability
 
-Communication and autonomous memory are required for Ivenna to operate. Bounded recovery from transient model-service failures lets ongoing work continue through brief outages. Unrecovered infrastructure, model-service, and session-execution failures end the runtime and its concurrent work. Defined tool outcomes, including mistaken references and unsuccessful or uncertain actions, remain observations from which Ivenna decides how to continue.
+A failure interrupts the work that depends on it. During a temporary model outage, the runtime can repeat an inference with the same observations. If the request is rejected or the response cannot be used, the focus retains its history and can resume when a fresh observation calls for its attention.
 
-The receiving boundary checks Ivenna's reception status before accepting correspondence. Reception closes during startup, shutdown, or failure; sender retry and queuing belong to the sender. See [reception readiness](running.md#service-status-and-reception) for the precheck's limits.
+An action may already have taken effect when a failure occurs. If a command finishes and the connection drops while uploading its output, Ivenna keeps the command's other results and records the uncertainty about the uploaded file.
+
+The receiving mail service checks the kernel's readiness before accepting correspondence. Reception opens after initialization and stays open while a focus waits for inference. If the kernel loses required access to its configured model, communication, memory, or working history, it closes reception and stops. The sender decides whether to queue or retry a letter it could not deliver. See [reception readiness](running.md#service-status-and-reception).
 
 ## Data ownership
 

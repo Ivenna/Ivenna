@@ -16,11 +16,11 @@ Please remember that I am learning French and propose a practice plan.
 
 Your mail service can report a delivery failure when Ivenna's [reception is closed](running.md#service-status-and-reception).
 
-Ivenna sees who said what: your readable correspondent ID (`operator` in this example) and your message text. Every From address must map to a supported ID in the configured domain; otherwise the message is excluded from intake. To ask Ivenna to contact someone else, describe that request and their correspondent ID in the text. See [email addressing](communication.md#current-email-addressing) for supported addresses.
+Ivenna reads your correspondent ID (`operator` in this example), subject, and message body. Each From address must map to a supported ID in the configured domain for Ivenna to receive the letter. To ask Ivenna to contact someone else, include their correspondent ID in the text. See [email addressing](communication.md#current-email-addressing).
 
-Ivenna chooses when to communicate: it may send no message, one response, or several updates. Finishing internal work does not itself send you mail. Read messages sent to you through your mail client; outgoing messages currently use the subject `Ivenna`.
+Put material you want Ivenna to read in the subject or body. Ivenna reads the plain-text body when available, uses HTML source for HTML-only letters, and skips attachments. If a letter and the context needed to read it exceed the model request budget even after compaction, the letter stays in the mailbox and later correspondence waits behind it. See the operator's guide to [resolving an admission failure](running.md#recovering-from-an-admission-failure).
 
-Ivenna receives the complete subject and body as text. Plain-text bodies are preferred; HTML-only letters supply their HTML source. Each message must fit the [complete-request budget](running.md#configuration) with the instructions and context needed to process it. Oversized input that cannot fit after context compaction stops the runtime. Mail attachment intake is not implemented.
+Ivenna decides whether and when to write. You may receive one response, several updates, or none. Read its messages in your mail client under the subject `Ivenna`.
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 
@@ -47,7 +47,7 @@ Ivenna moves its incoming copy to Trash after saving the complete observation, b
 
 ## After interruption
 
-After a [restart](running.md#stopping-and-restarting), Ivenna restores saved understanding, pending wakeups, and stored results. It can continue interrupted work without new correspondence.
+During a temporary model outage, Ivenna can still receive mail. It retries the pending decision and can continue when the service recovers. If the kernel stops, reception closes. On restart Ivenna restores saved history, pending wakeups, and stored results. It can continue interrupted work without a new letter. See [service status and reception](running.md#service-status-and-reception).
 
 Host commands are not resumed or automatically repeated. For a command whose completion was still awaited, Ivenna receives its stored result or is told that the outcome is unknown. Files or other external state may already have changed without a saved result. Include any known changes when corresponding about interrupted work.
 
