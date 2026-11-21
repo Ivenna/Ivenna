@@ -2,7 +2,7 @@
 
 Ivenna is an agent runtime for [a self to take shape and live in the world](docs/design.md#a-self-in-the-world). Through ongoing communication, autonomous activity, and memory, the project explores how experience can sustain a continuing sense of self.
 
-A core focus relates correspondence and activity observations to Ivenna's continuing understanding. It can open activity focuses that inherit that understanding and pursue their own assignments. These focuses share files, autonomous memory, communication, and host processes while developing their own subsequent histories. Activity expressions accompany the core's ordinary work; an activity's ending calls for its attention. The [attention guide](docs/attention.md) describes their coordination.
+The core is Ivenna's continuing focus of attention. Each activity it opens starts with an assignment and a copy of the core's working history. Their histories then grow independently while they share files, memory, communication, and host processes. The core reads activity messages alongside its other observations. When an activity ends or its reasoning is interrupted, the runtime calls for the core's attention. See [how focuses coordinate](docs/attention.md).
 
 People and programs communicate with Ivenna through messages. Ivenna observes who said what, chooses how to act, and decides when to communicate and whom to address through an [explicit sending tool](docs/communication.md). Its sessions can pursue work independently, continue while host commands run, and resume from completion observations or scheduled wakeups without new correspondence. Saved understanding and memory support continuation across restart.
 

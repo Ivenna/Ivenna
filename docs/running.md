@@ -22,8 +22,7 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_BASE_URL` | Model API base URL | `https://api.deepseek.com` |
 | `LLM_MODEL` | Model name | `deepseek-flash` |
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `65536` |
-| `LLM_MAX_ATTEMPTS` | Maximum HTTP attempts per inference, including the first; `1` disables retries | `3` |
-| `LLM_REQUEST_TIMEOUT_MS` | Total time limit per inference, including retries; a separate limit for each file upload | `600000` (10 minutes) |
+| `LLM_REQUEST_TIMEOUT_MS` | Time limit for one inference attempt or one file upload, including upload negotiation | `600000` (10 minutes) |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
 | `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `1048576` (1 MiB) |
@@ -36,7 +35,7 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
-| `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session; excludes startup and activity reports | `64` |
+| `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
 | `DATA_DIR` | Persistent base directory for host command output in the kernel filesystem | Required |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
@@ -48,13 +47,11 @@ Numeric kernel settings must be positive. Relative `DATA_DIR` and `MEMORY_SSH_CO
 
 ### Model requests
 
-Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments. A response reported as incomplete fails model execution and stops the runtime.
+Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments.
 
-Ordinary reasoning effort is configured separately for each role. Accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; choose values supported by the model service. Compaction always uses `high` reasoning effort with no tools, independently of the ordinary session settings.
+Choose an ordinary reasoning effort for each role from the values supported by your model service. Ivenna accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Compaction always uses `high` with no tools.
 
-Each ordinary or compaction inference has one `LLM_REQUEST_TIMEOUT_MS` limit covering all `LLM_MAX_ATTEMPTS` attempts and retry delays. The [transport policy](architecture.md#model-transport) determines which failures can be retried; exhausting either limit stops the runtime. The adapter validates a complete response before returning tool calls, so retries repeat inference without repeating tool execution. A generation whose response was lost may still incur model-service charges.
-
-Files are uploaded before the next inference, with a separate `LLM_REQUEST_TIMEOUT_MS` limit for each file's [upload negotiation](architecture.md#tool-results). A service rejection becomes a `file_upload_failed` tool-content error. Failures in transport or the model service, including an incomplete successful response, stop the runtime; cancellation stops active work and joins it. See [uploaded model files](#uploaded-model-files) for their retention lifecycle.
+`LLM_REQUEST_TIMEOUT_MS` applies separately to each inference attempt, including compaction. A temporary outage can therefore delay a decision beyond this timeout. For each file upload, the timeout covers the entire negotiation. See [when model work stalls](#when-model-work-stalls) and [file outcomes](content.md#complete-files).
 
 ### Context budgets
 
@@ -66,15 +63,15 @@ Handovers carry pending callback references and, for the core, existing activity
 
 Individual tool results can meet their [content limits](content.md#model-request-checks) while a large batch or inline image exceeds the context budgets. Inline images include base64 encoding overhead. Reduce their size or use image URL references when that overhead would exceed the request budget.
 
-For files, the byte budgets measure identifiers and source descriptions. They do not measure the content expanded by the model service, so a request within Ivenna's budget may still exceed the service's context limits. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for its limits. Service rejections follow the [model-request policy](#model-requests).
+For files, the byte budgets measure identifiers and source descriptions. The model service expands those references, so a request within Ivenna's budget can still exceed the service's context limits. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) and [when model work stalls](#when-model-work-stalls).
 
-If a summary request exceeds its budget or compaction cannot produce a handover that fits the continuation request, the runtime stops with its earlier history and unadmitted observations intact. Input that still cannot fit after compaction fails with `ContextBudgetExhausted`. See the [compaction mechanism](architecture.md#bounded-model-context) for measurement and retry behavior.
+If a summary request exceeds its budget or compaction cannot fit the next ordinary request, the affected focus waits with its earlier history and unadmitted observations intact. See [recovering from an admission failure](#recovering-from-an-admission-failure) and the [compaction mechanism](architecture.md#bounded-model-context).
 
 ### Session and command capacity
 
 `MAX_SESSIONS` counts the core and all registered activities, including those asleep. Startup fails if saved identities exceed it; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a slot. Ready sessions can advance concurrently. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes). The session and command defaults are tuning starting points; size them for the workload and resources available.
 
-`MAX_PENDING_EVENTS` limits ordinary accepted events buffered for a session. Startup observations, passive activity expressions, and activity endings are excluded. Opening a focus and admitting its ending do not need space in the core's ordinary event queue. Correspondence and callback mail have independent intake allowances and stay in their durable sources when their destination is full. Focus messages use this ordinary allowance and return `focus_queue_full` when the recipient cannot accept them. Capacity and polling can delay scheduled work.
+`MAX_PENDING_EVENTS` counts correspondence, callbacks, assignments, and focus messages buffered for a session. Startup observations, activity expressions, endings, and notices of activity interruption are exempt. Correspondence and callback mail have independent intake allowances and stay in their mailboxes when their destination is full. A focus message returns `focus_queue_full` when the recipient cannot accept it. Capacity and polling can delay scheduled work.
 
 ## Changing the model
 
@@ -150,20 +147,22 @@ export DATA_DIR=/path/to/instance/data
 
 The kernel's startup directory becomes the default directory for host commands. The executable embeds its model-facing resources and can run independently of the source checkout.
 
-Use one kernel per mailbox. Startup discovers the account, checks memory availability, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before following the [usage guide](usage.md) to send a message. Diagnostics are written to the kernel's standard error; service diagnostics follow each service's configuration.
+Run one kernel per mailbox. The kernel binds `SERVICE_ADDRESS` before accessing the account. If the address is in use, startup exits. On Linux, an `AddressInUse` error just after an upgrade can persist until the older executable's connections leave `TIME_WAIT`.
+
+The kernel initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a message](usage.md#sending-a-request). The kernel writes diagnostics to standard error.
 
 Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
 
 ## Service status and reception
 
-The HTTP listener at `SERVICE_ADDRESS` exposes:
+The HTTP listener at `SERVICE_ADDRESS` reports listener health and mail reception separately.
 
 | Endpoint | Response |
 | --- | --- |
 | `GET /healthz` | `200 OK` for listener health |
-| `GET /readyz` | `200 OK` with `X-Ivenna-Ready: true` when reception is open; otherwise `503 Service Unavailable` |
+| `GET /readyz` | `200 OK` with `X-Ivenna-Ready: true` when reception is open, `503 Service Unavailable` when closed |
 
-Reception opens after initialization and initial storage maintenance. Startup model work runs with reception open. Reception closes when the runtime stops or fails. These endpoints report lifecycle state; they do not probe mail or memory on each request. For a listener reachable at `127.0.0.1:8090`, check the current state with:
+Reception stays open during startup reasoning and while a focus waits for the model. Check its state at the configured address. For the default port on the kernel host, run this command.
 
 ```sh
 curl --include http://127.0.0.1:8090/readyz
@@ -171,29 +170,41 @@ curl --include http://127.0.0.1:8090/readyz
 
 Configure the mail receiving boundary to check the readiness header at an address it can reach and reject incoming traffic when the header is absent, including when the endpoint cannot be reached. Apply the policy to every receiving address and delivery path used for correspondence. The [local Stalwart setup](../dev/README.md#configuring-mail) demonstrates an SMTP recipient check.
 
-Readiness describes the kernel's reception state when queried. It reserves no processing capacity, and the runtime can stop after a successful check or accepted delivery. The kernel continues to read [pending correspondence](#mail-intake) already present in its account.
+An accepted letter can wait in the mailbox if a focus is busy or the kernel stops after delivery. On restart the kernel reads [pending correspondence](#mail-intake) already in its account.
+
+### When model work stalls
+
+Look for `retrying inference` or `interrupted` in the kernel's standard error. Both messages identify the affected focus.
+
+- **Temporary outage.** The kernel retries the same inference, including a request for a compaction summary. Each retry logs its delay. The first wait is 250–500 milliseconds. The range doubles after each failure up to 2.5–5 minutes. A longer delay requested by the service in `Retry-After` takes precedence. Retries reuse completed tool results. A lost model response can still incur charges.
+- **Interrupted focus.** A rejected request or an incomplete or invalid generation leaves that focus's history intact. Another observation can resume its work, and the core receives a notice if an activity was interrupted. A 403 or 404 can refer to a resource used by one request. If either status recurs across focuses, check model access and `LLM_BASE_URL`.
+- **Kernel exit.** A shared failure on the inference endpoint, such as HTTP 401, exhausted account quota, or an incompatible protocol, closes reception and stops the kernel. Correct the reported problem before restarting. When the file service returns 401, the kernel records the rejected upload in the tool result and can continue to the next inference. See [model transport](architecture.md#model-transport) and [file outcomes](content.md#complete-files).
+
+### Recovering from an admission failure
+
+If the core cannot fit an incoming letter and its context in a model request, the letter stays unacknowledged in the mailbox. Later correspondence waits behind it. Another accepted observation or a restart can prompt a new attempt. Polling that same letter leaves it pending.
+
+If admission keeps failing, check the [context budgets](#context-budgets) and restart with budgets suitable for the model and the letter. To withdraw the letter instead, stop the kernel, move it out of [eligible intake](#mail-intake), then restart. The kernel rebuilds pending deliveries from the mailbox.
 
 ## Stopping and restarting
 
-Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work and host commands, and wait for the runtime's tasks to end. Infrastructure and execution failures also stop the runtime. Diagnose the failure and restore any unavailable services before restarting.
+Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work (including model recovery waits) and host commands, and wait for the runtime's tasks to end. Failure of a required service such as history storage, or an unrecoverable execution error, also stops the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
 Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
 
-The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other activity sessions remain asleep until an event arrives.
+The core and sessions with interrupted activations or unread internal observations receive fresh startup observations. Other activity sessions remain asleep until an event arrives. If the kernel saved a letter just before stopping and its acknowledgement is still pending, the letter can appear again.
 
 Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose deadlines passed while the runtime was unavailable become due. Host completions without stored results receive interruption observations with unknown effects; already stored results are preserved.
 
 Host processes and command handles are not restored, and commands are not replayed. Working history preserves confirmed model/tool exchanges; an interrupted operation may have produced effects without a saved result. Ivenna decides how to continue from its history and current state; include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) for what continuation means and [startup and interruption](architecture.md#startup-and-interruption) for the reconstruction contract.
 
-### Recovering from an admission failure
-
-When an incoming message fails admission with `ContextBudgetExhausted`, it remains unacknowledged. On restart, the runtime retries admission from saved history; a new summary may produce a request that fits. If the limit recurs, review the [request budgets](#configuration) and [eligible pending correspondence](#mail-intake). Adjust the budgets or remove a message that cannot fit from eligible intake as appropriate.
-
 ### Updating the executable
 
 Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
 
-The current handover format includes the state sampled for its summary inference and that sample's observation time. Earlier handover records without these fields are incompatible with this executable. See [persistent working history](architecture.md#persistent-working-history) for the stored representation.
+Older configurations may contain `LLM_MAX_ATTEMPTS`. The kernel now ignores this setting and continues retrying temporary inference failures. `LLM_REQUEST_TIMEOUT_MS` limits each attempt. See [model request settings](#model-requests).
+
+Earlier executables cannot restore a checkpoint whose selected history or pending observations include a `focus_interrupted` event. The current executable requires handover records to include the state sampled for the summary and its observation time. Earlier handovers without those fields fail restoration. See [persistent working history](architecture.md#persistent-working-history).
 
 ## Data and retention
 
@@ -246,7 +257,7 @@ Unread activity expressions retain every new text in order with its original obs
 
 ### Uploaded model files
 
-Saved working history includes the original bytes and service identifiers of uploaded files. Later inferences and restart reuse those identifiers. The [working-history limits](#working-history) also apply to these original bytes.
+When an upload returns a usable reference, saved working history includes the original bytes and the service identifier. Later inferences reuse that identifier, including after restart. The [working-history limits](#working-history) apply to the bytes. If an upload may have reached the service but returned no usable reference, the service account can also contain a file whose identifier Ivenna never received. See [file outcomes](content.md#complete-files).
 
 Uploads live at `LLM_BASE_URL` in the account authenticated by `LLM_API_KEY`. Ivenna does not request an upload expiration or delete uploads during compaction or history retirement. Manage them separately under the service's retention policy; see DeepSeek's [Files API](https://api-docs.deepseek.com/guides/files_api/). Deleting an upload still referenced by retained contexts prevents later requests from using that identifier; retained originals are not automatically reuploaded.
 

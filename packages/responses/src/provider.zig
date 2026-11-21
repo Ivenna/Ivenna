@@ -12,7 +12,6 @@ pub const Provider = struct {
     pub const default_base_url = "https://api.deepseek.com";
     pub const default_model = "deepseek-flash";
     pub const default_max_output_tokens: u32 = 65536;
-    pub const default_max_attempts: u32 = 3;
     pub const default_request_timeout_ms: u32 = 600000;
 
     client: *std.http.Client,
@@ -20,9 +19,7 @@ pub const Provider = struct {
     api_key: []const u8 = "",
     model: []const u8 = default_model,
     max_output_tokens: u32 = default_max_output_tokens,
-    /// Maximum HTTP attempts per inference, including the initial request.
-    max_attempts: u32 = default_max_attempts,
-    /// Milliseconds available for all HTTP attempts and retry waits.
+    /// Deadline in milliseconds for one inference attempt or one file upload.
     request_timeout_ms: u32 = default_request_timeout_ms,
 
     pub fn port(self: *Provider) Model.Port {
@@ -33,7 +30,7 @@ pub const Provider = struct {
         } };
     }
 
-    fn next(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!Model.Response {
+    fn next(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!Model.Outcome {
         const self: *Provider = @ptrCast(@alignCast(context));
         return self.send(arena, try self.requestPayload(arena, request));
     }
@@ -69,14 +66,8 @@ pub const Provider = struct {
                     if (part.file.reference == null) {
                         switch (try self.uploadFile(arena, part.file)) {
                             .reference => |reference| part.file.reference = reference,
-                            .rejected => |status| {
-                                part.* = .{ .text = try std.json.Stringify.valueAlloc(arena, .{
-                                    .@"error" = .{
-                                        .code = "file_upload_failed",
-                                        .message = "The model service rejected the file upload, so the file contents were not attached.",
-                                        .http_status = @backingInt(status),
-                                    },
-                                }, .{}) };
+                            .failure => |failure| {
+                                part.* = try failure.part(arena, part.file);
                                 continue;
                             },
                         }
@@ -187,7 +178,29 @@ pub const Provider = struct {
         };
     }
 
-    const Upload = union(enum) { reference: []const u8, rejected: std.http.Status };
+    const Upload = union(enum) { reference: []const u8, failure: UploadFailure };
+
+    const UploadFailure = union(enum) {
+        rejected: std.http.Status,
+        not_sent,
+        uncertain,
+
+        fn part(self: UploadFailure, arena: Allocator, file: File) !Content.Part {
+            const http_status: ?u16 = if (self == .rejected) @backingInt(self.rejected) else null;
+            return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
+                .file = file.describe(),
+                .@"error" = .{
+                    .code = if (self == .uncertain) "file_upload_uncertain" else "file_upload_failed",
+                    .message = switch (self) {
+                        .not_sent => "The upload attempt ended before sending the file.",
+                        .rejected => "The file service rejected the upload.",
+                        .uncertain => "No file reference was confirmed. The service may have stored the file.",
+                    },
+                    .http_status = http_status,
+                },
+            }, .{ .emit_null_optional_fields = false }) };
+        }
+    };
 
     fn uploadFile(self: Provider, arena: Allocator, file: File) !Upload {
         const io = self.client.io;
@@ -196,34 +209,27 @@ pub const Provider = struct {
             .raw = .fromMilliseconds(self.request_timeout_ms),
             .clock = .awake,
         });
-        const Result = union(enum) { upload: anyerror!Upload, timeout: std.Io.Cancelable!void };
-        var buffer: [2]Result = undefined;
-        var select = std.Io.Select(Result).init(io, &buffer);
-        defer select.cancelDiscard();
-        // Both purposes share one deadline. A lost response is never replayed:
-        // it may follow successful, billable parsing and storage.
-        try select.concurrent(.upload, uploadFileNegotiated, .{ self, arena, file });
-        try select.concurrent(.timeout, waitForDeadline, .{ io, deadline });
-        return switch (try select.await()) {
-            .upload => |result| try result,
-            .timeout => |result| blk: {
-                try result;
-                break :blk error.ModelFileUploadTimedOut;
-            },
+        // A lost response may follow successful, billable parsing and storage.
+        var failure: UploadFailure = .not_sent;
+        const upload = runUntil(Upload, io, deadline, uploadFileNegotiated, .{ self, arena, file, &failure }) catch |err| {
+            if (!retryableTransport(err) and !invalidEnvelope(err)) return err;
+            return .{ .failure = failure };
         };
+        return upload orelse .{ .failure = failure };
     }
 
-    fn uploadFileNegotiated(self: Provider, arena: Allocator, file: File) !Upload {
-        const result = try self.uploadFileOnce(arena, file, "rich_layout_recognition");
+    fn uploadFileNegotiated(self: Provider, arena: Allocator, file: File, failure: *UploadFailure) !Upload {
+        const result = try self.uploadFileOnce(arena, file, "rich_layout_recognition", failure);
         // The service rejects some formats for one purpose and accepts them
         // for the other. A definite 400 is a failed upload, which the service
         // does not store or bill; it need not identify the rejection's cause.
-        if (result == .rejected and result.rejected == .bad_request)
-            return self.uploadFileOnce(arena, file, "user_data");
+        if (result == .failure and result.failure == .rejected and result.failure.rejected == .bad_request)
+            return self.uploadFileOnce(arena, file, "user_data", failure);
         return result;
     }
 
-    fn uploadFileOnce(self: Provider, arena: Allocator, file: File, purpose: []const u8) !Upload {
+    fn uploadFileOnce(self: Provider, arena: Allocator, file: File, purpose: []const u8, failure: *UploadFailure) !Upload {
+        failure.* = .not_sent;
         var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
         defer scratch.deinit();
         const temporary = scratch.allocator();
@@ -240,45 +246,51 @@ pub const Provider = struct {
         const url = try std.fmt.allocPrint(temporary, "{s}/files", .{base_url});
         const authorization = try std.fmt.allocPrint(temporary, "Bearer {s}", .{self.api_key});
         const content_type = try std.fmt.allocPrint(temporary, "multipart/form-data; boundary={s}", .{boundary});
-        var request = try self.client.request(.POST, try std.Uri.parse(url), .{
+        var request = self.client.request(.POST, try std.Uri.parse(url), .{
             .headers = .{
                 .content_type = .{ .override = content_type },
                 .authorization = .{ .override = authorization },
                 .accept_encoding = .{ .override = "identity" },
             },
             .redirect_behavior = .unhandled,
-        });
+        }) catch |err| switch (err) {
+            error.UnknownHostName, error.NoAddressReturned, error.TlsInitializationFailed => return .{ .failure = .not_sent },
+            else => return err,
+        };
         defer request.deinit();
         errdefer if (request.connection) |connection| {
             connection.closing = true;
         };
+        failure.* = .uncertain;
         sendPayload(&request, &payload) catch |err| return transportError(&request, err);
         var response = request.receiveHead(&.{}) catch |err| return transportError(&request, err);
-        const status = response.head.status;
-        if (status.class() == .client_error) {
+        if (!completeRepresentation(response.head)) {
             request.connection.?.closing = true;
-            return .{ .rejected = status };
+            const status = response.head.status;
+            if (status.class() == .client_error or status == .not_implemented or status == .http_version_not_supported)
+                failure.* = .{ .rejected = status };
+            return .{ .failure = failure.* };
         }
-        if (status != .ok) {
-            std.log.warn("model file endpoint returned HTTP {d}", .{@backingInt(status)});
-            return error.ModelHttpFailure;
-        }
-        if (response.head.content_encoding != .identity) return error.UnsupportedModelEncoding;
-        const content_length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
-        const reader = response.reader(&.{});
-        const bytes = if (content_length) |length|
-            reader.readAllocAll(temporary, std.math.cast(usize, length) orelse return error.OutOfMemory) catch |err| return transportError(&request, err)
-        else
-            reader.allocRemaining(temporary, .unlimited) catch |err| return transportError(&request, err);
-        const uploaded = std.json.parseFromSliceLeaky(struct { id: []const u8 }, temporary, bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return error.InvalidModelResponse,
+        var buffer: [4096]u8 = undefined;
+        var json = std.json.Reader.init(temporary, response.reader(&buffer));
+        defer json.deinit();
+        const uploaded = std.json.parseFromTokenSourceLeaky(struct { id: []const u8 }, temporary, &json, .{ .ignore_unknown_fields = true }) catch |err| {
+            request.connection.?.closing = true;
+            return switch (err) {
+                error.OutOfMemory => err,
+                error.ReadFailed => transportError(&request, err),
+                else => .{ .failure = .uncertain },
+            };
         };
-        if (uploaded.id.len == 0) return error.InvalidModelResponse;
+        // A complete JSON object may still precede a premature connection close.
+        if (request.reader.state == .body_remaining_content_length or uploaded.id.len == 0) {
+            request.connection.?.closing = true;
+            return .{ .failure = .uncertain };
+        }
         return .{ .reference = try arena.dupe(u8, uploaded.id) };
     }
 
-    fn send(self: Provider, arena: Allocator, request_payload: Payload) !Model.Response {
+    fn send(self: Provider, arena: Allocator, request_payload: Payload) !Model.Outcome {
         const io = self.client.io;
         try io.checkCancel();
         const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
@@ -289,57 +301,20 @@ pub const Provider = struct {
         const url = try std.fmt.allocPrint(arena, "{s}/responses", .{std.mem.trimEnd(u8, self.base_url, "/")});
         const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{self.api_key});
 
-        const Result = union(enum) { response: anyerror!Model.Response, timeout: std.Io.Cancelable!void };
-        var buffer: [2]Result = undefined;
-        var select = std.Io.Select(Result).init(io, &buffer);
-        // Join the exchange before the caller can release its request arena.
-        defer select.cancelDiscard();
-        try select.concurrent(.response, sendWithRetries, .{ self, arena, payload, url, authorization });
-        try select.concurrent(.timeout, waitForDeadline, .{ io, deadline });
-        return switch (try select.await()) {
-            .response => |result| try result,
-            .timeout => |result| blk: {
-                try result;
-                break :blk error.ModelRequestTimedOut;
-            },
+        // A 429 can supply a retry delay before its optional diagnostic stalls.
+        var on_timeout: Model.Outcome = .{ .unavailable = .{} };
+        const attempt = runUntil(Model.Outcome, io, deadline, sendAttempt, .{ self, arena, payload, url, authorization, &on_timeout }) catch |err| {
+            if (invalidEnvelope(err)) return .{ .rejected = .invalid_response };
+            if (!retryableTransport(err)) return err;
+            std.log.warn("model connection failed ({s})", .{@errorName(err)});
+            return .{ .unavailable = .{} };
         };
+        if (attempt) |outcome| return outcome;
+        std.log.warn("model request timed out after {d} ms", .{self.request_timeout_ms});
+        return on_timeout;
     }
 
-    const Attempt = union(enum) {
-        response: Model.Response,
-        retry: struct { status: std.http.Status, after_ms: ?i64 },
-    };
-
-    fn sendWithRetries(self: Provider, arena: Allocator, payload: []const u8, url: []const u8, authorization: []const u8) !Model.Response {
-        const io = self.client.io;
-        var attempt: u32 = 1;
-        while (true) : (attempt += 1) {
-            try io.checkCancel();
-            var after_ms: ?i64 = null;
-            if (self.sendAttempt(arena, payload, url, authorization)) |result| {
-                switch (result) {
-                    .response => |response| return response,
-                    .retry => |retry| {
-                        if (attempt >= self.max_attempts) {
-                            std.log.warn("model endpoint returned HTTP {d}; exhausted {d} attempts", .{ @backingInt(retry.status), attempt });
-                            return error.ModelHttpFailure;
-                        }
-                        after_ms = retry.after_ms;
-                        std.log.warn("model endpoint returned HTTP {d}; retrying after attempt {d}/{d}", .{ @backingInt(retry.status), attempt, self.max_attempts });
-                    },
-                }
-            } else |err| {
-                if (!retryableTransport(err) or attempt >= self.max_attempts) return err;
-                std.log.warn("model transport failed ({s}); retrying after attempt {d}/{d}", .{ @errorName(err), attempt, self.max_attempts });
-            }
-            var random: [2]u8 = undefined;
-            io.random(&random);
-            const delay_ms = after_ms orelse retryDelay(attempt, std.mem.readInt(u16, &random, .little));
-            try io.sleep(.fromMilliseconds(delay_ms), .awake);
-        }
-    }
-
-    fn sendAttempt(self: Provider, arena: Allocator, payload: []const u8, url: []const u8, authorization: []const u8) !Attempt {
+    fn sendAttempt(self: Provider, arena: Allocator, payload: []const u8, url: []const u8, authorization: []const u8, on_timeout: *Model.Outcome) !Model.Outcome {
         // Response bytes are temporary; decoded output belongs to the caller.
         var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
         defer scratch.deinit();
@@ -361,16 +336,28 @@ pub const Provider = struct {
         var parts = [_][]const u8{payload};
         sendPayload(&request, &parts) catch |err| return transportError(&request, err);
         var response = request.receiveHead(&.{}) catch |err| return transportError(&request, err);
-        if (retryableStatus(response.head.status)) {
-            const after_ms = retryAfter(response.head, self.client.io);
+        if (!completeRepresentation(response.head)) {
             request.connection.?.closing = true;
-            return .{ .retry = .{ .status = response.head.status, .after_ms = after_ms } };
+            const status = response.head.status;
+            std.log.warn("model inference endpoint returned HTTP {d}", .{@backingInt(status)});
+            switch (status) {
+                .payment_required => return error.ModelQuotaExhausted,
+                .unauthorized, .proxy_auth_required, .method_not_allowed, .not_implemented, .http_version_not_supported => return error.ModelHttpFailure,
+                .request_timeout, .too_many_requests => {},
+                else => switch (status.class()) {
+                    .success, .informational => return .{ .rejected = .invalid_response },
+                    .client_error => return .{ .rejected = .request_rejected },
+                    .redirect => return error.ModelHttpFailure,
+                    .server_error => {},
+                },
+            }
+            const disposition = retryDisposition(response.head, self.client.io);
+            if (status == .too_many_requests) {
+                on_timeout.* = disposition;
+                if (try exhaustedQuota(temporary, &response)) return error.ModelQuotaExhausted;
+            }
+            return disposition;
         }
-        if (response.head.status != .ok) {
-            std.log.warn("model endpoint returned HTTP {d}", .{@backingInt(response.head.status)});
-            return error.ModelHttpFailure;
-        }
-        if (response.head.content_encoding != .identity) return error.UnsupportedModelEncoding;
         const content_length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
         const reader = response.reader(&.{});
         var output = std.Io.Writer.Allocating.init(temporary);
@@ -386,7 +373,11 @@ pub const Provider = struct {
                 return transportError(&request, err);
             };
         }
-        return .{ .response = try decodeResponse(arena, output.written()) };
+        return .{ .response = decodeResponse(arena, output.written()) catch |err| switch (err) {
+            error.InvalidModelResponse => return .{ .rejected = .invalid_response },
+            error.ModelResponseNotCompleted => return .{ .rejected = .incomplete_response },
+            else => return err,
+        } };
     }
 
     /// Decode every output item before returning calls for execution. Check
@@ -556,12 +547,59 @@ fn sendPayload(request: *std.http.Client.Request, parts: [][]const u8) std.Io.Wr
     try body.end();
 }
 
-fn waitForDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
-    try deadline.wait(io);
+/// Null means the deadline elapsed. Join the exchange before its caller
+/// inspects any partial result or releases the borrowed buffers.
+fn runUntil(comptime T: type, io: std.Io, deadline: std.Io.Clock.Timestamp, comptime operation: anytype, args: std.meta.ArgsTuple(@TypeOf(operation))) !?T {
+    const Result = union(enum) { exchange: anyerror!T, timeout: std.Io.Cancelable!void };
+    var buffer: [2]Result = undefined;
+    var select = std.Io.Select(Result).init(io, &buffer);
+    defer select.cancelDiscard();
+    try select.concurrent(.exchange, operation, args);
+    try select.concurrent(.timeout, std.Io.Clock.Timestamp.wait, .{ deadline, io });
+    switch (try select.await()) {
+        .exchange => |result| return try result,
+        .timeout => |result| {
+            try result;
+            return null;
+        },
+    }
 }
 
-fn retryableStatus(status: std.http.Status) bool {
-    return status.class() == .server_error or status == .request_timeout or status == .too_many_requests;
+fn completeRepresentation(head: std.http.Client.Response.Head) bool {
+    return head.status.class() == .success and head.status != .no_content and head.status != .reset_content and
+        head.status != .partial_content and head.content_encoding == .identity;
+}
+
+/// An incomplete or oversized optional diagnostic leaves the status and retry headers in force.
+fn exhaustedQuota(arena: Allocator, response: *std.http.Client.Response) !bool {
+    const limit = 16 * 1024;
+    if (response.head.content_encoding != .identity) return false;
+    const length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
+    if (length) |len| if (len > limit) return false;
+    const bytes = response.reader(&.{}).allocRemaining(arena, .limited(limit)) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.StreamTooLong => return false,
+        error.ReadFailed => {
+            const cause = transportError(response.request, err);
+            if (cause == error.Canceled) return cause;
+            return false;
+        },
+    };
+    if (length) |len| if (bytes.len != len) return false;
+    const Diagnostic = struct { @"error": struct { code: ?[]const u8 = null, type: ?[]const u8 = null } };
+    const diagnostic = std.json.parseFromSliceLeaky(Diagnostic, arena, bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return false,
+    };
+    return std.mem.eql(u8, diagnostic.@"error".code orelse "", "insufficient_quota") or
+        std.mem.eql(u8, diagnostic.@"error".type orelse "", "insufficient_quota");
+}
+
+fn invalidEnvelope(err: anyerror) bool {
+    return switch (err) {
+        error.HttpHeadersInvalid, error.HttpHeadersOversize, error.HttpChunkInvalid, error.HttpContentEncodingUnsupported => true,
+        else => false,
+    };
 }
 
 fn retryableTransport(err: anyerror) bool {
@@ -587,19 +625,16 @@ fn retryableTransport(err: anyerror) bool {
     };
 }
 
-fn retryDelay(attempt: u32, random: u16) i64 {
-    const base: i64 = @as(i64, 500) << @intCast(@min(attempt - 1, 4));
-    // Equal jitter spreads concurrent sessions over half to all of the delay.
-    return @divTrunc(base, 2) + @divTrunc(@divTrunc(base, 2) * random, std.math.maxInt(u16));
-}
-
-fn retryAfter(head: std.http.Client.Response.Head, io: std.Io) ?i64 {
+fn retryDisposition(head: std.http.Client.Response.Head, io: std.Io) Model.Outcome {
+    var after_ms: ?i64 = null;
     var headers = head.iterateHeaders();
     while (headers.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "x-should-retry") and std.ascii.eqlIgnoreCase(header.value, "false"))
+            return .{ .rejected = .request_rejected };
         if (std.ascii.eqlIgnoreCase(header.name, "retry-after"))
-            return retryAfterMilliseconds(header.value, std.Io.Clock.real.now(io).toMilliseconds());
+            after_ms = retryAfterMilliseconds(header.value, std.Io.Clock.real.now(io).toMilliseconds());
     }
-    return null;
+    return .{ .unavailable = .{ .retry_after_ms = after_ms } };
 }
 
 fn retryAfterMilliseconds(raw: []const u8, now_ms: i64) ?i64 {
@@ -608,8 +643,8 @@ fn retryAfterMilliseconds(raw: []const u8, now_ms: i64) ?i64 {
     if (for (value) |byte| {
         if (!std.ascii.isDigit(byte)) break false;
     } else true) {
-        const seconds = std.fmt.parseInt(i64, value, 10) catch return std.math.maxInt(i64);
-        return seconds *| 1000;
+        const seconds = std.fmt.parseInt(i64, value, 10) catch return null;
+        return std.math.mul(i64, seconds, 1000) catch null;
     }
 
     // IMF-fixdate uses English names and UTC.
@@ -637,6 +672,8 @@ test "Retry-After preserves server timing and ignores invalid dates" {
     try testing.expectEqual(@as(?i64, 1500), retryAfterMilliseconds("Thu, 01 Jan 1970 00:00:02 GMT", 500));
     try testing.expectEqual(@as(?i64, 0), retryAfterMilliseconds("Thu, 01 Jan 1970 00:00:02 GMT", 3000));
     try testing.expectEqual(@as(?i64, 500), retryAfterMilliseconds("Wed, 21 Oct 2015 07:28:00 GMT", 1445412479500));
+    try testing.expectEqual(null, retryAfterMilliseconds("999999999999999999999999", 0));
+    try testing.expectEqual(null, retryAfterMilliseconds("9223372036854776", 0));
     try testing.expectEqual(null, retryAfterMilliseconds("-1", 0));
     try testing.expectEqual(null, retryAfterMilliseconds("tomorrow", 0));
     try testing.expectEqual(null, retryAfterMilliseconds("Fri, 30 Feb 2024 00:00:00 GMT", 0));

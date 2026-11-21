@@ -14,18 +14,15 @@ const completed = "{\"status\":\"completed\",\"output\":[{\"type\":\"function_ca
 const success = reply("200 OK", "", completed);
 const unavailable = reply("503 Service Unavailable", "Retry-After: 0\r\n", "{}");
 const overloaded = reply("529 Service Overloaded", "Retry-After: 0\r\n", "{}");
-const rate_limited = reply("429 Too Many Requests", "Retry-After: 0\r\n", "{}");
-const long_backoff = reply("429 Too Many Requests", "Retry-After: 3600\r\n", "{}");
 
 fn reply(comptime status: []const u8, comptime headers: []const u8, comptime body: []const u8) []const u8 {
-    return std.fmt.comptimePrint("HTTP/1.1 {s}\r\nContent-Length: {d}\r\n{s}\r\n{s}", .{ status, body.len, headers, body });
+    return std.fmt.comptimePrint("HTTP/1.1 {s}\r\nConnection: close\r\nContent-Length: {d}\r\n{s}\r\n{s}", .{ status, body.len, headers, body });
 }
 
 const Exchange = struct {
     response: []const u8,
     target: []const u8 = "/responses",
     wait_for_close: bool = false,
-    signal_after_close: bool = false,
 };
 
 /// A real HTTP peer captures requests and can stop before the head or body is
@@ -72,22 +69,17 @@ const Server = struct {
             defer std.testing.allocator.free(body);
             if (is_file) {
                 try self.file_payloads.append(std.testing.allocator, try std.testing.allocator.dupe(u8, body));
-            } else {
-                if (self.payload) |previous| {
-                    try std.testing.expectEqualStrings(previous, body);
-                } else {
-                    self.payload = try std.testing.allocator.dupe(u8, body);
-                }
+            } else if (self.payload == null) {
+                self.payload = try std.testing.allocator.dupe(u8, body);
             }
             try writer.interface.writeAll(exchange.response);
             try writer.interface.flush();
-            if (!exchange.signal_after_close) self.received.set(self.io);
+            self.received.set(self.io);
             if (exchange.wait_for_close) {
                 var buffer: [1]u8 = undefined;
                 var buffers = [_][]u8{&buffer};
                 if (try connection.read(self.io, &buffers) != 0) return error.UnexpectedRequestReplay;
             }
-            if (exchange.signal_after_close) self.received.set(self.io);
         }
     }
 };
@@ -128,8 +120,8 @@ const Fixture = struct {
     }
 };
 
-test "model retries server errors and rate limits with the identical request" {
-    var fixture = try Fixture.init(&.{ .{ .response = overloaded }, .{ .response = rate_limited }, .{ .response = success } });
+test "one inference sends the complete request and validates the response" {
+    var fixture = try Fixture.init(&.{.{ .response = success }});
     defer fixture.deinit();
     var provider = try fixture.start();
     const text = try fixture.arena.allocator().alloc(u8, 48 * 1024);
@@ -139,26 +131,48 @@ test "model retries server errors and rate limits with the identical request" {
         .tools = input.tools,
         .reasoning_effort = input.reasoning_effort,
     };
-    const response = try provider.port().next(fixture.arena.allocator(), large_input);
+    const response = (try provider.port().next(fixture.arena.allocator(), large_input)).response;
     try std.testing.expectEqual(@as(usize, 1), response.calls.len);
     try std.testing.expectEqualStrings("accepted", response.calls[0].call_id);
     try std.testing.expectEqualStrings("inspect", response.calls[0].name);
     try std.testing.expectEqualStrings("{}", response.calls[0].arguments);
-    try fixture.finish(3);
+    try fixture.finish(1);
     const sent = try std.json.parseFromSliceLeaky(struct { input: []struct { content: []const u8 } }, fixture.arena.allocator(), fixture.server.payload.?, .{ .ignore_unknown_fields = true });
     try std.testing.expectEqualStrings(text, sent.input[0].content);
 }
 
-test "model fails on non-retryable HTTP errors and invalid complete responses" {
-    for ([_]struct { response: []const u8, err: anyerror, wait_for_close: bool = false }{
-        .{ .response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 500\r\n\r\n", .err = error.ModelHttpFailure, .wait_for_close = true },
-        .{ .response = reply("400 Bad Request", "", "{}"), .err = error.ModelHttpFailure },
-        .{ .response = reply("409 Conflict", "", "{}"), .err = error.ModelHttpFailure },
-        .{ .response = reply("200 OK", "", "{"), .err = error.InvalidModelResponse },
-        .{ .response = reply("200 OK", "", "{\"status\":\"incomplete\",\"output\":[]}"), .err = error.ModelResponseNotCompleted },
-        .{ .response = reply("200 OK", "", "{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"partial\",\"name\":\"inspect\",\"arguments\":\"{}\"},{\"type\":\"unknown\"}]}"), .err = error.InvalidModelResponse },
+test "request rejections and unusable generations yield no tools" {
+    for ([_]struct { response: []const u8, rejection: Model.Rejection }{
+        .{ .response = reply("400 Bad Request", "", "{}"), .rejection = .request_rejected },
+        .{ .response = reply("403 Forbidden", "", "{}"), .rejection = .request_rejected },
+        .{ .response = reply("404 Not Found", "", "{}"), .rejection = .request_rejected },
+        .{ .response = reply("503 Service Unavailable", "X-Should-Retry: false\r\n", "{}"), .rejection = .request_rejected },
+        .{ .response = reply("206 Partial Content", "", completed), .rejection = .invalid_response },
+        .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: malformed\r\n\r\n", .rejection = .invalid_response },
+        .{ .response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx!!", .rejection = .invalid_response },
+        .{ .response = reply("200 OK", "", "{\"status\":\"incomplete\",\"output\":[]}"), .rejection = .incomplete_response },
+        .{ .response = reply("200 OK", "", "{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"partial\",\"name\":\"inspect\",\"arguments\":\"{}\"},{\"type\":\"unknown\"}]}"), .rejection = .invalid_response },
     }) |case| {
-        var fixture = try Fixture.init(&.{.{ .response = case.response, .wait_for_close = case.wait_for_close }});
+        var fixture = try Fixture.init(&.{.{ .response = case.response }});
+        defer fixture.deinit();
+        var provider = try fixture.start();
+        const outcome = try provider.port().next(fixture.arena.allocator(), input);
+        try std.testing.expectEqual(case.rejection, outcome.rejected);
+        try fixture.finish(1);
+    }
+}
+
+test "shared endpoint and account failures propagate" {
+    for ([_]struct { response: []const u8, err: anyerror }{
+        .{ .response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 500\r\n\r\n", .err = error.ModelHttpFailure },
+        .{ .response = reply("402 Payment Required", "", "{}"), .err = error.ModelQuotaExhausted },
+        .{ .response = reply("405 Method Not Allowed", "", "{}"), .err = error.ModelHttpFailure },
+        .{ .response = reply("307 Temporary Redirect", "Location: /elsewhere\r\n", "{}"), .err = error.ModelHttpFailure },
+        .{ .response = reply("501 Not Implemented", "", "{}"), .err = error.ModelHttpFailure },
+        .{ .response = reply("429 Too Many Requests", "Retry-After: 8\r\n", "{\"error\":{\"code\":\"insufficient_quota\"}}"), .err = error.ModelQuotaExhausted },
+        .{ .response = reply("429 Too Many Requests", "x-should-retry: false\r\n", "{\"error\":{\"type\":\"insufficient_quota\",\"code\":null}}"), .err = error.ModelQuotaExhausted },
+    }) |case| {
+        var fixture = try Fixture.init(&.{.{ .response = case.response, .wait_for_close = true }});
         defer fixture.deinit();
         var provider = try fixture.start();
         try std.testing.expectError(case.err, provider.port().next(fixture.arena.allocator(), input));
@@ -166,30 +180,25 @@ test "model fails on non-retryable HTTP errors and invalid complete responses" {
     }
 }
 
-test "model retries premature head and body EOF without exposing calls from the failed attempt" {
+test "transient HTTP and incomplete transfers return after one attempt" {
     const stale = "{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"discarded\",\"name\":\"inspect\",\"arguments\":\"{}\"}]}";
-    for ([_][]const u8{
-        "HTTP/1.1 ",
-        "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n" ++ stale,
-        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{",
-    }) |broken| {
-        var fixture = try Fixture.init(&.{ .{ .response = broken }, .{ .response = success } });
+    for ([_]struct { response: []const u8, retry_after_ms: ?i64 = null }{
+        .{ .response = "" },
+        .{ .response = "HTTP/1.1 " },
+        .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n" ++ stale },
+        .{ .response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{" },
+        .{ .response = overloaded, .retry_after_ms = 0 },
+        .{ .response = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 80000\r\nRetry-After: 3\r\n\r\n", .retry_after_ms = 3000 },
+        .{ .response = reply("429 Too Many Requests", "", "{\"error\":{\"message\":\"insufficient_quota\"}}") },
+        .{ .response = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 150\r\nRetry-After: 3\r\n\r\n{\"error\":{\"code\":\"insufficient_quota\"}}", .retry_after_ms = 3000 },
+    }) |case| {
+        var fixture = try Fixture.init(&.{.{ .response = case.response }});
         defer fixture.deinit();
         var provider = try fixture.start();
-        const response = try provider.port().next(fixture.arena.allocator(), input);
-        try std.testing.expectEqual(@as(usize, 1), response.calls.len);
-        try std.testing.expectEqualStrings("accepted", response.calls[0].call_id);
-        try fixture.finish(2);
+        const outcome = try provider.port().next(fixture.arena.allocator(), input);
+        try std.testing.expectEqual(case.retry_after_ms, outcome.unavailable.retry_after_ms);
+        try fixture.finish(1);
     }
-}
-
-test "model stops at its total attempt limit" {
-    var fixture = try Fixture.init(&.{ .{ .response = unavailable }, .{ .response = unavailable } });
-    defer fixture.deinit();
-    var provider = try fixture.start();
-    provider.max_attempts = 2;
-    try std.testing.expectError(error.ModelHttpFailure, provider.port().next(fixture.arena.allocator(), input));
-    try fixture.finish(2);
 }
 
 test "model rejects response encoding without reading the body or retrying" {
@@ -199,29 +208,50 @@ test "model rejects response encoding without reading the body or retrying" {
     }});
     defer fixture.deinit();
     var provider = try fixture.start();
-    try std.testing.expectError(error.UnsupportedModelEncoding, provider.port().next(fixture.arena.allocator(), input));
+    const outcome = try provider.port().next(fixture.arena.allocator(), input);
+    try std.testing.expectEqual(Model.Rejection.invalid_response, outcome.rejected);
     try fixture.finish(1);
 }
 
-const waiting_exchanges = [_]Exchange{
+const blocked_reads = [_]Exchange{
     .{ .response = "", .wait_for_close = true },
     .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{", .wait_for_close = true },
-    .{ .response = long_backoff, .wait_for_close = true, .signal_after_close = true },
 };
 
-test "model deadline covers response headers, response body, and retry waits" {
-    for (waiting_exchanges) |exchange| {
+test "a stalled response head or body meets the attempt deadline" {
+    for (blocked_reads) |exchange| {
         var fixture = try Fixture.init(&.{exchange});
         defer fixture.deinit();
         var provider = try fixture.start();
         provider.request_timeout_ms = 100;
-        try std.testing.expectError(error.ModelRequestTimedOut, provider.port().next(fixture.arena.allocator(), input));
+        const outcome = try provider.port().next(fixture.arena.allocator(), input);
+        try std.testing.expectEqual(null, outcome.unavailable.retry_after_ms);
         try fixture.finish(1);
     }
 }
 
-test "model cancellation ends response reads and retry waits without another attempt" {
-    for (waiting_exchanges) |exchange| {
+test "rate-limit diagnostic timeout preserves the status and retry directive" {
+    for ([_]bool{ false, true }) |no_retry| {
+        const status = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 500\r\nRetry-After: 3600\r\n";
+        var fixture = try Fixture.init(&.{.{ .response = if (no_retry)
+            status ++ "X-Should-Retry: false\r\n\r\n{"
+        else
+            status ++ "\r\n{", .wait_for_close = true }});
+        defer fixture.deinit();
+        var provider = try fixture.start();
+        provider.request_timeout_ms = 100;
+        const outcome = try provider.port().next(fixture.arena.allocator(), input);
+        if (no_retry) {
+            try std.testing.expectEqual(Model.Rejection.request_rejected, outcome.rejected);
+        } else {
+            try std.testing.expectEqual(@as(?i64, 3_600_000), outcome.unavailable.retry_after_ms);
+        }
+        try fixture.finish(1);
+    }
+}
+
+test "model cancellation ends response reads without issuing another attempt" {
+    for (blocked_reads ++ .{Exchange{ .response = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 500\r\n\r\n{", .wait_for_close = true }}) |exchange| {
         var fixture = try Fixture.init(&.{exchange});
         defer fixture.deinit();
         var provider = try fixture.start();
@@ -328,33 +358,16 @@ test "file upload negotiates from the rejection status and reuses the accepted r
     try std.testing.expect(std.mem.indexOf(u8, fixture.server.payload.?, "\"type\":\"input_file\"") != null);
 }
 
-test "rejected file upload negotiation stops after its second purpose" {
-    for ([_]bool{ false, true }) |server_failure| {
-        const exchanges = [_]Exchange{
-            .{ .target = "/files", .response = upload_rejected },
-            .{ .target = "/files", .response = if (server_failure) unavailable else upload_rejected },
-            .{ .response = success },
-        };
-        var fixture = try Fixture.init(&exchanges);
-        defer fixture.deinit();
-        var provider = try fixture.start();
-        const a = fixture.arena.allocator();
-        var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{ .{ .file = .{ .bytes = "\x00\xffunknown" } }, .{ .text = "Sibling observation" } } } } }};
-        const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-        if (server_failure) {
-            try std.testing.expectError(error.ModelHttpFailure, provider.port().limitToolReplies(a, request, &history));
-            try std.testing.expectEqual(null, history[0].tool_result.content.parts[0].file.reference);
-            try fixture.finish(2);
-        } else {
-            try provider.port().limitToolReplies(a, request, &history);
-            try std.testing.expect(std.mem.indexOf(u8, history[0].tool_result.content.parts[0].text, "file_upload_failed") != null);
-            try std.testing.expectEqualStrings("Sibling observation", history[0].tool_result.content.parts[1].text);
-            _ = try provider.port().next(a, request);
-            try fixture.finish(3);
-            try std.testing.expect(std.mem.indexOf(u8, fixture.server.payload.?, "input_file") == null);
-        }
-        try std.testing.expectEqual(@as(usize, 2), fixture.server.file_payloads.items.len);
-    }
+test "file upload stops negotiating after the second rejection" {
+    var fixture = try Fixture.init(&.{
+        .{ .target = "/files", .response = upload_rejected },
+        .{ .target = "/files", .response = upload_rejected },
+    });
+    defer fixture.deinit();
+    var provider = try fixture.start();
+    const part = try prepareFile(&provider, fixture.arena.allocator());
+    try std.testing.expect(std.mem.indexOf(u8, part.text, "file_upload_failed") != null);
+    try fixture.finish(2);
 }
 
 test "file count limit omits only new files before uploading" {
@@ -377,67 +390,84 @@ test "file count limit omits only new files before uploading" {
     try fixture.finish(0);
 }
 
-test "file rejection preserves sibling observations and infrastructure failures are not replayed" {
-    for ([_]struct { response: []const u8, err: ?anyerror }{
-        .{ .response = "HTTP/1.1 415 Unsupported Media Type\r\nContent-Length: 500\r\n\r\n", .err = null },
-        .{ .response = unavailable, .err = error.ModelHttpFailure },
-        .{ .response = reply("200 OK", "", "{\"id\":\"\"}"), .err = error.InvalidModelResponse },
-    }) |case| {
-        var fixture = try Fixture.init(&.{.{ .target = "/files", .response = case.response, .wait_for_close = true }});
-        defer fixture.deinit();
-        var provider = try fixture.start();
-        var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{ .{ .file = .{ .bytes = "bytes" } }, .{ .text = "Sibling observation" } } } } }};
-        const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-        if (case.err) |err| {
-            try std.testing.expectError(err, provider.port().limitToolReplies(fixture.arena.allocator(), request, &history));
-        } else {
-            try provider.port().limitToolReplies(fixture.arena.allocator(), request, &history);
-            try std.testing.expect(std.mem.indexOf(u8, history[0].tool_result.content.parts[0].text, "file_upload_failed") != null);
-            try std.testing.expectEqualStrings("Sibling observation", history[0].tool_result.content.parts[1].text);
-        }
-        try fixture.finish(1);
-    }
+fn prepareFile(provider: *Provider, a: Allocator) !Content.Part {
+    var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = .{ .bytes = "bytes" } }} } } }};
+    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
+    try provider.port().limitToolReplies(a, request, &history);
+    return history[0].tool_result.content.parts[0];
 }
 
-test "file upload validates the complete metadata body before retaining its reference" {
-    for ([_]struct { response: []const u8, err: ?anyerror }{
-        .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{\"id\":\"file-api-test\"}", .err = error.EndOfStream },
-        .{ .response = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"id\":\"file-api-test\"}", .err = null },
+test "a denied file upload leaves the other observations available for inference" {
+    var fixture = try Fixture.init(&.{
+        .{ .target = "/files", .response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 500\r\n\r\n", .wait_for_close = true },
+        .{ .response = success },
+    });
+    defer fixture.deinit();
+    var provider = try fixture.start();
+    var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{ .{ .file = .{ .bytes = "bytes" } }, .{ .text = "Sibling observation" } } } } }};
+    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
+    const a = fixture.arena.allocator();
+    try provider.port().limitToolReplies(a, request, &history);
+    const outcome = try provider.port().next(a, request);
+    try std.testing.expectEqualStrings("accepted", outcome.response.calls[0].call_id);
+    try fixture.finish(2);
+    const payload = fixture.server.payload.?;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "file_upload_failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "Sibling observation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "input_file") == null);
+}
+
+test "a refused connection never sent the file" {
+    const io = std.testing.io;
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    const reserved = try address.bind(io, .{ .mode = .stream, .protocol = .tcp });
+    defer reserved.close(io);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    defer client.deinit();
+    var provider: Provider = .{ .client = &client, .base_url = try std.fmt.allocPrint(a, "http://{f}", .{reserved.address}) };
+    const part = try prepareFile(&provider, a);
+    try std.testing.expect(std.mem.indexOf(u8, part.text, "file_upload_failed") != null);
+}
+
+test "file upload keeps a reference only from complete metadata" {
+    const extension: [20 * 1024]u8 = @splat('x');
+    for ([_]struct { response: []const u8, complete: bool }{
+        .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{\"id\":\"file-api-test\"}", .complete = false },
+        .{ .response = unavailable, .complete = false },
+        .{ .response = reply("201 Created", "", "{\"extension\":\"" ++ extension ++ "\",\"id\":\"file-api-test\"}"), .complete = true },
+        .{ .response = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"id\":\"file-api-test\"}", .complete = true },
     }) |case| {
         var fixture = try Fixture.init(&.{.{ .target = "/files", .response = case.response }});
         defer fixture.deinit();
         var provider = try fixture.start();
-        var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = .{ .bytes = "bytes" } }} } } }};
-        const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-        if (case.err) |err| {
-            try std.testing.expectError(err, provider.port().limitToolReplies(fixture.arena.allocator(), request, &history));
-            try std.testing.expectEqual(null, history[0].tool_result.content.parts[0].file.reference);
+        const part = try prepareFile(&provider, fixture.arena.allocator());
+        if (case.complete) {
+            try std.testing.expectEqualStrings("file-api-test", part.file.reference.?);
         } else {
-            try provider.port().limitToolReplies(fixture.arena.allocator(), request, &history);
-            try std.testing.expect(history[0].tool_result.content.parts[0].file.reference != null);
+            try std.testing.expect(std.mem.indexOf(u8, part.text, "file_upload_uncertain") != null);
         }
         try fixture.finish(1);
     }
 }
 
 test "file uploads respect cancellation and deadlines without replaying uncertain effects" {
-    for ([_][]const u8{ "", "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{" }) |response| {
-        for ([_]bool{ false, true }) |cancel| {
-            var fixture = try Fixture.init(&.{.{ .target = "/files", .response = response, .wait_for_close = true }});
-            defer fixture.deinit();
-            var provider = try fixture.start();
-            provider.request_timeout_ms = if (cancel) 5000 else 100;
-            var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = .{ .bytes = "bytes" } }} } } }};
-            const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-            if (cancel) {
-                var pending = try fixture.io.concurrent(Model.Port.limitToolReplies, .{ provider.port(), fixture.arena.allocator(), request, &history });
-                defer pending.cancel(fixture.io) catch {};
-                try fixture.server.received.waitTimeout(fixture.io, .{ .duration = .{ .raw = .fromSeconds(3), .clock = .awake } });
-                try std.testing.expectError(error.Canceled, pending.cancel(fixture.io));
-            } else {
-                try std.testing.expectError(error.ModelFileUploadTimedOut, provider.port().limitToolReplies(fixture.arena.allocator(), request, &history));
-            }
-            try fixture.finish(1);
+    for ([_]bool{ false, true }) |cancel| {
+        var fixture = try Fixture.init(&.{.{ .target = "/files", .response = "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{", .wait_for_close = true }});
+        defer fixture.deinit();
+        var provider = try fixture.start();
+        provider.request_timeout_ms = if (cancel) 5000 else 100;
+        if (cancel) {
+            var pending = try fixture.io.concurrent(prepareFile, .{ &provider, fixture.arena.allocator() });
+            defer _ = pending.cancel(fixture.io) catch {};
+            try fixture.server.received.waitTimeout(fixture.io, .{ .duration = .{ .raw = .fromSeconds(3), .clock = .awake } });
+            try std.testing.expectError(error.Canceled, pending.cancel(fixture.io));
+        } else {
+            const part = try prepareFile(&provider, fixture.arena.allocator());
+            try std.testing.expect(std.mem.indexOf(u8, part.text, "file_upload_uncertain") != null);
         }
+        try fixture.finish(1);
     }
 }

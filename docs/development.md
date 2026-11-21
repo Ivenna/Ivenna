@@ -72,7 +72,7 @@ Keep agent-owned action recognition, typed arguments, and role selection togethe
 
 Follow the [capability principles](design.md#understanding-and-autonomy) when writing these resources. Read each tool declaration as one interface: names, structure, constraints, and descriptions appear together. Express value choices and bounds structurally, and mirror actual runtime defaults in schema annotations. Use descriptions for the action, its effects, and parameter or result semantics the structure cannot convey. Keep cues of ownership and continuity brief and open to Ivenna's judgment, leaving content, organization, and learned practices to its experience. Preserve precision about the operation behind a suggestive name.
 
-Allow for mistaken reasoning and incomplete recall in the interfaces and execution flow. Keep references discoverable where they are needed, and treat invalid selections as operation outcomes. Prompts explain meaning and invite judgment. Enforce programmatic requirements at their owning runtime boundaries. Prefer small, local responses to model errors, including another inference where it can correct the result. Let unresolved execution failures follow the availability contract.
+Allow for mistaken reasoning and incomplete recall. Make references discoverable where Ivenna needs them, and report an invalid selection in the operation's result. Prompts explain meaning and invite judgment. The runtime component that owns an operation enforces its requirements.
 
 Put task facts and observations in user input. Prompts and tool descriptions should explain decisions and interpretation; field references belong in the [input contract](input.md), mechanisms in the architecture guide, and procedures in the running guides. Update affected resources and interface documentation together.
 
@@ -82,7 +82,7 @@ Execution owns session state and the boundaries at which new observations can af
 
 Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values and cancel and join tasks before releasing their dependencies. The owning capability manages independent resources and publishes their registered outcomes; the agent manages session lifetimes and [future observations](architecture.md#event-sources-and-callback-admission). Bind capability registrations through the invoking session's execution-owned registrar, and persist a registration before returning its callback identity.
 
-Keep a session's identity independent of context residency, and retain its history for as long as it can resume. The [availability contract](design.md#runtime-availability) governs whether a failure is an observation or ends execution.
+Keep a session's identity independent of context residency, and retain its history for as long as it can resume. When handling a failure, consider what repeating the operation would do. A fresh inference can revise an unusable summary. A command that already ran has an outcome to preserve. See [runtime availability](design.md#runtime-availability).
 
 ### Working history
 

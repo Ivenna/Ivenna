@@ -16,7 +16,14 @@ Files contain the complete source bytes, independently of text page or preview b
 
 The configured model service owns file format recognition and parsing. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for supported inputs, parsing behavior, and service limits.
 
-A file rejected during upload returns a text error part with code `file_upload_failed`; the operation description and source information remain available. Other failures follow the [model-request policy](running.md#model-requests). See the [model adapter](architecture.md#tool-results) for upload handling and the [running guide](running.md#uploaded-model-files) for file storage lifecycles.
+If the upload ends without a usable reference, a JSON text part replaces the attachment. It gives the original `file.byte_length` and an `error` with a code and message. Other parts still describe the operation, including the exit status and log paths of a completed host command.
+
+| Code | What happened |
+| --- | --- |
+| `file_upload_failed` | The adapter could not send the file, or the file service rejected it. A rejection includes `error.http_status`. |
+| `file_upload_uncertain` | The adapter received no usable reference. The file service may already have stored the file. |
+
+See [upload handling](architecture.md#tool-results) for how the adapter handles these outcomes.
 
 ## Image URL references
 

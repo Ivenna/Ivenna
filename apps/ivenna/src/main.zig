@@ -16,6 +16,8 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     const io = init.io;
+    var service = try Service.listen(io, config.service_address);
+    defer service.deinit();
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -40,12 +42,12 @@ pub fn main(init: std.process.Init) !void {
         .api_key = config.llm_api_key,
         .model = config.llm_model,
         .max_output_tokens = config.llm_max_output_tokens,
-        .max_attempts = config.llm_max_attempts,
         .request_timeout_ms = config.llm_request_timeout_ms,
     };
     const shared_tools = [_]contracts.Tools{try memory_client.tools(a)};
     const activity_tools = [_]contracts.Tools{try host_tools.tools(a)};
     var engine: agent.Engine = .{
+        .allocator = init.gpa,
         .io = io,
         .model = provider.port(),
         .shared_tools = &shared_tools,
@@ -65,9 +67,6 @@ pub fn main(init: std.process.Init) !void {
         .max_pending_events = config.max_pending_events,
     });
     defer kernel.deinit();
-    var service = try Service.listen(io, config.service_address, &kernel);
-    defer service.deinit();
-
     const action: std.posix.Sigaction = .{
         .handler = .{ .handler = requestStop },
         .mask = std.posix.sigemptyset(),
@@ -87,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
         kernel.closeReception();
         select.cancelDiscard();
     }
-    try select.concurrent(.service, Service.run, .{&service});
+    try select.concurrent(.service, Service.run, .{ &service, &kernel });
     try select.concurrent(.host, host.Host.run, .{&host_tools});
     try select.concurrent(.kernel, agent.Kernel.run, .{&kernel});
     try select.concurrent(.shutdown, waitForStop, .{io});

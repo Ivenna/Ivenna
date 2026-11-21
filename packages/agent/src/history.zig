@@ -38,6 +38,8 @@ pub const History = struct {
         session_id: u64,
         focus_id: []const u8,
         role: Input.Role,
+        /// An unfinished activation, including one waiting for a new input,
+        /// gets a startup observation when the runtime next starts.
         was_running: bool,
         epoch: u64,
         /// Null when unloaded; the confirmed checkpoint retains its selection.
@@ -63,6 +65,7 @@ pub const History = struct {
             }
             for (session.observations) |event| switch (event) {
                 .assignment, .focus_message => {},
+                .focus_interrupted => if (session.role != .core) return error.InvalidHistory,
                 else => return error.InvalidHistory,
             };
             try validateEntries(session.focus_id, session.entries orelse &.{});

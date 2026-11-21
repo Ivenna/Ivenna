@@ -9,10 +9,6 @@ const Allocator = std.mem.Allocator;
 /// Owned working history and its model-message view. Registry synchronizes
 /// mutation; request assembly remains read-only.
 pub const Context = struct {
-    /// Only a newly admitted group is presented as this turn's observations.
-    /// Older groups remain in the LLM conversation, even after empty output.
-    pub const Delivery = enum { none, latest };
-
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
     scope: Scope,
@@ -63,37 +59,26 @@ pub const Context = struct {
         try self.append(.{ .exchange = batch });
     }
 
-    /// Returned request data belongs to a; retained payloads borrow self.
-    pub fn request(self: *const Context, a: Allocator, current: Input.Current, delivery: Delivery) ![]const Model.Item {
-        const events = switch (delivery) {
-            .none => &.{},
-            .latest => self.entries.items[self.entries.items.len - 1].record.events.items,
-        };
-        return self.workRequest(a, current, self.messages.items.len - @intFromBool(delivery == .latest), events);
-    }
-
-    /// Assemble candidate observations for measurement without retaining them.
-    pub fn requestWithEvents(self: *const Context, a: Allocator, events: []const Input.Event, current: Input.Current) ![]const Model.Item {
-        return self.workRequest(a, current, self.messages.items.len, events);
-    }
-
-    fn workRequest(self: *const Context, a: Allocator, current: Input.Current, prefix_len: usize, events: []const Input.Event) ![]const Model.Item {
-        return self.buildRequest(a, prefix_len, .{ .current = current, .purpose = .{ .work = events } });
+    /// Present new observations once alongside the retained history. The
+    /// request borrows self through inference and owns its rendered turn in a.
+    pub fn request(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event) ![]const Model.Item {
+        return self.buildRequest(a, .{ .current = current, .purpose = .{ .work = events } });
     }
 
     /// Assemble a summary request from retained history and sampled state;
     /// pending events stay outside.
     pub fn summaryRequest(self: *const Context, a: Allocator, snapshot: Input.Snapshot, instructions: []const u8) ![]const Model.Item {
-        return self.buildRequest(a, self.messages.items.len, .{
+        return self.buildRequest(a, .{
             .current = snapshot.current,
             .purpose = .{ .summarize = .{ .instructions = instructions, .state = snapshot.state } },
         });
     }
 
-    fn buildRequest(self: *const Context, a: Allocator, prefix_len: usize, turn: Input.Turn) ![]Model.Item {
+    fn buildRequest(self: *const Context, a: Allocator, turn: Input.Turn) ![]Model.Item {
+        const prefix_len = self.messages.items.len;
         const messages = try a.alloc(Model.Item, prefix_len + 2);
         messages[0] = .{ .message = .{ .role = .system, .text = @embedFile("system.md") } };
-        @memcpy(messages[1 .. prefix_len + 1], self.messages.items[0..prefix_len]);
+        @memcpy(messages[1 .. prefix_len + 1], self.messages.items);
         messages[prefix_len + 1] = .{ .message = .{ .role = .user, .text = try Input.renderTurn(a, turn) } };
         return messages;
     }
@@ -163,15 +148,20 @@ test "candidate requests leave history intact and latest observations appear onc
     defer context.deinit();
     try context.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .startup = .{ .observed_at_unix_ms = 0 } }} } });
     const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
-    const before = try context.request(a, current, .none);
+    const before = try context.request(a, current, &.{});
     const events: []const Input.Event = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Remember our plan.", .observed_at_unix_ms = 900 } }};
 
-    const candidate = try context.requestWithEvents(a, events, current);
+    const candidate = try context.request(a, current, events);
     try std.testing.expectEqual(@as(usize, 1), context.records().len);
-    try std.testing.expectEqualDeep(before, try context.request(a, current, .none));
+    try std.testing.expectEqualDeep(before, try context.request(a, current, &.{}));
+    try std.testing.expectEqual(before.len, candidate.len);
+    try std.testing.expectEqualDeep(before[0 .. before.len - 1], candidate[0 .. candidate.len - 1]);
+    try std.testing.expectEqual(1, std.mem.count(u8, candidate[candidate.len - 1].message.text, events[0].input.text));
 
     try context.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = events } });
-    try std.testing.expectEqualDeep(candidate, try context.request(a, current, .latest));
+    const later = try context.request(a, current, &.{});
+    try std.testing.expectEqual(1, std.mem.count(u8, later[later.len - 2].message.text, events[0].input.text));
+    try std.testing.expectEqualDeep(before[before.len - 1], later[later.len - 1]);
     try std.testing.expectEqual(@as(usize, 2), context.records().len);
 }
 
@@ -209,7 +199,7 @@ test "encoded native exchanges restore independently of their source buffers" {
     defer context.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const request = try context.request(arena.allocator(), .{ .focus_id = "practice-2", .role = .activity, .observed_at_unix_ms = 1000 }, .none);
+    const request = try context.request(arena.allocator(), .{ .focus_id = "practice-2", .role = .activity, .observed_at_unix_ms = 1000 }, &.{});
     try std.testing.expectEqual(@as(usize, 4), request.len);
     try std.testing.expectEqualSlices(u8, &.{ 0, 255, '"', '\\', '\n' }, request[1].continuation);
     const reply = request[2].tool_result;

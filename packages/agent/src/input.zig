@@ -81,6 +81,16 @@ pub const FocusMessage = struct {
     }
 };
 
+pub const FocusInterrupted = struct {
+    focus_id: []const u8,
+    observed_at_unix_ms: i64,
+    reason: []const u8,
+
+    pub fn jsonStringify(self: FocusInterrupted, writer: anytype) !void {
+        try writer.write(.{ .focus_id = self.focus_id, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms }, .reason = self.reason });
+    }
+};
+
 pub const PendingCallback = struct {
     callback_id: []const u8,
     source: contracts.Callback.Source,
@@ -166,6 +176,7 @@ pub const Event = union(enum) {
     assignment: Assignment,
     activity: ActivityReport,
     focus_message: FocusMessage,
+    focus_interrupted: FocusInterrupted,
     callback: Callback,
 
     pub fn jsonStringify(self: Event, writer: anytype) !void {
@@ -201,6 +212,11 @@ pub fn cloneEvent(a: Allocator, event: Event) !Event {
             break :blk .{ .activity = .{ .from_focus = try a.dupe(u8, report.from_focus), .messages = messages, .ended_at_unix_ms = report.ended_at_unix_ms } };
         },
         .focus_message => |message| .{ .focus_message = .{ .from_focus = try a.dupe(u8, message.from_focus), .observed_at_unix_ms = message.observed_at_unix_ms, .text = try a.dupe(u8, message.text) } },
+        .focus_interrupted => |failure| .{ .focus_interrupted = .{
+            .focus_id = try a.dupe(u8, failure.focus_id),
+            .observed_at_unix_ms = failure.observed_at_unix_ms,
+            .reason = try a.dupe(u8, failure.reason),
+        } },
         .callback => |callback| .{ .callback = .{
             .callback_id = try a.dupe(u8, callback.callback_id),
             .source = switch (callback.source) {

@@ -4,5 +4,7 @@ pub const Input = @import("input.zig");
 
 test {
     _ = @import("context.zig");
+    _ = @import("inference_test.zig");
     _ = @import("input.zig");
+    _ = @import("sessions.zig");
 }

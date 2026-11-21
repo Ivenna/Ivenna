@@ -2,6 +2,7 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const Compaction = @import("compaction.zig");
 const Engine = @import("engine.zig").Engine;
+const FocusResult = @import("engine.zig").FocusResult;
 const Content = @import("content").Content;
 const Input = @import("input.zig");
 const AgentTools = @import("tools.zig");
@@ -10,7 +11,6 @@ const contracts = @import("agent_contracts");
 const Communication = contracts.Communication;
 const Model = contracts.Model;
 const Allocator = std.mem.Allocator;
-const Session = Sessions.Session;
 const Work = Sessions.Work;
 
 /// Coordinate sessions, model/tool rounds, communication, and retained history within
@@ -151,14 +151,16 @@ pub const Kernel = struct {
     }
 
     fn execute(self: *Kernel, work: Work) !void {
-        const session_id = work.session.session_id;
-        const result = self.respond(work);
         defer self.sessions.endWorker(work.session);
-        result catch |err| {
+        const interrupted = self.respond(work) catch |err| {
             if (err == error.Canceled) return error.Canceled;
-            std.log.err("session {d} execution failed: {s}", .{ session_id, @errorName(err) });
+            std.log.err("execution failed in {s}: {s}", .{ work.session.focus_id, @errorName(err) });
             return err;
         };
+        if (interrupted) |reason| {
+            std.log.warn("focus {s} interrupted: {s}", .{ work.session.focus_id, reason });
+            return self.sessions.interrupt(work, reason);
+        }
         try self.sessions.save();
     }
 
@@ -210,53 +212,51 @@ pub const Kernel = struct {
         }
     };
 
-    fn respond(self: *Kernel, work: Work) !void {
+    fn respond(self: *Kernel, work: Work) !?[]const u8 {
         const session = work.session;
-        var delivery: Context.Delivery = .none;
-        if (work.activation.deliveries.items.len != 0 or try self.sessions.collectPending(work)) {
-            try self.admitEvents(work);
-            delivery = .latest;
-        }
         while (true) {
             try self.io.checkCancel();
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var view = try self.requestContext(a, session, delivery);
-            defer view.deinit();
+            if (work.activation.deliveries.items.len == 0) try self.sessions.collectPending(work);
+            var history = try self.sessions.snapshot(session);
+            defer history.deinit();
+            const input = switch (try self.prepareRequest(a, work, &history)) {
+                .ready => |input| input,
+                .interrupted => |reason| return reason,
+            };
+            var round = switch (try self.engine.beginRound(a, session.focus_id, input, session.role)) {
+                .ready => |round| round,
+                .interrupted => |reason| return reason,
+            };
+            defer round.inference.deinit();
             var runtime: RuntimeRound = .{ .kernel = self, .work = work };
             defer runtime.deinit();
-            const inference = try self.engine.infer(a, view.input, session.role);
-            try self.sessions.recordAssistant(work, inference.response.text);
+            try self.sessions.recordAssistant(work, round.inference.response.text);
             const replies = try self.engine.executeTools(a, .{
                 .session_id = session.session_id,
                 .focus_id = session.focus_id,
                 .callback = .{ .context = &runtime, .register = RuntimeRound.registerCallback },
                 .command_reference = .{ .context = &runtime, .issue = RuntimeRound.issueCommandReference },
-            }, inference, .{
+            }, &round, .{
                 .context = &runtime,
                 .invoke = RuntimeRound.invoke,
             });
-            delivery = .none;
-            try self.sessions.commitRound(work, inference.response.output, replies, runtime.forks.items);
+            try self.sessions.commitRound(work, round.inference.response.output, replies, runtime.forks.items);
             runtime.forks.clearRetainingCapacity();
             try self.sessions.save();
-            if (replies.len == 0 and try self.sessions.finish(work)) return;
-            if (try self.sessions.collectPending(work)) {
-                try self.admitEvents(work);
-                delivery = .latest;
-            }
+            if (replies.len == 0 and try self.sessions.finish(work)) return null;
         }
     }
 
-    const Selection = struct { count: usize, context: Context };
+    const Selection = struct { count: usize, events: []const Input.Event };
     const max_summary_attempts = 2;
 
     /// Fill one ordinary input across I/O pages, measuring grouped activity
     /// reports. The retained selection still identifies a raw delivery prefix.
-    fn selectEvents(self: *Kernel, a: Allocator, work: Work, history: *const Context) !?Selection {
+    fn selectEvents(self: *Kernel, a: Allocator, work: Work, history: *const Context, current: Input.Current) !?Selection {
         var count: usize = 0;
-        const current = try self.sessions.current(a, work.session);
         var events: std.ArrayList(Input.Event) = .empty;
         defer events.deinit(a);
         var trial_arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -268,118 +268,88 @@ pub const Kernel = struct {
                 if (!try self.sessions.extendReports(work)) break;
                 continue;
             }
-            // After an overflow, select the largest fitting prefix of the loaded
-            // deliveries using the same inference identity and time.
-            var start: usize = 1;
-            if (count != 0 and try self.eventsFit(&trial_arena, work.session.role, history, current, events.items, count)) {
-                start = count + 1;
-            } else count = 0;
-            for (start..events.items.len) |end| {
+            // The previous page's prefix already fit this snapshot.
+            for (count + 1..events.items.len) |end| {
                 if (try self.eventsFit(&trial_arena, work.session.role, history, current, events.items, end)) count = end;
             }
             break;
         }
         if (count == 0) return null;
-        var selected = try history.clone(self.allocator);
-        errdefer selected.deinit();
         const grouped = try Input.coalesceActivityReports(a, events.items[0..count]);
-        try selected.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = grouped } });
-        return .{ .count = count, .context = selected };
+        return .{ .count = count, .events = grouped };
     }
 
     fn eventsFit(self: *Kernel, scratch: *std.heap.ArenaAllocator, role: Input.Role, history: *const Context, current: Input.Current, events: []const Input.Event, count: usize) !bool {
         const trial = scratch.allocator();
         defer _ = scratch.reset(.retain_capacity);
         const grouped = try Input.coalesceActivityReports(trial, events[0..count]);
-        const input = try history.requestWithEvents(trial, grouped, current);
+        const input = try history.request(trial, current, grouped);
         return try self.engine.requestBytes(trial, input, role) <= self.limits.request_bytes;
     }
 
-    fn admitEvents(self: *Kernel, work: Work) !void {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var history = try self.sessions.snapshot(work.session);
-        defer history.deinit();
-        var selection = try self.selectEvents(a, work, &history);
-        if (selection == null and history.records().len != 0) {
-            var rejection: ?Compaction.Rejection = null;
-            for (0..max_summary_attempts) |_| {
-                const state = try self.sessions.compactionSnapshot(a, work.session);
-                const result = try Compaction.summarize(self.engine.model, a, &history, state, self.limits.compaction_bytes, rejection);
-                switch (result) {
-                    .rejected => |reason| rejection = reason,
-                    .handover => |handover| {
-                        var compacted = try history.withHandover(self.allocator, handover);
-                        defer compacted.deinit();
-                        selection = try self.selectEvents(a, work, &compacted);
-                        if (selection != null) break;
-                        rejection = .too_large;
-                    },
-                }
-            }
-            if (selection == null) return rejection.?.failure();
-        }
-        var selected = selection orelse return error.ContextBudgetExhausted;
-        {
-            errdefer selected.context.deinit();
-            try self.sessions.admitEvents(work, selected.count, selected.context);
-        }
-        try self.sessions.save();
-        for (work.activation.deliveries.items) |delivery| {
-            const receipt = delivery.receipt orelse continue;
-            try self.inbox.acknowledge(a, receipt);
-            try self.sessions.acknowledged(receipt);
-            delivery.receipt = null;
-        }
-        self.sessions.releaseDeliveries(work);
-    }
+    /// Fit continuation and admission against the same snapshot. A rejected
+    /// handover changes neither the selected history nor any inbox receipt.
+    fn prepareRequest(self: *Kernel, a: Allocator, work: Work, history: *Context) !FocusResult([]const Model.Item) {
+        if (try self.fitRequest(a, work, history, false)) |input| return .{ .ready = input };
+        if (history.records().len == 0)
+            return .{ .interrupted = "The next request exceeds the context budget even with no retained history." };
 
-    /// Owns the history snapshot borrowed by the request-arena input view.
-    const RequestView = struct {
-        context: Context,
-        input: []const Model.Item,
-
-        fn deinit(self: *RequestView) void {
-            self.context.deinit();
-            self.* = undefined;
-        }
-    };
-
-    fn requestContext(self: *Kernel, a: Allocator, session: *Session, delivery: Context.Delivery) !RequestView {
-        var view = try self.sessions.snapshot(session);
-        errdefer view.deinit();
-        const current = try self.sessions.current(a, session);
-        const input = try view.request(a, current, delivery);
-        if (try self.engine.requestBytes(a, input, session.role) <= self.limits.request_bytes) return .{ .context = view, .input = input };
         var rejection: ?Compaction.Rejection = null;
         for (0..max_summary_attempts) |_| {
-            const snapshot = try self.sessions.compactionSnapshot(a, session);
-            const result = try Compaction.summarize(self.engine.model, a, &view, snapshot, self.limits.compaction_bytes, rejection);
-            switch (result) {
+            const state = try self.sessions.compactionSnapshot(a, work.session);
+            switch (try Compaction.summarize(self.engine, a, history, state, self.limits.compaction_bytes, rejection)) {
+                .interrupted => |reason| return .{ .interrupted = reason },
                 .rejected => |reason| rejection = reason,
                 .handover => |handover| {
-                    var candidate = try view.withHandover(self.allocator, handover);
-                    var installed = false;
-                    defer if (!installed) candidate.deinit();
-                    var replacement = try candidate.clone(self.allocator);
-                    errdefer replacement.deinit();
-                    const replacement_current = try self.sessions.current(a, session);
-                    const replacement_input = try replacement.request(a, replacement_current, .none);
-                    if (try self.engine.requestBytes(a, replacement_input, session.role) > self.limits.request_bytes) {
-                        replacement.deinit();
-                        rejection = .too_large;
-                        continue;
+                    var candidate = try history.withHandover(self.allocator, handover);
+                    errdefer candidate.deinit();
+                    if (try self.fitRequest(a, work, &candidate, true)) |input| {
+                        history.deinit();
+                        history.* = candidate;
+                        return .{ .ready = input };
                     }
-                    try self.sessions.replaceContext(session, candidate);
-                    installed = true;
-                    try self.sessions.save();
-                    view.deinit();
-                    return .{ .context = replacement, .input = replacement_input };
+                    candidate.deinit();
+                    rejection = .too_large;
                 },
             }
         }
-        return rejection.?.failure();
+        return .{ .interrupted = rejection.?.description() };
+    }
+
+    /// The returned input borrows history. Publish a separate owned copy
+    /// when admitting observations or replacing the registry's selected epoch.
+    fn fitRequest(self: *Kernel, a: Allocator, work: Work, history: *const Context, compacted: bool) !?[]const Model.Item {
+        const current = try self.sessions.current(a, work.session);
+        const selection = if (work.activation.deliveries.items.len != 0)
+            try self.selectEvents(a, work, history, current) orelse return null
+        else
+            null;
+        const input = try history.request(a, current, if (selection) |selected| selected.events else &.{});
+        if (selection == null) {
+            if (try self.engine.requestBytes(a, input, work.session.role) > self.limits.request_bytes) return null;
+            if (!compacted) return input;
+        }
+        {
+            var retained = try history.clone(self.allocator);
+            errdefer retained.deinit();
+            if (selection) |selected| {
+                try retained.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = selected.events } });
+                try self.sessions.admitEvents(work, selected.count, retained);
+            } else {
+                try self.sessions.replaceContext(work.session, retained);
+            }
+        }
+        try self.sessions.save();
+        if (selection != null) {
+            for (work.activation.deliveries.items) |delivery| {
+                const receipt = delivery.receipt orelse continue;
+                try self.inbox.acknowledge(a, receipt);
+                try self.sessions.acknowledged(receipt);
+                delivery.receipt = null;
+            }
+            self.sessions.releaseDeliveries(work);
+        }
+        return input;
     }
 };
 
