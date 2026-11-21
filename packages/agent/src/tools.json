@@ -1,7 +1,7 @@
 [
   {
     "name": "send_message",
-    "description": "Submit text to correspondents by ID; returns a submission reference.",
+    "description": "Write to correspondents by ID. A reference means the sending service accepted your message for delivery.",
     "parameters": {
       "type": "object",
       "properties": {

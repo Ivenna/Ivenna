@@ -14,19 +14,23 @@ pub const Message = struct {
 };
 
 pub const Submission = struct {
+    /// Confirms that the sending service accepted the message for delivery.
     reference: []const u8,
 };
 
-/// A defined sending outcome. Infrastructure failures use the error channel.
 pub const SendResult = union(enum) {
     submitted: Submission,
+    /// The adapter found an unsupported correspondent ID before submission.
     invalid_recipient: void,
+    /// Preparation stopped before the adapter attempted submission.
+    not_submitted: void,
+    /// The adapter attempted submission and the service may have accepted it.
+    submission_unknown: void,
 };
 
-/// Explicit message submission. Participant ID resolution and native addressing
-/// belong to the adapter. A submission reference does not prove delivery.
-/// Unsupported recipient IDs return invalid_recipient without submitting.
-/// Returned submission values belong to the supplied allocator.
+/// The adapter resolves correspondent IDs to native addresses and submits the
+/// message. Failures of required service access propagate to the caller.
+/// The caller owns the returned reference, allocated with the supplied allocator.
 pub const Sender = struct {
     context: *anyopaque,
     submit: *const fn (*anyopaque, std.mem.Allocator, Message) anyerror!SendResult,

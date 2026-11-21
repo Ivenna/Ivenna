@@ -23,10 +23,8 @@ pub fn main(init: std.process.Init) !void {
     const a = arena.allocator();
     const host_directory = try std.process.currentPathAlloc(io, a);
     const data_directory = try std.fs.path.resolve(a, &.{ host_directory, config.data_dir });
-    var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
-    defer client.deinit();
     var mail: email.Integration = undefined;
-    try mail.init(init.gpa, &client, .{
+    try mail.init(init.gpa, io, .{
         .session_url = config.mail_session_url,
         .authorization = try config.authorization(a),
         .address = config.mail_address,
@@ -36,6 +34,8 @@ pub fn main(init: std.process.Init) !void {
     try memory_client.checkAvailable(a);
     var host_tools = host.Host.init(init.gpa, io, host_directory, data_directory, init.environ_map, mail.callbackPublisher(), config.max_host_commands);
     defer host_tools.deinit();
+    var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
+    defer client.deinit();
     var provider: responses.Provider = .{
         .client = &client,
         .base_url = config.llm_base_url,

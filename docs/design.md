@@ -90,7 +90,7 @@ Model changes should support this same developing life by preserving access to i
 
 A failure interrupts the work that depends on it. During a temporary model outage, the runtime can repeat an inference with the same observations. If the request is rejected or the response cannot be used, the focus retains its history and can resume when a fresh observation calls for its attention.
 
-An action may already have taken effect when a failure occurs. If a command finishes and the connection drops while uploading its output, Ivenna keeps the command's other results and records the uncertainty about the uploaded file.
+A lost response can leave an action's effects uncertain. The runtime can repeat a mailbox read or check stored records to confirm a write. If it still cannot tell whether the mail service accepted a message, the [sending result](communication.md#sending-a-message) tells Ivenna that sending again could produce a duplicate. If the response to a file upload is lost after a command finishes, Ivenna keeps the other command results and learns that the file service may already have stored the output.
 
 The receiving mail service checks the kernel's readiness before accepting correspondence. Reception opens after initialization and stays open while a focus waits for inference. If the kernel loses required access to its configured model, communication, memory, or working history, it closes reception and stops. The sender decides whether to queue or retry a letter it could not deliver. See [reception readiness](running.md#service-status-and-reception).
 

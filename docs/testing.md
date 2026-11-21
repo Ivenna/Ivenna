@@ -34,7 +34,9 @@ The script uses Nushell's standard assertions, sends JSON requests directly to t
 
 The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. The checks run directly with Zig and Nushell and require no deployed services or model credentials. Extend or replace automated checks when the evidence they provide justifies their execution and maintenance cost.
 
-The Responses and email adapter tests use local HTTP servers to exercise interrupted transfers and cancellation. The Responses tests also check which parts of a tool result survive an upload failure. These servers use plain HTTP. A local HTTPS server can verify how many request bytes reach the receiver when the [request writer](architecture.md#model-transport) uses TLS.
+The email adapter tests use a local HTTP server to drop connections and count the requests that reach it. They check that a mailbox read can recover and that an interrupted send submits its draft at most once. For callbacks and working history, the tests check what stored evidence lets the adapter confirm a write after it loses the response.
+
+Both the email and Responses adapter tests cover cancellation over plain HTTP. The Responses tests also check which parts of a tool result survive an upload failure. To measure how many request bytes reach a TLS peer, exercise the [request writer](architecture.md#model-transport) against a local HTTPS server.
 
 The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The session registry tests use a history store that can report a failed save after receiving the checkpoint. They check that activity completion publishes once and that a later maintenance pass republishes the same selection when confirmation was lost.
 

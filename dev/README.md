@@ -116,7 +116,7 @@ From a second terminal, check reception at the default listener address:
 curl --include http://127.0.0.1:8090/readyz
 ```
 
-Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the URL if you changed the listener. See [service status](../docs/running.md#service-status-and-reception) for startup and reception behavior. Kernel diagnostics appear in its terminal; mail and memory diagnostics appear in the service logs.
+Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the URL if you changed the listener. See [service status](../docs/running.md#service-status-and-reception) for startup and reception behavior. The kernel terminal shows [JMAP request failures](../docs/running.md#when-a-mail-request-fails). The mail and memory services write their own logs.
 
 ## Sending a message
 
