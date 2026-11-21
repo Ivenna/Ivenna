@@ -161,7 +161,6 @@ pub const Kernel = struct {
             std.log.warn("focus {s} interrupted: {s}", .{ work.session.focus_id, reason });
             return self.sessions.interrupt(work, reason);
         }
-        try self.sessions.save();
     }
 
     const RuntimeRound = struct {
@@ -231,9 +230,14 @@ pub const Kernel = struct {
                 .interrupted => |reason| return reason,
             };
             defer round.inference.deinit();
+            const response = round.inference.response;
+            if (response.calls.len == 0) {
+                if (try self.sessions.commitResponse(work, &history, response.output, response.text)) return null;
+                continue;
+            }
             var runtime: RuntimeRound = .{ .kernel = self, .work = work };
             defer runtime.deinit();
-            try self.sessions.recordAssistant(work, round.inference.response.text);
+            try self.sessions.recordBeforeTools(work, response.text);
             const replies = try self.engine.executeTools(a, .{
                 .session_id = session.session_id,
                 .focus_id = session.focus_id,
@@ -243,10 +247,8 @@ pub const Kernel = struct {
                 .context = &runtime,
                 .invoke = RuntimeRound.invoke,
             });
-            try self.sessions.commitRound(work, round.inference.response.output, replies, runtime.forks.items);
-            runtime.forks.clearRetainingCapacity();
-            try self.sessions.save();
-            if (replies.len == 0 and try self.sessions.finish(work)) return null;
+            try history.appendBatch(response.output, replies);
+            try self.sessions.commitToolRound(work, &history, &runtime.forks);
         }
     }
 
@@ -316,9 +318,9 @@ pub const Kernel = struct {
         return .{ .interrupted = rejection.?.description() };
     }
 
-    /// The returned input borrows history. Publish a separate owned copy
-    /// when admitting observations or replacing the registry's selected epoch.
-    fn fitRequest(self: *Kernel, a: Allocator, work: Work, history: *const Context, compacted: bool) !?[]const Model.Item {
+    /// The returned input borrows history. Render selected events in the current
+    /// turn before appending them to history so this request presents them once.
+    fn fitRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, compacted: bool) !?[]const Model.Item {
         const current = try self.sessions.current(a, work.session);
         const selection = if (work.activation.deliveries.items.len != 0)
             try self.selectEvents(a, work, history, current) orelse return null
@@ -329,17 +331,10 @@ pub const Kernel = struct {
             if (try self.engine.requestBytes(a, input, work.session.role) > self.limits.request_bytes) return null;
             if (!compacted) return input;
         }
-        {
-            var retained = try history.clone(self.allocator);
-            errdefer retained.deinit();
-            if (selection) |selected| {
-                try retained.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = selected.events } });
-                try self.sessions.admitEvents(work, selected.count, retained);
-            } else {
-                try self.sessions.replaceContext(work.session, retained);
-            }
+        if (selection) |selected| {
+            try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = selected.events } });
         }
-        try self.sessions.save();
+        try self.sessions.commitInput(work, if (selection) |selected| selected.count else 0, history);
         if (selection != null) {
             for (work.activation.deliveries.items) |delivery| {
                 const receipt = delivery.receipt orelse continue;

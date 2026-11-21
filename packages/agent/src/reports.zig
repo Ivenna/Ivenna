@@ -42,11 +42,11 @@ pub const Outbox = struct {
     records: std.ArrayList(Metadata) = .empty,
     endings: usize = 0,
 
+    /// Restore the unread chain selected by the validated history checkpoint.
     pub fn init(allocator: Allocator, store: Store, saved: ?Checkpoint) !Outbox {
         var self: Outbox = .{ .allocator = allocator, .store = store };
         errdefer self.deinit();
         const header = saved orelse return self;
-        try header.validate();
         self.group = try allocator.dupe(u8, header.group);
         var scratch = std.heap.ArenaAllocator.init(allocator);
         defer scratch.deinit();
@@ -75,20 +75,27 @@ pub const Outbox = struct {
         self.* = undefined;
     }
 
-    pub fn append(self: *Outbox, report: Entry) !void {
-        try validateReport(report);
-        try self.records.ensureUnusedCapacity(self.allocator, 1);
+    pub fn append(self: *Outbox, reports: []const Entry) !void {
+        if (reports.len == 0) return;
+        try self.records.ensureUnusedCapacity(self.allocator, reports.len);
         const group = self.group orelse try self.store.allocateGroup(self.allocator);
         errdefer if (self.group == null) self.allocator.free(group);
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
-        const previous = if (self.records.items.len == 0) null else self.records.items[self.records.items.len - 1].key;
-        const body = try Codec.encode(scratch.allocator(), Record{ .previous = previous, .value = report });
-        const key = Codec.digest(body);
-        try self.store.create(scratch.allocator(), &.{.{ .group = group, .key = key, .previous = previous, .body = body }});
+        const a = scratch.allocator();
+        const records = try a.alloc(Store.Record, reports.len);
+        var previous: ?Key = if (self.records.getLastOrNull()) |last| last.key else null;
+        for (reports, records) |report, *record| {
+            const body = try Codec.encode(a, Record{ .previous = previous, .value = report });
+            record.* = .{ .group = group, .key = Codec.digest(body), .previous = previous, .body = body };
+            previous = record.key;
+        }
+        try self.store.create(a, records);
         self.group = group;
-        self.records.appendAssumeCapacity(.{ .key = key, .previous = previous });
-        self.endings += @intFromBool(report.content == .ended);
+        for (records, reports) |record, report| {
+            self.records.appendAssumeCapacity(.{ .key = record.key, .previous = record.previous });
+            self.endings += @intFromBool(report.content == .ended);
+        }
     }
 
     /// Returned entries belong to a. Reading or measuring does not consume them.
@@ -114,7 +121,8 @@ pub const Outbox = struct {
             if (!equalKey(Codec.digest(body), reference.key)) return error.InvalidHistory;
             const record = try Codec.decode(Record, a, body);
             if (!equalPrevious(record.previous, reference.previous)) return error.InvalidHistory;
-            try validateReport(record.value);
+            const source_id = contracts.Reference.sequence(record.value.from_focus) orelse return error.InvalidHistory;
+            if (source_id <= 1) return error.InvalidHistory;
             report.* = record.value;
             endings += @intFromBool(report.content == .ended);
         }
@@ -166,7 +174,6 @@ pub const Outbox = struct {
         const group = self.group orelse return error.InvalidHistory;
         var index: Index = .empty;
         for (try self.store.query(a, &.{group})) |reference| {
-            if (!std.mem.eql(u8, reference.group, group)) return error.InvalidHistory;
             const entry = try index.getOrPut(a, reference.key);
             if (entry.found_existing) {
                 if (!equalPrevious(entry.value_ptr.previous, reference.previous)) return error.InvalidHistory;
@@ -175,10 +182,6 @@ pub const Outbox = struct {
         return index;
     }
 };
-
-fn validateReport(report: Entry) !void {
-    if ((contracts.Reference.sequence(report.from_focus) orelse return error.InvalidHistory) <= 1) return error.InvalidHistory;
-}
 
 fn equalKey(left: Key, right: Key) bool {
     return std.mem.eql(u8, &left, &right);

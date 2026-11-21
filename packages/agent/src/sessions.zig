@@ -266,13 +266,18 @@ pub const Registry = struct {
         work.activation.deliveries.clearRetainingCapacity();
     }
 
-    pub fn admitEvents(self: *Registry, work: Work, count: usize, context: Context) !void {
+    /// Save a copy of the worker's history, advance the outbox past admitted
+    /// reports, and remove registrations for admitted callbacks in one checkpoint.
+    /// The caller can then acknowledge the deliveries.
+    pub fn commitInput(self: *Registry, work: Work, count: usize, history: *const Context) !void {
+        var retained = try history.clone(self.allocator);
+        defer retained.deinit();
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
         const deliveries = &work.activation.deliveries;
-        std.debug.assert(count != 0 and count <= deliveries.items.len);
+        std.debug.assert(count != 0 or deliveries.items.len == 0);
         const suffix = deliveries.items[count..];
         var report_count: usize = 0;
         var endings: usize = 0;
@@ -281,16 +286,16 @@ pub const Registry = struct {
             endings += @intFromBool(delivery.event.activity.ended_at_unix_ms != null);
         };
         try session.pending.ensureUnusedCapacity(self.allocator, suffix.len);
-        if (report_count != 0) try self.reports.consume(report_count, endings);
+        try self.reports.consume(report_count, endings);
         session.pending.insertSliceAssumeCapacity(0, suffix);
         deliveries.items.len = count;
-        if (session.context) |*previous| previous.deinit();
-        session.context = context;
-        session.epoch = context.scope.epoch;
+        std.mem.swap(Context, &session.context.?, &retained);
+        session.epoch = session.context.?.scope.epoch;
         work.activation.admitted = true;
         for (deliveries.items) |delivery| if (delivery.callback_id) |id| {
             self.completeCallbackLocked(id);
         };
+        try self.saveLocked();
     }
 
     pub fn prepareFork(self: *Registry, work: Work, name: []const u8, task: []const u8) !ForkPlan {
@@ -320,26 +325,24 @@ pub const Registry = struct {
         self.destroySession(plan.session);
     }
 
-    /// Failure leaves every unpublished plan with its caller for abandonFork,
-    /// including any independent contexts already prepared for publication.
-    pub fn commitRound(self: *Registry, work: Work, output: []const Model.Item, replies: []const Model.Item, plans: []const ForkPlan) !void {
+    /// Publish the completed context and its forks together. On every return
+    /// the caller owns the context left in `completed` and any remaining plans.
+    pub fn commitToolRound(self: *Registry, work: Work, completed: *Context, plans: *std.ArrayList(ForkPlan)) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
-        var completed = try session.context.?.clone(self.allocator);
-        errdefer completed.deinit();
-        try completed.appendBatch(output, replies);
-        for (plans) |plan| {
+        for (plans.items) |plan| {
             plan.session.context = try Context.restore(self.allocator, .{ .session_id = plan.session.session_id, .epoch = 0 }, plan.session.focus_id, completed.records());
         }
-        try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(plans.len));
-        session.context.?.deinit();
-        session.context = completed;
-        for (plans) |plan| {
+        try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(plans.items.len));
+        std.mem.swap(Context, &session.context.?, completed);
+        for (plans.items) |plan| {
             self.sessions.putAssumeCapacity(plan.session.session_id, plan.session);
             self.reserved_sessions -= 1;
         }
+        plans.clearRetainingCapacity();
+        try self.saveLocked();
     }
 
     pub fn snapshot(self: *Registry, session: *Session) !Context {
@@ -349,24 +352,14 @@ pub const Registry = struct {
         return session.context.?.clone(self.allocator);
     }
 
-    /// Retain newly emitted activity text without scheduling the core.
-    pub fn recordAssistant(self: *Registry, work: Work, text: ?[]const u8) !void {
+    /// Keep an activity's expression available through interruption of its tools.
+    pub fn recordBeforeTools(self: *Registry, work: Work, text: ?[]const u8) !void {
         if (work.session == self.core or text == null) return;
         const observed_at = self.now();
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        try self.reports.append(.{
-            .from_focus = work.session.focus_id,
-            .observed_at_unix_ms = observed_at,
-            .content = .{ .assistant = text.? },
-        });
-        try self.saveLocked();
-    }
-
-    pub fn save(self: *Registry) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
+        try self.reportResponseLocked(work.session, text, observed_at, false);
         try self.saveLocked();
     }
 
@@ -398,7 +391,7 @@ pub const Registry = struct {
                 .focus_id = session.focus_id,
                 .role = session.role,
                 .epoch = session.epoch,
-                .was_running = session.state != .idle or hasStartup(session.pending.items),
+                .was_running = session.role == .activity and (session.state != .idle or hasStartup(session.pending.items)),
                 .entries = if (session.context) |*context| context.records() else null,
                 .observations = observations.items,
             });
@@ -412,14 +405,6 @@ pub const Registry = struct {
             .sessions = retained.items,
             .activity_reports = self.reports.checkpoint(),
         });
-    }
-
-    pub fn replaceContext(self: *Registry, session: *Session, replacement: Context) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        if (session.context) |*previous| previous.deinit();
-        session.context = replacement;
-        session.epoch = replacement.scope.epoch;
     }
 
     pub fn current(self: *Registry, a: Allocator, session: *Session) !Input.Current {
@@ -460,25 +445,33 @@ pub const Registry = struct {
         };
     }
 
-    /// Finalize a response without tool calls when no queued input requires
-    /// another round. Callback checks, reporting, and session retirement share
-    /// the same lock.
-    pub fn finish(self: *Registry, work: Work) !bool {
+    /// Commit the outcome of a round without tool calls. Returns true when
+    /// the activation has finished. On every return the caller owns the
+    /// context left in `history`.
+    pub fn commitResponse(self: *Registry, work: Work, history: *Context, output: []const Model.Item, text: ?[]const u8) !bool {
+        const observed_at = self.now();
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
-        if (self.hasWork(session)) return false;
-        const completed_activity = session != self.core and self.callbackCount(session.session_id) == 0;
-        const finished_at = self.now();
-        if (completed_activity) try self.recordCompletionLocked(session, finished_at);
-        session.state = .idle;
-        work.activation.destroy(self.allocator);
+        const finished = !self.hasWork(session);
+        const completed_activity = finished and session != self.core and self.callbackCount(session.session_id) == 0;
+        if (!completed_activity) try history.appendBatch(output, &.{});
+        if (session != self.core) try self.reportResponseLocked(session, text, observed_at, completed_activity);
         if (completed_activity) {
             const removed = self.sessions.remove(session.session_id);
             std.debug.assert(removed);
+            self.core.notify();
+        } else {
+            std.mem.swap(Context, &session.context.?, history);
         }
-        return true;
+        if (finished) {
+            session.state = .idle;
+            work.activation.destroy(self.allocator);
+        }
+        try self.saveLocked();
+        if (finished and !completed_activity) unloadActivityContext(session);
+        return finished;
     }
 
     /// The current inference could not proceed. Put its unadmitted observations
@@ -507,10 +500,19 @@ pub const Registry = struct {
         session.state = if (ready) .idle else .interrupted;
         activation.destroy(self.allocator);
         try self.saveLocked();
+        unloadActivityContext(session);
     }
 
-    /// Release a worker borrow after saving. Waiting contexts can be unloaded;
-    /// completed sessions can be destroyed once no worker retains them.
+    /// Later saves reuse the last confirmed history for an unloaded activity.
+    /// Unload only after the checkpoint containing this context is confirmed.
+    fn unloadActivityContext(session: *Session) void {
+        if (session.role == .activity) {
+            session.context.?.deinit();
+            session.context = null;
+        }
+    }
+
+    /// Completed sessions can be destroyed once no worker retains them.
     pub fn endWorker(self: *Registry, session: *Session) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -518,9 +520,6 @@ pub const Registry = struct {
         if (session.borrowed_workers != 0) return;
         if (!self.sessions.contains(session.session_id)) {
             self.destroySession(session);
-        } else if (session != self.core and session.state != .running) {
-            if (session.context) |*context| context.deinit();
-            session.context = null;
         }
     }
 
@@ -681,14 +680,20 @@ pub const Registry = struct {
         for (absent.items) |key| if (self.noticed.fetchRemove(key)) |entry| self.allocator.free(entry.key);
     }
 
-    fn recordCompletionLocked(self: *Registry, session: *Session, ended_at: i64) !void {
-        try self.ensureStartupLocked(self.core);
-        try self.reports.append(.{
+    fn reportResponseLocked(self: *Registry, session: *Session, text: ?[]const u8, observed_at: i64, ended: bool) !void {
+        var buffer: [2]Reports.Entry = undefined;
+        var facts: std.ArrayList(Reports.Entry) = .initBuffer(&buffer);
+        if (text) |message| facts.appendAssumeCapacity(.{
             .from_focus = session.focus_id,
-            .observed_at_unix_ms = ended_at,
+            .observed_at_unix_ms = observed_at,
+            .content = .{ .assistant = message },
+        });
+        if (ended) facts.appendAssumeCapacity(.{
+            .from_focus = session.focus_id,
+            .observed_at_unix_ms = self.now(),
             .content = .ended,
         });
-        self.core.notify();
+        try self.reports.append(facts.items);
     }
 
     fn takeReady(self: *Registry, session: *Session) !?Work {
@@ -839,35 +844,46 @@ fn freeSource(a: Allocator, source: contracts.Callback.Source) void {
     if (source == .host) a.free(source.host.command_id);
 }
 
-test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
-    // This case starts with an empty mailbox history and never admits a round.
+const TestStorage = struct {
     const Store = contracts.HistoryStore;
-    const Storage = struct {
-        fn load(_: *anyopaque, _: Allocator) anyerror!?[]const u8 {
-            return null;
-        }
-        fn allocateGroup(_: *anyopaque, a: Allocator) anyerror![]const u8 {
-            return a.dupe(u8, "core");
-        }
-        fn save(_: *anyopaque, _: []const u8) anyerror!void {}
-        fn query(_: *anyopaque, _: Allocator, _: []const []const u8) anyerror![]const Store.Reference {
-            return error.UnexpectedQuery;
-        }
-        fn read(_: *anyopaque, _: Allocator, _: []const Store.Reference) anyerror![]const []const u8 {
-            return error.UnexpectedRead;
-        }
-        fn create(_: *anyopaque, _: Allocator, _: []const Store.Record) anyerror!void {
-            return error.UnexpectedRecord;
-        }
-        fn maintain(_: *anyopaque, _: Allocator, _: Store.Retention) anyerror!void {
-            return error.UnexpectedMaintenance;
-        }
-    };
-    var storage: Storage = .{};
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, .{
-        .context = &storage,
-        .vtable = &.{ .load = Storage.load, .allocateGroup = Storage.allocateGroup, .save = Storage.save, .query = Storage.query, .read = Storage.read, .create = Storage.create, .maintain = Storage.maintain },
-    });
+    groups: usize = 0,
+    checkpoints: usize = 0,
+    last_checkpoint: ?Store.Key = null,
+    fail_save: bool = false,
+
+    fn port(self: *TestStorage) Store {
+        return .{
+            .context = self,
+            .vtable = &.{ .load = load, .allocateGroup = allocateGroup, .save = save, .query = query, .read = read, .create = create, .maintain = maintain },
+        };
+    }
+    fn load(_: *anyopaque, _: Allocator) anyerror!?[]const u8 {
+        return null;
+    }
+    fn allocateGroup(context: *anyopaque, a: Allocator) anyerror![]const u8 {
+        const self: *TestStorage = @ptrCast(@alignCast(context));
+        self.groups += 1;
+        return std.fmt.allocPrint(a, "group-{d}", .{self.groups});
+    }
+    fn save(context: *anyopaque, body: []const u8) anyerror!void {
+        const self: *TestStorage = @ptrCast(@alignCast(context));
+        self.checkpoints += 1;
+        self.last_checkpoint = @import("record_codec.zig").digest(body);
+        if (self.fail_save) return error.UnconfirmedCheckpoint;
+    }
+    fn query(_: *anyopaque, _: Allocator, _: []const []const u8) anyerror![]const Store.Reference {
+        return error.UnexpectedQuery;
+    }
+    fn read(_: *anyopaque, _: Allocator, _: []const Store.Reference) anyerror![]const []const u8 {
+        return error.UnexpectedRead;
+    }
+    fn create(_: *anyopaque, _: Allocator, _: []const Store.Record) anyerror!void {}
+    fn maintain(_: *anyopaque, _: Allocator, _: Store.Retention) anyerror!void {}
+};
+
+test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
+    var storage: TestStorage = .{};
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port());
     defer registry.deinit();
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
@@ -904,4 +920,56 @@ test "an interrupted activation retains its receipts and only fresh arrivals wak
     const retry = (try registry.takeReadyBatch(a))[0];
     try std.testing.expectEqual(4, retry.activation.deliveries.items.len);
     registry.endWorker(retry.session);
+}
+
+/// Start the next ready focus and admit its single startup or assignment.
+fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, history: Context } {
+    const work = (try registry.takeReadyBatch(a))[0];
+    const deliveries = work.activation.deliveries.items;
+    try std.testing.expectEqual(1, deliveries.len);
+    var history = try registry.snapshot(work.session);
+    errdefer history.deinit();
+    try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = &.{deliveries[0].event} } });
+    try registry.commitInput(work, 1, &history);
+    registry.releaseDeliveries(work);
+    return .{ .work = work, .history = history };
+}
+
+test "activity completion publishes once and maintenance republishes the same checkpoint after an unconfirmed save" {
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    for ([_]bool{ false, true }) |sleeping| {
+        var storage: TestStorage = .{};
+        var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port());
+        defer registry.deinit();
+        var core = try admitTestInput(&registry, a);
+        defer core.history.deinit();
+        defer registry.endWorker(core.work.session);
+        var plans: std.ArrayList(ForkPlan) = .empty;
+        try plans.append(a, try registry.prepareFork(core.work, "research", "Read the notes."));
+        try core.history.appendBatch(&.{.{ .continuation = "open_focus" }}, &.{.{
+            .tool_result = .{ .call_id = "open", .content = .{ .parts = &.{} } },
+        }});
+        try registry.commitToolRound(core.work, &core.history, &plans);
+        var activity = try admitTestInput(&registry, a);
+        defer activity.history.deinit();
+        const output: []const Model.Item = &.{.{ .continuation = "final response" }};
+        if (sleeping) {
+            _ = try registry.registerCallback(a, activity.work, "read", .{ .host = .{ .command_id = "read-1" } });
+            storage.fail_save = true;
+            try std.testing.expectError(error.UnconfirmedCheckpoint, registry.commitResponse(activity.work, &activity.history, output, "Read the notes."));
+            registry.endWorker(activity.work.session);
+            const unconfirmed = storage.last_checkpoint.?;
+            storage.last_checkpoint = null;
+            storage.fail_save = false;
+            try registry.maintain();
+            try std.testing.expectEqual(unconfirmed, storage.last_checkpoint.?);
+        } else {
+            defer registry.endWorker(activity.work.session);
+            const before = storage.checkpoints;
+            try std.testing.expect(try registry.commitResponse(activity.work, &activity.history, output, "Read the notes."));
+            try std.testing.expectEqual(before + 1, storage.checkpoints);
+        }
+    }
 }

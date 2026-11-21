@@ -544,7 +544,9 @@ fn sendPayload(request: *std.http.Client.Request, parts: [][]const u8) std.Io.Wr
     request.transfer_encoding = .{ .content_length = length };
     var body = try request.sendBodyUnflushed(&.{});
     try body.writer.writeVecAll(parts);
-    try body.end();
+    try body.endUnflushed();
+    // HTTPS also buffers encrypted records in the underlying socket writer.
+    try request.connection.?.flush();
 }
 
 /// Null means the deadline elapsed. Join the exchange before its caller
