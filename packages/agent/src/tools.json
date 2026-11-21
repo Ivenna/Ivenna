@@ -27,7 +27,7 @@
   },
   {
     "name": "open_focus",
-    "description": "Open another focus of your attention around a task while the core continues.",
+    "description": "Open another focus of your attention to pursue a task while the core continues. The activity can write to correspondents, use shared memory, and run shell commands on the host.",
     "parameters": {
       "type": "object",
       "properties": {
