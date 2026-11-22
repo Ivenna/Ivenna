@@ -13,7 +13,7 @@ pub const Pty = struct {
         // any command. An unsupported kernel or missing procfs cannot provide
         // the terminal lifetime contract.
         const probe = linux.pidfd_open(linux.getpid(), 0);
-        switch (std.posix.errno(probe)) {
+        switch (linux.errno(probe)) {
             .SUCCESS => {},
             .NOSYS => return error.TerminalSessionUnsupported,
             .MFILE => return error.ProcessFdQuotaExceeded,
@@ -46,7 +46,8 @@ pub const Pty = struct {
     }
 
     pub fn foregroundGroup(self: Pty) ?std.posix.pid_t {
-        const group = std.posix.tcgetpgrp(self.master.handle) catch return null;
+        var group: std.posix.pid_t = undefined;
+        _ = ioctl(self.master, linux.T.IOCGPGRP, @intFromPtr(&group)) catch return null;
         return if (group > 0) group else null;
     }
 
@@ -81,13 +82,13 @@ pub const Pty = struct {
             while (try entries.next(io)) |entry| {
                 const pid = std.fmt.parseInt(std.posix.pid_t, entry.name, 10) catch continue;
                 const candidate_session = linux.getsid(pid);
-                switch (std.posix.errno(candidate_session)) {
+                switch (linux.errno(candidate_session)) {
                     .SUCCESS => if (candidate_session != session) continue,
                     .SRCH => continue,
                     else => |err| return std.posix.unexpectedErrno(err),
                 }
                 const descriptor = linux.pidfd_open(pid, 0);
-                switch (std.posix.errno(descriptor)) {
+                switch (linux.errno(descriptor)) {
                     .SUCCESS => {},
                     .SRCH => continue,
                     .ACCES, .PERM => return error.AccessDenied,
@@ -110,7 +111,7 @@ pub const Pty = struct {
                 const length = stat.readPositional(io, &.{&buffer}, 0) catch |err| {
                     // procfs returns ESRCH when a task disappears after open;
                     // std.Io does not distinguish it in ReadPositionalError.
-                    if (std.posix.errno(linux.pidfd_send_signal(handle.handle, @fromBackingInt(@intCast(0)), null, 0)) == .SRCH) continue;
+                    if (linux.errno(linux.pidfd_send_signal(handle.handle, @fromBackingInt(@intCast(0)), null, 0)) == .SRCH) continue;
                     return err;
                 };
                 const data = buffer[0..length];
@@ -121,7 +122,7 @@ pub const Pty = struct {
                 _ = fields.next() orelse continue; // process group
                 const found = std.fmt.parseInt(std.posix.pid_t, fields.next() orelse continue, 10) catch continue;
                 if (found != session) continue;
-                switch (std.posix.errno(linux.pidfd_send_signal(handle.handle, sig, null, 0))) {
+                switch (linux.errno(linux.pidfd_send_signal(handle.handle, sig, null, 0))) {
                     .SUCCESS => count += 1,
                     .SRCH => {},
                     .PERM => return error.PermissionDenied,
@@ -137,7 +138,7 @@ pub const Pty = struct {
 fn ioctl(file: std.Io.File, request: u32, argument: usize) !usize {
     while (true) {
         const result = linux.ioctl(file.handle, request, argument);
-        switch (std.posix.errno(result)) {
+        switch (linux.errno(result)) {
             .SUCCESS => return result,
             .INTR => continue,
             .NOTTY => return error.NotATerminal,

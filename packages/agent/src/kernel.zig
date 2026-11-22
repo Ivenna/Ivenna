@@ -38,6 +38,7 @@ pub const Kernel = struct {
         sender: Communication.Sender,
         callbacks: contracts.Callback.Publisher,
         history: contracts.HistoryStore,
+        subscriptions: *@import("subscriptions").Store,
     };
 
     pub const Config = struct {
@@ -57,7 +58,7 @@ pub const Kernel = struct {
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
             .poll_interval_ms = config.poll_interval_ms,
-            .sessions = try Sessions.Registry.init(allocator, io, config.max_sessions, config.max_pending_events, dependencies.history),
+            .sessions = try Sessions.Registry.init(allocator, io, config.max_sessions, config.max_pending_events, dependencies.history, dependencies.subscriptions),
         };
     }
 
@@ -199,6 +200,14 @@ pub const Kernel = struct {
                 .schedule_attention => |args| blk: {
                     const id = self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text) catch |err| return try toolFailure(a, err);
                     break :blk try runtimeResult(a, .{ .callback_id = id });
+                },
+                .subscribe => |args| blk: {
+                    const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.listener) catch |err| return toolFailure(a, err);
+                    break :blk try runtimeResult(a, subscription);
+                },
+                .withdraw_subscription => |args| blk: {
+                    const changed = try self.kernel.sessions.withdrawSubscription(self.work, args.subscription_id);
+                    break :blk try runtimeResult(a, .{ .subscription_id = args.subscription_id, .changed = changed });
                 },
                 .open_focus => |args| blk: {
                     try self.forks.ensureUnusedCapacity(self.kernel.allocator, 1);
@@ -360,8 +369,359 @@ fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
 
 fn toolFailure(a: Allocator, err: anyerror) !Content {
     return switch (err) {
+        error.InvalidArguments => error.InvalidToolArguments,
         error.UnknownSession => runtimeError(a, "unknown_focus", "The focus is not addressable."),
         error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The focus cannot currently accept another observation."),
         else => err,
     };
+}
+
+const TestStore = @import("test_history.zig").TestStore;
+
+const SubscriptionFixture = struct {
+    const testing = std.testing;
+    storage: TestStore = .{},
+
+    fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *@import("subscriptions").Store) !Kernel {
+        engine.* = .{
+            .allocator = testing.allocator,
+            .io = testing.io,
+            .model = .{ .context = self, .vtable = &.{ .requestBytes = requestBytes, .next = undefined, .limitToolReplies = undefined } },
+            .shared_tools = &.{},
+            .activity_tools = &.{},
+        };
+        return Kernel.init(testing.allocator, testing.io, .{
+            .engine = engine,
+            .subscriptions = subscriptions,
+            .inbox = undefined,
+            .sender = undefined,
+            .callbacks = undefined,
+            .history = self.storage.port(),
+        }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
+    }
+
+    fn requestBytes(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!u64 {
+        return std.mem.count(u8, request.history[request.history.len - 1].message.text, "budget-marker");
+    }
+
+    fn takeWork(instance: *Kernel, a: Allocator) !Work {
+        const ready = try instance.sessions.takeReadyBatch(a);
+        try testing.expectEqual(1, ready.len);
+        return ready[0];
+    }
+
+    fn admit(instance: *Kernel, a: Allocator, work: Work) !Context {
+        var history = try instance.sessions.snapshot(work.session);
+        errdefer history.deinit();
+        try testing.expect(try instance.fitRequest(a, work, &history, false) != null);
+        return history;
+    }
+
+    /// Leave a subscribed activity sleeping while the core continues its round.
+    fn watchingActivity(instance: *Kernel, a: Allocator, core: Work, history: *Context, name: []const u8) ![]const u8 {
+        var plans: std.ArrayList(Sessions.ForkPlan) = .empty;
+        try plans.append(a, try instance.sessions.prepareFork(core, name, "Watch for updates."));
+        try instance.sessions.commitToolRound(core, history, &plans);
+        const work = try takeWork(instance, a);
+        var activity = try admit(instance, a, work);
+        defer activity.deinit();
+        const sub = try instance.sessions.subscribe(a, work, "updates", "Source listener");
+        try finish(instance, work, &activity);
+        return sub.subscription_id;
+    }
+
+    fn finish(instance: *Kernel, work: Work, history: *Context) !void {
+        defer instance.sessions.endWorker(work.session);
+        try testing.expect(try instance.sessions.commitResponse(work, history, &.{}, null));
+    }
+};
+
+test "an activity can use the reference returned by subscribe to withdraw another focus's registration" {
+    const testing = std.testing;
+    const Tool = struct {
+        fn call(a: Allocator, round: *Kernel.RuntimeRound, name: []const u8, args: anytype) !std.json.Value {
+            const arguments = try std.json.Stringify.valueAlloc(a, args, .{});
+            const request = (try AgentTools.Request.parse(a, round.work.session.role, name, arguments)).?;
+            const reply = try Kernel.RuntimeRound.invoke(round, a, request);
+            return std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
+        }
+    };
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer core_history.deinit();
+    const created = (try Tool.call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed" })).object.get("result").?;
+    const core_id = created.object.get("subscription_id").?.string;
+    _ = try Tool.call(a, &core, "open_focus", .{ .name = "research", .task = "Watch for releases." });
+    try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks);
+
+    var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer activity.deinit();
+    const closed = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
+    try testing.expectEqualStrings(core_id, closed.get("subscription_id").?.string);
+    try testing.expect(closed.get("changed").?.bool);
+
+    const repeated = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
+    try testing.expect(!repeated.get("changed").?.bool);
+}
+
+test "startup requires the subscription catalog and working history to belong together" {
+    const testing = std.testing;
+    const Store = @import("subscriptions").Store;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.storage.arena.deinit();
+    var catalog = try Store.open(testing.allocator, ":memory:");
+    defer catalog.close();
+    var engine: Engine = undefined;
+    var initial = try fixture.kernel(&engine, &catalog);
+    initial.deinit();
+
+    var other = try Store.open(testing.allocator, ":memory:");
+    defer other.close();
+    try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &other));
+    fixture.storage.checkpoint = null;
+    try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &catalog));
+}
+
+test "subscription admission and database acknowledgement survive either outcome of an unconfirmed checkpoint" {
+    const testing = std.testing;
+    const Subs = @import("subscriptions");
+    for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
+        var fixture: SubscriptionFixture = .{};
+        defer fixture.storage.arena.deinit();
+        const a = fixture.storage.arena.allocator();
+        var store = try Subs.Store.open(a, ":memory:");
+        defer store.close();
+        var engine: Engine = undefined;
+        {
+            var kernel = try fixture.kernel(&engine, &store);
+            defer kernel.deinit();
+            const core = try SubscriptionFixture.takeWork(&kernel, a);
+            var history = try SubscriptionFixture.admit(&kernel, a, core);
+            defer history.deinit();
+            const sub = try kernel.sessions.subscribe(a, core, "releases", "release listener");
+            _ = try store.publish(sub.subscription_id, .{ .key = "release", .text = "Release published" }, 10);
+            try testing.expect(!try kernel.sessions.commitResponse(core, &history, &.{}, null));
+            try kernel.sessions.collectPending(core);
+            fixture.storage.fail_save = failure;
+            try testing.expectError(error.UnconfirmedCheckpoint, SubscriptionFixture.admit(&kernel, a, core));
+        }
+        fixture.storage.fail_save = .none;
+        var kernel = try fixture.kernel(&engine, &store);
+        defer kernel.deinit();
+        try testing.expectEqual(failure == .before_commit, try store.latestSequence("core-1") != 0);
+        const resumed = try SubscriptionFixture.takeWork(&kernel, a);
+        var history = try SubscriptionFixture.admit(&kernel, a, resumed);
+        defer history.deinit();
+        var reports: usize = 0;
+        for (history.records()) |entry| {
+            if (entry != .record or entry.record != .events) continue;
+            for (entry.record.events.items) |event| if (event == .subscription) {
+                try testing.expectEqualStrings("Release published", event.subscription.text);
+                reports += 1;
+            };
+        }
+        try testing.expectEqual(1, reports);
+        try SubscriptionFixture.finish(&kernel, resumed, &history);
+    }
+}
+
+test "dispatch retires a withdrawn activity once its accepted reports have been admitted" {
+    const testing = std.testing;
+    const Case = enum { live, restart_empty, restart_with_report };
+    for ([_]Case{ .live, .restart_empty, .restart_with_report }) |scenario| {
+        var fixture: SubscriptionFixture = .{};
+        defer fixture.storage.arena.deinit();
+        const a = fixture.storage.arena.allocator();
+        var store = try @import("subscriptions").Store.open(a, ":memory:");
+        defer store.close();
+        var engine: Engine = undefined;
+        var kernel = try fixture.kernel(&engine, &store);
+        defer kernel.deinit();
+        const core = try SubscriptionFixture.takeWork(&kernel, a);
+        var core_history = try SubscriptionFixture.admit(&kernel, a, core);
+        defer core_history.deinit();
+        const sub = try SubscriptionFixture.watchingActivity(&kernel, a, core, &core_history, "watch");
+        if (scenario == .restart_with_report) _ = try store.publish(sub, .{ .key = "final", .text = "Final report" }, 100);
+        _ = try kernel.sessions.withdrawSubscription(core, sub);
+        try SubscriptionFixture.finish(&kernel, core, &core_history);
+
+        if (scenario != .live) {
+            const restored = try fixture.kernel(&engine, &store);
+            kernel.deinit();
+            kernel = restored;
+        }
+        // Retiring an idle activity can notify the core after its dispatch slot.
+        var ready = try kernel.sessions.takeReadyBatch(a);
+        if (ready.len == 0) ready = try kernel.sessions.takeReadyBatch(a);
+        if (scenario == .restart_with_report) {
+            try testing.expectEqual(2, ready.len);
+            var final_report = try SubscriptionFixture.admit(&kernel, a, ready[1]);
+            defer final_report.deinit();
+            const events = final_report.records()[final_report.records().len - 1].record.events.items;
+            try testing.expectEqualStrings("Final report", events[events.len - 1].subscription.text);
+            try SubscriptionFixture.finish(&kernel, ready[1], &final_report);
+        } else try testing.expectEqual(1, ready.len);
+        const ending = ready[0];
+        var received = try SubscriptionFixture.admit(&kernel, a, ending);
+        defer received.deinit();
+        const events = received.records()[received.records().len - 1].record.events.items;
+        const observation = events[events.len - 1].activity;
+        try testing.expectEqualStrings("watch-2", observation.from_focus);
+        try testing.expect(observation.ended_at_unix_ms != null);
+        try SubscriptionFixture.finish(&kernel, ending, &received);
+    }
+}
+
+test "an activity admits its sampled backlog in one input and receives a later report after withdrawal" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    kernel.sessions.max_pending = 1;
+    const core = try SubscriptionFixture.takeWork(&kernel, a);
+    defer kernel.sessions.endWorker(core.session);
+    var core_history = try SubscriptionFixture.admit(&kernel, a, core);
+    defer core_history.deinit();
+    const watch = try SubscriptionFixture.watchingActivity(&kernel, a, core, &core_history, "watch");
+    const backlog = 70;
+    for (0..backlog) |i| {
+        const text = try std.fmt.allocPrint(a, "update {d}", .{i});
+        _ = try store.publish(watch, .{ .key = text, .text = text }, @intCast(i));
+    }
+    const activity = try SubscriptionFixture.takeWork(&kernel, a);
+    // Publication races with admission after the first I/O page was collected.
+    _ = try store.publish(watch, .{ .key = "later", .text = "One more" }, backlog);
+    try testing.expect(try kernel.sessions.withdrawSubscription(core, watch));
+    var received = try SubscriptionFixture.admit(&kernel, a, activity);
+    defer received.deinit();
+    const events = received.records()[received.records().len - 1].record.events.items;
+    try testing.expectEqual(backlog, events.len);
+    for (events, 0..) |event, index| {
+        try testing.expectEqual(@as(i64, @intCast(index)), event.subscription.observed_at_unix_ms);
+    }
+    try testing.expect(!try kernel.sessions.commitResponse(activity, &received, &.{}, null));
+    try kernel.sessions.collectPending(activity);
+    var later = try SubscriptionFixture.admit(&kernel, a, activity);
+    defer later.deinit();
+    const next = later.records()[later.records().len - 1].record.events.items;
+    try testing.expectEqual(1, next.len);
+    try testing.expectEqualStrings("One more", next[0].subscription.text);
+    try SubscriptionFixture.finish(&kernel, activity, &later);
+}
+
+test "a subscription backlog leaves another focus schedulable and each source gets a turn under a one-event budget" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+
+    const core = try SubscriptionFixture.takeWork(&kernel, a);
+    var history = try SubscriptionFixture.admit(&kernel, a, core);
+    defer history.deinit();
+    const wakeup = try kernel.sessions.registerCallback(a, core, "wake", .wakeup);
+    const stream = try kernel.sessions.subscribe(a, core, "stream", "listener");
+    const build = try SubscriptionFixture.watchingActivity(&kernel, a, core, &history, "budget-marker");
+    try SubscriptionFixture.finish(&kernel, core, &history);
+
+    for (0..4) |index| try testing.expectEqual(.accepted, try store.publish(stream.subscription_id, .{
+        .key = try std.fmt.allocPrint(a, "report-{d}", .{index}),
+        .text = "budget-marker",
+    }, @intCast(index)));
+    try testing.expectEqual(.accepted, try store.publish(build, .{
+        .key = "done",
+        .text = "ready",
+    }, 90));
+    const callback: contracts.Inbox.Incoming = .{
+        .content = .{ .callback = .{ .id = wakeup.id, .text = "budget-marker", .observed_at_unix_ms = 100 } },
+    };
+    try testing.expectEqual(.accepted, try kernel.sessions.accept(callback));
+    for (0..2) |_| try testing.expectEqual(.accepted, try kernel.sessions.accept(.{
+        .content = .{ .message = .{ .from = &.{"operator"}, .text = "budget-marker", .observed_at_unix_ms = 100 } },
+    }));
+    kernel.limits.request_bytes = 1;
+    const ready = try kernel.sessions.takeReadyBatch(a);
+    try testing.expectEqual(2, ready.len);
+    const work = ready[1];
+    try testing.expectEqualStrings("budget-marker-2", work.session.focus_id);
+    var received = try SubscriptionFixture.admit(&kernel, a, work);
+    defer received.deinit();
+    try testing.expect(try kernel.sessions.withdrawSubscription(work, build));
+    try SubscriptionFixture.finish(&kernel, work, &received);
+
+    const resumed = ready[0];
+    try testing.expectEqualStrings("core-1", resumed.session.focus_id);
+    defer kernel.sessions.endWorker(resumed.session);
+    var served: std.EnumSet(std.meta.Tag(Input.Event)) = .empty;
+    for (0..3) |index| {
+        if (index != 0) try kernel.sessions.collectPending(resumed);
+        var admitted = try SubscriptionFixture.admit(&kernel, a, resumed);
+        defer admitted.deinit();
+        const events = admitted.records()[admitted.records().len - 1].record.events.items;
+        try testing.expectEqual(1, events.len);
+        served.insert(std.meta.activeTag(events[0]));
+        try testing.expect(!try kernel.sessions.commitResponse(resumed, &admitted, &.{}, null));
+    }
+    try testing.expect(served.contains(.callback) and served.contains(.subscription) and served.contains(.activity));
+    try testing.expectEqual(.duplicate, try kernel.sessions.accept(callback));
+}
+
+test "a rejected inference resumes for remaining reports while failed admission waits for fresh input" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    const startup = try SubscriptionFixture.takeWork(&kernel, a);
+    var initial = try SubscriptionFixture.admit(&kernel, a, startup);
+    defer initial.deinit();
+    const subscription = try kernel.sessions.subscribe(a, startup, "read", "feed listener");
+    try SubscriptionFixture.finish(&kernel, startup, &initial);
+    for ([_][]const u8{ "first", "second" }) |key| {
+        _ = try store.publish(subscription.subscription_id, .{ .key = key, .text = "budget-marker" }, 100);
+    }
+    kernel.limits.request_bytes = 1;
+    const first = try SubscriptionFixture.takeWork(&kernel, a);
+    var admitted = try SubscriptionFixture.admit(&kernel, a, first);
+    defer admitted.deinit();
+    try kernel.sessions.interrupt(first, "The model rejected the inference after admission.");
+    kernel.sessions.endWorker(first.session);
+    const second = try SubscriptionFixture.takeWork(&kernel, a);
+    try testing.expectEqual(1, second.activation.deliveries.items.len);
+    const third = @import("subscriptions").NewReport{ .key = "third", .text = "budget-marker" };
+    _ = try store.publish(subscription.subscription_id, third, 110);
+    try kernel.sessions.interrupt(second, "The remaining observation could not be admitted.");
+    kernel.sessions.endWorker(second.session);
+    const retry = try SubscriptionFixture.takeWork(&kernel, a);
+    try testing.expectEqual(2, retry.activation.deliveries.items.len);
+    try kernel.sessions.interrupt(retry, "The batch still cannot be admitted.");
+    kernel.sessions.endWorker(retry.session);
+    try testing.expectEqual(.duplicate, try store.publish(subscription.subscription_id, third, 120));
+    try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
+    _ = try store.publish(subscription.subscription_id, .{ .key = "fourth", .text = "budget-marker" }, 130);
+    const resumed = try SubscriptionFixture.takeWork(&kernel, a);
+    try testing.expectEqual(3, resumed.activation.deliveries.items.len);
+    kernel.sessions.endWorker(resumed.session);
 }

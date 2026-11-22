@@ -9,11 +9,6 @@ pub const Instant = struct {
         const text = format(self.unix_ms);
         try writer.write(&text);
     }
-
-    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Instant {
-        const text = try std.json.innerParse([]const u8, allocator, source, options);
-        return parse(text) catch return error.InvalidCharacter;
-    }
 };
 
 pub fn parse(text: []const u8) error{InvalidTimestamp}!Instant {

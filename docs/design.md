@@ -28,7 +28,7 @@ Model-facing inputs describe current attention, observations, and possible actio
 
 Reasoning can lose details, confuse references, or choose unsuccessful actions. Operation results, observations, and discoverable command handles support recognition and recovery. The runtime retains the references and routing state needed for delivery and resumption independently of Ivenna's recollection or generated summaries. Ivenna can reconsider an action from its outcome.
 
-Capabilities keep operation outcomes connected to their sources and supported content. Bounded observations provide a way to inspect further content, and omissions remain distinguishable from an empty source. This lets Ivenna decide which evidence needs further inspection.
+Capabilities keep operation outcomes connected to their sources and supported content. When a tool returns a preview, it gives Ivenna a way to inspect the rest. Identifying omitted content lets Ivenna distinguish it from an empty source.
 
 Changes to shared memory require a clear target. An edit that could select several occurrences requires an explicit choice, and the previous entry remains intact until its replacement is ready. Ivenna can refine an intended change without losing the memory it was trying to revise.
 
@@ -43,7 +43,9 @@ Core and activity focuses use the same system prompt. Each receives observations
 | Communicate with people and programs | Yes | Yes |
 | Remember, revisit, revise, arrange, and forget | Yes | Yes |
 | Open and reach focuses | Yes | — |
-| Arrange future attention | Yes | — |
+| Schedule a wakeup | Yes | — |
+| Subscribe to observations for the current focus | Yes | Yes |
+| Withdraw a subscription by its complete reference | Yes | Yes |
 | Run and interact with host programs | — | Yes |
 
 The core can [open an activity focus](attention.md#opening-a-focus) with a free-form assignment. It carries the core's retained understanding, relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
@@ -62,17 +64,21 @@ Ivenna chooses whether to communicate, to whom, and what to say through `send_me
 
 A task describes work to accomplish. A session has a stable identity, retained understanding, and an event queue. Each activation continues a session's work through model/tool rounds, admitting further events between complete rounds so new information can guide the next decision without interrupting an inference or tool.
 
-A response without tool calls ends the activation when no queued arrivals require more reasoning. At that boundary, an activity with an observation still registered sleeps with its identity and understanding retained; otherwise its session ends and the core receives an [ending observation](attention.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
+A response without tool calls ends the activation when no queued arrivals require more reasoning. At that boundary an activity awaiting a callback or a subscription report can sleep with its identity and working history intact. An activity with no remaining work ends, and the core receives an [ending observation](attention.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
 
 ### Events and waiting
 
 Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a waiting session. Messages preserve their actual sources for the receiver to weigh against its own evidence and understanding.
 
-The core can arrange observations for later attention. Host commands that outlive their initial tool calls arrange completion observations for the calling activities. Each arrangement binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [returning later](attention.md#returning-later) and [callback observations](attention.md#callback-observations).
+The core can schedule a wakeup for a particular time. A host command that outlives its initial tool call arranges a completion observation for the calling activity. Each callback binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [returning later](attention.md#returning-later) and [callback observations](attention.md#callback-observations).
 
 Activities choose how long to wait for host work before continuing their own reasoning. A bounded default gives brief commands time to return their results in the same exchange, while returning attention from longer commands for further work and coordination. An activity can shorten that wait to regain control sooner, or extend it when obtaining the result is more useful than proceeding immediately. The core and other activities continue while it waits.
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
+
+A focus can subscribe to a source it wants to follow over time. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. Ivenna chooses which changes its listener reports. A report can bring a sleeping focus back to its work, and a working focus can consider several reports together after its current round.
+
+The subscription stays with its focus across sleep, handover, and restart. Any focus with its reference can withdraw it when the source no longer needs attention. Observations already accepted still belong to the focus that subscribed. See [subscriptions](attention.md#subscriptions).
 
 ### Context and continuity
 
@@ -94,8 +100,10 @@ A lost response can leave an action's effects uncertain. The runtime can repeat 
 
 The receiving mail service checks the kernel's readiness before accepting correspondence. Reception opens after initialization and stays open while a focus waits for inference. If the kernel loses required access to its configured model, communication, memory, or working history, it closes reception and stops. The sender decides whether to queue or retry a letter it could not deliver. See [reception readiness](running.md#service-status-and-reception).
 
+An independent listener can still report to an active subscription while the kernel is stopped. Those observations are available for delivery when the kernel resumes. If collection was interrupted, the listener can tell the focus which part of the source's history it could recover. See [listener deployment](running.md#subscription-listeners).
+
 ## Data ownership
 
-The deployment user owns Ivenna's correspondence, working histories, artifacts, and autonomous memory, and chooses where they live. Keep them open to inspection and management.
+The deployment user owns Ivenna's correspondence, working histories, subscriptions, artifacts, and autonomous memory, and chooses where they live. Keep them open to inspection and management.
 
 These stores have separate retention lifecycles. History remains available while a retained context needs it; other material follows deployment policy. See [history retention](architecture.md#history-retention) and [running Ivenna](running.md#data-and-retention). Diagnostics remain separate from the source material and handovers used for continuity.

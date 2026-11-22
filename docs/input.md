@@ -40,6 +40,7 @@ An `events` record has `focus_id: Text` and `items: Event[]`. Each admission ret
 | `focus_message` | `FocusMessage` | Observation sent directly by the core |
 | `focus_interrupted` | `FocusInterrupted` | Runtime observation that an activity could not continue reasoning |
 | `callback` | `Callback` | A registered wakeup or host completion observation |
+| `subscription` | `SubscriptionReport` | A listener's report to the focus that subscribed |
 
 #### Incoming messages
 
@@ -55,7 +56,7 @@ Correspondence enters the core as an `input` observation of who said what; it im
 
 #### Startup and restart
 
-`Startup` carries `observed_at: Time`, the beginning of this runtime. On restart, the runtime queues this event for the core and for each activity with an unfinished activation or unread internal observations. Other restored activities receive it with their next event. Newly opened activities start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
+`Startup.observed_at` records the time the runtime started. The runtime queues this event on restart for the core and for each activity with an unfinished activation or unread internal observations. For other restored activities it queues the event when they next have work. Newly opened activities start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
 
 #### Assignments and reports
 
@@ -118,6 +119,19 @@ The ID matches the `callback_id` returned by `schedule_attention` or a `run_host
 
 A restored host source can identify an execution in an earlier runtime; its command ID is not a restored control handle. See [command lifetimes](host.md#command-lifetimes) for stored results and interruption observations after restart.
 
+#### Subscription observations
+
+Each `subscription` event carries one listener report to the focus that subscribed. Reports for that focus appear in acceptance order across its subscriptions.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `subscription_id` | `Text` | Complete reference returned by `subscribe`, shared by all reports for that subscription |
+| `observed_at` | `Time` | Time the local reporter received the submission |
+| `source_time` | `Time`, when supplied | Time the listener attributes to the upstream event |
+| `text` | `Text` | Listener's account of what it observed |
+
+The listener can include a source link, a revision, or a gap in coverage in `text`. See [subscription delivery and withdrawal](attention.md#subscriptions).
+
 ### Handovers
 
 A `handover` record contains:
@@ -131,18 +145,21 @@ A `handover` record contains:
 
 #### Sampled state
 
-A `State` contains two collections:
+A `State` can contain the following collections:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `activities` | `Text[]` | Complete references of the core's existing activities, including sleeping activities |
 | `callbacks` | `PendingCallback[]` | Observations arranged for the sampled focus and awaiting admission |
+| `subscriptions` | `Text[]` | Complete references of the subscriptions active for this focus at the time of the sample, including those whose listeners have never reported |
 
-The activity list omits the core itself and is empty for an activity focus. Empty collections are omitted; an absent field means that collection was empty at the sample. When both are empty, the entire `state` field is omitted.
+The activity list omits the core itself and is empty for an activity focus. Empty collections are omitted. When all collections are empty, the entire `state` field is omitted.
+
+A subscription withdrawn before the sample is absent from `subscriptions`. A report accepted before withdrawal can still arrive with that ID.
 
 Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after its result is published or queued. A pending host source identifies the execution being observed; it does not imply that its process is still running or its handle remains available. Observation text arrives separately as an event. The runtime routes and resumes registered observations without requiring the model to retain their IDs.
 
-The handover's `observed_at`, or the compaction turn's `current.observed_at`, dates this state sample. An activity can end before its ending report enters the core's history, so a later sample can omit an activity whose ending has not yet been admitted. Reports retain their source and original times. Selecting a reference that is no longer addressable returns [`unknown_focus`](attention.md#results-and-errors).
+The handover's `observed_at`, or the compaction turn's `current.observed_at`, dates this state sample. An activity can end before its ending report enters the core's history, so a later sample can omit an activity whose ending has not yet been admitted. Reports retain their source and original times. Sending a focus message to an activity that has ended returns [`unknown_focus`](attention.md#results-and-errors).
 
 For example, the summary can explain the work while sampled state retains the references:
 
@@ -153,6 +170,7 @@ handover:
   summary: A 20-minute practice outline is being prepared. Revisit the plan when it arrives.
   state:
     activities: [practice-2]
+    subscriptions: [releases-1]
     callbacks:
       - callback_id: revisit-practice-5
         source:
@@ -177,27 +195,31 @@ An ordinary turn with no new events contains only `current` and continues from t
 
 `summarize` contains `instructions: Text` and, when nonempty, complete `state: State`. It asks for condensed understanding with current state available for recollection. Events waiting for admission remain outside this request.
 
-For example, an ordinary core turn can present an admitted callback:
+For example, the [scheduled wakeup](attention.md#returning-later) and the [release listener's report](subscriptions.md#publish-an-observation) can reach the core in the same turn.
 
 ```yaml
 current:
   focus_id: core-1
   role: core
-  observed_at: "2026-11-06T12:00:01.000Z"
+  observed_at: "2026-11-10T18:00:01.000Z"
 events:
   - callback:
       callback_id: revisit-practice-5
       source:
         wakeup: {}
-      observed_at: "2026-11-06T12:00:00.500Z"
+      observed_at: "2026-11-10T18:00:00.500Z"
       text: Revisit the French practice plan.
+  - subscription:
+      subscription_id: releases-1
+      observed_at: "2026-11-10T17:59:59.200Z"
+      text: Stable release v2.4.0 is available
 ```
 
-The callback event connects the arriving observation with the earlier registration result. The runtime retains the reference and its source in the event.
+Each event carries the reference returned by the tool that arranged it. The release report gives the reporter's local receipt time. The listener supplied no source time, so the event omits `source_time`.
 
 ## Handover generation and replacement
 
-A compaction inference receives the common system prompt, complete retained history, and a turn with `current` and `summarize`. Tools are disabled. Waiting events and unread activity reports remain outside the request. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary of the understanding and unfinished work worth carrying forward.
+A compaction inference receives the common system prompt, complete retained history, and a turn with `current` and `summarize`. Tools are disabled. Observations awaiting admission remain outside the request. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary of the understanding and unfinished work worth carrying forward.
 
 When the runtime asks for a revised summary, `summarize.instructions` explains what needs to change. The model sees the original history again. Only an accepted summary enters history, paired with the state and observation time supplied to that inference. The next ordinary turn adds its own identity, time, and newly admitted events.
 

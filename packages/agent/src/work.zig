@@ -6,8 +6,8 @@ pub const Delivery = struct {
     arena: std.heap.ArenaAllocator,
     event: Input.Event,
     receipt: ?[]const u8,
-    /// Delivery routing remains internal; the event carries its semantic reference.
-    callback_id: ?u64 = null,
+    /// Progress to commit with the observation's admission to history.
+    admission: union(enum) { none, callback: u64, subscription: u64 } = .none,
 
     /// Copy the event and optional transport receipt into the delivery arena.
     pub fn create(allocator: Allocator, event: Input.Event, receipt: ?[]const u8) !*Delivery {
@@ -32,20 +32,14 @@ pub const Delivery = struct {
 };
 
 pub const Activation = struct {
-    deliveries: std.ArrayList(*Delivery),
+    deliveries: std.ArrayList(*Delivery) = .empty,
     admitted: bool = false,
+    /// Reports published after this sequence belong to a later input.
+    subscription_at_collection: u64 = 0,
+    subscription_read_through: u64 = 0,
+    activity_reports_read: usize = 0,
     /// An observation requesting attention arrived after the last collection.
     new_arrival: bool = false,
-
-    /// Success takes ownership of the deliveries, copying only their pointers.
-    pub fn create(allocator: Allocator, deliveries: []const *Delivery) !*Activation {
-        const self = try allocator.create(Activation);
-        errdefer allocator.destroy(self);
-        self.* = .{ .deliveries = .empty };
-        errdefer self.deliveries.deinit(allocator);
-        try self.deliveries.appendSlice(allocator, deliveries);
-        return self;
-    }
 
     pub fn destroy(self: *Activation, allocator: Allocator) void {
         for (self.deliveries.items) |delivery| delivery.destroy(allocator);

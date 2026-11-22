@@ -99,5 +99,41 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "subscribe",
+    "description": "Create a subscription for this focus. Each call returns a new subscription_id to give to a listener you set up separately. A report can wake this focus, and one turn can include several reports. An activity can run \"$IVENNA_REPORT\" --help for reporting commands and examples.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "listener": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Describe what the listener watches and when it reports."
+        }
+      },
+      "required": ["name", "listener"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "withdraw_subscription",
+    "description": "Close any focus's subscription to new reports. Reports already accepted still reach the subscribing focus. Stop the listener separately if needed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "subscription_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["subscription_id"],
+      "additionalProperties": false
+    }
   }
 ]

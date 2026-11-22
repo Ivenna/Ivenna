@@ -4,9 +4,9 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 ## Runtime requirements
 
-Use a built `ivenna` executable, `/bin/sh`, and an OpenSSH client in the kernel's execution environment. See the [build instructions](development.md#repository-and-build) to build from source. Host commands run as the kernel's OS account and use the files and programs available in that environment.
+Install `ivenna` and `ivenna-report` from the same build in the same directory so the kernel can locate the reporter for host commands. Host commands run as the kernel's OS account. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
 
-Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, readable `/proc`, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. These facilities establish the controlling terminal and allow cleanup of its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
+Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
 The application uses the Responses adapter with DeepSeek as the default model service. Supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`. [File input](content.md#complete-files) additionally requires DeepSeek-compatible Files API parsing and `input_file` references; the default `deepseek-flash` supports them. The kernel also needs access to the [mail service](#mail-service) and [memory service](#memory-service). The mail receiving boundary needs access to the kernel's [reception status](#service-status-and-reception).
 
@@ -33,11 +33,11 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAIL_USERNAME` | Mail login | Required for username/password authentication |
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
-| `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
+| `MAIL_POLL_INTERVAL_MS` | Delay between intake passes for mail and subscription reports | `2000` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
-| `DATA_DIR` | Persistent base directory for host command output in the kernel filesystem | Required |
+| `DATA_DIR` | Persistent directory for the subscription database and host command output | Required |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
@@ -59,7 +59,7 @@ Choose an ordinary reasoning effort for each role from the values supported by y
 
 Choose both byte budgets and the output-token limit together for the configured model and workload. The ordinary budget controls how much history can accumulate before a handover; the larger compaction budget leaves room to summarize history after a complete model/tool round crosses that limit. Byte counts are not token estimates; input and output must also fit the model's token limits.
 
-Handovers carry pending callback references and, for the core, existing activity references alongside the generated summary. Callback registrations have no separate count limit, so pending work can consume a growing share of the budget. A handover has no separate byte limit; the complete continuation request must fit the ordinary budget.
+Handovers carry the focus's pending callback and active subscription references alongside the generated summary. Core handovers also carry existing activity references. These collections grow with outstanding work and count toward both the summary request and the ordinary requests that retain the handover.
 
 Individual tool results can meet their [content limits](content.md#model-request-checks) while a large batch or inline image exceeds the context budgets. Inline images include base64 encoding overhead. Reduce their size or use image URL references when that overhead would exceed the request budget.
 
@@ -71,13 +71,13 @@ If a summary request exceeds its budget or compaction cannot fit the next ordina
 
 `MAX_SESSIONS` counts the core and all registered activities, including those asleep. Startup fails if saved identities exceed it; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a slot. Ready sessions can advance concurrently. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes). The session and command defaults are tuning starting points; size them for the workload and resources available.
 
-`MAX_PENDING_EVENTS` counts correspondence, callbacks, assignments, and focus messages buffered for a session. Startup observations, activity expressions, endings, and notices of activity interruption are exempt. Correspondence and callback mail have independent intake allowances and stay in their mailboxes when their destination is full. A focus message returns `focus_queue_full` when the recipient cannot accept it. Capacity and polling can delay scheduled work.
+`MAX_PENDING_EVENTS` counts correspondence, callbacks, assignments, and focus messages buffered for a session. Subscription reports wait in SQLite and enter each turn within its request budget. Startup observations, activity expressions, endings, and notices of activity interruption are exempt from the queue limit. Correspondence and callback mail have independent intake allowances and stay in their mailboxes when their destination is full. A focus message returns `focus_queue_full` when the recipient cannot accept it. Capacity and polling can delay scheduled work.
 
 ## Changing the model
 
 Retained history can include native model output and reasoning data supplied by the model adapter, plus file identifiers supplied by the model service. A replacement service and model must accept those items as well as the configured tools and reasoning settings. File identifiers also require access to the account that owns the uploads. The runtime does not translate retained model output, transfer uploaded files between services, or verify in advance that a replacement model can consume them. Establish compatibility before resuming retained work with the replacement model.
 
-To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MODEL` and any changed service settings, then restart. Keep the existing mail account, `MAIL_ADDRESS`, and memory workspace to retain the material needed for continuation.
+To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MODEL` and any changed service settings, then restart. Keep the existing mail account, `MAIL_ADDRESS`, subscription database and memory workspace to retain the material needed for continuation.
 
 ## Mail service
 
@@ -133,7 +133,7 @@ The [local development setup](../dev/README.md#configuring-memory) packages this
 
 ## Starting the kernel
 
-Prepare the configured services and supply the required [environment settings](#configuration). For an executable installed at `/path/to/ivenna`, choose the host workspace and output storage when starting it:
+`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` with no arguments from the directory you want host commands to use by default.
 
 ```sh
 cd /path/to/workspace
@@ -141,13 +141,21 @@ export DATA_DIR=/path/to/instance/data
 /path/to/ivenna
 ```
 
-The kernel's startup directory becomes the default directory for host commands. The executable embeds its model-facing resources and can run independently of the source checkout.
+The executable embeds its model-facing resources and can run independently of the source checkout.
 
-Run one kernel per mailbox. The kernel binds `SERVICE_ADDRESS` before accessing the account. If the address is in use, startup exits. On Linux, an `AddressInUse` error just after an upgrade can persist until the older executable's connections leave `TIME_WAIT`.
+Give each kernel its own mailbox and `DATA_DIR`. The kernel binds `SERVICE_ADDRESS` before accessing the account. If the address is in use, startup exits. On Linux, an `AddressInUse` error just after an upgrade can persist until the older executable's connections leave `TIME_WAIT`.
 
 The kernel initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a message](usage.md#sending-a-request). The kernel writes diagnostics to standard error.
 
 Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
+
+## Subscription listeners
+
+Start the program that watches the source and give it the `subscription_id` returned when a focus [registers the subscription](attention.md#subscriptions). When the subscription is withdrawn, stop the listener if it has no other work.
+
+A listener running as a host command inherits the reporter's absolute path in `IVENNA_REPORT` and the kernel's data directory in `DATA_DIR`. It stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs.
+
+To keep collecting while the kernel is stopped, run the listener independently, for example under a service manager on the same host. Give it the path to the installed `ivenna-report` and point its `DATA_DIR` at the directory the kernel initialized. An absolute path works even when the two programs start in different directories. The reporter needs read and write access to the existing subscription database and its directory. Limit that access to trusted processes. Reports accepted during downtime are available to their subscribing focus after restart. See the [listener protocol](subscriptions.md) for publication and cursor recovery.
 
 ## Service status and reception
 
@@ -190,11 +198,13 @@ If the core cannot fit an incoming letter and its context in a model request, th
 
 If admission keeps failing, check the [context budgets](#context-budgets) and restart with budgets suitable for the model and the letter. To withdraw the letter instead, stop the kernel, move it out of [eligible intake](#mail-intake), then restart. The kernel rebuilds pending deliveries from the mailbox.
 
+A subscription report that cannot fit stays in the subscription database. If the same report keeps blocking that focus, check the ordinary request budget. Withdrawing the subscription closes it to new reports. The focus still needs enough request space to receive the one already accepted.
+
 ## Stopping and restarting
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work (including model recovery waits) and host commands, and wait for the runtime's tasks to end. Failure of a required service such as history storage, or an unrecoverable execution error, also stops the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
-Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
+Start the executable with the same mail account, `MAIL_ADDRESS`, and subscription store to resume its saved focuses and pending deliveries. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mail account and `DATA_DIR` identify the same instance. When restoring backup data, use a [matched mailbox and subscription store](#backups-and-transfers).
 
 The core receives a fresh startup observation on every restart. A restored activity receives one immediately if it had an unfinished activation or unread internal observations. Other restored activities receive startup with their next event. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
@@ -204,11 +214,13 @@ Host processes and command handles are not restored, and commands are not replay
 
 ### Updating the executable
 
-Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
+Before updating across a storage-format change, preserve a [complete backup](#backups-and-transfers) and keep the executables that can read it. To resume [saved history](architecture.md#persistent-working-history), the current kernel requires a mailbox checkpoint that identifies its subscription database. To start fresh with the current build, give it a separate mailbox and `DATA_DIR`.
+
+If either binary reports `IncompatibleSubscriptionSchema`, check that `DATA_DIR` points to the intended instance and that both the kernel and reporter support its database format. For `SubscriptionCatalogMismatch`, check the [mailbox and database pairing](#stopping-and-restarting).
 
 Older configurations may contain `LLM_MAX_ATTEMPTS`. The kernel now ignores this setting and continues retrying temporary inference failures. `LLM_REQUEST_TIMEOUT_MS` limits each attempt. See [model request settings](#model-requests).
 
-Earlier executables cannot restore a checkpoint whose selected history or pending observations include a `focus_interrupted` event. The current executable requires handover records to include the state sampled for the summary and its observation time. Earlier handovers without those fields fail restoration. See [persistent working history](architecture.md#persistent-working-history).
+Earlier executables cannot restore a checkpoint whose selected history or pending observations include a `focus_interrupted` event. The current executable requires handovers to include the summary's observation time and sampled state. See [persistent working history](architecture.md#persistent-working-history).
 
 ## Data and retention
 
@@ -219,7 +231,10 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
+| `<DATA_DIR>/subscriptions.sqlite3` | Subscription registrations, listener cursors, accepted report keys, and reports awaiting history admission |
 | Configured model-service account | Uploaded files and their service-side parsing results |
+
+Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
 
@@ -241,7 +256,7 @@ Keep original correspondence separately if you need it beyond the Trash retentio
 
 ### Working history
 
-A message with the subject `Ivenna history checkpoint` lists the state the kernel uses to resume its sessions. For each session, `head` points to the latest retained history record and `count` gives the number of records in that chain. Admitted observations and model/tool exchanges live in those separate records, so a whole new exchange can change just a few fields in the checkpoint. The checkpoint also tracks scheduled wakeups, callback registrations and unread activity reports.
+A message with the subject `Ivenna history checkpoint` lists the state the kernel uses to resume its sessions. For each session, `head` points to the latest retained history record and `count` gives the number of records in that chain. Admitted observations and model/tool exchanges live in those separate records, so a whole new exchange can change just a few fields in the checkpoint. The checkpoint also tracks scheduled wakeups, callback registrations, unread activity reports, and how far each focus has read in the subscription database.
 
 Suppose the core receives a letter and the model returns text without calling tools. In an otherwise idle kernel, this normally produces two revisions. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response in the core's history. Sending a reply to the correspondent requires a `send_message` call.
 
@@ -256,7 +271,7 @@ Forks store independent copies of inherited history; include these copies when s
 
 Each complete model/tool round must fit the mail service's advertised `maxSizeRequest` when saved. File bytes and encoding overhead count toward that history request, so meeting the [source limits](content.md#automatic-classification) does not guarantee that a file or batch can be saved. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`; any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See the [history storage protocol](architecture.md#history-storage) for the encoding and batching mechanism.
 
-A sleeping activity retains its history even when its context is unloaded. When the session ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. Its unread reports remain selected independently of that session until the core admits them. Admitted reports belong to the core's history, and shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
+A sleeping activity retains its history even when its context is unloaded. When the activity ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. The activity's messages and ending remain available to the core until they enter the core's history. Shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
 Unread activity expressions retain every new text in order with its original observation time; they are not replaced with the latest text. Ending times are also retained. The core admits reports within its ordinary request budget. Unread reference metadata grows with the backlog, and all unread bodies occupy mailbox storage. Activity messages and endings are outside `MAX_PENDING_EVENTS`, so size runtime memory and mailbox capacity for work that can accumulate before the core next reads it. See [activity reports](architecture.md#activity-reports) for reading and admission behavior.
 
@@ -269,6 +284,12 @@ Uploads live at `LLM_BASE_URL` in the account authenticated by `LLM_API_KEY`. Iv
 Preserve the host artifact or memory entry when it needs to outlive selected working history. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for service behavior and billing.
 
 ### Backups and transfers
+
+Back up the mailbox and subscription database together. Startup checks the database identity, which stays the same across snapshots of an instance. Pairing an older mailbox with a newer database can lose a report if the database already removed it and the mailbox snapshot predates its admission.
+
+If taking the backups separately, stop the kernel before saving either store and leave it stopped until both backups finish. Use a SQLite backup of `<DATA_DIR>/subscriptions.sqlite3`. To copy the database files directly, pause independent listeners too and include any SQLite journal files with the database.
+
+For restoration, stop the kernel and listeners before replacing the mailbox and database with their matched copies. Keep the listener programs and their configuration so they can resume collection on the restored subscriptions.
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 
@@ -293,7 +314,5 @@ A mailbox backup preserves stored callbacks and wakeup arrangements, not running
 Set `DATA_DIR` to writable storage that supports ordinary files and subdirectories. An absolute path keeps output storage stable across changes to the kernel's startup directory. Launching a command creates any missing output directories with private permissions.
 
 Host output files remain available after the command and activity session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
-
-Changing `DATA_DIR` selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
 
 Keep provisioning files, credentials, and SSH keys with the deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by the supplied setup.

@@ -4,6 +4,8 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
+        .ivenna_report = .{ .path = "../ivenna-report" },
+        .subscriptions = .{ .path = "../../packages/subscriptions" },
         .agent = .{ .path = "../../packages/agent" },
         .agent_contracts = .{ .path = "../../packages/agent_contracts" },
         .email = .{ .path = "../../packages/email" },

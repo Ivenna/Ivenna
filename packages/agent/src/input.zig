@@ -107,6 +107,28 @@ pub const Callback = struct {
     }
 };
 
+pub const SubscriptionReport = struct {
+    subscription_id: []const u8,
+    text: []const u8,
+    observed_at_unix_ms: i64,
+    source_time_unix_ms: ?i64,
+
+    pub fn jsonStringify(self: SubscriptionReport, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("subscription_id");
+        try writer.write(self.subscription_id);
+        try writer.objectField("observed_at");
+        try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
+        if (self.source_time_unix_ms) |time| {
+            try writer.objectField("source_time");
+            try writer.write(Time.Instant{ .unix_ms = time });
+        }
+        try writer.objectField("text");
+        try writer.write(self.text);
+        try writer.endObject();
+    }
+};
+
 /// Identity and observation time accompanying one inference.
 pub const Current = struct {
     focus_id: []const u8,
@@ -124,14 +146,15 @@ pub const Snapshot = struct {
     state: State,
 };
 
-/// Existing activity references for the core and pending callbacks for the
-/// sampled focus.
+/// The sampled focus's pending callbacks and active subscriptions. The core
+/// also sees the existing activities.
 pub const State = struct {
     activities: []const []const u8,
     callbacks: []const PendingCallback,
+    subscriptions: []const []const u8,
 
     pub fn isEmpty(self: State) bool {
-        return self.activities.len == 0 and self.callbacks.len == 0;
+        return self.activities.len == 0 and self.callbacks.len == 0 and self.subscriptions.len == 0;
     }
 
     pub fn jsonStringify(self: State, writer: anytype) !void {
@@ -144,12 +167,20 @@ pub const State = struct {
             try writer.objectField("callbacks");
             try writer.write(self.callbacks);
         }
+        if (self.subscriptions.len != 0) {
+            try writer.objectField("subscriptions");
+            try writer.write(self.subscriptions);
+        }
         try writer.endObject();
     }
 };
 
 pub fn cloneState(a: Allocator, state: State) !State {
-    return .{ .activities = try cloneIds(a, state.activities), .callbacks = try cloneCallbacks(a, state.callbacks) };
+    return .{
+        .activities = try cloneIds(a, state.activities),
+        .callbacks = try cloneCallbacks(a, state.callbacks),
+        .subscriptions = try cloneIds(a, state.subscriptions),
+    };
 }
 
 fn cloneCallbacks(a: Allocator, values: []const PendingCallback) ![]const PendingCallback {
@@ -178,6 +209,7 @@ pub const Event = union(enum) {
     focus_message: FocusMessage,
     focus_interrupted: FocusInterrupted,
     callback: Callback,
+    subscription: SubscriptionReport,
 
     pub fn jsonStringify(self: Event, writer: anytype) !void {
         try writer.beginObject();
@@ -216,6 +248,12 @@ pub fn cloneEvent(a: Allocator, event: Event) !Event {
             .focus_id = try a.dupe(u8, failure.focus_id),
             .observed_at_unix_ms = failure.observed_at_unix_ms,
             .reason = try a.dupe(u8, failure.reason),
+        } },
+        .subscription => |report| .{ .subscription = .{
+            .subscription_id = try a.dupe(u8, report.subscription_id),
+            .text = try a.dupe(u8, report.text),
+            .observed_at_unix_ms = report.observed_at_unix_ms,
+            .source_time_unix_ms = report.source_time_unix_ms,
         } },
         .callback => |callback| .{ .callback = .{
             .callback_id = try a.dupe(u8, callback.callback_id),

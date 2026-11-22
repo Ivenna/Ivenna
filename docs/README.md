@@ -8,6 +8,7 @@ Choose a guide for your task:
 | --- | --- |
 | Prepare, run, and update the supplied local development environment | [Local development](../dev/README.md) |
 | Run Ivenna, diagnose stalled work, and manage services and retained data | [Running guide](running.md) |
+| Run a listener that keeps collecting while the kernel is stopped | [Subscription listeners](running.md#subscription-listeners) |
 | Send messages and understand reception and responses | [Usage guide](usage.md) |
 
 ## Design and development
@@ -25,7 +26,8 @@ Choose a guide for your task:
 | --- | --- |
 | Interpret history records, inference turns, and runtime state | [Input contract](input.md) |
 | Use correspondent IDs and communicate with people and programs | [Communication](communication.md) |
-| Open and coordinate focuses and arrange later attention | [Attention](attention.md) |
+| Coordinate focuses, schedule wakeups, and manage subscriptions | [Attention](attention.md) |
+| Write a listener that reports observations and resumes from a saved cursor | [Subscription listener protocol](subscriptions.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |
 | Run commands and interact with host processes | [Host shell](host.md) |
 | Interpret text, images, files, and omitted content | [Tool content](content.md) |

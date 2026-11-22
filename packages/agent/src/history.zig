@@ -26,6 +26,7 @@ pub const History = struct {
     pub const Wakeup = struct { id: u64, at_unix_ms: i64, text: []const u8 };
     pub const CallbackRegistration = struct { id: u64, reference: []const u8, session_id: u64, source: contracts.Callback.Source };
 
+    subscription_catalog: [32]u8,
     next_session_id: u64,
     next_callback_id: u64,
     next_command_id: u64,
@@ -41,6 +42,7 @@ pub const History = struct {
         /// When true, an activity receives startup on restore even with no
         /// pending observations. The core always receives startup.
         was_running: bool,
+        subscription_through: u64,
         epoch: u64,
         /// Null when unloaded; the confirmed checkpoint retains its selection.
         entries: ?[]const Entry,
@@ -93,6 +95,7 @@ pub const History = struct {
 
 /// Each session selects the committed prefix of its current epoch's group.
 const Checkpoint = struct {
+    subscription_catalog: [32]u8,
     next_session_id: u64,
     next_callback_id: u64,
     next_command_id: u64,
@@ -106,6 +109,7 @@ const Checkpoint = struct {
         focus_id: []const u8,
         role: Input.Role,
         was_running: bool,
+        subscription_through: u64,
         epoch: u64,
         group: []const u8,
         head: ?Key,
@@ -188,6 +192,7 @@ pub const Persistence = struct {
                 .focus_id = session.focus_id,
                 .role = session.role,
                 .was_running = session.was_running,
+                .subscription_through = session.subscription_through,
                 .epoch = session.epoch,
                 .entries = try a.alloc(Entry, session.count),
                 .observations = &.{},
@@ -238,6 +243,7 @@ pub const Persistence = struct {
         }
         try self.readSelections(a, selections.items);
         const history: History = .{
+            .subscription_catalog = checkpoint.subscription_catalog,
             .next_session_id = checkpoint.next_session_id,
             .next_callback_id = checkpoint.next_callback_id,
             .next_command_id = checkpoint.next_command_id,
@@ -333,6 +339,7 @@ pub const Persistence = struct {
                 .focus_id = session.focus_id,
                 .role = session.role,
                 .was_running = session.was_running,
+                .subscription_through = session.subscription_through,
                 .epoch = session.epoch,
                 .group = if (current) |known| known.checkpoint.group else try self.store.allocateGroup(a),
                 .head = null,
@@ -367,6 +374,7 @@ pub const Persistence = struct {
         }
         try builder.flush();
         const document = try Codec.encode(a, Checkpoint{
+            .subscription_catalog = history.subscription_catalog,
             .next_session_id = history.next_session_id,
             .next_callback_id = history.next_callback_id,
             .next_command_id = history.next_command_id,

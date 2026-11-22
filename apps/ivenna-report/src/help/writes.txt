@@ -1,0 +1,27 @@
+Cursor changes and write receipts
+
+Set "to" to the new source position as a string. The cursor changes only
+if "from" matches the saved position. Use the cursor returned by inspect.
+If it is null, you can omit "from". If it is the empty string, pass
+"from": "". The reporter's JSON reader accepts up to 4 MiB per string.
+
+Read the JSON string on stdout and check the exit status.
+
+Exit 0
+  "accepted"         The write committed.
+  "duplicate"        publish recognized a key already accepted on this
+                     subscription. The retry leaves the queue and cursor
+                     unchanged, even after the focus has received the report.
+
+Nonzero exit
+  "withdrawn"        The ID is unknown or withdrawn. Stop using this ID.
+  "cursor_conflict"  "from" differs from the saved cursor. Read it with inspect
+                     and check which items remain. A publish rejected for this
+                     reason leaves its key available for retry.
+  "busy"             The store is busy. Retry later.
+  "storage_full"     Free storage before retrying.
+  "invalid_request"  Correct the arguments or the JSON request.
+
+If the receipt is missing or incomplete, check stderr. The write may already
+have committed. Retry publish with the original key on the same subscription.
+For checkpoint, inspect the saved cursor before deciding whether to retry.

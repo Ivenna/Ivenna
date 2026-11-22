@@ -39,7 +39,9 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 ## Ongoing work and memory
 
-Ivenna can pursue work while receiving further messages and may consider several waiting messages together. Its activities can keep working or sleep while host commands run, then continue when results arrive. Their intermediate expressions accompany the core's ordinary inputs; their endings request its attention. The core can also arrange later attention without a new message from you. See [Attention](attention.md) for how these focuses coordinate. Processing depends on runtime availability and capacity; a scheduled time does not guarantee a reply at that time.
+Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring a new version to its attention without another letter from you. The core can also schedule a wakeup, and an activity can resume when its host command finishes.
+
+The core sees activity updates with its next ordinary input. An activity's ending calls for its attention. Ivenna decides whether and when to write back. See [how focuses coordinate](attention.md).
 
 Continued work uses retained understanding and [autonomous memory](memory.md). Ivenna chooses what to retain, revisit, and revise as its understanding develops. Include relevant context when following up, since Ivenna can condense its working history. Keep your own copy if you need the exact wording after [Ivenna's mail copies expire](running.md#communication-copies).
 

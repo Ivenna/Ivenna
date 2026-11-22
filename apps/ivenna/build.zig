@@ -4,15 +4,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const agent = b.dependency("agent", .{
-        .target = target,
-        .optimize = optimize,
-    }).module("agent");
-    const contracts = b.dependency("agent_contracts", .{ .target = target, .optimize = optimize }).module("agent_contracts");
-    const email = b.dependency("email", .{ .target = target, .optimize = optimize }).module("email");
-    const responses = b.dependency("responses", .{ .target = target, .optimize = optimize }).module("responses");
-    const host = b.dependency("host", .{ .target = target, .optimize = optimize }).module("host");
-    const memory = b.dependency("memory", .{ .target = target, .optimize = optimize }).module("memory");
+    const options = .{ .target = target, .optimize = optimize };
+    const agent = b.dependency("agent", options).module("agent");
+    const subscriptions = b.dependency("subscriptions", options).module("subscriptions");
+    const contracts = b.dependency("agent_contracts", options).module("agent_contracts");
+    const email = b.dependency("email", options).module("email");
+    const responses = b.dependency("responses", options).module("responses");
+    const host = b.dependency("host", options).module("host");
+    const memory = b.dependency("memory", options).module("memory");
     const app = b.addExecutable(.{
         .name = "ivenna",
         .root_module = b.createModule(.{
@@ -21,6 +20,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "agent", .module = agent },
+                .{ .name = "subscriptions", .module = subscriptions },
                 .{ .name = "agent_contracts", .module = contracts },
                 .{ .name = "email", .module = email },
                 .{ .name = "responses", .module = responses },
@@ -31,6 +31,10 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(app);
 
-    const run = b.addRunArtifact(app);
+    const reporter = b.dependency("ivenna_report", options);
+    b.installArtifact(reporter.artifact("ivenna-report"));
+    const run = b.addRunFile(.{ .relative = .{ .base = .install_bin, .sub_path = "ivenna" } });
+    run.step.dependOn(b.getInstallStep());
+    run.addPassthruArgs();
     b.step("run", "Run Ivenna").dependOn(&run.step);
 }

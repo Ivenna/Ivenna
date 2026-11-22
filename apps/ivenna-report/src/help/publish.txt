@@ -1,0 +1,21 @@
+ivenna-report publish SUBSCRIPTION_ID
+
+Queue an observation for the subscribing focus, even while the kernel is
+stopped. For a new subscription, this example also saves feed position "17".
+
+  printf '%s\n' '{
+    "key": "release-v2.4.0",
+    "text": "Stable release v2.4.0 is available",
+    "cursor": {"to": "17"}
+  }' | "$IVENNA_REPORT" publish releases-1
+
+Send one JSON object on stdin with these fields.
+
+  key                  Nonempty string identifying the update within this
+                       subscription. Reuse it for retries. Use a new key to
+                       report a later revision.
+  text                 Observation to deliver, a string of 1–2048 UTF-8 bytes.
+  source_time_unix_ms  Optional source event time in integer Unix milliseconds
+                       from -62167219200000 through 253402300799000.
+  cursor               Optional cursor change to commit with the observation.
+                       Omitting it leaves the saved position in place.

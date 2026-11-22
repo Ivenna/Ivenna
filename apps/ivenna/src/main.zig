@@ -5,16 +5,37 @@ const email = @import("email");
 const responses = @import("responses");
 const host = @import("host");
 const memory = @import("memory");
+const subscriptions = @import("subscriptions");
 const Config = @import("config.zig").Config;
 const Service = @import("service.zig").Service;
 
 var stopping: std.atomic.Value(bool) = .init(false);
 
-pub fn main(init: std.process.Init) !void {
-    const config = Config.load(init.environ_map) catch |err| {
-        std.log.err("invalid Ivenna configuration: {s}", .{@errorName(err)});
-        return err;
-    };
+const usage =
+    \\Usage: ivenna [--help]
+    \\
+    \\Run the Ivenna kernel. Host commands start in the current directory by default.
+    \\The kernel reads DATA_DIR and the model, mail and memory settings from the
+    \\environment. See docs/running.md in the source tree for configuration.
+    \\
+    \\  -h, --help   Show this help and exit.
+    \\
+;
+
+pub fn main(init: std.process.Init) !u8 {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1) {
+        const help = std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h");
+        if (help and args.len == 2) {
+            try std.Io.File.stdout().writeStreamingAll(init.io, usage);
+            return 0;
+        }
+        const unexpected = if (help) args[2] else args[1];
+        std.log.err("unexpected argument \"{f}\". See 'ivenna --help'.", .{std.zig.fmtString(unexpected)});
+        return 2;
+    }
+
+    const config = try Config.load(init.environ_map);
     const io = init.io;
     var service = try Service.listen(io, config.service_address);
     defer service.deinit();
@@ -23,6 +44,9 @@ pub fn main(init: std.process.Init) !void {
     const a = arena.allocator();
     const host_directory = try std.process.currentPathAlloc(io, a);
     const data_directory = try std.fs.path.resolve(a, &.{ host_directory, config.data_dir });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, data_directory, .fromMode(0o700));
+    var subscription_store = try subscriptions.Store.open(init.gpa, try std.fs.path.join(a, &.{ data_directory, subscriptions.filename }));
+    defer subscription_store.close();
     var mail: email.Integration = undefined;
     try mail.init(init.gpa, io, .{
         .session_url = config.mail_session_url,
@@ -32,7 +56,13 @@ pub fn main(init: std.process.Init) !void {
     defer mail.deinit();
     var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
     try memory_client.checkAvailable(a);
-    var host_tools = host.Host.init(init.gpa, io, host_directory, data_directory, init.environ_map, mail.callbackPublisher(), config.max_host_commands);
+    var host_env = try init.environ_map.clone(a);
+    defer host_env.deinit();
+    try host_env.put("DATA_DIR", data_directory);
+    const bin_dir = try std.process.executableDirPathAlloc(io, a);
+    const reporter = comptime "ivenna-report" ++ @import("builtin").target.exeFileExt();
+    try host_env.put("IVENNA_REPORT", try std.fs.path.join(a, &.{ bin_dir, reporter }));
+    var host_tools = host.Host.init(init.gpa, io, host_directory, data_directory, &host_env, mail.callbackPublisher(), config.max_host_commands);
     defer host_tools.deinit();
     var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
     defer client.deinit();
@@ -60,6 +90,7 @@ pub fn main(init: std.process.Init) !void {
         .sender = mail.sender(),
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),
+        .subscriptions = &subscription_store,
     }, .{
         .limits = config.context_limits,
         .poll_interval_ms = config.mail_poll_interval_ms,
@@ -100,6 +131,7 @@ pub fn main(init: std.process.Init) !void {
             std.log.info("stopping Ivenna and waiting for active work", .{});
         },
     }
+    return 0;
 }
 
 fn requestStop(_: std.posix.SIG) callconv(.c) void {

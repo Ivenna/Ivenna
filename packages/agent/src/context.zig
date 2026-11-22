@@ -218,6 +218,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     try original.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Keep working on our plan.", .observed_at_unix_ms = 100 } }} } });
     var activity_id = "practice-2".*;
     var command_id = "inspect-7".*;
+    var subscription_id = "releases-4".*;
     const handover: Input.Handover = .{
         .focus_id = "core-1",
         .observed_at_unix_ms = 900,
@@ -225,12 +226,14 @@ test "candidate handover retains sampled references and leaves earlier history a
         .state = .{
             .activities = &.{&activity_id},
             .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = &command_id } } }},
+            .subscriptions = &.{&subscription_id},
         },
     };
     var replacement = try original.withHandover(std.testing.allocator, handover);
     defer replacement.deinit();
     @memset(&activity_id, 0);
     @memset(&command_id, 0);
+    @memset(&subscription_id, 0);
 
     try std.testing.expectEqual(@as(usize, 1), original.records().len);
     try std.testing.expectEqualStrings("Keep working on our plan.", original.records()[0].record.events.items[0].input.text);
@@ -241,6 +244,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     const expected_state: Input.State = .{
         .activities = &.{"practice-2"},
         .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = "inspect-7" } } }},
+        .subscriptions = &.{"releases-4"},
     };
     try std.testing.expectEqualDeep(expected_state, retained.state);
 }

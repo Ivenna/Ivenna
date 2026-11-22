@@ -59,7 +59,7 @@ Treat prompts and tool descriptions as editable interfaces:
 | Resource | Purpose |
 | --- | --- |
 | [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
-| [Agent tools](../packages/agent/src/tools.json) | External expression, opening and reaching focuses, and future attention |
+| [Agent tools](../packages/agent/src/tools.json) | Send messages, open and reach focuses, schedule wakeups, and manage subscriptions |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | Understanding to carry into a handover |
@@ -80,7 +80,9 @@ Put task facts and observations in user input. Prompts and tool descriptions sho
 
 Execution owns session state and the boundaries at which new observations can affect it. Preserve complete model/tool rounds when changing admission or scheduling. The [architecture guide](architecture.md#sessions-work-and-communication) defines registry synchronization and the lifetimes of activations, contexts, and workers.
 
-Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values and cancel and join tasks before releasing their dependencies. The owning capability manages independent resources and publishes their registered outcomes; the agent manages session lifetimes and [future observations](architecture.md#event-sources-and-callback-admission). Bind capability registrations through the invoking session's execution-owned registrar, and persist a registration before returning its callback identity.
+Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values and cancel and join tasks before releasing their dependencies. The capability manages those resources and publishes their outcomes. The agent manages session lifetimes and routes observations.
+
+Persist the receiving focus before returning a callback or subscription reference. Capabilities register callbacks through the invoking session's registrar. A report can outlive its subscription, so its destination must remain available after withdrawal. See [callback registration](architecture.md#event-sources-and-callback-admission) and [subscription delivery](architecture.md#subscription-delivery).
 
 Keep a session's identity independent of context residency, and retain its history for as long as it can resume. When handling a failure, consider what repeating the operation would do. A fresh inference can revise an unusable summary. A command that already ran has an outcome to preserve. See [runtime availability](design.md#runtime-availability).
 
@@ -96,22 +98,17 @@ Storage failures must not silently replace history with an empty context. [Start
 
 ## Repository and build
 
-| Location | Responsibility |
-| --- | --- |
-| [apps/ivenna](../apps/ivenna) | Configuration, adapter assembly, HTTP status, application startup and shutdown |
-| [apps/memory](../apps/memory) | Remote memory handler, image, and SSH entry point |
-| [packages](../packages) | Runtime libraries and their resources; see the [architecture map](architecture.md#responsibilities) for each package's interface and responsibility |
-| [dev](../dev/README.md) | Local service orchestration and instance preparation |
-
-Each Zig library declares its module and dependencies in `build.zig` and `build.zig.zon`, with public exports in `src/root.zig`. When adding or moving a unit, update its consuming build declarations, the [root package's exported source paths](../build.zig.zon), and the architecture map. `apps/ivenna` links the libraries into one executable. The memory app is a separate Nushell program; its Containerfile packages it for container use.
-
-Install the Zig version in [`.zig-version`](../.zig-version), then build the application from the repository root:
+Use the Zig version in [`.zig-version`](../.zig-version). From the repository root, build the kernel (`ivenna`) and the subscription reporter (`ivenna-report`) together.
 
 ```sh
 zig build
 ```
 
-The executable is installed at `zig-out/bin/ivenna` and embeds the [model-facing resources](#model-facing-resources). Rebuild it after editing code or those resources. The [local development guide](../dev/README.md) covers service preparation, running from source, and updating middleware; the [running guide](running.md#starting-the-kernel) covers starting the built executable.
+The [root build](../build.zig) and the [kernel application build](../apps/ivenna/build.zig) both install the two executables in `zig-out/bin`. From either build directory, `zig build run -- --help` displays the kernel's usage before you configure the services. To build and test just the reporter, run `zig build` and `zig build test` from [apps/ivenna-report](../apps/ivenna-report).
+
+Each application owns its entry point. The [memory app](../apps/memory) has a Nushell entry point and a Containerfile. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
+
+The kernel embeds its [model-facing resources](#model-facing-resources), and the reporter embeds its [command help](../apps/ivenna-report/src/help). Rebuild the corresponding executable after editing those files. For service preparation and running from source, see the [local development guide](../dev/README.md). For starting the installed kernel, see the [running guide](running.md#starting-the-kernel).
 
 ## Validation
 

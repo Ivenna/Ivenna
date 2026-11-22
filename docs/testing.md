@@ -20,7 +20,7 @@ zig build
 zig build test
 ```
 
-The Zig packages selected in the [root build](../build.zig) use Zig's built-in tests. Their package roots include internal test files through `test` blocks in `src/root.zig`; new tests in those files need to be reachable through these imports. Adding a package to this test step also requires a root build entry and a [dependency manifest](../build.zig.zon) entry.
+The [root build](../build.zig) runs the registered Zig library and application tests. Library roots include internal test files through `test` blocks in `src/root.zig`. Adding a package to the test step requires a root build entry and a [dependency manifest](../build.zig.zon) entry.
 
 For the [memory protocol tests](../apps/memory/tests.nu), install Nushell at the version used in the memory [Containerfile](../apps/memory/Containerfile). These tests also use the standard `ln` command:
 
@@ -40,4 +40,12 @@ Both the email and Responses adapter tests cover cancellation over plain HTTP. T
 
 The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The session registry tests use a history store that can report a failed save after receiving the checkpoint. They check that activity completion publishes once and that a later maintenance pass republishes the same selection when confirmation was lost.
 
-Restoring a focus after a process restart and communicating with configured services require checking the running application. See [validation across runtime boundaries](development.md#validation) and the [local development guide](../dev/README.md).
+The CLI tests invoke both executables in an empty environment to verify that help works before configuration. For a mistyped reporter command, they check the JSON receipt on stdout and the diagnostic on stderr.
+
+For process restart and communication through the configured services, exercise the running application in the [local development environment](../dev/README.md). See [validation across runtime boundaries](development.md#validation).
+
+### Subscription delivery
+
+- **Listener process.** Each request runs the reporter in a separate process against a temporary on-disk catalog. The tests check receipts and exit status for publication, same-key retries, cursor changes, invalid fields, and publication after withdrawal. See the [reporter process tests](../apps/ivenna-report/src/report_test.zig).
+- **Subscription store.** Two SQLite connections exercise publication and withdrawal. The tests check that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. See the [store tests](../packages/subscriptions/src/root.zig).
+- **Focus history.** The kernel tests cover ordered admission across pages, later arrivals, tight input budgets, interrupted admission, and withdrawal of a sleeping activity's last subscription. To exercise recovery, they inject a failure before checkpoint commit or a lost confirmation after commit. In each case they rebuild the kernel against the same test history store and in-memory SQLite catalog and check that the receiving history contains the report exactly once. See the [kernel tests](../packages/agent/src/kernel.zig).

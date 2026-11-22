@@ -108,7 +108,7 @@ podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml up -d --w
 zig build run
 ```
 
-Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers. `zig build run` builds and runs the kernel. Keep it running in this terminal and use one kernel per mailbox.
+Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers. `zig build run` installs `ivenna` and `ivenna-report` in `zig-out/bin`, then starts the kernel. Keep it running in this terminal. Each kernel needs its own mailbox and `DATA_DIR`.
 
 From a second terminal, check reception at the default listener address:
 
@@ -141,6 +141,18 @@ With the supplied readiness policy installed, this command receives a `550` reje
 
 Read messages from Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna chooses whether and when to reply. See the [usage guide](../docs/usage.md) for continuing correspondence and interpreting responses.
 
+## Trying a subscription listener
+
+Once a focus has [registered a subscription](../docs/attention.md#subscriptions), use the returned ID to try the [listener protocol](../docs/subscriptions.md). In another terminal at the repository root, [load the instance configuration](#configuration) to export the kernel's `DATA_DIR`. Set the reporter path and replace the example ID with the one the focus returned.
+
+```sh
+export IVENNA_REPORT="$PWD/zig-out/bin/ivenna-report"
+subscription_id='releases-1'
+"$IVENNA_REPORT" inspect "$subscription_id"
+```
+
+The result shows the receiving focus and saved cursor. A `null` result means the ID is unknown or withdrawn. To keep collecting across kernel stops, see [listener deployment](../docs/running.md#subscription-listeners).
+
 ## Stopping and restarting
 
 Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how running host commands stop, and how Ivenna continues interrupted work.
@@ -159,9 +171,9 @@ Keep the same instance directory and [load its configuration](#configuration) fo
 
 ### Kernel
 
-The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Before running an updated executable against an existing mailbox, check the [history-format requirements](../docs/running.md#updating-the-executable). After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild and restart it.
+The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Check the [storage format requirements](../docs/running.md#updating-the-executable) before updating an existing instance. After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild both executables and restart it.
 
-To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Check history compatibility before resuming and rebuild memory if its sources changed. The new checkout becomes the default directory for host commands.
+To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Point any independent listeners at the new checkout's `zig-out/bin/ivenna-report`. Rebuild memory if its sources changed. The new checkout becomes the default directory for host commands.
 
 ### Memory
 
@@ -215,5 +227,6 @@ For another memory deployment, configure capacity at its [service entry point](.
 | `$DEV_INSTANCE_DIR/mail/provision.ndjson` | Private mail configuration plan |
 | `$DEV_INSTANCE_DIR/memory/` | Local memory SSH configuration and keys |
 | `<DATA_DIR>/host/` | Full host command output |
+| `<DATA_DIR>/subscriptions.sqlite3` | Subscription catalog, listener progress, and pending observations |
 
-The example places host output under `$DEV_INSTANCE_DIR/data/`; `DATA_DIR` can select another location. Changing it leaves SSH files and middleware volumes in place. Container removal and recreation preserve the external volumes and private instance files. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.
+The example sets `DATA_DIR` to `$DEV_INSTANCE_DIR/data/`. When moving the instance, [back up the subscription database and mailbox together](../docs/running.md#backups-and-transfers). Container removal and recreation preserve the external volumes and private instance files. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.
