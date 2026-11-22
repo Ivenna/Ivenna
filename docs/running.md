@@ -4,7 +4,7 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 ## Runtime requirements
 
-Install `ivenna` and `ivenna-report` from the same build in the same directory. The kernel locates the reporter beside its executable and gives host commands its absolute path in `IVENNA_REPORT`. Host commands run as the kernel's OS account. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+Install `ivenna` and `ivenna-report` from the same build in the same directory so the kernel can locate the reporter for host commands. Host commands run as the kernel's OS account. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
@@ -151,11 +151,11 @@ Startup reads and validates all selected session history, including sleeping ses
 
 ## Subscription listeners
 
-When a focus registers a [subscription](attention.md#subscriptions), give the returned `subscription_id` to the program that watches the source. The listener invokes `ivenna-report` with that ID to send observations to the subscribing focus.
+Start the program that watches the source and give it the `subscription_id` returned when a focus [registers the subscription](attention.md#subscriptions). When the subscription is withdrawn, stop the listener if it has no other work.
 
-A listener launched as a host command inherits `IVENNA_REPORT` and `DATA_DIR` and stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs.
+A listener running as a host command inherits the reporter's absolute path in `IVENNA_REPORT` and the kernel's data directory in `DATA_DIR`. It stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs.
 
-To keep collecting while the kernel is stopped, run the listener independently, for example under a service manager on the same host. Give it the installed reporter's path and set `DATA_DIR` to the kernel's data directory. Use an absolute path if the two programs start in different working directories. The listener needs write access to this directory. Keep access limited to trusted processes. For examples of publishing a report and resuming from a saved cursor, see the [listener protocol](subscriptions.md).
+To keep collecting while the kernel is stopped, run the listener independently, for example under a service manager on the same host. Give it the path to the installed `ivenna-report` and point its `DATA_DIR` at the directory the kernel initialized. An absolute path works even when the two programs start in different directories. The reporter needs read and write access to the existing subscription database and its directory. Limit that access to trusted processes. Reports accepted during downtime are available to their subscribing focus after restart. See the [listener protocol](subscriptions.md) for publication and cursor recovery.
 
 ## Service status and reception
 
@@ -214,9 +214,9 @@ Host processes and command handles are not restored, and commands are not replay
 
 ### Updating the executable
 
-The kernel must be able to read the saved [working history](architecture.md#persistent-working-history). The kernel and reporter must both support the subscription database format. Before updating an existing deployment across a storage-format change, preserve a [complete backup](#backups-and-transfers) and keep the matching kernel and reporter. To start a fresh instance, give it its own mailbox and `DATA_DIR`.
+Before updating across a storage-format change, preserve a [complete backup](#backups-and-transfers) and keep the executables that can read it. To resume [saved history](architecture.md#persistent-working-history), the current kernel requires a mailbox checkpoint that identifies its subscription database. To start fresh with the current build, give it a separate mailbox and `DATA_DIR`.
 
-If either binary reports `IncompatibleSubscriptionSchema`, check that `DATA_DIR` points to the intended instance and use the build that wrote the database. A saved mailbox checkpoint also identifies its subscription database. See [stopping and restarting](#stopping-and-restarting) for a catalog mismatch.
+If either binary reports `IncompatibleSubscriptionSchema`, check that `DATA_DIR` points to the intended instance and that both the kernel and reporter support its database format. For `SubscriptionCatalogMismatch`, check the [mailbox and database pairing](#stopping-and-restarting).
 
 Older configurations may contain `LLM_MAX_ATTEMPTS`. The kernel now ignores this setting and continues retrying temporary inference failures. `LLM_REQUEST_TIMEOUT_MS` limits each attempt. See [model request settings](#model-requests).
 
@@ -234,7 +234,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | `<DATA_DIR>/subscriptions.sqlite3` | Subscription registrations, listener cursors, accepted report keys, and reports awaiting history admission |
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
-Pending subscription reports occupy local disk space until the kernel acknowledges delivery. The subscription database retains each accepted report key until withdrawal so listeners can retry after delivery.
+Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
 
@@ -285,7 +285,7 @@ Preserve the host artifact or memory entry when it needs to outlive selected wor
 
 ### Backups and transfers
 
-Back up the mailbox and subscription database together. The mailbox records which reports have entered each focus's history. A newer database may already have discarded a report that is still missing from an older mailbox.
+Back up the mailbox and subscription database together. Startup checks the database identity, which stays the same across snapshots of an instance. Pairing an older mailbox with a newer database can lose a report if the database already removed it and the mailbox snapshot predates its admission.
 
 If taking the backups separately, stop the kernel before saving either store and leave it stopped until both backups finish. Use a SQLite backup of `<DATA_DIR>/subscriptions.sqlite3`. To copy the database files directly, pause independent listeners too and include any SQLite journal files with the database.
 

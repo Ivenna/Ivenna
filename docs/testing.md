@@ -40,10 +40,12 @@ Both the email and Responses adapter tests cover cancellation over plain HTTP. T
 
 The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The session registry tests use a history store that can report a failed save after receiving the checkpoint. They check that activity completion publishes once and that a later maintenance pass republishes the same selection when confirmation was lost.
 
-The CLI tests invoke both executables in an empty environment to verify that help works before configuration. For a mistyped reporter command, they check the JSON receipt on stdout and the diagnostic on stderr. With a temporary catalog, the reporter tests check replies and exit status when a listener publishes, retries a report, changes a cursor, supplies a field of the wrong type, or uses a withdrawn subscription. See the [reporter process tests](../apps/ivenna-report/src/report_test.zig).
-
-The store tests use separate SQLite connections to check cursor conflict rollback, duplicate detection after acknowledgement, and the destination of reports accepted before withdrawal. See the [subscription store tests](../packages/subscriptions/src/root.zig).
-
-The kernel tests check that one focus can admit several pages of reports in order, that later arrivals wait for the following input, and that other ready sources receive input space under a tight budget. They also exercise interrupted admission, withdrawal of a sleeping activity's last subscription, and checkpoints whose confirmation was lost. In separate cases a checkpoint fails before commit or loses confirmation after commit. The tests reconstruct the kernel against the same test history and catalog and check that the report appears exactly once in the receiving history. See the [kernel tests](../packages/agent/src/kernel.zig).
+The CLI tests invoke both executables in an empty environment to verify that help works before configuration. For a mistyped reporter command, they check the JSON receipt on stdout and the diagnostic on stderr.
 
 For process restart and communication through the configured services, exercise the running application in the [local development environment](../dev/README.md). See [validation across runtime boundaries](development.md#validation).
+
+### Subscription delivery
+
+- **Listener process.** Each request runs the reporter in a separate process against a temporary on-disk catalog. The tests check receipts and exit status for publication, same-key retries, cursor changes, invalid fields, and publication after withdrawal. See the [reporter process tests](../apps/ivenna-report/src/report_test.zig).
+- **Subscription store.** Two SQLite connections exercise publication and withdrawal. The tests check that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. See the [store tests](../packages/subscriptions/src/root.zig).
+- **Focus history.** The kernel tests cover ordered admission across pages, later arrivals, tight input budgets, interrupted admission, and withdrawal of a sleeping activity's last subscription. To exercise recovery, they inject a failure before checkpoint commit or a lost confirmation after commit. In each case they rebuild the kernel against the same test history store and in-memory SQLite catalog and check that the receiving history contains the report exactly once. See the [kernel tests](../packages/agent/src/kernel.zig).

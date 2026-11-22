@@ -6,7 +6,7 @@ The core is Ivenna's continuing focus of attention. Each activity it opens start
 
 People and programs correspond with Ivenna through messages. Ivenna observes who said what, chooses how to act, and decides when to write and whom to address. See [communication](docs/communication.md).
 
-The core can schedule a wakeup, and an activity can resume when its host command finishes. Either can subscribe to a source such as a project's release feed. A listener reports new versions to the focus that subscribed. A report can wake a sleeping focus, and one turn can bring several reports together. See [subscriptions](docs/attention.md#subscriptions).
+The core can schedule a wakeup, and an activity can resume when its host command finishes. Both can subscribe to a source such as a project's release feed. A separate listener watches the feed and reports new versions to the focus that subscribed. A report can wake that focus, and one turn can include several reports. See [registering a subscription](docs/attention.md#subscriptions) and [writing a listener](docs/subscriptions.md).
 
 The current implementation uses email for correspondence and working history, shared [memory rooms](docs/memory.md) over SSH, and [host commands](docs/host.md) for activities. Communication and memory must be available for it to run. The deployment user owns the records, memory, and artifacts; the [running guide](docs/running.md) describes service requirements and retained data.
 

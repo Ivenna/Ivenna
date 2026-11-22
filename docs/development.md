@@ -59,7 +59,7 @@ Treat prompts and tool descriptions as editable interfaces:
 | Resource | Purpose |
 | --- | --- |
 | [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
-| [Agent tools](../packages/agent/src/tools.json) | External expression, opening and reaching focuses, and future attention |
+| [Agent tools](../packages/agent/src/tools.json) | Send messages, open and reach focuses, schedule wakeups, and manage subscriptions |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | Understanding to carry into a handover |

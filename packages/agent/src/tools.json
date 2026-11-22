@@ -102,7 +102,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Register this focus to receive reports from a listener. Set up the listener separately and give it the returned subscription_id. A report can wake this focus, and one turn can include several reports. An activity can run \"$IVENNA_REPORT\" --help for reporting commands and examples.",
+    "description": "Create a subscription for this focus. Each call returns a new subscription_id to give to a listener you set up separately. A report can wake this focus, and one turn can include several reports. An activity can run \"$IVENNA_REPORT\" --help for reporting commands and examples.",
     "parameters": {
       "type": "object",
       "properties": {

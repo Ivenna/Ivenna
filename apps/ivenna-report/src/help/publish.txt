@@ -19,6 +19,3 @@ Send one JSON object on stdin with these fields.
                        from -62167219200000 through 253402300799000.
   cursor               Optional cursor change to commit with the observation.
                        Omitting it leaves the saved position in place.
-
-If the write may have committed before you received a complete receipt,
-publish again with the original key.

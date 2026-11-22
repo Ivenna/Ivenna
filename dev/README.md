@@ -118,12 +118,6 @@ curl --include http://127.0.0.1:8090/readyz
 
 Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the URL if you changed the listener. See [service status](../docs/running.md#service-status-and-reception) for startup and reception behavior. The kernel terminal shows [JMAP request failures](../docs/running.md#when-a-mail-request-fails). The mail and memory services write their own logs.
 
-To run the [subscription listener examples](../docs/subscriptions.md) in another terminal, export the kernel's `DATA_DIR` from the [instance configuration](#configuration) and use the ID returned by the subscribing focus. From the repository root, set the executable path for the examples.
-
-```sh
-export IVENNA_REPORT="$PWD/zig-out/bin/ivenna-report"
-```
-
 ## Sending a message
 
 The operator account provides the `operator` correspondent ID for the local mailbox. Its sender address must use the domain of `MAIL_ADDRESS`; see [supported addressing](../docs/communication.md#current-email-addressing). With reception open, [load the instance configuration](#configuration) in a second terminal and submit through the local SMTP endpoint:
@@ -146,6 +140,18 @@ EOF
 With the supplied readiness policy installed, this command receives a `550` rejection when reception is closed or unreachable. The [mail setup](#configuring-mail) describes the policy's scope.
 
 Read messages from Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna chooses whether and when to reply. See the [usage guide](../docs/usage.md) for continuing correspondence and interpreting responses.
+
+## Trying a subscription listener
+
+Once a focus has [registered a subscription](../docs/attention.md#subscriptions), use the returned ID to try the [listener protocol](../docs/subscriptions.md). In another terminal at the repository root, [load the instance configuration](#configuration) to export the kernel's `DATA_DIR`. Set the reporter path and replace the example ID with the one the focus returned.
+
+```sh
+export IVENNA_REPORT="$PWD/zig-out/bin/ivenna-report"
+subscription_id='releases-1'
+"$IVENNA_REPORT" inspect "$subscription_id"
+```
+
+The result shows the receiving focus and saved cursor. A `null` result means the ID is unknown or withdrawn. To keep collecting across kernel stops, see [listener deployment](../docs/running.md#subscription-listeners).
 
 ## Stopping and restarting
 

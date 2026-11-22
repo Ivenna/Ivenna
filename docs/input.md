@@ -121,11 +121,11 @@ A restored host source can identify an execution in an earlier runtime; its comm
 
 #### Subscription observations
 
-Each `subscription` event carries one listener report addressed to the focus that subscribed. A turn can carry reports from several subscriptions or several reports from one subscription.
+Each `subscription` event carries one listener report to the focus that subscribed. Reports for that focus appear in acceptance order across its subscriptions.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `subscription_id` | `Text` | Complete reference returned at registration |
+| `subscription_id` | `Text` | Complete reference returned by `subscribe`, shared by all reports for that subscription |
 | `observed_at` | `Time` | Time the local reporter received the submission |
 | `source_time` | `Time`, when supplied | Time the listener attributes to the upstream event |
 | `text` | `Text` | Listener's account of what it observed |

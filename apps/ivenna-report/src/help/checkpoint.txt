@@ -5,6 +5,3 @@ report. Send the cursor change as one JSON object on stdin. For example, if
 inspect returns cursor "17" and the listener skips item 18, run
 
   printf '%s\n' '{"from":"17","to":"18"}' | "$IVENNA_REPORT" checkpoint releases-1
-
-If the write may have committed before you received a complete receipt, use
-inspect to read the saved cursor before deciding whether to retry.

@@ -64,7 +64,7 @@ The focus admits each callback at most once. The email adapter preserves the fir
 
 ## Subscriptions
 
-Call `subscribe` in the focus that should receive the reports. Use the `listener` field to describe the source and when to report. The description can include where to find the listener program or its configuration. In this example, the core follows release announcements across assignments.
+Call `subscribe` in the focus that should receive the reports. Describe in `listener` what to watch and when to report, such as once per release or in a daily digest. The description can include where to find the listener program or its configuration. In this example, the core follows release announcements across assignments.
 
 ```json
 {
@@ -73,19 +73,19 @@ Call `subscribe` in the focus that should receive the reports. Use the `listener
 }
 ```
 
-The tool returns a reference for that focus's subscription.
+Each call creates a subscription and returns its complete reference, even if this focus already follows the same source.
 
 ```json
 {"result":{"subscription_id":"releases-1"}}
 ```
 
-Set up the listener separately and give it the complete `subscription_id`. If an activity runs the listener for `releases-1` on the host, its reports still go to the core. The listener can publish selected changes as they happen or combine them into one report, such as a daily digest. See the [listener protocol](subscriptions.md).
+Set up the listener separately and give it the returned `subscription_id`. If an activity runs the listener for `releases-1` on the host, its reports still go to the core. A replacement listener can use the same ID to resume from the saved feed position. See the [listener protocol](subscriptions.md).
 
-An accepted report makes a sleeping focus ready. A working focus can read it after its current model/tool round. One turn can include several reports in acceptance order alongside other observations. Reports beyond the input budget stay queued for later turns. See [subscription observations](input.md#subscription-observations).
+An accepted report makes a sleeping focus ready. A working focus can read several reports alongside other observations after its current model/tool round. Reports beyond the input budget stay queued for later turns. See [subscription observations](input.md#subscription-observations).
 
-Subscriptions survive sleep and restart. The focus can find its active subscription IDs in the [state sampled for a handover](input.md#sampled-state). A replacement listener can use the same reference and [resume from the saved cursor](subscriptions.md#resume-from-a-cursor).
+Subscriptions survive sleep and restart. The focus can find its active subscription IDs in the [state sampled for a handover](input.md#sampled-state).
 
-Any focus can call `withdraw_subscription` with the complete `subscription_id`. The result echoes the ID. `changed` is `true` if this call closed an active subscription and `false` otherwise. Reports accepted before withdrawal still reach the subscribing focus. Stop the listener separately if needed.
+Any focus can call `withdraw_subscription` with the complete `subscription_id`. The result echoes the ID. The `changed` field is `true` when the call closes an active subscription and `false` for an unknown or previously withdrawn ID. Reports accepted before withdrawal still reach the subscribing focus. Stop the listener separately if needed.
 
 ## Results and errors
 

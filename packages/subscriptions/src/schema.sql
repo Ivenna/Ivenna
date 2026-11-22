@@ -23,6 +23,8 @@ CREATE TABLE reports (
     received INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX reports_by_focus ON reports(focus_id);
+-- Keep keys until withdrawal so a listener that loses its receipt can retry
+-- even after the focus receives the report. See docs/subscriptions.md#withdrawal.
 CREATE TABLE accepted_report_keys (
     subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
     key TEXT NOT NULL,
