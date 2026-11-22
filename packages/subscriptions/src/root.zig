@@ -1,151 +1,145 @@
 const std = @import("std");
 const sql = @import("db.zig");
-const c = sql.c;
-const Statement = sql.Statement;
+const zqlite = @import("zqlite");
+const c = zqlite.c;
 const Allocator = std.mem.Allocator;
 const Reference = @import("agent_contracts").Reference;
 
-pub const Reminder = enum { immediate, next_input };
-pub const Retrieval = enum { unavailable, current, version };
 pub const filename = "subscriptions.sqlite3";
+const schema_version = 2;
+pub const Reminder = enum { immediate, next_input };
+
+pub const Created = struct {
+    subscription_id: []const u8,
+};
+
 pub const Subscription = struct {
     subscription_id: []const u8,
     focus_id: []const u8,
-    reminder: Reminder,
     listener: []const u8,
-    active: bool,
-    external: bool,
-    status: ?[]const u8,
-    progress: ?[]const u8,
-    pending: u64,
-};
-
-/// The references and reminder policies a focus needs to recognize its
-/// registrations. Inactive entries still have an outstanding external follow.
-pub const Registration = struct {
-    subscription_id: []const u8,
-    focus_id: []const u8,
     reminder: Reminder,
-    active: bool,
-
-    fn read(a: Allocator, s: Statement) !Registration {
-        return .{
-            .subscription_id = try s.copy(a, 0),
-            .focus_id = try s.copy(a, 1),
-            .reminder = try s.tag(Reminder, 2),
-            .active = s.number(3) != 0,
-        };
-    }
+    cursor: ?[]const u8,
 };
 
 pub const Report = struct {
     sequence: u64,
     reference: []const u8,
     text: []const u8,
-    handle: ?[]const u8,
-    retrieval: Retrieval,
-    version: ?[]const u8,
-    truncated: bool,
     source_time_unix_ms: ?i64,
     observed_at_unix_ms: i64,
+};
+
+pub const Cursor = struct {
+    from: ?[]const u8 = null,
+    to: []const u8,
+
+    fn validate(self: Cursor) !void {
+        if (self.from) |from| if (!std.unicode.utf8ValidateSlice(from)) return error.InvalidArguments;
+        if (!std.unicode.utf8ValidateSlice(self.to)) return error.InvalidArguments;
+    }
 };
 
 pub const NewReport = struct {
     key: []const u8,
     text: []const u8,
-    progress: ?[]const u8 = null,
-    expected_progress: ?[]const u8 = null,
-    handle: ?[]const u8 = null,
-    retrieval: Retrieval = .unavailable,
-    version: ?[]const u8 = null,
-    truncated: bool = false,
     source_time_unix_ms: ?i64 = null,
+    cursor: ?Cursor = null,
 };
 pub const PublishResult = enum { accepted, duplicate };
-pub const Checkpoint = struct {
-    progress: ?[]const u8 = null,
-    expected_progress: ?[]const u8 = null,
-    status: ?[]const u8 = null,
-    external: ?bool = null,
-};
 
-/// One connection per process or serialized client. Independent connections
-/// share SQLite's commit order, including producers running with the kernel down.
-/// Callers supply an arena for query results and serialize calls on each Store.
+/// Each Store owns one SQLite connection. Serialize calls on a shared Store
+/// and supply an arena for query results. The kernel and independent reporters
+/// open separate connections to the same catalog.
 pub const Store = struct {
-    db: *c.sqlite3,
+    db: zqlite.Conn,
 
     pub fn open(a: Allocator, path: []const u8) !Store {
         var self = try connect(a, path, true);
         errdefer self.close();
+        // Claim an empty file and install its format in one write transaction.
+        // Another opener can observe only the empty file or the complete catalog.
+        try self.exec("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        const version = try self.integer("PRAGMA user_version", .{});
+        if (version != schema_version) {
+            if (version != 0 or try self.integer("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
+                return error.IncompatibleSubscriptionSchema;
+            try self.exec(@embedFile("schema.sql"));
+            try self.exec(std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
+        }
+        try self.exec("COMMIT");
         try self.exec("PRAGMA journal_mode=WAL");
-        try self.exec(@embedFile("schema.sql"));
         return self;
     }
 
     /// A producer opens a provisioned store. A mistyped DATA_DIR must not
     /// create a new stream of identifiers.
     pub fn openExisting(a: Allocator, path: []const u8) !Store {
-        return connect(a, path, false);
+        var self = try connect(a, path, false);
+        errdefer self.close();
+        if (try self.integer("PRAGMA user_version", .{}) != schema_version) return error.IncompatibleSubscriptionSchema;
+        return self;
     }
 
     fn connect(a: Allocator, path: []const u8, initialize: bool) !Store {
         if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
         const path_z = try a.dupeSentinel(u8, path, 0);
         defer a.free(path_z);
-        var db: ?*c.sqlite3 = null;
-        const rc = c.sqlite3_open_v2(path_z.ptr, &db, c.SQLITE_OPEN_READWRITE | @as(c_int, if (initialize) c.SQLITE_OPEN_CREATE else 0), null);
-        errdefer if (db) |ptr| {
-            _ = c.sqlite3_close(ptr);
-        };
-        try sql.check(rc);
-        var self = Store{ .db = db.? };
-        try sql.check(c.sqlite3_busy_timeout(self.db, 5000));
+        const flags = c.SQLITE_OPEN_READWRITE | @as(c_int, if (initialize) c.SQLITE_OPEN_CREATE else 0);
+        var self = Store{ .db = try sql.open(path_z, flags) };
+        errdefer self.close();
+        try sql.checked(self.db.busyTimeout(5000));
         try self.exec("PRAGMA foreign_keys=ON");
         try self.exec("PRAGMA synchronous=FULL");
         return self;
     }
 
     pub fn close(self: *Store) void {
-        std.debug.assert(c.sqlite3_close(self.db) == c.SQLITE_OK);
+        self.db.close();
         self.* = undefined;
     }
 
     fn exec(self: *Store, query: [:0]const u8) !void {
-        try sql.check(c.sqlite3_exec(self.db, query.ptr, null, null, null));
+        try sql.checked(self.db.execNoArgs(query.ptr));
     }
 
     fn rollback(self: *Store) void {
-        if (c.sqlite3_get_autocommit(self.db) != 0) return;
+        if (c.sqlite3_get_autocommit(self.db.conn) != 0) return;
         self.exec("ROLLBACK") catch |err| std.log.err("subscription rollback failed: {s}", .{@errorName(err)});
     }
 
-    fn statement(self: *Store, query: [:0]const u8, args: anytype) !Statement {
-        const s = try Statement.init(self.db, query);
+    fn statement(self: *Store, query: [:0]const u8, args: anytype) !zqlite.Stmt {
+        // The wrapper binds text with the 32-bit sqlite3_bind_text API.
+        inline for (args) |arg| {
+            if (@TypeOf(arg) == []const u8 or @TypeOf(arg) == ?[]const u8) {
+                if (@as(?[]const u8, arg)) |value| if (value.len > std.math.maxInt(c_int)) return error.InvalidArguments;
+            }
+        }
+        const s = try sql.checked(self.db.prepare(query));
         errdefer s.deinit();
-        try s.bind(args);
+        try sql.checked(s.bind(args));
         return s;
     }
 
     fn change(self: *Store, query: [:0]const u8, args: anytype) !bool {
         const s = try self.statement(query, args);
         defer s.deinit();
-        if (try s.next()) return error.InvalidSubscriptionDatabase;
-        return c.sqlite3_changes(self.db) != 0;
+        try sql.checked(s.stepToCompletion());
+        return self.db.changes() != 0;
     }
 
     fn integer(self: *Store, query: [:0]const u8, args: anytype) !u64 {
         const s = try self.statement(query, args);
         defer s.deinit();
-        if (!try s.next()) return error.InvalidSubscriptionDatabase;
-        return s.unsigned(0);
+        if (!try sql.checked(s.step())) return error.InvalidSubscriptionDatabase;
+        return sql.unsigned(s.int(0));
     }
 
     pub fn identity(self: *Store) ![32]u8 {
         const s = try self.statement("SELECT identity FROM metadata WHERE singleton=1", .{});
         defer s.deinit();
-        if (!try s.next()) return error.InvalidSubscriptionDatabase;
-        const id = try s.text(0);
+        if (!try sql.checked(s.step())) return error.InvalidSubscriptionDatabase;
+        const id = try sql.text(s, 0);
         if (id.len != 32) return error.InvalidSubscriptionDatabase;
         return id[0..32].*;
     }
@@ -158,191 +152,132 @@ pub const Store = struct {
         _ = try self.change("UPDATE metadata SET bound=1 WHERE singleton=1", .{});
     }
 
-    pub fn create(self: *Store, a: Allocator, owner: u64, focus_id: []const u8, name: []const u8, reminder: Reminder, listener: []const u8) !Registration {
-        if (!Reference.validName(name) or !validText(listener, null)) return error.InvalidArguments;
+    pub fn create(self: *Store, a: Allocator, focus_id: []const u8, name: []const u8, reminder: Reminder, listener: []const u8) !Created {
+        if (!Reference.validName(name) or !validText(listener)) return error.InvalidArguments;
         try self.exec("BEGIN IMMEDIATE");
         errdefer self.rollback();
         const s = try self.statement(
-            \\INSERT INTO subscriptions(name,session_id,focus_id,reminder,listener) VALUES(?,?,?,?,?)
-            \\RETURNING reference,focus_id,reminder,active
-        , .{ name, owner, focus_id, reminder, listener });
+            "INSERT INTO subscriptions(focus_id,name,reminder,listener) VALUES(?,?,?,?) RETURNING reference",
+            .{ focus_id, name, @tagName(reminder), listener },
+        );
         defer s.deinit();
-        if (!try s.next()) return error.InvalidSubscriptionDatabase;
-        const row = try Registration.read(a, s);
-        if (try s.next()) return error.InvalidSubscriptionDatabase;
+        if (!try sql.checked(s.step())) return error.InvalidSubscriptionDatabase;
+        const reference = try sql.copyText(a, s, 0);
+        try sql.checked(s.stepToCompletion());
         try self.exec("COMMIT");
-        return row;
+        return .{ .subscription_id = reference };
     }
 
-    pub fn registrations(self: *Store, a: Allocator, owner: ?u64) ![]const Registration {
-        const query = "SELECT reference,focus_id,reminder,active FROM subscriptions";
-        const s = if (owner) |id|
-            try self.statement(query ++ " WHERE session_id=? ORDER BY id", .{id})
-        else
-            try self.statement(query ++ " ORDER BY id", .{});
+    pub fn hasActive(self: *Store, focus_id: []const u8) !bool {
+        return try self.integer("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE focus_id=?)", .{focus_id}) != 0;
+    }
+
+    pub fn activeReferences(self: *Store, a: Allocator, focus_id: []const u8) ![]const []const u8 {
+        const s = try self.statement("SELECT reference FROM subscriptions WHERE focus_id=? ORDER BY id", .{focus_id});
         defer s.deinit();
-        var rows: std.ArrayList(Registration) = .empty;
-        while (try s.next()) try rows.append(a, try Registration.read(a, s));
-        return rows.toOwnedSlice(a);
+        var references: std.ArrayList([]const u8) = .empty;
+        while (try sql.checked(s.step())) try references.append(a, try sql.copyText(a, s, 0));
+        return references.toOwnedSlice(a);
     }
 
     pub fn inspect(self: *Store, a: Allocator, reference: []const u8) !?Subscription {
-        const s = try self.statement(
-            \\SELECT reference, focus_id, reminder, listener, active, external, status, progress,
-            \\       (SELECT count(*) FROM reports WHERE reports.reference=subscriptions.reference)
-            \\FROM subscriptions WHERE reference=?
-        , .{reference});
+        const s = try self.statement("SELECT reference,focus_id,listener,reminder,cursor FROM subscriptions WHERE reference=?", .{reference});
         defer s.deinit();
-        if (!try s.next()) return null;
+        if (!try sql.checked(s.step())) return null;
         return .{
-            .subscription_id = try s.copy(a, 0),
-            .focus_id = try s.copy(a, 1),
-            .reminder = try s.tag(Reminder, 2),
-            .listener = try s.copy(a, 3),
-            .active = s.number(4) != 0,
-            .external = s.number(5) != 0,
-            .status = try s.optionalText(a, 6),
-            .progress = try s.optionalText(a, 7),
-            .pending = try s.unsigned(8),
+            .subscription_id = try sql.copyText(a, s, 0),
+            .focus_id = try sql.copyText(a, s, 1),
+            .listener = try sql.copyText(a, s, 2),
+            .reminder = std.meta.stringToEnum(Reminder, try sql.text(s, 3)) orelse return error.InvalidSubscriptionDatabase,
+            .cursor = if (s.columnType(4) == .null) null else try sql.copyText(a, s, 4),
         };
     }
 
-    pub fn withdraw(self: *Store, owner: ?u64, reference: []const u8) !bool {
-        try self.exec("BEGIN IMMEDIATE");
-        errdefer self.rollback();
-        const found = try self.change("UPDATE subscriptions SET active=0 WHERE reference=?1 AND active AND (?2 IS NULL OR session_id=?2)", .{ reference, owner });
-        if (found) {
-            _ = try self.change("DELETE FROM producer_keys WHERE subscription_id=(SELECT id FROM subscriptions WHERE reference=?)", .{reference});
-            _ = try self.change("DELETE FROM subscriptions WHERE reference=? AND NOT external", .{reference});
-        }
-        try self.exec("COMMIT");
-        return found;
+    pub fn withdraw(self: *Store, reference: []const u8) !bool {
+        return self.change("DELETE FROM subscriptions WHERE reference=?", .{reference});
     }
 
-    /// Accept a report for an active registration and advance its source cursor
-    /// in one transaction. Retrying its key preserves the committed cursor.
+    /// Capture the registration's destination and reminder together with
+    /// the report, its retry key and any cursor advance.
     pub fn publish(self: *Store, reference: []const u8, report: NewReport, received_unix_ms: i64) !PublishResult {
-        if (!validText(report.key, 256) or !validText(report.text, 2048) or
-            !validOptional(report.handle, 512) or !validOptional(report.version, 512) or
-            (report.handle == null) != (report.retrieval == .unavailable) or
-            !validInstant(report.source_time_unix_ms) or !validInstant(received_unix_ms))
+        if (report.text.len > 2048 or !validText(report.text) or !validText(report.key))
             return error.InvalidArguments;
-        try validateProgress(report.expected_progress, report.progress);
+        // The model renders source timestamps as four-digit UTC years. zdt
+        // accepts milliseconds through the start of the final second.
+        if (report.source_time_unix_ms) |ms| if (ms < -62_167_219_200_000 or ms > 253_402_300_799_000)
+            return error.InvalidArguments;
+        if (report.cursor) |cursor| try cursor.validate();
         try self.exec("BEGIN IMMEDIATE");
         errdefer self.rollback();
-        const s = try self.statement("SELECT id,progress FROM subscriptions WHERE reference=? AND active", .{reference});
-        defer s.deinit();
-        if (!try s.next()) return error.SubscriptionWithdrawn;
-        const id = try s.unsigned(0);
         const registered = try self.change(
-            \\INSERT INTO producer_keys(subscription_id,key) VALUES(?,?)
+            \\INSERT INTO accepted_report_keys(subscription_id,key) SELECT id,? FROM subscriptions WHERE reference=?
             \\ON CONFLICT(subscription_id,key) DO NOTHING
-        , .{ id, report.key });
+        , .{ report.key, reference });
         if (!registered) {
+            try self.requireRegistration(reference);
             try self.exec("COMMIT");
             return .duplicate;
         }
-        if (report.progress != null and !try progressMatches(s, 1, report.expected_progress)) return error.ProgressConflict;
+        if (report.cursor) |cursor| try self.advanceCursor(reference, cursor);
         _ = try self.change(
-            \\INSERT INTO reports(reference,session_id,reminder,text,handle,retrieval,version,truncated,source_time,received)
-            \\SELECT reference,session_id,reminder,?2,?3,?4,?5,?6,?7,?8 FROM subscriptions WHERE id=?1
-        , .{ id, report.text, report.handle, report.retrieval, report.version, report.truncated, report.source_time_unix_ms, received_unix_ms });
-        if (report.progress) |next| _ = try self.change("UPDATE subscriptions SET progress=? WHERE id=?", .{ next, id });
+            \\INSERT INTO reports(reference,focus_id,reminder,text,source_time,received)
+            \\SELECT reference,focus_id,reminder,?,?,? FROM subscriptions WHERE reference=?
+        , .{ report.text, report.source_time_unix_ms, received_unix_ms, reference });
         try self.exec("COMMIT");
         return .accepted;
     }
 
-    /// A listener may advance through filtered events or record upstream state
-    /// without waking its owner. After local withdrawal only closure/status
-    /// for an outstanding external relationship is accepted.
-    pub fn checkpoint(self: *Store, reference: []const u8, value: Checkpoint) !void {
-        if ((value.progress == null and value.status == null and value.external == null) or
-            !validOptional(value.status, 512)) return error.InvalidArguments;
-        try validateProgress(value.expected_progress, value.progress);
-        try self.exec("BEGIN IMMEDIATE");
-        errdefer self.rollback();
-        const s = try self.statement("SELECT id,active,progress FROM subscriptions WHERE reference=?", .{reference});
-        defer s.deinit();
-        if (!try s.next()) return error.SubscriptionWithdrawn;
-        if (s.number(1) == 0 and (value.progress != null or value.external == true)) return error.SubscriptionWithdrawn;
-        if (value.progress != null and !try progressMatches(s, 2, value.expected_progress)) return error.ProgressConflict;
-        const id = try s.unsigned(0);
-        _ = try self.change(
-            \\UPDATE subscriptions SET progress=coalesce(?,progress),status=coalesce(?,status),
-            \\external=coalesce(?,external) WHERE id=?
-        , .{ value.progress, value.status, value.external, id });
-        _ = try self.change("DELETE FROM subscriptions WHERE id=? AND NOT active AND NOT external", .{id});
-        try self.exec("COMMIT");
+    pub fn checkpoint(self: *Store, reference: []const u8, cursor: Cursor) !void {
+        try cursor.validate();
+        try self.advanceCursor(reference, cursor);
     }
 
-    pub fn pending(self: *Store, a: Allocator, owner: u64, after: u64, limit: usize) ![]const Report {
+    fn advanceCursor(self: *Store, reference: []const u8, cursor: Cursor) !void {
+        if (try self.change("UPDATE subscriptions SET cursor=? WHERE reference=? AND cursor IS ?", .{ cursor.to, reference, cursor.from })) return;
+        try self.requireRegistration(reference);
+        return error.CursorConflict;
+    }
+
+    fn requireRegistration(self: *Store, reference: []const u8) !void {
+        if (try self.integer("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE reference=?)", .{reference}) == 0)
+            return error.SubscriptionWithdrawn;
+    }
+
+    pub fn hasPending(self: *Store, focus_id: []const u8, after: u64) !bool {
+        return try self.integer("SELECT EXISTS(SELECT 1 FROM reports WHERE focus_id=? AND sequence>?)", .{ focus_id, try sql.signed(after) }) != 0;
+    }
+
+    pub fn pending(self: *Store, a: Allocator, focus_id: []const u8, after: u64, limit: usize) ![]const Report {
         const s = try self.statement(
-            \\SELECT sequence,reference,text,handle,retrieval,version,truncated,source_time,received
-            \\FROM reports WHERE session_id=? AND sequence>? ORDER BY sequence LIMIT ?
-        , .{ owner, after, limit });
+            \\SELECT sequence,reference,text,source_time,received
+            \\FROM reports WHERE focus_id=? AND sequence>? ORDER BY sequence LIMIT ?
+        , .{ focus_id, try sql.signed(after), try sql.signed(limit) });
         defer s.deinit();
         var rows: std.ArrayList(Report) = .empty;
-        while (try s.next()) try rows.append(a, .{
-            .sequence = try s.unsigned(0),
-            .reference = try s.copy(a, 1),
-            .text = try s.copy(a, 2),
-            .handle = try s.optionalText(a, 3),
-            .retrieval = try s.tag(Retrieval, 4),
-            .version = try s.optionalText(a, 5),
-            .truncated = s.number(6) != 0,
-            .source_time_unix_ms = if (s.isNull(7)) null else s.number(7),
-            .observed_at_unix_ms = s.number(8),
+        while (try sql.checked(s.step())) try rows.append(a, .{
+            .sequence = try sql.unsigned(s.int(0)),
+            .reference = try sql.copyText(a, s, 1),
+            .text = try sql.copyText(a, s, 2),
+            .source_time_unix_ms = s.nullableInt(3),
+            .observed_at_unix_ms = s.int(4),
         });
         return rows.toOwnedSlice(a);
     }
 
-    pub fn hasActive(self: *Store, owner: u64) !bool {
-        return try self.integer("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE session_id=? AND active)", .{owner}) != 0;
+    pub fn latestImmediate(self: *Store, focus_id: []const u8) !u64 {
+        return self.integer("SELECT coalesce(max(sequence),0) FROM reports WHERE focus_id=? AND reminder='immediate'", .{focus_id});
     }
 
-    pub fn latestImmediate(self: *Store, owner: u64) !u64 {
-        return self.integer("SELECT coalesce(max(sequence),0) FROM reports WHERE session_id=? AND reminder='immediate'", .{owner});
-    }
-
-    pub fn hasImmediate(self: *Store, owner: u64, after: u64) !bool {
-        return try self.latestImmediate(owner) > after;
-    }
-
-    pub fn hasPending(self: *Store, owner: u64, after: u64) !bool {
-        return try self.integer("SELECT EXISTS(SELECT 1 FROM reports WHERE session_id=? AND sequence>?)", .{ owner, after }) != 0;
-    }
-
-    pub fn acknowledge(self: *Store, owner: u64, through: u64) !void {
-        _ = try self.change("DELETE FROM reports WHERE session_id=? AND sequence<=?", .{ owner, through });
+    pub fn acknowledge(self: *Store, focus_id: []const u8, through: u64) !void {
+        _ = try self.change("DELETE FROM reports WHERE focus_id=? AND sequence<=?", .{ focus_id, try sql.signed(through) });
     }
 };
 
-fn validText(s: []const u8, max: ?usize) bool {
-    if (max) |limit| if (s.len > limit) return false;
+fn validText(s: []const u8) bool {
     return s.len != 0 and std.unicode.utf8ValidateSlice(s);
 }
 
-fn validOptional(value: ?[]const u8, max: ?usize) bool {
-    return if (value) |s| validText(s, max) else true;
-}
-
-fn validInstant(time: ?i64) bool {
-    // The renderer uses a four-digit UTC year. zdt accepts millisecond instants
-    // up to the start of the final representable second.
-    return if (time) |ms| ms >= -62_167_219_200_000 and ms <= 253_402_300_799_000 else true;
-}
-
-fn validateProgress(expected: ?[]const u8, next: ?[]const u8) !void {
-    if (!validOptional(expected, null) or !validOptional(next, null) or (expected != null and next == null))
-        return error.InvalidArguments;
-}
-
-fn progressMatches(s: Statement, column: c_int, expected: ?[]const u8) !bool {
-    if (s.isNull(column)) return expected == null;
-    return if (expected) |value| std.mem.eql(u8, try s.text(column), value) else false;
-}
-
-test "independent connections preserve progress, retry receipts and accepted reports" {
+test "independent connections preserve cursors, retries and the reminder at acceptance" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -353,76 +288,70 @@ test "independent connections preserve progress, retry receipts and accepted rep
     const path = try std.fs.path.join(a, &.{ dir, filename });
     var kernel = try Store.open(a, path);
     defer kernel.close();
+    var producer = try Store.openExisting(a, path);
+    defer producer.close();
+    const activity = "read-2";
+    const ref = (try kernel.create(a, activity, "feed", .next_input, "watch changes")).subscription_id;
     if (@hasDecl(std.Io.File.Permissions, "toMode")) {
         for ([_][]const u8{ filename, filename ++ "-wal", filename ++ "-shm" }) |file| {
             const stat = try temporary.dir.statFile(t.io, file, .{});
             try t.expectEqual(0, stat.permissions.toMode() & 0o077);
         }
     }
-    var producer = try Store.openExisting(a, path);
-    defer producer.close();
-    const row = try kernel.create(a, 2, "work-2", "feed", .next_input, "watch changes");
-    const ref = row.subscription_id;
     const token: [800]u8 = @splat('x');
-    const first = NewReport{ .key = "post-1", .text = "First", .progress = &token, .source_time_unix_ms = -62_167_219_200_000 };
+    const first = NewReport{ .key = &token, .text = "First", .cursor = .{ .to = "" }, .source_time_unix_ms = -62_167_219_200_000 };
     try t.expectEqual(.accepted, try producer.publish(ref, first, 10));
-    try t.expect(!try kernel.hasImmediate(2, 0));
-    const admitted = (try kernel.pending(a, 2, 0, 1))[0];
-    try kernel.acknowledge(2, admitted.sequence);
-    try t.expectEqual(.duplicate, try producer.publish(ref, first, 10));
-    try t.expect(!try kernel.hasPending(2, 0));
+    const other = (try kernel.create(a, "core-1", "feed", .immediate, "read a second feed")).subscription_id;
+    try t.expectEqual(.accepted, try producer.publish(other, .{ .key = first.key, .text = "For the core", .cursor = .{ .to = "B" } }, 11));
+    try t.expectEqualStrings("B", (try producer.inspect(a, other)).?.cursor.?);
+    const admitted = (try kernel.pending(a, activity, 0, 1))[0];
+    try t.expectEqualStrings("First", admitted.text);
+    try kernel.acknowledge(activity, admitted.sequence);
+    const retry = NewReport{ .key = first.key, .text = "Edited retry", .cursor = .{ .from = "", .to = "retry cursor" } };
+    try t.expectEqual(.duplicate, try producer.publish(ref, retry, 15));
+    try t.expect(!try kernel.hasPending(activity, 0));
 
-    var next = NewReport{ .key = "post-2", .text = "Second", .progress = "tail", .source_time_unix_ms = std.math.maxInt(i64) };
+    var next = NewReport{ .key = "post-2", .text = "Second", .cursor = .{ .to = "tail" }, .source_time_unix_ms = std.math.maxInt(i64) };
     try t.expectError(error.InvalidArguments, producer.publish(ref, next, 20));
     next.source_time_unix_ms = null;
-    try t.expectError(error.ProgressConflict, producer.publish(ref, next, 20));
-    next.expected_progress = (try producer.inspect(a, ref)).?.progress;
-    try t.expectEqualStrings(&token, next.expected_progress.?);
+    try t.expectError(error.CursorConflict, producer.publish(ref, next, 20));
+    next.cursor.?.from = (try producer.inspect(a, ref)).?.cursor;
+    try t.expectEqualStrings("", next.cursor.?.from.?);
     try t.expectEqual(.accepted, try producer.publish(ref, next, 20));
-    try t.expect(try kernel.withdraw(2, ref));
-    const pending_reports = try kernel.pending(a, 2, admitted.sequence, 8);
-    try t.expectEqual(1, pending_reports.len);
+    try t.expectEqualStrings("tail", (try producer.inspect(a, ref)).?.cursor.?);
+
+    try t.expect(try kernel.withdraw(ref));
+    const renewed = (try kernel.create(a, activity, "feed", .immediate, "watch changes")).subscription_id;
+    try t.expectError(error.SubscriptionWithdrawn, producer.publish(ref, next, 25));
+    try t.expectEqual(0, try kernel.latestImmediate(activity));
+    try t.expectEqual(.accepted, try producer.publish(renewed, first, 30));
+    const pending_reports = try kernel.pending(a, activity, admitted.sequence, 8);
+    try t.expectEqual(2, pending_reports.len);
+    try t.expectEqualStrings(ref, pending_reports[0].reference);
     try t.expectEqualStrings("Second", pending_reports[0].text);
-    try t.expect(!try kernel.hasImmediate(2, admitted.sequence));
+    try t.expectEqualStrings(renewed, pending_reports[1].reference);
+    try t.expectEqual(pending_reports[1].sequence, try kernel.latestImmediate(activity));
 }
 
-test "an outstanding external cancellation keeps only its actionable state" {
+test "kernel and producer preserve incompatible catalogs" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var store = try Store.open(a, ":memory:");
-    defer store.close();
-    const ref = (try store.create(a, 2, "check-2", "follow", .immediate, "external feed")).subscription_id;
-    try store.checkpoint(ref, .{ .external = true, .status = "pending approval" });
-    try t.expect(!try store.hasImmediate(2, 0));
-    _ = try store.publish(ref, .{ .key = "status-event", .text = "pending" }, 10);
-    try t.expect(try store.withdraw(2, ref));
-    try t.expect(!try store.withdraw(2, ref));
-    try t.expectEqual(0, try store.integer("SELECT count(*) FROM producer_keys", .{}));
-    try store.acknowledge(2, try store.latestImmediate(2));
-    const closing = (try store.inspect(a, ref)).?;
-    try t.expect(closing.external and !closing.active);
-    const newer = try store.create(a, 1, "core-1", "follow", .next_input, "follow again");
-    try store.checkpoint(newer.subscription_id, .{ .external = true, .status = "awaiting confirmation" });
-    const all = try store.registrations(a, null);
-    try t.expectEqual(@as(usize, 2), all.len);
-    try t.expectEqualStrings(ref, all[0].subscription_id);
-    try t.expect(!all[0].active);
-    try t.expectEqualStrings(newer.subscription_id, all[1].subscription_id);
-    try t.expect(all[1].active);
-    const own = try store.registrations(a, 2);
-    try t.expectEqual(@as(usize, 1), own.len);
-    try t.expectEqualStrings(ref, own[0].subscription_id);
-    try t.expectEqualStrings("check-2", own[0].focus_id);
-    try t.expectEqual(Reminder.immediate, own[0].reminder);
-
-    try t.expectError(error.SubscriptionWithdrawn, store.publish(ref, .{ .key = "late", .text = "late" }, 20));
-    try t.expectError(error.SubscriptionWithdrawn, store.checkpoint(ref, .{ .progress = "unexpected" }));
-    try store.checkpoint(ref, .{ .external = false, .status = "withdrawal confirmed" });
-    try t.expect(try store.inspect(a, ref) == null);
-    try t.expectEqual(@as(usize, 0), (try store.registrations(a, 2)).len);
-    const current = (try store.inspect(a, newer.subscription_id)).?;
-    try t.expect(current.active and current.external);
-    try t.expectEqualStrings("awaiting confirmation", current.status.?);
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, filename });
+    var prior = try Store.connect(a, path, true);
+    defer prior.close();
+    try prior.exec("CREATE TABLE reports(sequence INTEGER PRIMARY KEY,reference TEXT,text TEXT) STRICT");
+    try prior.exec("INSERT INTO reports VALUES(1,'feed-1','waiting for delivery')");
+    inline for (.{ 0, 1 }) |version| {
+        try prior.exec(std.fmt.comptimePrint("PRAGMA user_version={d}", .{version}));
+        try t.expectError(error.IncompatibleSubscriptionSchema, Store.openExisting(a, path));
+        try t.expectError(error.IncompatibleSubscriptionSchema, Store.open(a, path));
+        try t.expectEqual(version, try prior.integer("PRAGMA user_version", .{}));
+        try t.expectEqual(1, try prior.integer("SELECT count(*) FROM sqlite_schema", .{}));
+        try t.expectEqual(1, try prior.integer("SELECT count(*) FROM reports WHERE sequence=1 AND reference='feed-1' AND text='waiting for delivery'", .{}));
+    }
 }

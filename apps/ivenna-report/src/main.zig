@@ -2,32 +2,31 @@ const std = @import("std");
 const subscriptions = @import("subscriptions");
 
 const usage =
-    \\Usage: ivenna-report inspect|publish|checkpoint SUBSCRIPTION_ID
+    \\Usage: ivenna-report COMMAND SUBSCRIPTION_ID
     \\
-    \\Use the ID returned by subscribe and set DATA_DIR to that instance's directory.
-    \\inspect      Print the registration and its progress, or null if none exists.
-    \\publish      Save an observation for the owning focus. Prints "accepted" or "duplicate".
-    \\checkpoint   Update progress or follow status without waking the focus. Prints "accepted".
+    \\Use the ID returned by subscribe. Set DATA_DIR to the kernel's data directory.
+    \\inspect      Print the registration and cursor, or null for an unknown or withdrawn ID.
+    \\publish      Save an observation and any cursor change together.
+    \\checkpoint   Advance the cursor after processing an item that needs no report.
     \\
-    \\publish and checkpoint read one JSON object (up to 64 KiB) from stdin.
-    \\For an existing subscription with ID releases-1, a listener can publish from sh:
-    \\  printf '%s\n' '{"key":"release-17","text":"Release 17 is available","progress":"17"}' |
+    \\Both writes read one JSON object from stdin. Host commands inherit IVENNA_REPORT.
+    \\In another shell, set it to the executable's path to run these examples.
+    \\  printf '%s\n' '{"key":"release-v2.4.0","text":"Stable release v2.4.0","cursor":{"to":"17"}}' |
     \\    "$IVENNA_REPORT" publish releases-1
+    \\  printf '%s\n' '{"from":"17","to":"18"}' | "$IVENNA_REPORT" checkpoint releases-1
     \\
-    \\Use a distinct key for each observation. Key and text limits are 256 and 2048 UTF-8 bytes.
-    \\Retry the same report with its original key. To advance the saved cursor:
-    \\  printf '%s\n' '{"expected_progress":"17","progress":"18"}' | "$IVENNA_REPORT" checkpoint releases-1
+    \\Use a nonempty key for each distinct update and reuse it for retries. Report
+    \\text takes 1–2048 UTF-8 bytes. Other strings can hold up to 4 MiB each.
+    \\Optional source_time_unix_ms gives the source event time in Unix milliseconds.
     \\
-    \\Reports can include source_time_unix_ms, version, truncated, and a handle with
-    \\retrieval set to "current" or "version". Set external to true in a checkpoint before
-    \\requesting an external follow, then to false once the publisher confirms closure.
-    \\
-    \\Read the JSON result on stdout. Rejections exit nonzero.
+    \\A successful write prints "accepted" or, for a key already accepted by this
+    \\subscription, "duplicate". These JSON errors on stdout have nonzero exit status.
     \\  "withdrawn"          Stop reporting on this reference.
-    \\  "progress_conflict"  Inspect the saved cursor before advancing it.
+    \\  "cursor_conflict"    Inspect the saved cursor before advancing it.
     \\  "busy"               Retry after contention subsides.
     \\  "storage_full"       Free storage before retrying.
     \\  "invalid_request"    Correct the arguments or JSON input.
+    \\If a failure leaves no JSON receipt, check stderr for diagnostics.
     \\
 ;
 
@@ -35,13 +34,13 @@ pub fn main(init: std.process.Init) !u8 {
     run(init) catch |err| {
         const reason: []const u8 = switch (err) {
             error.SubscriptionWithdrawn => "withdrawn",
-            error.ProgressConflict => "progress_conflict",
+            error.CursorConflict => "cursor_conflict",
             error.SubscriptionStoreBusy => "busy",
             error.SubscriptionStoreFull => "storage_full",
-            error.InvalidArguments, error.StreamTooLong => "invalid_request",
+            error.InvalidArguments => "invalid_request",
             else => return err,
         };
-        try output(init.io, init.arena.allocator(), reason);
+        try output(init.io, reason);
         return 1;
     };
     return 0;
@@ -64,36 +63,70 @@ fn run(init: std.process.Init) !void {
     var store = try subscriptions.Store.openExisting(a, try std.fs.path.join(a, &.{ directory, subscriptions.filename }));
     defer store.close();
     const reference = args[2];
-    if (action == .inspect) return output(init.io, a, try store.inspect(a, reference));
+    if (action == .inspect) return output(init.io, try store.inspect(a, reference));
 
-    // Bound the single submission, including escaped UTF-8 and JSON syntax.
     var buf: [4096]u8 = undefined;
     var input = std.Io.File.stdin().readerStreaming(init.io, &buf);
-    const json = try input.interface.allocRemaining(a, .limited(64 * 1024));
+    var json = std.json.Reader.init(a, &input.interface);
+    defer json.deinit();
     switch (action) {
         .publish => {
-            const report = try parse(subscriptions.NewReport, a, json);
+            const report = try parse(struct {
+                key: Scalar([]const u8),
+                text: Scalar([]const u8),
+                source_time_unix_ms: ?Scalar(i64) = null,
+                cursor: ?Cursor = null,
+            }, a, &json);
             const received_unix_ms = std.Io.Clock.real.now(init.io).toMilliseconds();
-            try output(init.io, a, try store.publish(reference, report, received_unix_ms));
+            try output(init.io, try store.publish(reference, .{
+                .key = report.key.value,
+                .text = report.text.value,
+                .source_time_unix_ms = if (report.source_time_unix_ms) |time| time.value else null,
+                .cursor = if (report.cursor) |cursor| cursor.move() else null,
+            }, received_unix_ms));
         },
         .checkpoint => {
-            const state = try parse(subscriptions.Checkpoint, a, json);
-            try store.checkpoint(reference, state);
-            try output(init.io, a, "accepted");
+            const cursor = try parse(Cursor, a, &json);
+            try store.checkpoint(reference, cursor.move());
+            try output(init.io, "accepted");
         },
         .inspect => unreachable,
     }
 }
 
-fn parse(comptime T: type, a: std.mem.Allocator, json: []const u8) !T {
-    return std.json.parseFromSliceLeaky(T, a, json, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return err,
+const Cursor = struct {
+    from: ?Scalar([]const u8) = null,
+    to: Scalar([]const u8),
+
+    fn move(self: Cursor) subscriptions.Cursor {
+        return .{ .from = if (self.from) |from| from.value else null, .to = self.to.value };
+    }
+};
+
+// The default decoder treats [65] and "A" as the same key and accepts quoted timestamps.
+fn Scalar(comptime T: type) type {
+    return struct {
+        value: T,
+
+        pub fn jsonParse(a: std.mem.Allocator, json: *std.json.Reader, options: std.json.ParseOptions) !@This() {
+            const expected: std.json.TokenType = if (T == []const u8) .string else .number;
+            if (try json.peekNextTokenType() != expected) return error.UnexpectedToken;
+            return .{ .value = try std.json.innerParse(T, a, json, options) };
+        }
+    };
+}
+
+fn parse(comptime T: type, a: std.mem.Allocator, json: *std.json.Reader) !T {
+    return std.json.parseFromTokenSourceLeaky(T, a, json, .{}) catch |err| switch (err) {
+        error.OutOfMemory, error.ReadFailed => return err,
         else => return error.InvalidArguments,
     };
 }
 
-fn output(io: std.Io, a: std.mem.Allocator, value: anytype) !void {
-    const bytes = try std.json.Stringify.valueAlloc(a, value, .{});
-    try std.Io.File.stdout().writeStreamingAll(io, bytes);
-    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+fn output(io: std.Io, value: anytype) !void {
+    var buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
+    try std.json.Stringify.value(value, .{}, &stdout.interface);
+    try stdout.interface.writeByte('\n');
+    try stdout.interface.flush();
 }

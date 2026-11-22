@@ -22,7 +22,7 @@ const Listener = struct {
 
         var buffer: [256]u8 = undefined;
         var output = child.stdout.?.readerStreaming(io, &buffer);
-        const bytes = try output.interface.allocRemaining(self.allocator, .limited(4096));
+        const bytes = try output.interface.allocRemaining(self.allocator, .unlimited);
         const term = try child.wait(io);
         try testing.expect(term == .exited);
         try testing.expectEqual(success, term.exited == 0);
@@ -36,7 +36,7 @@ const Listener = struct {
     }
 };
 
-test "an offline listener publishes successive reports, checkpoints, and sees withdrawal" {
+test "the reporter accepts observations while the kernel is stopped and rejects them after withdrawal" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -52,23 +52,28 @@ test "an offline listener publishes successive reports, checkpoints, and sees wi
         .reference = blk: {
             var owner = try subscriptions.Store.open(a, path);
             defer owner.close();
-            break :blk (try owner.create(a, 1, "core-1", "news", .next_input, "test listener")).subscription_id;
+            break :blk (try owner.create(a, "research-2", "news", .next_input, "test listener")).subscription_id;
         },
     };
-    const report = .{ .key = "item-1", .text = "first", .progress = "1" };
-    try listener.expectReply("publish", .{ .key = "item-1", .text = "first", .observed_at_unix_ms = 0 }, false, "invalid_request");
+    const first_cursor: [40 * 1024]u8 = @splat('1');
+    const next_cursor: [40 * 1024]u8 = @splat('2');
+    const report = .{ .key = "item-1", .text = "first", .cursor = .{ .to = &first_cursor } };
+    // A JSON array must not reserve the same key as the string "item-1".
+    const array_key = [_]u16{ 'i', 't', 'e', 'm', '-', '1' };
+    try listener.expectReply("publish", .{ .key = array_key, .text = "wrong type" }, false, "invalid_request");
     try listener.expectReply("publish", report, true, "accepted");
     try listener.expectReply("publish", .{ .key = "item-2", .text = "second" }, true, "accepted");
     try listener.expectReply("publish", report, true, "duplicate");
-    try listener.expectReply("checkpoint", .{ .progress = "2" }, false, "progress_conflict");
-    try listener.expectReply("checkpoint", .{ .expected_progress = "1", .progress = "2" }, true, "accepted");
+    try listener.expectReply("checkpoint", .{ .to = "2" }, false, "cursor_conflict");
+    try listener.expectReply("checkpoint", .{ .from = &first_cursor, .to = &next_cursor }, true, "accepted");
     const details = (try listener.request("inspect", null, true)).object;
     try testing.expectEqualStrings(listener.reference, details.get("subscription_id").?.string);
-    try testing.expectEqualStrings("2", details.get("progress").?.string);
-    try testing.expectEqual(@as(i64, 2), details.get("pending").?.integer);
+    try testing.expectEqualStrings("research-2", details.get("focus_id").?.string);
+    try testing.expectEqualStrings(&next_cursor, details.get("cursor").?.string);
 
     var owner = try subscriptions.Store.openExisting(a, path);
     defer owner.close();
-    try testing.expect(try owner.withdraw(null, listener.reference));
+    try testing.expect(try owner.withdraw(listener.reference));
     try listener.expectReply("publish", report, false, "withdrawn");
+    try testing.expect((try listener.request("inspect", null, true)) == .null);
 }

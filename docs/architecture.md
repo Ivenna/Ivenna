@@ -36,7 +36,8 @@ flowchart TD
     Report[apps/ivenna-report] --> Subscriptions
     Agent --> Subscriptions
     Subscriptions --> Contracts
-    Subscriptions --> SQLite[SQLite]
+    Subscriptions --> Zqlite[zqlite]
+    Zqlite --> SQLite[SQLite]
     Agent --> Contracts
     Email --> Contracts
     Responses --> Contracts
@@ -126,7 +127,7 @@ Unknown focus selections remain ordinary tool errors. Activity endings and inter
 
 The email adapter supplies typed correspondence or callbacks with optional opaque receipts. The agent routes correspondence to the core and callbacks through their registration. [Work](../packages/agent/src/work.zig) owns each accepted observation through durable admission and receipt acknowledgement. In-process events have no transport receipts.
 
-At a model-round boundary, the registry gathers the session's ordinary queue and a page of its subscription reports. For the core it also reads the oldest unread activity facts, extending that batch across outbox pages while space permits. A pending startup observation comes first. The registry rotates which source gets the next chance at a tight input budget and preserves order within each source. Before measurement, `Input.coalesceActivityReports` groups activity facts by focus in order of first appearance, retaining each focus's messages and ending in order. The kernel selects the longest prefix of deliveries that fits the complete encoded request.
+At a model-round boundary, the registry gathers the session's ordinary queue and a page of subscription reports addressed to it. For the core it also reads the oldest unread activity facts, extending that batch across outbox pages while space permits. A pending startup observation comes first. The registry rotates which source gets the next chance at a tight input budget and preserves order within each source. Before measurement, `Input.coalesceActivityReports` groups activity facts by focus in order of first appearance, retaining each focus's messages and ending in order. The kernel selects the longest prefix of deliveries that fits the complete encoded request.
 
 Selection and ordinary inference use the same retained history, focus identity, observation time, and grouped events. The registry returns unselected ordinary deliveries to the front of their queue. Unselected journal and subscription entries stay in their durable sources for the next eligible input. If no prefix fits, the kernel can compact retained history and try selection again. An input that still cannot fit [interrupts the activation](#interrupted-activations) and stays queued. See [bounded model context](#bounded-model-context) for compaction and request limits.
 
@@ -138,7 +139,7 @@ Only the core can invoke `open_focus`. Each call reserves an identity and prepar
 
 Each copy includes retained events, complete native model/tool exchanges, and any existing handover followed by later history. All replies from the calling round are included, even those produced after the fork call. Forking generates no extra summary. Original record focus references remain intact as provenance; historical tool calls are not replayed.
 
-The activity restores this history under its own `Context.scope` and `focus_id`. Its assignment is the first new queued observation. It constructs fresh inference turns from its own queue. Callback registrations, wakeup schedules and subscriptions keep their original destinations. New inputs supply the activity's current identity and events, with tools selected for its role under the same system prompt. Inherited assistant output is not collected again as a new report. See [opening a focus](attention.md#opening-a-focus) and [assignment fields](input.md#assignments-and-reports).
+The activity restores this history under its own `Context.scope` and `focus_id`. Its assignment is the first new queued observation. It constructs fresh inference turns from its own queue. Callbacks, wakeups and subscription reports keep their original destinations. New inputs supply the activity's current identity and events, with tools selected for its role under the same system prompt. Inherited assistant output is not collected again as a new report. See [opening a focus](attention.md#opening-a-focus) and [assignment fields](input.md#assignments-and-reports).
 
 ## Activity reports
 
@@ -154,12 +155,12 @@ Tool replies lead to another round. For a response without tool calls, the regis
 
 | State after the response | Result for the focus |
 | --- | --- |
-| A queued observation requests attention | The focus retains the response and continues its activation. |
-| The core has no work requesting attention | The core retains the response for its next activation. Going idle needs no separate checkpoint because the core receives startup on every [restart](#startup-and-interruption). |
-| An activity has an empty queue and a pending callback or active subscription | The activity sleeps with its updated history and can receive further observations. |
-| An activity has no queued work, pending callback, active subscription or unadmitted subscription report | The activity ends. One checkpoint drops the session from saved history and selects the outbox records for its final message (if present) and its ending, in that order. |
+| An observation requests further attention | The focus retains the response and continues its activation. |
+| The core has no work requesting attention | The core goes idle with the response in its retained history. |
+| An idle activity still has a pending callback, an active subscription or a report waiting for ordinary input | The activity sleeps with its updated history and can receive further observations. |
+| An activity has no queued work, pending callback, active subscription or report awaiting admission | The activity ends. One checkpoint drops the session from saved history and selects the outbox records for its final message (if present) and its ending, in that order. |
 
-For a retained focus, the registry takes ownership of the worker's updated context. A sleeping activity can unload that context after checkpoint confirmation. If the core withdraws the activity's last subscription and the activity has no pending callbacks, the dispatcher schedules any remaining reports for admission. With no work left, the dispatcher publishes the activity's ending directly. The registry frees an ended activity's remaining state when its last worker releases it.
+For a retained focus, the registry takes ownership of the worker's updated context. A sleeping activity can unload that context after checkpoint confirmation. At startup and after a withdrawal, the dispatcher also checks whether a sleeping activity can end. A report waiting for ordinary input keeps the activity addressable. The registry frees an ended activity's remaining state when its last worker releases it.
 
 ### Interrupted activations
 
@@ -177,13 +178,15 @@ Intake resolves the numeric delivery ID through its registration, adds the saved
 
 ## Subscription delivery
 
-The kernel opens or creates the catalog in `DATA_DIR`. A listener submits a report through `ivenna-report`, which opens the existing catalog in a separate process. This lets a listener collect observations while the kernel is stopped. Both programs use the same [store implementation](../packages/subscriptions/src/root.zig).
+The kernel creates or opens the SQLite catalog in `DATA_DIR`. Each invocation of `ivenna-report` opens the existing catalog independently, so a listener can publish while the kernel is stopped. Both executables share the [store implementation](../packages/subscriptions/src/root.zig) and its [pinned SQLite build](../packages/subscriptions/build.zig).
 
-The subscription reference selects a registration and its owning session. Within that registration, the listener's report key identifies retries, including a retry after the kernel has admitted the report. For each newly accepted key, SQLite assigns a delivery sequence that orders the reports for admission.
+Publication and withdrawal serialize as SQLite writes. A publication commits the report, its key and any cursor advance together. While the registration is active, repeating an accepted key leaves the queue and cursor unchanged, even after acknowledgement. A failed cursor comparison rolls back the publication and leaves the new key available for retry.
 
-Publication and withdrawal take the same SQLite write lock. Publication checks that the registration is active and saves a new report, its key and any cursor advance in one transaction. A cursor conflict leaves the previous cursor in place and the key available for a retry. Each accepted row keeps its original destination and reminder after local withdrawal.
+Each report stores the subscription reference, receiving focus and reminder from its registration. Withdrawal deletes the registration and its keys in one transaction. The registry can still deliver earlier reports under their original reminder by reading the reports alone. See the [catalog schema](../packages/subscriptions/src/schema.sql).
 
-The registry checks readiness separately for each owner. At [admission](#activation-admission) it reads that owner's reports after the last admitted sequence, up to the smaller of `MAX_PENDING_EVENTS` and 64. The kernel saves the highest admitted sequence with the focus's history, then deletes the admitted rows from SQLite once the checkpoint is confirmed. On restart it uses the selected checkpoint to finish any outstanding deletion. The checkpoint also identifies the catalog it was saved against. Restore both stores from the same point as described in [backups and transfers](running.md#backups-and-transfers).
+SQLite assigns one increasing sequence across all reports. An idle focus becomes ready when an immediate report has a sequence above its last admitted one. Admission reads that focus's reports in sequence order, including earlier passive reports, up to the smaller of `MAX_PENDING_EVENTS` and 64. The registry saves the highest admitted sequence with the focus's history, then deletes its reports through that sequence once the mailbox confirms the checkpoint. Startup uses the selected checkpoint to finish any deletion the previous process missed. See [activation admission](#activation-admission).
+
+The mailbox checkpoint identifies its catalog. Startup checks that identity before applying saved sequences. A mailbox without a saved catalog identity can be paired only with an unbound catalog. Keep the two stores at a consistent point when restoring a backup. See [backups and transfers](running.md#backups-and-transfers).
 
 ## Working history and user messages
 
@@ -233,7 +236,7 @@ At round commit, Context copies the prepared parts into its retained arena; [his
 
 The model service expands file references after receiving the encoded request. The [running guide](running.md#context-budgets) explains the consequences for context sizing.
 
-For each compaction attempt, `Registry.compactionSnapshot` copies current identity, time, and `Input.State` under one lock. The state contains existing activity references for the core, pending callbacks for the receiving focus, and the subscription registrations within its scope. Startup observations also sample those registrations, so a subscription committed just before a lost tool reply remains discoverable after restart. `Context.summaryRequest` combines the compaction sample with the common system prompt, retained history and [summary instructions](../packages/agent/src/compaction.md). Earlier handovers keep their stored state. The summary inference uses no tools and `high` reasoning, bounded by `CONTEXT_COMPACTION_BYTES`; waiting events and unread activity reports remain outside the request.
+For each compaction attempt, `Registry.compactionSnapshot` samples the receiving focus's identity, time, pending callbacks and active subscription references under the registry lock. For the core it also samples existing activity references. `Context.summaryRequest` combines this sample with the common system prompt, retained history and [summary instructions](../packages/agent/src/compaction.md). Earlier handovers keep their stored state. Unadmitted observations remain outside the summary request. The summary inference runs without tools at `high` reasoning within `CONTEXT_COMPACTION_BYTES`.
 
 The generated summary must contain nonempty text after trimming and no tool calls. The runtime pairs it with the sampled state and time to form the handover. The kernel measures the complete replacement ordinary request, including any selected events, against `CONTEXT_REQUEST_BYTES`. When it fits, the new epoch starts with the handover followed by the admitted events. Earlier message storage follows [retention](#history-retention).
 

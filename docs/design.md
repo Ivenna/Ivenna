@@ -28,7 +28,7 @@ Model-facing inputs describe current attention, observations, and possible actio
 
 Reasoning can lose details, confuse references, or choose unsuccessful actions. Operation results, observations, and discoverable command handles support recognition and recovery. The runtime retains the references and routing state needed for delivery and resumption independently of Ivenna's recollection or generated summaries. Ivenna can reconsider an action from its outcome.
 
-Capabilities keep operation outcomes connected to their sources and supported content. Bounded observations provide a way to inspect further content, and omissions remain distinguishable from an empty source. This lets Ivenna decide which evidence needs further inspection.
+Capabilities keep operation outcomes connected to their sources and supported content. When a tool returns a preview, it gives Ivenna a way to inspect the rest. Identifying omitted content lets Ivenna distinguish it from an empty source.
 
 Changes to shared memory require a clear target. An edit that could select several occurrences requires an explicit choice, and the previous entry remains intact until its replacement is ready. Ivenna can refine an intended change without losing the memory it was trying to revise.
 
@@ -45,7 +45,7 @@ Core and activity focuses use the same system prompt. Each receives observations
 | Open and reach focuses | Yes | — |
 | Schedule a wakeup | Yes | — |
 | Subscribe to observations for the current focus | Yes | Yes |
-| Withdraw a subscription | Any focus's subscription | Its own subscriptions |
+| Withdraw a subscription by its complete reference | Yes | Yes |
 | Run and interact with host programs | — | Yes |
 
 The core can [open an activity focus](attention.md#opening-a-focus) with a free-form assignment. It carries the core's retained understanding, relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
@@ -64,7 +64,7 @@ Ivenna chooses whether to communicate, to whom, and what to say through `send_me
 
 A task describes work to accomplish. A session has a stable identity, retained understanding, and an event queue. Each activation continues a session's work through model/tool rounds, admitting further events between complete rounds so new information can guide the next decision without interrupting an inference or tool.
 
-A response without tool calls ends the activation when no queued arrivals require more reasoning. At that boundary an activity with a pending callback or an active subscription sleeps with its identity and working history intact. An activity with no remaining source of work ends, and the core receives an [ending observation](attention.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
+A response without tool calls ends the activation when no queued arrivals require more reasoning. At that boundary an activity awaiting a callback or a subscription report can sleep with its identity and working history intact. An activity with no remaining work ends, and the core receives an [ending observation](attention.md#activity-completion). The core remains available between activations. Ivenna assesses task outcomes from the observations it has gathered.
 
 ### Events and waiting
 
@@ -76,9 +76,9 @@ Activities choose how long to wait for host work before continuing their own rea
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
 
-A subscription lets a focus follow a source over time. Ivenna chooses which changes a listener should report and whether each report should wake the owning focus or wait for its next ordinary input. The core can hold a lasting interest. An activity can follow a source for its assignment and ask the core to take up an interest that outlives the task.
+A focus can subscribe to a source it wants to follow over time. Reports return to the focus that subscribed, so an activity investigating a release can judge the next update in light of what it has already learned. The core can subscribe directly when an interest spans assignments. For each subscription, Ivenna chooses which changes its listener reports and whether those reports should wake the focus or wait for its next ordinary input.
 
-The focus keeps the subscription reference across sleep, restart, and handover, even if its listener has stayed silent. Withdrawal closes local intake. Reports accepted before withdrawal keep their original reminder. A listener can also report a gap in what it could recover or record that an external publisher has yet to confirm a follow. These distinctions let Ivenna judge what it has observed and decide whether to keep listening. See [subscriptions](attention.md#subscriptions).
+The subscription survives sleep and restart. Its reference stays available through a handover even if the listener has never reported. Ivenna can replace the listener and keep the same subscription. Any focus with the complete reference can withdraw it. Reports accepted before withdrawal keep their destination and reminder. See [subscriptions](attention.md#subscriptions).
 
 ### Context and continuity
 
@@ -100,7 +100,7 @@ A lost response can leave an action's effects uncertain. The runtime can repeat 
 
 The receiving mail service checks the kernel's readiness before accepting correspondence. Reception opens after initialization and stays open while a focus waits for inference. If the kernel loses required access to its configured model, communication, memory, or working history, it closes reception and stops. The sender decides whether to queue or retry a letter it could not deliver. See [reception readiness](running.md#service-status-and-reception).
 
-An independently running subscription listener can still save reports for an existing, active subscription while the kernel is stopped. When the kernel resumes, it delivers those observations to their owning focus according to its reminder. See [listener deployment](running.md#subscription-listeners).
+An independent listener can still report to an active subscription while the kernel is stopped. Those observations are available for delivery when the kernel resumes. If collection was interrupted, the listener can tell the focus which part of the source's history it could recover. See [listener deployment](running.md#subscription-listeners).
 
 ## Data ownership
 

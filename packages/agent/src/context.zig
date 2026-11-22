@@ -226,7 +226,7 @@ test "candidate handover retains sampled references and leaves earlier history a
         .state = .{
             .activities = &.{&activity_id},
             .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = &command_id } } }},
-            .subscriptions = &.{.{ .subscription_id = &subscription_id, .focus_id = &activity_id, .reminder = .next_input, .active = true }},
+            .subscriptions = &.{&subscription_id},
         },
     };
     var replacement = try original.withHandover(std.testing.allocator, handover);
@@ -244,23 +244,22 @@ test "candidate handover retains sampled references and leaves earlier history a
     const expected_state: Input.State = .{
         .activities = &.{"practice-2"},
         .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = "inspect-7" } } }},
-        .subscriptions = &.{.{ .subscription_id = "releases-4", .focus_id = "practice-2", .reminder = .next_input, .active = true }},
+        .subscriptions = &.{"releases-4"},
     };
     try std.testing.expectEqualDeep(expected_state, retained.state);
 }
 
-test "startup and handover records saved before subscriptions restore" {
+test "restoring a handover saved before subscription sampling preserves its summary" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const encoded =
-        \\.{
-        \\    .{ .record = .{ .events = .{ .focus_id = "core-1", .items = .{.{ .startup = .{ .observed_at_unix_ms = 100 } }} } } },
-        \\    .{ .record = .{ .handover = .{ .focus_id = "core-1", .observed_at_unix_ms = 120, .summary = "Waiting.", .state = .{ .activities = .{}, .callbacks = .{} } } } },
-        \\}
+        \\.{ .record = .{ .handover = .{ .focus_id = "core-1", .observed_at_unix_ms = 120,
+        \\    .summary = "Waiting.", .state = .{ .activities = .{}, .callbacks = .{} } } } }
     ;
-    const entries = try @import("record_codec.zig").decode([]const Entry, arena.allocator(), encoded);
-    var context = try Context.restore(std.testing.allocator, .{ .session_id = 1, .epoch = 1 }, "core-1", entries);
+    const entry = try @import("record_codec.zig").decode(Entry, arena.allocator(), encoded);
+    var context = try Context.restore(std.testing.allocator, .{ .session_id = 1, .epoch = 1 }, "core-1", &.{entry});
     defer context.deinit();
-    try std.testing.expectEqual(0, context.records()[0].record.events.items[0].startup.subscriptions.len);
-    try std.testing.expect(context.records()[1].record.handover.state.isEmpty());
+    const restored = context.records()[0].record.handover;
+    try std.testing.expectEqualStrings("Waiting.", restored.summary);
+    try std.testing.expect(restored.state.isEmpty());
 }

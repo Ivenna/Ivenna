@@ -59,7 +59,7 @@ Choose an ordinary reasoning effort for each role from the values supported by y
 
 Choose both byte budgets and the output-token limit together for the configured model and workload. The ordinary budget controls how much history can accumulate before a handover; the larger compaction budget leaves room to summarize history after a complete model/tool round crosses that limit. Byte counts are not token estimates; input and output must also fit the model's token limits.
 
-Handovers carry pending callback references, subscription registrations in scope, and for the core, existing activity references alongside the generated summary. Startup observations also carry the subscription references. These collections grow with outstanding work and count toward the context budgets. The complete continuation request must fit the ordinary budget.
+Handovers carry the focus's pending callback and active subscription references alongside the generated summary. Core handovers also carry existing activity references. These collections grow with outstanding work and count toward both the summary request and the ordinary requests that retain the handover.
 
 Individual tool results can meet their [content limits](content.md#model-request-checks) while a large batch or inline image exceeds the context budgets. Inline images include base64 encoding overhead. Reduce their size or use image URL references when that overhead would exceed the request budget.
 
@@ -103,9 +103,11 @@ Eligible correspondence without the private acknowledgement marker is pending, i
 
 ## Subscription listeners
 
-Install `ivenna-report` beside `ivenna`. Both use the subscription store in `DATA_DIR`. Keep this directory private to trusted deployment processes on a local filesystem with SQLite locking. Pending reports occupy disk space until acknowledged. The store retains each accepted report key until the subscription is withdrawn.
+Install `ivenna-report` beside `ivenna`. Both use the subscription store in `DATA_DIR`. Keep this directory private to trusted deployment processes on a local filesystem with SQLite locking.
 
-An activity can start a listener as a host command. The kernel supplies the absolute paths to `ivenna-report` and the instance directory in `IVENNA_REPORT` and `DATA_DIR`. Host commands stop with the kernel. For collection across shutdown, run the listener under the deployment's service manager and give it the same paths and subscription reference. The [listener protocol](subscriptions.md) covers submitting reports, resuming from a saved cursor, and handling withdrawal.
+An activity can give a host command the subscription ID to report on. The command inherits the absolute paths to `ivenna-report` in `IVENNA_REPORT` and the instance's data directory in `DATA_DIR`. A [pending command callback](host.md#command-lifetimes) keeps the launching activity available until the command finishes. Host commands stop with the kernel.
+
+To keep collecting while the kernel is stopped, run the listener under your service manager. Give it the subscription ID, set `DATA_DIR` to the same absolute directory and point the listener at the installed `ivenna-report` executable. See the [listener protocol](subscriptions.md) for submitting observations and resuming collection.
 
 ## Memory service
 
@@ -210,11 +212,11 @@ Host processes and command handles are not restored, and commands are not replay
 
 ### Updating the executable
 
-Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and retain a compatible executable, or use a separate dedicated mailbox for the new format. Incompatible history fails startup; updating the executable does not clear or migrate the account.
+Restoration requires a [history format](architecture.md#persistent-working-history) understood by the executable. The prototype provides no compatibility layer or automatic migration for storage-format changes. Before applying such an update to an existing deployment, preserve a [complete backup](#backups-and-transfers) and keep its matching kernel and reporter binaries. To run the new format in a separate instance, give it its own dedicated mailbox and `DATA_DIR`. On a history mismatch, startup stops with the existing history in place.
 
 Older configurations may contain `LLM_MAX_ATTEMPTS`. The kernel now ignores this setting and continues retrying temporary inference failures. `LLM_REQUEST_TIMEOUT_MS` limits each attempt. See [model request settings](#model-requests).
 
-A checkpoint from before subscriptions can initialize a fresh local catalog. Subsequent checkpoints identify that catalog for restoration.
+A mailbox checkpoint saved before subscriptions can resume with a fresh local subscription database. Subsequent checkpoints identify the database and record each focus's delivery progress. If startup reports `IncompatibleSubscriptionSchema`, resume the instance with an executable that supports its database and mailbox formats.
 
 Earlier executables cannot restore a checkpoint whose selected history or pending observations include a `focus_interrupted` event. The current executable requires handover records to include the state sampled for the summary and its observation time. Earlier handovers without those fields fail restoration. See [persistent working history](architecture.md#persistent-working-history).
 
@@ -227,8 +229,10 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
-| `<DATA_DIR>/subscriptions.sqlite3` | Subscription identities, producer progress and keys, and reports awaiting history admission |
+| `<DATA_DIR>/subscriptions.sqlite3` | Subscription registrations, listener cursors, accepted report keys, and reports awaiting history admission |
 | Configured model-service account | Uploaded files and their service-side parsing results |
+
+Pending subscription reports occupy local disk space until the kernel acknowledges delivery. The subscription database retains each accepted report key until withdrawal so listeners can retry after delivery.
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
 
@@ -279,7 +283,9 @@ Preserve the host artifact or memory entry when it needs to outlive selected wor
 
 ### Backups and transfers
 
-The mailbox holds the focus histories and the subscription store holds reports awaiting acknowledgement. Restore both from the same point in time. Stop the kernel and pause independent listeners while backing up the pair. Use a SQLite-consistent backup of the subscription store, or copy its database and any SQLite journal files together while all writers are stopped. Keep the listener programs and configuration needed to resume collection.
+Restore the mailbox and subscription database from a matched backup. The mailbox records which reports have entered each focus's history. A newer database may already have discarded a report that is still missing from an older mailbox.
+
+If backing up the two stores separately, stop the kernel before saving either and leave it stopped until both backups finish. Take a consistent SQLite backup of `<DATA_DIR>/subscriptions.sqlite3`. If copying the database files directly, also pause independent listeners and copy any SQLite journal files with the database. Keep the listener programs and configuration needed to resume collection.
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 

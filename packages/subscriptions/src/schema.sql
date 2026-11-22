@@ -1,44 +1,34 @@
-BEGIN IMMEDIATE;
-CREATE TABLE IF NOT EXISTS metadata (
+CREATE TABLE metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton=1),
     identity TEXT NOT NULL,
-    bound INTEGER NOT NULL DEFAULT 0
-);
-INSERT INTO metadata(singleton, identity) VALUES(1, lower(hex(randomblob(16))))
-ON CONFLICT(singleton) DO NOTHING;
-CREATE TABLE IF NOT EXISTS subscriptions (
+    bound INTEGER NOT NULL DEFAULT 0 CHECK (bound IN (0, 1))
+) STRICT;
+INSERT INTO metadata(singleton, identity) VALUES(1, lower(hex(randomblob(16))));
+CREATE TABLE subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    reference TEXT AS (name || '-' || id) STORED UNIQUE,
-    session_id INTEGER NOT NULL,
+    reference TEXT AS (name || '-' || id) UNIQUE,
     focus_id TEXT NOT NULL,
-    reminder TEXT NOT NULL,
+    reminder TEXT NOT NULL CHECK (reminder IN ('immediate', 'next_input')),
     listener TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1,
-    external INTEGER NOT NULL DEFAULT 0,
-    status TEXT,
-    progress TEXT
-);
-CREATE INDEX IF NOT EXISTS owners ON subscriptions(session_id, id);
-CREATE TABLE IF NOT EXISTS reports (
+    cursor TEXT
+) STRICT;
+CREATE INDEX subscriptions_by_focus ON subscriptions(focus_id);
+-- Delivery terms are copied from the registration at acceptance so pending
+-- reports can be delivered after withdrawal deletes the registration.
+CREATE TABLE reports (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     reference TEXT NOT NULL,
-    session_id INTEGER NOT NULL,
-    reminder TEXT NOT NULL,
+    focus_id TEXT NOT NULL,
+    reminder TEXT NOT NULL CHECK (reminder IN ('immediate', 'next_input')),
     text TEXT NOT NULL,
-    handle TEXT,
-    retrieval TEXT NOT NULL,
-    version TEXT,
-    truncated INTEGER NOT NULL,
     source_time INTEGER,
     received INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS admissions ON reports(session_id, sequence);
-CREATE INDEX IF NOT EXISTS reminders ON reports(session_id, reminder, sequence);
-CREATE INDEX IF NOT EXISTS backlog ON reports(reference);
-CREATE TABLE IF NOT EXISTS producer_keys (
+) STRICT;
+CREATE INDEX reports_by_focus ON reports(focus_id);
+CREATE INDEX immediate_reports ON reports(focus_id) WHERE reminder='immediate';
+CREATE TABLE accepted_report_keys (
     subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
     key TEXT NOT NULL,
     PRIMARY KEY(subscription_id, key)
-) WITHOUT ROWID;
-COMMIT;
+) WITHOUT ROWID, STRICT;

@@ -10,13 +10,19 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }).createModule();
+    const zqlite = b.createModule(.{
+        .root_source_file = b.dependency("zqlite", .{}).module("zqlite").root_source_file,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "c", .module = bindings }},
+    });
     const mod = b.addModule("subscriptions", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "sqlite", .module = bindings },
+            .{ .name = "zqlite", .module = zqlite },
             .{ .name = "agent_contracts", .module = b.dependency("agent_contracts", options).module("agent_contracts") },
         },
     });

@@ -203,7 +203,7 @@ pub const Kernel = struct {
                 },
                 .subscribe => |args| blk: {
                     const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.reminder, args.listener) catch |err| return toolFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .subscription_id = subscription.subscription_id, .focus_id = subscription.focus_id });
+                    break :blk try runtimeResult(a, subscription);
                 },
                 .withdraw_subscription => |args| blk: {
                     const changed = try self.kernel.sessions.withdrawSubscription(self.work, args.subscription_id);
@@ -376,16 +376,11 @@ fn toolFailure(a: Allocator, err: anyerror) !Content {
     };
 }
 
-const SubscriptionFixture = struct {
-    const Store = contracts.HistoryStore;
-    const testing = std.testing;
+const TestStore = @import("test_history.zig").TestStore;
 
-    arena: std.heap.ArenaAllocator = .init(testing.allocator),
-    checkpoint: ?[]const u8 = null,
-    fail_save: enum { none, before_commit, after_commit } = .none,
-    measure_marked_events: bool = false,
-    groups: usize = 0,
-    records: std.ArrayList(Store.Record) = .empty,
+const SubscriptionFixture = struct {
+    const testing = std.testing;
+    storage: TestStore = .{},
 
     fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *@import("subscriptions").Store) !Kernel {
         engine.* = .{
@@ -401,81 +396,13 @@ const SubscriptionFixture = struct {
             .inbox = undefined,
             .sender = undefined,
             .callbacks = undefined,
-            .history = .{ .context = self, .vtable = &.{
-                .load = load,
-                .allocateGroup = allocateGroup,
-                .query = query,
-                .read = read,
-                .create = create,
-                .save = save,
-                .maintain = maintain,
-            } },
-        }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 2, .max_pending_events = 3 });
+            .history = self.storage.port(),
+        }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
     }
 
-    fn requestBytes(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!u64 {
-        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        if (!self.measure_marked_events) return 0;
+    fn requestBytes(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!u64 {
         return std.mem.count(u8, request.history[request.history.len - 1].message.text, "budget-marker");
     }
-
-    fn load(context: *anyopaque, a: Allocator) anyerror!?[]const u8 {
-        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        return if (self.checkpoint) |body| try a.dupe(u8, body) else null;
-    }
-
-    fn allocateGroup(context: *anyopaque, a: Allocator) anyerror![]const u8 {
-        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        self.groups += 1;
-        return std.fmt.allocPrint(a, "group-{d}", .{self.groups});
-    }
-
-    fn query(context: *anyopaque, a: Allocator, groups: []const []const u8) anyerror![]const Store.Reference {
-        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        var references: std.ArrayList(Store.Reference) = .empty;
-        for (self.records.items) |record| {
-            for (groups) |group| {
-                if (!std.mem.eql(u8, group, record.group)) continue;
-                try references.append(a, .{ .group = try a.dupe(u8, record.group), .key = record.key, .previous = record.previous, .locator = "" });
-                break;
-            }
-        }
-        return references.toOwnedSlice(a);
-    }
-
-    fn read(context: *anyopaque, a: Allocator, references: []const Store.Reference) anyerror![]const []const u8 {
-        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        const bodies = try a.alloc([]const u8, references.len);
-        for (references, bodies) |reference, *body| {
-            for (self.records.items) |record| {
-                if (std.mem.eql(u8, record.group, reference.group) and std.mem.eql(u8, &record.key, &reference.key)) {
-                    body.* = try a.dupe(u8, record.body);
-                    break;
-                }
-            } else return error.MissingTestRecord;
-        }
-        return bodies;
-    }
-
-    fn create(context: *anyopaque, _: Allocator, records: []const Store.Record) anyerror!void {
-        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        const a = self.arena.allocator();
-        for (records) |record| {
-            var owned = record;
-            owned.group = try a.dupe(u8, record.group);
-            owned.body = try a.dupe(u8, record.body);
-            try self.records.append(a, owned);
-        }
-    }
-
-    fn save(context: *anyopaque, body: []const u8) anyerror!void {
-        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        if (self.fail_save == .before_commit) return error.UnconfirmedCheckpoint;
-        self.checkpoint = try self.arena.allocator().dupe(u8, body);
-        if (self.fail_save == .after_commit) return error.UnconfirmedCheckpoint;
-    }
-
-    fn maintain(_: *anyopaque, _: Allocator, _: Store.Retention) anyerror!void {}
 
     fn takeWork(instance: *Kernel, a: Allocator) !Work {
         const ready = try instance.sessions.takeReadyBatch(a);
@@ -496,7 +423,7 @@ const SubscriptionFixture = struct {
     }
 };
 
-test "withdrawal enforces focus ownership and resubscribing creates a fresh reference" {
+test "an activity can use the reference returned by subscribe to withdraw another focus's registration" {
     const testing = std.testing;
     const Tool = struct {
         fn call(a: Allocator, round: *Kernel.RuntimeRound, name: []const u8, args: anytype) !std.json.Value {
@@ -507,8 +434,8 @@ test "withdrawal enforces focus ownership and resubscribing creates a fresh refe
         }
     };
     var fixture: SubscriptionFixture = .{};
-    defer fixture.arena.deinit();
-    const a = fixture.arena.allocator();
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
     var store = try @import("subscriptions").Store.open(a, ":memory:");
     defer store.close();
     var engine: Engine = undefined;
@@ -520,77 +447,44 @@ test "withdrawal enforces focus ownership and resubscribing creates a fresh refe
     defer core_history.deinit();
     const created = (try Tool.call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed", .reminder = "next_input" })).object.get("result").?;
     const core_id = created.object.get("subscription_id").?.string;
-    try testing.expectEqualStrings("core-1", created.object.get("focus_id").?.string);
     _ = try Tool.call(a, &core, "open_focus", .{ .name = "research", .task = "Watch for releases." });
     try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks);
 
     var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer activity.deinit();
-    const outside_scope = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?;
-    try testing.expect(!outside_scope.object.get("changed").?.bool);
+    const closed = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
+    try testing.expectEqualStrings(core_id, closed.get("subscription_id").?.string);
+    try testing.expect(closed.get("changed").?.bool);
 
-    const watch = (try Tool.call(a, &activity, "subscribe", .{ .name = "releases", .listener = "task feed", .reminder = "immediate" })).object.get("result").?.object;
-    const activity_id = watch.get("subscription_id").?.string;
-    try testing.expectEqualStrings(activity.work.session.focus_id, watch.get("focus_id").?.string);
-    try testing.expect(!std.mem.eql(u8, core_id, activity_id));
-    const core_subscriptions = (try kernel.sessions.compactionSnapshot(a, core.work.session)).state.subscriptions;
-    try testing.expectEqual(2, core_subscriptions.len);
-    try testing.expectEqualStrings(core_id, core_subscriptions[0].subscription_id);
-    try testing.expectEqualStrings(activity_id, core_subscriptions[1].subscription_id);
-    const own_subscriptions = (try kernel.sessions.compactionSnapshot(a, activity.work.session)).state.subscriptions;
-    try testing.expectEqual(1, own_subscriptions.len);
-    try testing.expectEqualStrings(activity_id, own_subscriptions[0].subscription_id);
-    const withdrawn = (try Tool.call(a, &core, "withdraw_subscription", .{ .subscription_id = activity_id })).object.get("result").?.object;
-    try testing.expectEqualStrings(activity_id, withdrawn.get("subscription_id").?.string);
-    try testing.expect(withdrawn.get("changed").?.bool);
-
-    const renewed = (try Tool.call(a, &activity, "subscribe", .{ .name = "releases", .listener = "task feed", .reminder = "next_input" })).object.get("result").?.object;
-    const renewed_id = renewed.get("subscription_id").?.string;
-    try testing.expect(!std.mem.eql(u8, renewed_id, activity_id));
-    const repeated = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = activity_id })).object.get("result").?.object;
+    const repeated = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
     try testing.expect(!repeated.get("changed").?.bool);
 }
 
-test "startup recovers a silent subscription committed before its tool reply" {
+test "startup requires the subscription catalog and working history to belong together" {
+    const testing = std.testing;
+    const Store = @import("subscriptions").Store;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.arena.deinit();
-    const a = fixture.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
-    defer store.close();
+    defer fixture.storage.arena.deinit();
+    var catalog = try Store.open(testing.allocator, ":memory:");
+    defer catalog.close();
     var engine: Engine = undefined;
-    {
-        var kernel = try fixture.kernel(&engine, &store);
-        defer kernel.deinit();
-        var round: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
-        defer round.deinit();
-        var history = try SubscriptionFixture.admit(&kernel, a, round.work);
-        defer history.deinit();
-        // The process stops after registration and before committing the model/tool exchange.
-        _ = try Kernel.RuntimeRound.invoke(&round, a, .{ .subscribe = .{ .name = "silent", .listener = "quiet feed", .reminder = .next_input } });
-    }
-    var kernel = try fixture.kernel(&engine, &store);
-    defer kernel.deinit();
-    const core = try SubscriptionFixture.takeWork(&kernel, a);
-    var history = try SubscriptionFixture.admit(&kernel, a, core);
-    defer history.deinit();
-    const events = history.records()[history.records().len - 1].record.events.items;
-    try std.testing.expectEqual(1, events.len);
-    const subscriptions = events[0].startup.subscriptions;
-    try std.testing.expectEqual(1, subscriptions.len);
-    try std.testing.expectEqualStrings("silent-1", subscriptions[0].subscription_id);
-    try std.testing.expectEqualStrings(core.session.focus_id, subscriptions[0].focus_id);
-    try std.testing.expectEqual(.next_input, subscriptions[0].reminder);
-    try std.testing.expect(try kernel.sessions.withdrawSubscription(core, subscriptions[0].subscription_id));
-    try SubscriptionFixture.finish(&kernel, core, &history);
+    var initial = try fixture.kernel(&engine, &catalog);
+    initial.deinit();
+
+    var other = try Store.open(testing.allocator, ":memory:");
+    defer other.close();
+    try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &other));
+    fixture.storage.checkpoint = null;
+    try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &catalog));
 }
 
 test "subscription admission and database acknowledgement survive either outcome of an unconfirmed checkpoint" {
     const testing = std.testing;
     const Subs = @import("subscriptions");
-    for ([_]@FieldType(SubscriptionFixture, "fail_save"){ .before_commit, .after_commit }) |failure| {
+    for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
         var fixture: SubscriptionFixture = .{};
-        defer fixture.arena.deinit();
-        const a = fixture.arena.allocator();
+        defer fixture.storage.arena.deinit();
+        const a = fixture.storage.arena.allocator();
         var store = try Subs.Store.open(a, ":memory:");
         defer store.close();
         var engine: Engine = undefined;
@@ -613,24 +507,17 @@ test "subscription admission and database acknowledgement survive either outcome
                 .key = "second",
                 .text = "second",
                 .source_time_unix_ms = 15,
-                .truncated = true,
-                .handle = "release/2",
-                .retrieval = .current,
             }, 20));
             const work = try SubscriptionFixture.takeWork(&kernel, a);
-            try testing.expect(try store.withdraw(1, renewed.subscription_id));
-            fixture.fail_save = failure;
+            try testing.expect(try store.withdraw(renewed.subscription_id));
+            fixture.storage.fail_save = failure;
             try testing.expectError(error.UnconfirmedCheckpoint, SubscriptionFixture.admit(&kernel, a, work));
-            try testing.expectEqual(2, (try store.pending(a, 1, 0, 8)).len);
+            try testing.expectEqual(2, (try store.pending(a, "core-1", 0, 8)).len);
         }
-        fixture.fail_save = .none;
-        var other_catalog = try Subs.Store.open(a, ":memory:");
-        defer other_catalog.close();
-        try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &other_catalog));
-
+        fixture.storage.fail_save = .none;
         var kernel = try fixture.kernel(&engine, &store);
         defer kernel.deinit();
-        const waiting = try store.pending(a, 1, 0, 8);
+        const waiting = try store.pending(a, "core-1", 0, 8);
         try testing.expectEqual(@as(usize, if (failure == .before_commit) 2 else 0), waiting.len);
         const resumed = try SubscriptionFixture.takeWork(&kernel, a);
         var history = try SubscriptionFixture.admit(&kernel, a, resumed);
@@ -643,24 +530,23 @@ test "subscription admission and database acknowledgement survive either outcome
         try testing.expectEqual(2, reports.items.len);
         try testing.expectEqualStrings("first", reports.items[0].text);
         try testing.expectEqualStrings("second", reports.items[1].text);
-        try testing.expect(reports.items[1].delivery_id > reports.items[0].delivery_id);
         try testing.expectEqualStrings("releases-1", reports.items[0].subscription_id);
         try testing.expectEqualStrings("releases-2", reports.items[1].subscription_id);
-        try testing.expectEqualStrings("release/2", reports.items[1].handle.?);
         try testing.expectEqual(@as(i64, 15), reports.items[1].source_time_unix_ms.?);
-        try testing.expect(reports.items[1].truncated);
-        try testing.expect(!try store.hasPending(1, 0));
+        try testing.expectEqual(0, (try store.pending(a, "core-1", 0, 1)).len);
         try SubscriptionFixture.finish(&kernel, resumed, &history);
         try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
     }
 }
 
-test "an activity can sleep on a passive subscription and finish when its last registration is withdrawn" {
+test "interleaved focus reports survive another focus withdrawing their registration" {
     const testing = std.testing;
-    for ([_]bool{ false, true }) |has_report| {
+    const Case = enum { empty, restart_empty, restart_passive };
+    for ([_]Case{ .empty, .restart_empty, .restart_passive }) |scenario| {
+        const has_report = scenario == .restart_passive;
         var fixture: SubscriptionFixture = .{};
-        defer fixture.arena.deinit();
-        const a = fixture.arena.allocator();
+        defer fixture.storage.arena.deinit();
+        const a = fixture.storage.arena.allocator();
         var store = try @import("subscriptions").Store.open(a, ":memory:");
         defer store.close();
         var engine: Engine = undefined;
@@ -670,38 +556,77 @@ test "an activity can sleep on a passive subscription and finish when its last r
             const core = try SubscriptionFixture.takeWork(&kernel, a);
             var core_history = try SubscriptionFixture.admit(&kernel, a, core);
             defer core_history.deinit();
+            const core_watch = try kernel.sessions.subscribe(a, core, "news", .immediate, "News feed");
             var plans: std.ArrayList(Sessions.ForkPlan) = .empty;
             try plans.append(a, try kernel.sessions.prepareFork(core, "watch", "Read the observations."));
+            try plans.append(a, try kernel.sessions.prepareFork(core, "review", "Review changes."));
             try kernel.sessions.commitToolRound(core, &core_history, &plans);
-            const work = try SubscriptionFixture.takeWork(&kernel, a);
-            var activity = try SubscriptionFixture.admit(&kernel, a, work);
-            defer activity.deinit();
-            const sub = try kernel.sessions.subscribe(a, work, "watch", .next_input, "test listener");
-            try SubscriptionFixture.finish(&kernel, work, &activity);
-            if (has_report) try testing.expectEqual(.accepted, try store.publish(sub.subscription_id, .{
-                .key = "change",
-                .text = "changed",
-            }, 17));
-            try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
-            try testing.expect(try kernel.sessions.withdrawSubscription(core, sub.subscription_id));
-            break :blk sub;
+            const activities = try kernel.sessions.takeReadyBatch(a);
+            try testing.expectEqual(2, activities.len);
+            var watches: [2]@import("subscriptions").Created = undefined;
+            for (activities, [_]@import("subscriptions").Reminder{ .next_input, .immediate }, &watches) |work, reminder, *watch| {
+                var activity = try SubscriptionFixture.admit(&kernel, a, work);
+                defer activity.deinit();
+                watch.* = try kernel.sessions.subscribe(a, work, "updates", reminder, "Source listener");
+                try SubscriptionFixture.finish(&kernel, work, &activity);
+            }
+            try SubscriptionFixture.finish(&kernel, core, &core_history);
+
+            // The two passive reports surround the core and review reports
+            // in the catalog's insertion order.
+            const passive = watches[0];
+            if (has_report) _ = try store.publish(passive.subscription_id, .{ .key = "first", .text = "first" }, 17);
+            _ = try store.publish(core_watch.subscription_id, .{ .key = "core", .text = "core news" }, 18);
+            _ = try store.publish(watches[1].subscription_id, .{ .key = "review", .text = "review news" }, 19);
+            if (has_report) _ = try store.publish(passive.subscription_id, .{ .key = "second", .text = "second" }, 20);
+            const ready = try kernel.sessions.takeReadyBatch(a);
+            try testing.expectEqual(2, ready.len);
+            try testing.expectEqualStrings("core-1", ready[0].session.focus_id);
+            try testing.expectEqualStrings("review-3", ready[1].session.focus_id);
+            // Admit the later sequence first. Each focus advances only its
+            // own checkpoint and acknowledges only its own reports.
+            for ([_]usize{ 1, 0 }) |index| {
+                const work = ready[index];
+                var history = try SubscriptionFixture.admit(&kernel, a, work);
+                defer history.deinit();
+                const events = history.records()[history.records().len - 1].record.events.items;
+                try testing.expectEqual(1, events.len);
+                try testing.expectEqualStrings(if (index == 1) "review news" else "core news", events[0].subscription.text);
+                if (index == 1) try testing.expect(try kernel.sessions.withdrawSubscription(work, passive.subscription_id));
+                try SubscriptionFixture.finish(&kernel, work, &history);
+            }
+            if (scenario == .empty) {
+                try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
+                try testing.expect(!kernel.sessions.sessions.contains(2));
+            }
+            break :blk passive;
         };
-        // The withdrawal reached SQLite but the kernel stopped before dispatch.
+        // Startup reconciles a withdrawal even if no dispatch ran after it.
         var kernel = try fixture.kernel(&engine, &store);
         defer kernel.deinit();
-        const batch = try kernel.sessions.takeReadyBatch(a);
-        try testing.expectEqual(@as(usize, if (has_report) 2 else 1), batch.len);
-        const core = batch[0];
+        const core = try SubscriptionFixture.takeWork(&kernel, a);
         var history = try SubscriptionFixture.admit(&kernel, a, core);
         defer history.deinit();
         if (has_report) {
-            const work = batch[1];
-            try testing.expectEqualStrings("watch-2", work.session.focus_id);
-            var activity = try SubscriptionFixture.admit(&kernel, a, work);
-            defer activity.deinit();
-            const events = activity.records()[activity.records().len - 1].record.events.items;
-            try testing.expectEqualStrings(sub.subscription_id, events[events.len - 1].subscription.subscription_id);
-            try SubscriptionFixture.finish(&kernel, work, &activity);
+            // The next ordinary turn can take one report. Its remaining
+            // passive sibling must still wait after the model responds.
+            kernel.sessions.max_pending = 1;
+            for ([_][]const u8{ "first", "second" }) |expected| {
+                try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
+                try kernel.sessions.sendFocusMessage(core, "watch-2", "What did the listener see?");
+                const work = try SubscriptionFixture.takeWork(&kernel, a);
+                try testing.expectEqualStrings("watch-2", work.session.focus_id);
+                var activity = try SubscriptionFixture.admit(&kernel, a, work);
+                defer activity.deinit();
+                const events = activity.records()[activity.records().len - 1].record.events.items;
+                for (events) |event| {
+                    if (event != .subscription) continue;
+                    try testing.expectEqualStrings(sub.subscription_id, event.subscription.subscription_id);
+                    try testing.expectEqualStrings(expected, event.subscription.text);
+                    break;
+                } else return error.MissingSubscriptionObservation;
+                try SubscriptionFixture.finish(&kernel, work, &activity);
+            }
         }
         try testing.expect(!kernel.sessions.sessions.contains(2));
         // A sleeping focus retired by dispatch may already have supplied the
@@ -709,8 +634,9 @@ test "an activity can sleep on a passive subscription and finish when its last r
         if (has_report) {
             try testing.expect(!try kernel.sessions.commitResponse(core, &history, &.{}, null));
             try kernel.sessions.collectPending(core);
+            const ending_history = try SubscriptionFixture.admit(&kernel, a, core);
             history.deinit();
-            history = try SubscriptionFixture.admit(&kernel, a, core);
+            history = ending_history;
         }
         const events = history.records()[history.records().len - 1].record.events.items;
         const ending = events[events.len - 1].activity;
@@ -720,11 +646,11 @@ test "an activity can sleep on a passive subscription and finish when its last r
     }
 }
 
-test "a passive backlog leaves another owner schedulable and each source gets a turn under a one-event budget" {
+test "a passive backlog leaves another focus schedulable and each source gets a turn under a one-event budget" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.arena.deinit();
-    const a = fixture.arena.allocator();
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
     var store = try @import("subscriptions").Store.open(a, ":memory:");
     defer store.close();
     var engine: Engine = undefined;
@@ -769,7 +695,6 @@ test "a passive backlog leaves another owner schedulable and each source gets a 
     for (0..2) |_| try testing.expectEqual(.accepted, try kernel.sessions.accept(.{
         .content = .{ .message = .{ .from = &.{"operator"}, .text = "budget-marker", .observed_at_unix_ms = 100 } },
     }));
-    fixture.measure_marked_events = true;
     kernel.limits.request_bytes = 1;
     const resumed = try SubscriptionFixture.takeWork(&kernel, a);
     defer kernel.sessions.endWorker(resumed.session);
@@ -790,8 +715,8 @@ test "a passive backlog leaves another owner schedulable and each source gets a 
 test "a rejected inference wakes for the unadmitted immediate suffix while failed admission waits for fresh input" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.arena.deinit();
-    const a = fixture.arena.allocator();
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
     var store = try @import("subscriptions").Store.open(a, ":memory:");
     defer store.close();
     var engine: Engine = undefined;
@@ -805,7 +730,6 @@ test "a rejected inference wakes for the unadmitted immediate suffix while faile
     for ([_][]const u8{ "first", "second" }) |key| {
         _ = try store.publish(subscription.subscription_id, .{ .key = key, .text = "budget-marker" }, 100);
     }
-    fixture.measure_marked_events = true;
     kernel.limits.request_bytes = 1;
     const first = try SubscriptionFixture.takeWork(&kernel, a);
     var admitted = try SubscriptionFixture.admit(&kernel, a, first);

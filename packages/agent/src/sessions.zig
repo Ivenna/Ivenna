@@ -80,6 +80,9 @@ pub const Registry = struct {
     callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
+    // Only withdrawal can remove the last reason for an already sleeping
+    // activity to stay. On startup, reconcile withdrawals from the prior run.
+    check_sleeping_activities: bool = true,
     next_session_id: u64 = 2,
     next_callback_id: u64 = 1,
     next_command_id: u64 = 1,
@@ -166,7 +169,7 @@ pub const Registry = struct {
         var restored = self.sessions.valueIterator();
         while (restored.next()) |entry| {
             const session = entry.*;
-            if (session.subscription_through != 0) try subscriptions.acknowledge(session.session_id, session.subscription_through);
+            if (session.subscription_through != 0) try subscriptions.acknowledge(session.focus_id, session.subscription_through);
         }
         return self;
     }
@@ -224,12 +227,15 @@ pub const Registry = struct {
         if (!self.hasCapacity(session)) return .deferred;
         const delivery = try Delivery.create(self.allocator, event, incoming.receipt);
         errdefer delivery.destroy(self.allocator);
-        delivery.callback_id = if (incoming.content == .callback) incoming.content.callback.id else null;
         try self.ensureStartupLocked(session);
         try session.pending.ensureUnusedCapacity(self.allocator, 1);
         const notice_key = if (incoming.receipt) |key| try self.allocator.dupe(u8, key) else null;
         errdefer if (notice_key) |key| self.allocator.free(key);
-        if (delivery.callback_id) |id| try self.queued_callbacks.put(self.allocator, id, {});
+        if (incoming.content == .callback) {
+            const id = incoming.content.callback.id;
+            try self.queued_callbacks.put(self.allocator, id, {});
+            delivery.admission = .{ .callback = id };
+        }
         if (notice_key) |key| try self.noticed.put(self.allocator, key, .scheduled);
         session.pending.appendAssumeCapacity(delivery);
         session.notify();
@@ -253,6 +259,7 @@ pub const Registry = struct {
         for (sessions) |session| {
             if (try self.takeReady(session)) |work| ready.appendAssumeCapacity(work);
         }
+        self.check_sleeping_activities = false;
         return ready.toOwnedSlice(a);
     }
 
@@ -261,58 +268,57 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        try self.collectLocked(work.session, work.activation);
+        try self.collectLocked(work.session, work.activation, try self.subscriptions.latestImmediate(work.session.focus_id));
     }
 
-    fn collectLocked(self: *Registry, session: *Session, activation: *Activation) !void {
-        std.debug.assert(activation.deliveries.items.len == 0);
-        // Sample before reading so an immediate arrival after this point still
-        // counts as fresh if admission or inference is interrupted.
-        session.noticed_immediate = try self.subscriptions.latestImmediate(session.session_id);
-        var arena: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const reports = try self.subscriptions.pending(a, session.session_id, session.subscription_through, @min(self.max_pending, report_read_batch));
-        var subscriptions: std.ArrayList(*Delivery) = .empty;
-        try subscriptions.ensureTotalCapacity(a, reports.len);
-        errdefer for (subscriptions.items) |delivery| delivery.destroy(self.allocator);
-        for (reports) |report| {
-            const delivery = try Delivery.create(self.allocator, .{ .subscription = .{
-                .subscription_id = report.reference,
-                .delivery_id = report.sequence,
-                .text = report.text,
-                .observed_at_unix_ms = report.observed_at_unix_ms,
-                .source_time_unix_ms = report.source_time_unix_ms,
-                .handle = report.handle,
-                .version = report.version,
-                .truncated = report.truncated,
-                .retrieval = report.retrieval,
-            } }, null);
-            subscriptions.appendAssumeCapacity(delivery);
+    fn collectLocked(self: *Registry, session: *Session, activation: *Activation, latest_immediate: u64) !void {
+        const deliveries = &activation.deliveries;
+        std.debug.assert(deliveries.items.len == 0);
+        // Reports can be reread from their stores. Ordinary arrivals stay in
+        // session.pending until the entire batch transfers to the activation.
+        errdefer {
+            _ = self.keepQueued(deliveries.items);
+            deliveries.clearRetainingCapacity();
         }
-        const activity = if (session == self.core) try self.readReportDeliveriesLocked(0) else &.{};
-        defer self.allocator.free(activity);
-        errdefer for (activity) |report| report.destroy(self.allocator);
-        try activation.deliveries.ensureUnusedCapacity(self.allocator, session.pending.items.len + activity.len + reports.len);
-        // Each source has its own arrival order. Rotate who receives the first
-        // part of a bounded input so a permanently busy source cannot crowd
-        // out another. Startup still introduces the first turn of a run.
         var ordinary = session.pending.items;
         if (ordinary.len != 0 and ordinary[0].event == .startup) {
-            activation.deliveries.appendAssumeCapacity(ordinary[0]);
+            try deliveries.append(self.allocator, ordinary[0]);
             ordinary = ordinary[1..];
         }
+        // Rotate which source receives the first part of a bounded input.
+        // Each source preserves its own arrival order.
         var stream = session.first_stream;
-        for (0..3) |_| {
-            activation.deliveries.appendSliceAssumeCapacity(switch (stream) {
-                .ordinary => ordinary,
-                .subscription => subscriptions.items,
-                .activity => activity,
-            });
+        while (true) {
+            switch (stream) {
+                .ordinary => try deliveries.appendSlice(self.allocator, ordinary),
+                .activity => if (session == self.core) {
+                    _ = try self.appendActivityReports(deliveries, 0);
+                },
+                .subscription => {
+                    var arena: std.heap.ArenaAllocator = .init(self.allocator);
+                    defer arena.deinit();
+                    const reports = try self.subscriptions.pending(arena.allocator(), session.focus_id, session.subscription_through, @min(self.max_pending, report_read_batch));
+                    try deliveries.ensureUnusedCapacity(self.allocator, reports.len);
+                    for (reports) |report| {
+                        const delivery = try Delivery.create(self.allocator, .{ .subscription = .{
+                            .subscription_id = report.reference,
+                            .text = report.text,
+                            .observed_at_unix_ms = report.observed_at_unix_ms,
+                            .source_time_unix_ms = report.source_time_unix_ms,
+                        } }, null);
+                        delivery.admission = .{ .subscription = report.sequence };
+                        deliveries.appendAssumeCapacity(delivery);
+                    }
+                },
+            }
             stream = stream.next();
+            if (stream == session.first_stream) break;
         }
         session.pending.clearRetainingCapacity();
-        activation.admitted = activation.deliveries.items.len == 0;
+        // An immediate report arriving after the sample counts as fresh if
+        // admission fails, even when it arrived during the reads above.
+        session.noticed_immediate = latest_immediate;
+        activation.admitted = deliveries.items.len == 0;
         activation.new_arrival = false;
     }
 
@@ -325,12 +331,7 @@ pub const Registry = struct {
         std.debug.assert(!work.activation.admitted);
         var staged: usize = 0;
         for (work.activation.deliveries.items) |delivery| staged += @intFromBool(delivery.event == .activity);
-        const reports = try self.readReportDeliveriesLocked(staged);
-        defer self.allocator.free(reports);
-        errdefer for (reports) |report| report.destroy(self.allocator);
-        if (reports.len == 0) return false;
-        try work.activation.deliveries.appendSlice(self.allocator, reports);
-        return true;
+        return self.appendActivityReports(&work.activation.deliveries, staged);
     }
 
     /// Already admitted observations live in Context; their receipts have been
@@ -342,7 +343,7 @@ pub const Registry = struct {
         std.debug.assert(work.activation.admitted);
         for (work.activation.deliveries.items) |delivery| {
             std.debug.assert(delivery.receipt == null);
-            if (delivery.callback_id) |id| _ = self.queued_callbacks.remove(id);
+            if (delivery.admission == .callback) _ = self.queued_callbacks.remove(delivery.admission.callback);
             delivery.destroy(self.allocator);
         }
         work.activation.deliveries.clearRetainingCapacity();
@@ -379,17 +380,17 @@ pub const Registry = struct {
             session.first_stream = Stream.of(delivery.event).next();
             break;
         }
-        var admitted_report = false;
-        for (deliveries.items) |delivery| {
-            if (delivery.callback_id) |id| self.completeCallbackLocked(id);
-            if (delivery.event == .subscription) {
-                std.debug.assert(delivery.event.subscription.delivery_id > session.subscription_through);
-                session.subscription_through = delivery.event.subscription.delivery_id;
-                admitted_report = true;
-            }
-        }
+        const previous_through = session.subscription_through;
+        for (deliveries.items) |delivery| switch (delivery.admission) {
+            .none => {},
+            .callback => |id| self.completeCallbackLocked(id),
+            .subscription => |sequence| {
+                std.debug.assert(sequence > session.subscription_through);
+                session.subscription_through = sequence;
+            },
+        };
         try self.saveLocked();
-        if (admitted_report) try self.subscriptions.acknowledge(session.session_id, session.subscription_through);
+        if (session.subscription_through != previous_through) try self.subscriptions.acknowledge(session.focus_id, session.subscription_through);
     }
 
     pub fn prepareFork(self: *Registry, work: Work, name: []const u8, task: []const u8) !ForkPlan {
@@ -532,7 +533,7 @@ pub const Registry = struct {
             .state = .{
                 .activities = try activities.toOwnedSlice(a),
                 .callbacks = try own_callbacks.toOwnedSlice(a),
-                .subscriptions = try self.subscriptions.registrations(a, subscriptionOwner(session)),
+                .subscriptions = try self.subscriptions.activeReferences(a, session.focus_id),
             },
         };
     }
@@ -554,13 +555,9 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
-        const can_end = try self.canEnd(session);
-        const more_reports = if (can_end)
-            try self.subscriptions.hasPending(session.session_id, session.subscription_through)
-        else
-            try self.subscriptions.hasImmediate(session.session_id, session.subscription_through);
-        const finished = !self.hasWork(session) and !more_reports;
-        const completed_activity = finished and can_end;
+        const finished = !self.hasWork(session) and
+            try self.subscriptions.latestImmediate(session.focus_id) <= session.subscription_through;
+        const completed_activity = finished and try self.canEnd(session);
         if (!completed_activity) try history.appendBatch(output, &.{});
         if (session != self.core) try self.reportResponseLocked(session, text, observed_at, completed_activity);
         if (completed_activity) {
@@ -599,9 +596,8 @@ pub const Registry = struct {
         } });
         // Further immediate reports can resume the focus. After admission, the
         // unadmitted suffix counts; before admission, wait for a new arrival.
-        const report_after = if (activation.admitted) session.subscription_through else session.noticed_immediate;
-        const fresh_report = try self.subscriptions.hasImmediate(session.session_id, report_after);
-        const ready = fresh_report or activation.new_arrival or (activation.admitted and self.hasWork(session));
+        if (activation.admitted) session.noticed_immediate = session.subscription_through;
+        const ready = activation.new_arrival or (activation.admitted and self.hasWork(session));
         session.pending.insertSliceAssumeCapacity(0, self.keepQueued(activation.deliveries.items));
         activation.deliveries.clearRetainingCapacity();
         session.state = if (ready) .idle else .interrupted;
@@ -702,24 +698,20 @@ pub const Registry = struct {
         return .{ .id = registration.id, .reference = try a.dupe(u8, registration.reference) };
     }
 
-    pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, reminder: Subscriptions.Reminder, listener: []const u8) !Subscriptions.Registration {
+    pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, reminder: Subscriptions.Reminder, listener: []const u8) !Subscriptions.Created {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        return self.subscriptions.create(a, work.session.session_id, work.session.focus_id, name, reminder, listener);
-    }
-
-    /// The core coordinates interests across focuses. Each activity manages
-    /// its own registrations.
-    fn subscriptionOwner(session: *const Session) ?u64 {
-        return if (session.role == .core) null else session.session_id;
+        return self.subscriptions.create(a, work.session.focus_id, name, reminder, listener);
     }
 
     pub fn withdrawSubscription(self: *Registry, work: Work, reference: []const u8) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        return self.subscriptions.withdraw(subscriptionOwner(work.session), reference);
+        const changed = try self.subscriptions.withdraw(reference);
+        if (changed) self.check_sleeping_activities = true;
+        return changed;
     }
 
     /// Before startup dispatch, these registrations belong to commands from the
@@ -839,62 +831,57 @@ pub const Registry = struct {
     }
 
     fn canEnd(self: *Registry, session: *Session) !bool {
-        return session != self.core and self.callbackCount(session.session_id) == 0 and
-            !try self.subscriptions.hasActive(session.session_id);
+        if (session == self.core) return false;
+        for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) return false;
+        return !try self.subscriptions.hasActive(session.focus_id) and
+            !try self.subscriptions.hasPending(session.focus_id, session.subscription_through);
     }
 
     fn takeReady(self: *Registry, session: *Session) !?Work {
         if (session.state == .running) return null;
+        const latest_immediate = try self.subscriptions.latestImmediate(session.focus_id);
         if (session.state == .interrupted) {
-            if (!try self.subscriptions.hasImmediate(session.session_id, session.noticed_immediate)) return null;
-            session.notify();
-        }
-        if (!self.hasWork(session) and !try self.subscriptions.hasImmediate(session.session_id, session.subscription_through)) {
-            // A sleeping activity's last registration may have been withdrawn
-            // by the core, including just before a restart.
-            if (!try self.canEnd(session)) return null;
-            if (!try self.subscriptions.hasPending(session.session_id, session.subscription_through)) {
+            if (latest_immediate <= session.noticed_immediate) return null;
+        } else if (!self.hasWork(session) and latest_immediate <= session.subscription_through) {
+            // Withdrawal can retire a sleeping activity. Accepted passive
+            // reports keep it addressable until its next ordinary input.
+            if (self.check_sleeping_activities and try self.canEnd(session)) {
                 try self.reportResponseLocked(session, null, self.now(), true);
                 _ = self.sessions.remove(session.session_id);
                 self.core.notify();
                 if (session.borrowed_workers == 0) self.destroySession(session);
                 try self.saveLocked();
-                return null;
             }
+            return null;
         }
         try self.ensureStartupLocked(session);
         try self.restoreContextLocked(session);
-        const activation = try Activation.create(self.allocator, &.{});
+        const activation = try self.allocator.create(Activation);
+        activation.* = .{};
         errdefer activation.destroy(self.allocator);
-        try self.collectLocked(session, activation);
+        try self.collectLocked(session, activation, latest_immediate);
         session.state = .{ .running = activation };
         session.borrowed_workers += 1;
         return .{ .session = session, .activation = activation };
     }
 
-    fn readReportDeliveriesLocked(self: *Registry, start: usize) ![]*Delivery {
+    fn appendActivityReports(self: *Registry, deliveries: *std.ArrayList(*Delivery), start: usize) !bool {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const reports = try self.reports.peek(arena.allocator(), start, report_read_batch);
-        const deliveries = try self.allocator.alloc(*Delivery, reports.len);
-        var initialized: usize = 0;
-        errdefer {
-            for (deliveries[0..initialized]) |delivery| delivery.destroy(self.allocator);
-            self.allocator.free(deliveries);
-        }
-        for (reports, deliveries) |report, *delivery| {
+        try deliveries.ensureUnusedCapacity(self.allocator, reports.len);
+        for (reports) |report| {
             const messages: []const Input.ActivityMessage = if (report.content == .assistant) &.{.{
                 .text = report.content.assistant,
                 .observed_at_unix_ms = report.observed_at_unix_ms,
             }} else &.{};
-            delivery.* = try Delivery.create(self.allocator, .{ .activity = .{
+            deliveries.appendAssumeCapacity(try Delivery.create(self.allocator, .{ .activity = .{
                 .from_focus = report.from_focus,
                 .messages = messages,
                 .ended_at_unix_ms = if (report.content == .ended) report.observed_at_unix_ms else null,
-            } }, null);
-            initialized += 1;
+            } }, null));
         }
-        return deliveries;
+        return reports.len != 0;
     }
 
     fn restoreContextLocked(self: *Registry, session: *Session) !void {
@@ -909,7 +896,6 @@ pub const Registry = struct {
         if (!session.needs_startup) return;
         const delivery = try Delivery.create(self.allocator, .{ .startup = .{ .observed_at_unix_ms = self.started_at_unix_ms } }, null);
         errdefer delivery.destroy(self.allocator);
-        delivery.event.startup.subscriptions = try self.subscriptions.registrations(delivery.arena.allocator(), subscriptionOwner(session));
         try session.pending.insert(self.allocator, 0, delivery);
         session.needs_startup = false;
     }
@@ -926,12 +912,6 @@ pub const Registry = struct {
     fn hasWork(self: *const Registry, session: *const Session) bool {
         if (session.pending.items.len != 0) return true;
         return session == self.core and self.reports.pendingEndings() != 0;
-    }
-
-    fn callbackCount(self: *const Registry, session_id: u64) usize {
-        var count: usize = 0;
-        for (self.callbacks.items) |callback| count += @intFromBool(callback.session_id == session_id);
-        return count;
     }
 
     fn hasCapacity(self: *Registry, session: *Session) bool {
@@ -997,45 +977,11 @@ fn freeSource(a: Allocator, source: contracts.Callback.Source) void {
     if (source == .host) a.free(source.host.command_id);
 }
 
-const TestStorage = struct {
-    const Store = contracts.HistoryStore;
-    groups: usize = 0,
-    checkpoints: usize = 0,
-    last_checkpoint: ?Store.Key = null,
-    fail_save: bool = false,
-
-    fn port(self: *TestStorage) Store {
-        return .{
-            .context = self,
-            .vtable = &.{ .load = load, .allocateGroup = allocateGroup, .save = save, .query = query, .read = read, .create = create, .maintain = maintain },
-        };
-    }
-    fn load(_: *anyopaque, _: Allocator) anyerror!?[]const u8 {
-        return null;
-    }
-    fn allocateGroup(context: *anyopaque, a: Allocator) anyerror![]const u8 {
-        const self: *TestStorage = @ptrCast(@alignCast(context));
-        self.groups += 1;
-        return std.fmt.allocPrint(a, "group-{d}", .{self.groups});
-    }
-    fn save(context: *anyopaque, body: []const u8) anyerror!void {
-        const self: *TestStorage = @ptrCast(@alignCast(context));
-        self.checkpoints += 1;
-        self.last_checkpoint = @import("record_codec.zig").digest(body);
-        if (self.fail_save) return error.UnconfirmedCheckpoint;
-    }
-    fn query(_: *anyopaque, _: Allocator, _: []const []const u8) anyerror![]const Store.Reference {
-        return error.UnexpectedQuery;
-    }
-    fn read(_: *anyopaque, _: Allocator, _: []const Store.Reference) anyerror![]const []const u8 {
-        return error.UnexpectedRead;
-    }
-    fn create(_: *anyopaque, _: Allocator, _: []const Store.Record) anyerror!void {}
-    fn maintain(_: *anyopaque, _: Allocator, _: Store.Retention) anyerror!void {}
-};
+const TestStore = @import("test_history.zig").TestStore;
 
 test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
-    var storage: TestStorage = .{};
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
     var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
     defer subscriptions.close();
     var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
@@ -1090,12 +1036,45 @@ fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, histo
     return .{ .work = work, .history = history };
 }
 
+test "compaction samples the active subscriptions addressed to this focus" {
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+    defer subscriptions.close();
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
+    defer registry.deinit();
+    var core = try admitTestInput(&registry, a);
+    defer core.history.deinit();
+    defer registry.endWorker(core.work.session);
+    const core_watch = try registry.subscribe(a, core.work, "releases", .next_input, "Release feed");
+    var plans: std.ArrayList(ForkPlan) = .empty;
+    try plans.append(a, try registry.prepareFork(core.work, "research", "Follow revisions."));
+    try registry.commitToolRound(core.work, &core.history, &plans);
+    var activity = try admitTestInput(&registry, a);
+    defer activity.history.deinit();
+    defer registry.endWorker(activity.work.session);
+    const activity_watch = try registry.subscribe(a, activity.work, "edits", .immediate, "Document edits");
+    const withdrawn = try registry.subscribe(a, activity.work, "previous", .immediate, "Previous publisher");
+    try std.testing.expect(try registry.withdrawSubscription(core.work, withdrawn.subscription_id));
+
+    const core_sample = try registry.compactionSnapshot(a, core.work.session);
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{core_watch.subscription_id}), core_sample.state.subscriptions);
+    const activity_sample = try registry.compactionSnapshot(a, activity.work.session);
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{activity_watch.subscription_id}), activity_sample.state.subscriptions);
+    const request = try activity.history.summaryRequest(a, activity_sample, "Summarize.");
+    try std.testing.expect(std.mem.indexOf(u8, request[request.len - 1].message.text, activity_watch.subscription_id) != null);
+}
+
 test "activity completion publishes once and maintenance republishes the same checkpoint after an unconfirmed save" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
     for ([_]bool{ false, true }) |sleeping| {
-        var storage: TestStorage = .{};
+        var storage: TestStore = .{};
+        defer storage.arena.deinit();
         var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
         defer subscriptions.close();
         var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
@@ -1114,19 +1093,20 @@ test "activity completion publishes once and maintenance republishes the same ch
         const output: []const Model.Item = &.{.{ .continuation = "final response" }};
         if (sleeping) {
             _ = try registry.registerCallback(a, activity.work, "read", .{ .host = .{ .command_id = "read-1" } });
-            storage.fail_save = true;
+            storage.fail_save = .after_commit;
             try std.testing.expectError(error.UnconfirmedCheckpoint, registry.commitResponse(activity.work, &activity.history, output, "Read the notes."));
             registry.endWorker(activity.work.session);
-            const unconfirmed = storage.last_checkpoint.?;
-            storage.last_checkpoint = null;
-            storage.fail_save = false;
+            const unconfirmed = storage.checkpoint.?;
+            const before = storage.saves;
+            storage.fail_save = .none;
             try registry.maintain();
-            try std.testing.expectEqual(unconfirmed, storage.last_checkpoint.?);
+            try std.testing.expectEqual(before + 1, storage.saves);
+            try std.testing.expectEqualStrings(unconfirmed, storage.checkpoint.?);
         } else {
             defer registry.endWorker(activity.work.session);
-            const before = storage.checkpoints;
+            const before = storage.saves;
             try std.testing.expect(try registry.commitResponse(activity.work, &activity.history, output, "Read the notes."));
-            try std.testing.expectEqual(before + 1, storage.checkpoints);
+            try std.testing.expectEqual(before + 1, storage.saves);
         }
     }
 }
