@@ -157,7 +157,7 @@ fn cloneCallbacks(a: Allocator, values: []const PendingCallback) ![]const Pendin
     for (owned) |*callback| {
         callback.callback_id = try a.dupe(u8, callback.callback_id);
         callback.source = switch (callback.source) {
-            .wakeup => .wakeup,
+            .wakeup, .subscription => callback.source,
             .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
         };
     }
@@ -220,7 +220,7 @@ pub fn cloneEvent(a: Allocator, event: Event) !Event {
         .callback => |callback| .{ .callback = .{
             .callback_id = try a.dupe(u8, callback.callback_id),
             .source = switch (callback.source) {
-                .wakeup => .wakeup,
+                .wakeup, .subscription => callback.source,
                 .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
             },
             .observed_at_unix_ms = callback.observed_at_unix_ms,

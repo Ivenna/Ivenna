@@ -25,13 +25,26 @@ const Source = union(enum) {
 pub const History = struct {
     pub const Wakeup = struct { id: u64, at_unix_ms: i64, text: []const u8 };
     pub const CallbackRegistration = struct { id: u64, reference: []const u8, session_id: u64, source: contracts.Callback.Source };
+    pub const Subscription = struct {
+        pub const Status = enum { active, withdrawn };
+        pub const Reminder = enum { immediate, next_input };
+
+        id: u64,
+        reference: []const u8,
+        session_id: u64,
+        status: Status,
+        reminder: Reminder,
+        callback_id: u64,
+    };
 
     next_session_id: u64,
     next_callback_id: u64,
+    next_subscription_id: u64,
     next_command_id: u64,
     sessions: []const Session,
     wakeups: []const Wakeup,
     callbacks: []const CallbackRegistration,
+    subscriptions: []const Subscription,
     activity_reports: ?Reports.Checkpoint,
 
     pub const Session = struct {
@@ -48,7 +61,8 @@ pub const History = struct {
     };
 
     fn validate(self: History, a: Allocator) !void {
-        if (self.sessions.len == 0 or self.next_callback_id == 0 or self.next_command_id == 0) return error.InvalidHistory;
+        if (self.sessions.len == 0 or self.next_callback_id == 0 or
+            self.next_subscription_id == 0 or self.next_command_id == 0) return error.InvalidHistory;
         var identities: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer identities.deinit(a);
         var cores: usize = 0;
@@ -72,15 +86,38 @@ pub const History = struct {
         }
         if (cores != 1) return error.InvalidHistory;
         if (self.activity_reports) |reports| try reports.validate();
+        var subscription_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer subscription_ids.deinit(a);
+        var subscriptions_by_callback: std.AutoHashMapUnmanaged(u64, *const Subscription) = .empty;
+        defer subscriptions_by_callback.deinit(a);
+        for (self.subscriptions) |*subscription| {
+            if (subscription.id == 0 or subscription.id >= self.next_subscription_id or
+                subscription.session_id == 0 or subscription.session_id >= self.next_session_id or
+                subscription.callback_id == 0 or subscription.callback_id >= self.next_callback_id or
+                contracts.Reference.sequence(subscription.reference) != subscription.id or
+                (try subscription_ids.getOrPut(a, subscription.id)).found_existing) return error.InvalidHistory;
+            const entry = try subscriptions_by_callback.getOrPut(a, subscription.callback_id);
+            if (entry.found_existing) return error.InvalidHistory;
+            entry.value_ptr.* = subscription;
+        }
         var callbacks: std.AutoHashMapUnmanaged(u64, contracts.Callback.Source) = .empty;
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
             if (callback.id == 0 or callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
             if (contracts.Reference.sequence(callback.reference) != callback.id) return error.InvalidHistory;
+            if (subscriptions_by_callback.fetchRemove(callback.id)) |entry| {
+                const subscription = entry.value;
+                if (callback.source != .subscription or callback.source.subscription.subscription_id != subscription.id or
+                    subscription.status != .active or subscription.session_id != callback.session_id) return error.InvalidHistory;
+            } else if (callback.source == .subscription) return error.InvalidHistory;
             if (callback.source == .host and contracts.Reference.sequence(callback.source.host.command_id) == null) return error.InvalidHistory;
             const entry = try callbacks.getOrPut(a, callback.id);
             if (entry.found_existing) return error.InvalidHistory;
             entry.value_ptr.* = callback.source;
+        }
+        var unmatched = subscriptions_by_callback.valueIterator();
+        while (unmatched.next()) |subscription| {
+            if (subscription.*.status != .withdrawn) return error.InvalidHistory;
         }
         var wakeup_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer wakeup_ids.deinit(a);
@@ -95,10 +132,12 @@ pub const History = struct {
 const Checkpoint = struct {
     next_session_id: u64,
     next_callback_id: u64,
+    next_subscription_id: u64 = 1,
     next_command_id: u64,
     sessions: []const Session,
     wakeups: []const History.Wakeup,
     callbacks: []const History.CallbackRegistration,
+    subscriptions: []const History.Subscription = &.{},
     activity_reports: ?Reports.Checkpoint,
 
     const Session = struct {
@@ -240,10 +279,12 @@ pub const Persistence = struct {
         const history: History = .{
             .next_session_id = checkpoint.next_session_id,
             .next_callback_id = checkpoint.next_callback_id,
+            .next_subscription_id = checkpoint.next_subscription_id,
             .next_command_id = checkpoint.next_command_id,
             .sessions = sessions,
             .wakeups = checkpoint.wakeups,
             .callbacks = checkpoint.callbacks,
+            .subscriptions = checkpoint.subscriptions,
             .activity_reports = checkpoint.activity_reports,
         };
         try history.validate(a);
@@ -369,10 +410,12 @@ pub const Persistence = struct {
         const document = try Codec.encode(a, Checkpoint{
             .next_session_id = history.next_session_id,
             .next_callback_id = history.next_callback_id,
+            .next_subscription_id = history.next_subscription_id,
             .next_command_id = history.next_command_id,
             .sessions = sessions,
             .wakeups = history.wakeups,
             .callbacks = history.callbacks,
+            .subscriptions = history.subscriptions,
             .activity_reports = history.activity_reports,
         });
         const candidate_digest = Codec.digest(document);
@@ -518,4 +561,21 @@ fn equalKey(left: Key, right: Key) bool {
 fn equalPrevious(left: ?Key, right: ?Key) bool {
     if (left) |key| return if (right) |other| equalKey(key, other) else false;
     return right == null;
+}
+
+test "checkpoints without subscriptions start at the first subscription ID" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const checkpoint = try Codec.decode(Checkpoint, arena.allocator(),
+        \\.{
+        \\  .next_session_id = 2, .next_callback_id = 1, .next_command_id = 1,
+        \\  .sessions = .{.{
+        \\    .session_id = 1, .focus_id = "core-1", .role = .core, .was_running = false,
+        \\    .epoch = 0, .group = "core", .head = null, .count = 0, .observations = null,
+        \\  }},
+        \\  .wakeups = .{}, .callbacks = .{}, .activity_reports = null,
+        \\}
+    );
+    try std.testing.expectEqual(1, checkpoint.next_subscription_id);
+    try std.testing.expectEqual(0, checkpoint.subscriptions.len);
 }

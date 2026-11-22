@@ -109,12 +109,7 @@ pub const Kernel = struct {
                 try self.callbacks.send(a, .{ .id = source.id, .text = source.text });
                 try self.sessions.wakeupSent(source.id);
             }
-            const waiting = try self.inbox.poll(a, try self.sessions.pollRequest());
-            try self.sessions.reconcile(waiting);
-            for (waiting) |incoming| switch (try self.sessions.accept(incoming)) {
-                .accepted, .deferred => {},
-                .duplicate => if (incoming.receipt) |receipt| try self.inbox.acknowledge(a, receipt),
-            };
+            try self.receivePending(a);
             try self.dispatch(tasks);
             const now = std.Io.Clock.awake.now(self.io).toMilliseconds();
             if (now - maintained_at >= 60_000) {
@@ -123,6 +118,15 @@ pub const Kernel = struct {
             }
             try self.io.sleep(.fromMilliseconds(self.poll_interval_ms), .awake);
         }
+    }
+
+    fn receivePending(self: *Kernel, a: Allocator) !void {
+        const waiting = try self.inbox.poll(a, try self.sessions.pollRequest());
+        try self.sessions.reconcile(waiting);
+        for (waiting) |incoming| switch (try self.sessions.accept(incoming)) {
+            .accepted, .deferred => {},
+            .duplicate, .absorbed => if (incoming.receipt) |receipt| try self.inbox.acknowledge(a, receipt),
+        };
     }
 
     fn restoreHostCallbacks(self: *Kernel) !void {
@@ -364,4 +368,328 @@ fn toolFailure(a: Allocator, err: anyerror) !Content {
         error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The focus cannot currently accept another observation."),
         else => err,
     };
+}
+
+const CallbackFixture = struct {
+    const Store = contracts.HistoryStore;
+    const Incoming = contracts.Inbox.Incoming;
+    const testing = std.testing;
+
+    arena: std.heap.ArenaAllocator = .init(testing.allocator),
+    checkpoint: ?[]const u8 = null,
+    fail_save: bool = false,
+    groups: usize = 0,
+    records: std.ArrayList(Store.Record) = .empty,
+    reports: std.ArrayList(Incoming) = .empty,
+    receipts: std.ArrayList([]const u8) = .empty,
+
+    fn kernel(self: *CallbackFixture, engine: *Engine) !Kernel {
+        engine.* = .{
+            .allocator = testing.allocator,
+            .io = testing.io,
+            .model = .{ .context = self, .vtable = &.{ .requestBytes = requestBytes, .next = undefined, .limitToolReplies = undefined } },
+            .shared_tools = &.{},
+            .activity_tools = &.{},
+        };
+        return Kernel.init(testing.allocator, testing.io, .{
+            .engine = engine,
+            .inbox = .{ .context = self, .vtable = &.{ .poll = poll, .acknowledge = acknowledge } },
+            .sender = undefined,
+            .callbacks = .{ .context = self, .publish = publish },
+            .history = .{ .context = self, .vtable = &.{
+                .load = load,
+                .allocateGroup = allocateGroup,
+                .query = query,
+                .read = read,
+                .create = create,
+                .save = save,
+                .maintain = maintain,
+            } },
+        }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 2, .max_pending_events = 3 });
+    }
+
+    fn requestBytes(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!u64 {
+        return 0;
+    }
+
+    fn publish(context: *anyopaque, _: Allocator, message: contracts.Callback.Message) anyerror!void {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        const a = self.arena.allocator();
+        const sequence = self.reports.items.len + 1;
+        try self.reports.append(a, .{
+            .content = .{ .callback = .{ .id = message.id, .text = try a.dupe(u8, message.text), .observed_at_unix_ms = @intCast(sequence) } },
+            .receipt = try std.fmt.allocPrint(a, "report-{d}", .{sequence}),
+        });
+    }
+
+    fn poll(context: *anyopaque, a: Allocator, request: contracts.Inbox.Poll) anyerror![]const Incoming {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        var waiting: std.ArrayList(Incoming) = .empty;
+        for (self.reports.items) |report| {
+            if (waiting.items.len == request.callbacks) break;
+            for (self.receipts.items) |receipt| {
+                if (std.mem.eql(u8, receipt, report.receipt.?)) break;
+            } else try waiting.append(a, report);
+        }
+        return waiting.toOwnedSlice(a);
+    }
+
+    fn acknowledge(context: *anyopaque, _: Allocator, receipt: []const u8) anyerror!void {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        const a = self.arena.allocator();
+        try self.receipts.append(a, try a.dupe(u8, receipt));
+    }
+
+    fn load(context: *anyopaque, a: Allocator) anyerror!?[]const u8 {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        return if (self.checkpoint) |body| try a.dupe(u8, body) else null;
+    }
+
+    fn allocateGroup(context: *anyopaque, a: Allocator) anyerror![]const u8 {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        self.groups += 1;
+        return std.fmt.allocPrint(a, "group-{d}", .{self.groups});
+    }
+
+    fn query(context: *anyopaque, a: Allocator, groups: []const []const u8) anyerror![]const Store.Reference {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        var references: std.ArrayList(Store.Reference) = .empty;
+        for (self.records.items) |record| {
+            for (groups) |group| {
+                if (!std.mem.eql(u8, group, record.group)) continue;
+                try references.append(a, .{ .group = try a.dupe(u8, record.group), .key = record.key, .previous = record.previous, .locator = "" });
+                break;
+            }
+        }
+        return references.toOwnedSlice(a);
+    }
+
+    fn read(context: *anyopaque, a: Allocator, references: []const Store.Reference) anyerror![]const []const u8 {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        const bodies = try a.alloc([]const u8, references.len);
+        for (references, bodies) |reference, *body| {
+            for (self.records.items) |record| {
+                if (std.mem.eql(u8, record.group, reference.group) and std.mem.eql(u8, &record.key, &reference.key)) {
+                    body.* = try a.dupe(u8, record.body);
+                    break;
+                }
+            } else return error.MissingTestRecord;
+        }
+        return bodies;
+    }
+
+    fn create(context: *anyopaque, _: Allocator, records: []const Store.Record) anyerror!void {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        const a = self.arena.allocator();
+        for (records) |record| {
+            var owned = record;
+            owned.group = try a.dupe(u8, record.group);
+            owned.body = try a.dupe(u8, record.body);
+            try self.records.append(a, owned);
+        }
+    }
+
+    fn save(context: *anyopaque, body: []const u8) anyerror!void {
+        const self: *CallbackFixture = @ptrCast(@alignCast(context));
+        if (self.fail_save) return error.UnconfirmedCheckpoint;
+        self.checkpoint = try self.arena.allocator().dupe(u8, body);
+    }
+
+    fn maintain(_: *anyopaque, _: Allocator, _: Store.Retention) anyerror!void {}
+
+    fn takeWork(instance: *Kernel, a: Allocator) !Work {
+        const ready = try instance.sessions.takeReadyBatch(a);
+        try testing.expectEqual(1, ready.len);
+        return ready[0];
+    }
+
+    fn admit(instance: *Kernel, a: Allocator, work: Work) !Context {
+        var history = try instance.sessions.snapshot(work.session);
+        errdefer history.deinit();
+        try testing.expect(try instance.fitRequest(a, work, &history, false) != null);
+        return history;
+    }
+
+    fn finish(instance: *Kernel, work: Work, history: *Context) !void {
+        defer instance.sessions.endWorker(work.session);
+        try testing.expect(try instance.sessions.commitResponse(work, history, &.{}, null));
+    }
+};
+
+test "subscription reports wake a focus repeatedly and withdrawal absorbs late receipts across restart" {
+    const testing = std.testing;
+    var fixture: CallbackFixture = .{};
+    defer fixture.arena.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var engine: Engine = undefined;
+    const name = "listener";
+    const withdrawn, const replacement = blk: {
+        var kernel = try fixture.kernel(&engine);
+        defer kernel.deinit();
+        const startup = try CallbackFixture.takeWork(&kernel, a);
+        var initial = try CallbackFixture.admit(&kernel, a, startup);
+        defer initial.deinit();
+        const wakeup = try kernel.sessions.registerCallback(a, startup, name, .wakeup);
+        const reference = try kernel.sessions.subscribe(a, startup, name, .next_input);
+        const subscription = (try kernel.sessions.subscription(a, reference)).?;
+        const callback_reference = try contracts.Reference.create(a, name, subscription.callback_id);
+        try testing.expectEqualStrings(wakeup.reference, reference);
+        const state = (try kernel.sessions.compactionSnapshot(a, startup.session)).state;
+        try testing.expectEqual(2, state.callbacks.len);
+        try testing.expectEqualStrings(wakeup.reference, state.callbacks[0].callback_id);
+        try testing.expectEqualStrings(callback_reference, state.callbacks[1].callback_id);
+        try CallbackFixture.finish(&kernel, startup, &initial);
+        try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
+
+        try kernel.callbacks.send(a, .{ .id = subscription.callback_id, .text = "first" });
+        try kernel.callbacks.send(a, .{ .id = subscription.callback_id, .text = "second" });
+        try kernel.receivePending(a);
+        try testing.expectEqual(0, fixture.receipts.items.len);
+        const work = try CallbackFixture.takeWork(&kernel, a);
+        try testing.expectEqual(subscription.session_id, work.session.session_id);
+        var history = try CallbackFixture.admit(&kernel, a, work);
+        defer history.deinit();
+        const events = history.records()[1].record.events.items;
+        try testing.expectEqual(2, events.len);
+        for (events, [_][]const u8{ "first", "second" }) |event, expected| {
+            try testing.expectEqualStrings(expected, event.callback.text);
+            try testing.expectEqualStrings(callback_reference, event.callback.callback_id);
+            try testing.expectEqual(subscription.id, event.callback.source.subscription.subscription_id);
+        }
+        try testing.expectEqual(2, fixture.receipts.items.len);
+
+        fixture.fail_save = true;
+        try testing.expectError(error.UnconfirmedCheckpoint, kernel.sessions.withdrawSubscription(subscription.id));
+        fixture.fail_save = false;
+        const before_retry = fixture.checkpoint.?;
+        try kernel.sessions.withdrawSubscription(subscription.id);
+        try testing.expect(!std.mem.eql(u8, before_retry, fixture.checkpoint.?));
+        try kernel.sessions.withdrawSubscription(subscription.id);
+        const inactive = (try kernel.sessions.subscription(a, reference)).?;
+        try testing.expectEqual(.withdrawn, inactive.status);
+        const new_reference = try kernel.sessions.subscribe(a, work, name, .immediate);
+        const active = (try kernel.sessions.subscription(a, new_reference)).?;
+        try testing.expect(active.id > subscription.id and active.callback_id > subscription.callback_id);
+        try CallbackFixture.finish(&kernel, work, &history);
+
+        try kernel.callbacks.send(a, .{ .id = subscription.callback_id, .text = "late" });
+        try kernel.receivePending(a);
+        try testing.expectEqualStrings("report-3", fixture.receipts.items[2]);
+        try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
+        break :blk .{ inactive, active };
+    };
+
+    var kernel = try fixture.kernel(&engine);
+    defer kernel.deinit();
+    const retained_withdrawn = (try kernel.sessions.subscription(a, withdrawn.reference)).?;
+    const retained_active = (try kernel.sessions.subscription(a, replacement.reference)).?;
+    try testing.expectEqualDeep(withdrawn, retained_withdrawn);
+    try testing.expectEqualDeep(replacement, retained_active);
+    const startup = try CallbackFixture.takeWork(&kernel, a);
+    var history = try CallbackFixture.admit(&kernel, a, startup);
+    defer history.deinit();
+    const retained_events = history.records()[1].record.events.items;
+    try testing.expectEqualStrings("first", retained_events[0].callback.text);
+    try testing.expectEqualStrings("second", retained_events[1].callback.text);
+    try testing.expectEqualStrings(try contracts.Reference.create(a, name, withdrawn.callback_id), retained_events[1].callback.callback_id);
+    const next_reference = try kernel.sessions.subscribe(a, startup, name, .immediate);
+    try testing.expectEqual(replacement.id + 1, (try kernel.sessions.subscription(a, next_reference)).?.id);
+    try CallbackFixture.finish(&kernel, startup, &history);
+
+    try kernel.callbacks.send(a, .{ .id = withdrawn.callback_id, .text = "late after restart" });
+    try kernel.receivePending(a);
+    try testing.expectEqualStrings("report-4", fixture.receipts.items[3]);
+    try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
+
+    try kernel.callbacks.send(a, .{ .id = replacement.callback_id, .text = "new listener" });
+    try kernel.receivePending(a);
+    const work = try CallbackFixture.takeWork(&kernel, a);
+    var resumed = try CallbackFixture.admit(&kernel, a, work);
+    defer resumed.deinit();
+    const event = resumed.records()[resumed.records().len - 1].record.events.items[0];
+    try testing.expectEqualStrings("new listener", event.callback.text);
+    try testing.expectEqualStrings(try contracts.Reference.create(a, name, replacement.callback_id), event.callback.callback_id);
+    try testing.expectEqualStrings("report-5", fixture.receipts.items[4]);
+    try CallbackFixture.finish(&kernel, work, &resumed);
+}
+
+test "withdrawal preserves an activity report already held for admission" {
+    const testing = std.testing;
+    var fixture: CallbackFixture = .{};
+    defer fixture.arena.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine);
+    defer kernel.deinit();
+    const startup = try CallbackFixture.takeWork(&kernel, a);
+    var initial = try CallbackFixture.admit(&kernel, a, startup);
+    defer initial.deinit();
+    var forks: std.ArrayList(Sessions.ForkPlan) = .empty;
+    try forks.ensureUnusedCapacity(a, 1);
+    forks.appendAssumeCapacity(try kernel.sessions.prepareFork(startup, "activity", "Listen for reports."));
+    try kernel.sessions.commitToolRound(startup, &initial, &forks);
+    try CallbackFixture.finish(&kernel, startup, &initial);
+
+    const assignment = try CallbackFixture.takeWork(&kernel, a);
+    var assigned = try CallbackFixture.admit(&kernel, a, assignment);
+    defer assigned.deinit();
+    const reference = try kernel.sessions.subscribe(a, assignment, "listener", .immediate);
+    const subscription = (try kernel.sessions.subscription(a, reference)).?;
+    try CallbackFixture.finish(&kernel, assignment, &assigned);
+
+    try kernel.callbacks.send(a, .{ .id = subscription.callback_id, .text = "held report" });
+    try kernel.receivePending(a);
+    try kernel.sessions.withdrawSubscription(subscription.id);
+    try kernel.callbacks.send(a, .{ .id = subscription.callback_id, .text = "late report" });
+    try kernel.receivePending(a);
+    try testing.expectEqual(1, fixture.receipts.items.len);
+    try testing.expectEqualStrings("report-2", fixture.receipts.items[0]);
+
+    const work = try CallbackFixture.takeWork(&kernel, a);
+    try testing.expectEqual(subscription.session_id, work.session.session_id);
+    var history = try CallbackFixture.admit(&kernel, a, work);
+    defer history.deinit();
+    const events = history.records()[history.records().len - 1].record.events.items;
+    try testing.expectEqual(1, events.len);
+    try testing.expectEqualStrings("held report", events[0].callback.text);
+    try testing.expectEqualStrings("report-1", fixture.receipts.items[1]);
+    try CallbackFixture.finish(&kernel, work, &history);
+}
+
+test "wakeup and host callbacks remain one-shot" {
+    const testing = std.testing;
+    var fixture: CallbackFixture = .{};
+    defer fixture.arena.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine);
+    defer kernel.deinit();
+    const startup = try CallbackFixture.takeWork(&kernel, a);
+    var initial = try CallbackFixture.admit(&kernel, a, startup);
+    defer initial.deinit();
+    const wakeup = try kernel.sessions.registerCallback(a, startup, "wake", .wakeup);
+    const host = try kernel.sessions.registerCallback(a, startup, "read", .{ .host = .{ .command_id = "read-1" } });
+    try CallbackFixture.finish(&kernel, startup, &initial);
+
+    for ([_]contracts.Callback.Registration{ wakeup, host }) |registration| {
+        try kernel.callbacks.send(a, .{ .id = registration.id, .text = "first result" });
+        try kernel.callbacks.send(a, .{ .id = registration.id, .text = "second result" });
+        try kernel.receivePending(a);
+        const work = try CallbackFixture.takeWork(&kernel, a);
+        var history = try CallbackFixture.admit(&kernel, a, work);
+        defer history.deinit();
+        const events = history.records()[history.records().len - 1].record.events.items;
+        try testing.expectEqual(1, events.len);
+        try testing.expectEqualStrings("first result", events[0].callback.text);
+        try CallbackFixture.finish(&kernel, work, &history);
+        try kernel.receivePending(a);
+        try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
+    }
+    try testing.expectEqual(4, fixture.receipts.items.len);
 }

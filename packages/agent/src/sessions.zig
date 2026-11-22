@@ -51,10 +51,12 @@ pub const Registry = struct {
     noticed: std.StringHashMapUnmanaged(enum { scheduled, acknowledged }) = .empty,
     wakeups: std.ArrayList(History.Wakeup) = .empty,
     callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
+    subscriptions: std.ArrayList(History.Subscription) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
     next_session_id: u64 = 2,
     next_callback_id: u64 = 1,
+    next_subscription_id: u64 = 1,
     next_command_id: u64 = 1,
     started_at_unix_ms: i64,
 
@@ -80,6 +82,7 @@ pub const Registry = struct {
             self.reports = reports;
             self.next_session_id = retained.next_session_id;
             self.next_callback_id = retained.next_callback_id;
+            self.next_subscription_id = retained.next_subscription_id;
             self.next_command_id = retained.next_command_id;
             for (retained.sessions) |record| {
                 const session = try allocator.create(Session);
@@ -98,6 +101,12 @@ pub const Registry = struct {
             }
             self.core = self.sessions.get(1).?;
             for (retained.callbacks) |callback| try self.restoreCallback(callback);
+            for (retained.subscriptions) |subscription_record| {
+                var owned = subscription_record;
+                owned.reference = try allocator.dupe(u8, subscription_record.reference);
+                errdefer allocator.free(owned.reference);
+                try self.subscriptions.append(allocator, owned);
+            }
             for (retained.wakeups) |wakeup| {
                 const text = try allocator.dupe(u8, wakeup.text);
                 errdefer allocator.free(text);
@@ -141,6 +150,8 @@ pub const Registry = struct {
         self.wakeups.deinit(self.allocator);
         for (self.callbacks.items) |callback| self.freeCallback(callback);
         self.callbacks.deinit(self.allocator);
+        for (self.subscriptions.items) |subscription_record| self.allocator.free(subscription_record.reference);
+        self.subscriptions.deinit(self.allocator);
         self.queued_callbacks.deinit(self.allocator);
         self.reports.deinit();
         self.history.deinit();
@@ -156,21 +167,30 @@ pub const Registry = struct {
         };
     }
 
-    pub const Intake = enum { accepted, deferred, duplicate };
+    pub const Intake = enum { accepted, deferred, duplicate, absorbed };
 
     pub fn accept(self: *Registry, incoming: Incoming) !Intake {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        const notice = if (incoming.receipt) |key| self.noticed.get(key) else null;
         const session, const event = switch (incoming.content) {
             .message => |message| .{ self.core, Input.Event{ .input = message } },
             .callback => |callback| blk: {
-                // Protect all transport copies until the admitted group has
-                // been published and its receipt acknowledged.
+                // Keep one-shot copies pending until their admission and acknowledgement.
                 if (self.queued_callbacks.contains(callback.id)) return .deferred;
+                // A receipt already held by a delivery must wait for its admission.
+                const inactive: Intake = if (notice == .scheduled) .deferred else .absorbed;
                 const registration = self.callbackLocked(callback.id) orelse {
+                    for (self.subscriptions.items) |subscription_record| {
+                        if (subscription_record.callback_id == callback.id) return inactive;
+                    }
                     if (callback.id != 0 and callback.id < self.next_callback_id) return .duplicate;
                     return error.UnknownCallback;
                 };
+                if (registration.source == .subscription) {
+                    const subscription_record = self.subscriptionLocked(registration.source.subscription.subscription_id) orelse return inactive;
+                    if (subscription_record.status == .withdrawn) return inactive;
+                }
                 break :blk .{ self.sessions.get(registration.session_id).?, Input.Event{ .callback = .{
                     .callback_id = registration.reference,
                     .source = registration.source,
@@ -179,11 +199,13 @@ pub const Registry = struct {
                 } } };
             },
         };
-        if (incoming.receipt) |key| if (self.noticed.contains(key)) return .deferred;
+        if (notice != null) return .deferred;
         if (!self.hasCapacity(session)) return .deferred;
         const delivery = try Delivery.create(self.allocator, event, incoming.receipt);
         errdefer delivery.destroy(self.allocator);
-        delivery.callback_id = if (incoming.content == .callback) incoming.content.callback.id else null;
+        if (event == .callback and event.callback.source != .subscription) {
+            delivery.callback_id = incoming.content.callback.id;
+        }
         try self.ensureStartupLocked(session);
         try session.pending.ensureUnusedCapacity(self.allocator, 1);
         const notice_key = if (incoming.receipt) |key| try self.allocator.dupe(u8, key) else null;
@@ -267,7 +289,7 @@ pub const Registry = struct {
     }
 
     /// Save a copy of the worker's history, advance the outbox past admitted
-    /// reports, and remove registrations for admitted callbacks in one checkpoint.
+    /// reports, and remove one-shot callback registrations in one checkpoint.
     /// The caller can then acknowledge the deliveries.
     pub fn commitInput(self: *Registry, work: Work, count: usize, history: *const Context) !void {
         var retained = try history.clone(self.allocator);
@@ -293,7 +315,7 @@ pub const Registry = struct {
         session.epoch = session.context.?.scope.epoch;
         work.activation.admitted = true;
         for (deliveries.items) |delivery| if (delivery.callback_id) |id| {
-            self.completeCallbackLocked(id);
+            self.removeCallbackLocked(id);
         };
         try self.saveLocked();
     }
@@ -399,9 +421,11 @@ pub const Registry = struct {
         try self.history.save(a, .{
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
+            .next_subscription_id = self.next_subscription_id,
             .next_command_id = self.next_command_id,
             .wakeups = self.wakeups.items,
             .callbacks = self.callbacks.items,
+            .subscriptions = self.subscriptions.items,
             .sessions = retained.items,
             .activity_reports = self.reports.checkpoint(),
         });
@@ -427,10 +451,12 @@ pub const Registry = struct {
             std.mem.sort([]const u8, activities.items, {}, lessActivity);
         }
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
-        for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
-            .callback_id = try a.dupe(u8, callback.reference),
-            .source = try cloneSource(a, callback.source),
-        });
+        for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) {
+            try own_callbacks.append(a, .{
+                .callback_id = try a.dupe(u8, callback.reference),
+                .source = try cloneSource(a, callback.source),
+            });
+        };
         return .{
             .current = try self.currentLocked(a, session),
             .state = .{ .activities = try activities.toOwnedSlice(a), .callbacks = try own_callbacks.toOwnedSlice(a) },
@@ -590,9 +616,70 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
+        if (source == .subscription) return error.InvalidCallbackSource;
         const registration = try self.registerCallbackLocked(work.session, name, source);
         try self.saveLocked();
         return .{ .id = registration.id, .reference = try a.dupe(u8, registration.reference) };
+    }
+
+    /// Persist the choice and its report registration. The reference belongs to a.
+    pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, reminder: History.Subscription.Reminder) ![]const u8 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        const id = self.next_subscription_id;
+        const next = try std.math.add(u64, id, 1);
+        const reference = try contracts.Reference.create(a, name, id);
+        errdefer a.free(reference);
+        try self.subscriptions.ensureUnusedCapacity(self.allocator, 1);
+        const owned_reference = try self.allocator.dupe(u8, reference);
+        errdefer self.allocator.free(owned_reference);
+        const registration = try self.registerCallbackLocked(work.session, name, .{ .subscription = .{ .subscription_id = id } });
+        errdefer self.freeCallback(self.callbacks.pop().?);
+        self.subscriptions.appendAssumeCapacity(.{
+            .id = id,
+            .reference = owned_reference,
+            .session_id = work.session.session_id,
+            .status = .active,
+            .reminder = reminder,
+            .callback_id = registration.id,
+        });
+        errdefer _ = self.subscriptions.pop();
+        self.next_subscription_id = next;
+        try self.saveLocked();
+        return reference;
+    }
+
+    /// Look up an exact reference. The returned reference belongs to a.
+    pub fn subscription(self: *Registry, a: Allocator, reference: []const u8) !?History.Subscription {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.subscriptions.items) |subscription_record| {
+            if (!std.mem.eql(u8, reference, subscription_record.reference)) continue;
+            var owned = subscription_record;
+            owned.reference = try a.dupe(u8, subscription_record.reference);
+            return owned;
+        }
+        return null;
+    }
+
+    pub fn withdrawSubscription(self: *Registry, id: u64) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        const subscription_record = self.subscriptionLocked(id) orelse return error.UnknownSubscription;
+        if (subscription_record.status == .withdrawn) return self.saveLocked();
+
+        const index = for (self.callbacks.items, 0..) |callback, index| {
+            if (callback.id == subscription_record.callback_id) break index;
+        } else unreachable;
+        const registration = self.callbacks.orderedRemove(index);
+        subscription_record.status = .withdrawn;
+        errdefer {
+            subscription_record.status = .active;
+            self.callbacks.insertAssumeCapacity(index, registration);
+        }
+        try self.saveLocked();
+        self.freeCallback(registration);
     }
 
     /// Before startup dispatch, these registrations belong to commands from the
@@ -641,7 +728,12 @@ pub const Registry = struct {
         return null;
     }
 
-    fn completeCallbackLocked(self: *Registry, id: u64) void {
+    fn subscriptionLocked(self: *Registry, id: u64) ?*History.Subscription {
+        for (self.subscriptions.items) |*subscription_record| if (subscription_record.id == id) return subscription_record;
+        return null;
+    }
+
+    fn removeCallbackLocked(self: *Registry, id: u64) void {
         for (self.callbacks.items, 0..) |callback, index| if (callback.id == id) {
             self.freeCallback(self.callbacks.orderedRemove(index));
             break;
@@ -835,13 +927,16 @@ fn assertWork(work: Work) void {
 
 fn cloneSource(a: Allocator, source: contracts.Callback.Source) !contracts.Callback.Source {
     return switch (source) {
-        .wakeup => .wakeup,
+        .wakeup, .subscription => source,
         .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
     };
 }
 
 fn freeSource(a: Allocator, source: contracts.Callback.Source) void {
-    if (source == .host) a.free(source.host.command_id);
+    switch (source) {
+        .wakeup, .subscription => {},
+        .host => |host| a.free(host.command_id),
+    }
 }
 
 const TestStorage = struct {
@@ -922,7 +1017,7 @@ test "an interrupted activation retains its receipts and only fresh arrivals wak
     registry.endWorker(retry.session);
 }
 
-/// Start the next ready focus and admit its single startup or assignment.
+/// Start the next ready focus and admit its single pending observation.
 fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, history: Context } {
     const work = (try registry.takeReadyBatch(a))[0];
     const deliveries = work.activation.deliveries.items;
@@ -972,4 +1067,64 @@ test "activity completion publishes once and maintenance republishes the same ch
             try std.testing.expectEqual(before + 1, storage.checkpoints);
         }
     }
+}
+
+test "a failed withdrawal save leaves the subscription active and its report admissible" {
+    const testing = std.testing;
+    var storage: TestStorage = .{};
+    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port());
+    defer registry.deinit();
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var initial = try admitTestInput(&registry, a);
+    defer initial.history.deinit();
+    defer registry.endWorker(initial.work.session);
+    const reference = try registry.subscribe(a, initial.work, "listener", .immediate);
+    const subscription = (try registry.subscription(a, reference)).?;
+    const callback_reference = try a.dupe(u8, registry.callbackLocked(subscription.callback_id).?.reference);
+    try testing.expect(try registry.commitResponse(initial.work, &initial.history, &.{}, null));
+
+    storage.fail_save = true;
+    try testing.expectError(error.UnconfirmedCheckpoint, registry.withdrawSubscription(subscription.id));
+    storage.fail_save = false;
+    try testing.expectEqualDeep(subscription, (try registry.subscription(a, reference)).?);
+    const callback = registry.callbackLocked(subscription.callback_id) orelse return error.MissingTestCallback;
+    try testing.expectEqualStrings(callback_reference, callback.reference);
+
+    try testing.expectEqual(Registry.Intake.accepted, try registry.accept(.{
+        .content = .{ .callback = .{ .id = subscription.callback_id, .text = "fresh report", .observed_at_unix_ms = 10 } },
+    }));
+    var resumed = try admitTestInput(&registry, a);
+    defer resumed.history.deinit();
+    defer registry.endWorker(resumed.work.session);
+    try testing.expectEqual(subscription.session_id, resumed.work.session.session_id);
+    const records = resumed.history.records();
+    try testing.expectEqualStrings("fresh report", records[records.len - 1].record.events.items[0].callback.text);
+}
+
+test "a failed subscribe save leaves only the subscription and callback from the retry" {
+    const testing = std.testing;
+    var storage: TestStorage = .{};
+    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port());
+    defer registry.deinit();
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const work = (try registry.takeReadyBatch(a))[0];
+    defer registry.endWorker(work.session);
+
+    storage.fail_save = true;
+    try testing.expectError(error.UnconfirmedCheckpoint, registry.subscribe(testing.allocator, work, "listener", .immediate));
+    try testing.expectEqual(0, registry.subscriptions.items.len);
+    try testing.expectEqual(0, registry.callbacks.items.len);
+
+    storage.fail_save = false;
+    const reference = try registry.subscribe(a, work, "listener", .immediate);
+    const subscription = (try registry.subscription(a, reference)).?;
+    try testing.expectEqual(1, registry.subscriptions.items.len);
+    try testing.expectEqual(1, registry.callbacks.items.len);
+    const callback = registry.callbacks.items[0];
+    try testing.expectEqual(subscription.callback_id, callback.id);
+    try testing.expectEqual(subscription.id, callback.source.subscription.subscription_id);
 }
