@@ -108,7 +108,7 @@ podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml up -d --w
 zig build run
 ```
 
-Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers. `zig build run` installs the kernel and its companion `ivenna-report` together, then starts the kernel. Keep the kernel running in this terminal and use one kernel per mailbox.
+Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers. `zig build run` installs `ivenna` and `ivenna-report` in `zig-out/bin`, then starts the kernel. Keep it running in this terminal. Each kernel needs its own mailbox and `DATA_DIR`.
 
 From a second terminal, check reception at the default listener address:
 
@@ -117,6 +117,8 @@ curl --include http://127.0.0.1:8090/readyz
 ```
 
 Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the URL if you changed the listener. See [service status](../docs/running.md#service-status-and-reception) for startup and reception behavior. The kernel terminal shows [JMAP request failures](../docs/running.md#when-a-mail-request-fails). The mail and memory services write their own logs.
+
+To run the [subscription listener examples](../docs/subscriptions.md) in another terminal, load the same [instance configuration](#configuration). From the repository root, set `export IVENNA_REPORT="$PWD/zig-out/bin/ivenna-report"` and use the ID returned by the subscribing focus.
 
 ## Sending a message
 
@@ -159,9 +161,9 @@ Keep the same instance directory and [load its configuration](#configuration) fo
 
 ### Kernel
 
-The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Before running an updated executable against an existing mailbox, check the [history-format requirements](../docs/running.md#updating-the-executable). After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild and restart it.
+The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Check the [storage format requirements](../docs/running.md#updating-the-executable) before updating an existing instance. After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild both executables and restart it.
 
-To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Check history compatibility before resuming and rebuild memory if its sources changed. The new checkout becomes the default directory for host commands.
+To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Point any independent listeners at the new checkout's `zig-out/bin/ivenna-report`. Rebuild memory if its sources changed. The new checkout becomes the default directory for host commands.
 
 ### Memory
 

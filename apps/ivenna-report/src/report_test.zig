@@ -52,24 +52,22 @@ test "the reporter accepts observations while the kernel is stopped and rejects 
         .reference = blk: {
             var owner = try subscriptions.Store.open(a, path);
             defer owner.close();
-            break :blk (try owner.create(a, "research-2", "news", .next_input, "test listener")).subscription_id;
+            break :blk (try owner.create(a, "research-2", "news", "test listener")).subscription_id;
         },
     };
-    const first_cursor: [40 * 1024]u8 = @splat('1');
-    const next_cursor: [40 * 1024]u8 = @splat('2');
-    const report = .{ .key = "item-1", .text = "first", .cursor = .{ .to = &first_cursor } };
+    const report = .{ .key = "item-1", .text = "first", .cursor = .{ .to = "1" } };
     // A JSON array must not reserve the same key as the string "item-1".
     const array_key = [_]u16{ 'i', 't', 'e', 'm', '-', '1' };
     try listener.expectReply("publish", .{ .key = array_key, .text = "wrong type" }, false, "invalid_request");
     try listener.expectReply("publish", report, true, "accepted");
-    try listener.expectReply("publish", .{ .key = "item-2", .text = "second" }, true, "accepted");
     try listener.expectReply("publish", report, true, "duplicate");
     try listener.expectReply("checkpoint", .{ .to = "2" }, false, "cursor_conflict");
-    try listener.expectReply("checkpoint", .{ .from = &first_cursor, .to = &next_cursor }, true, "accepted");
+    try listener.expectReply("checkpoint", .{ .from = "1", .to = "2" }, true, "accepted");
     const details = (try listener.request("inspect", null, true)).object;
     try testing.expectEqualStrings(listener.reference, details.get("subscription_id").?.string);
     try testing.expectEqualStrings("research-2", details.get("focus_id").?.string);
-    try testing.expectEqualStrings(&next_cursor, details.get("cursor").?.string);
+    try testing.expectEqualStrings("test listener", details.get("listener").?.string);
+    try testing.expectEqualStrings("2", details.get("cursor").?.string);
 
     var owner = try subscriptions.Store.openExisting(a, path);
     defer owner.close();

@@ -102,7 +102,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Receive recurring reports in this focus. Give the returned subscription_id to a listener you set up separately. An activity can run \"$IVENNA_REPORT\" --help for the reporting protocol.",
+    "description": "Follow a source in this focus. Set up a listener separately and give it the returned subscription_id. A report can wake this focus. You can read several reports together in one turn. An activity can run \"$IVENNA_REPORT\" --help for the listener protocol.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -115,20 +115,15 @@
           "type": "string",
           "minLength": 1,
           "description": "Describe what the listener watches and when it reports."
-        },
-        "reminder": {
-          "type": "string",
-          "enum": ["immediate", "next_input"],
-          "description": "immediate can wake this focus. next_input waits for an ordinary input, including a continuation after tools."
         }
       },
-      "required": ["name", "listener", "reminder"],
+      "required": ["name", "listener"],
       "additionalProperties": false
     }
   },
   {
     "name": "withdraw_subscription",
-    "description": "Close any focus's subscription to new reports. Reports already accepted keep their reminder.",
+    "description": "Close any focus's subscription to new reports. Reports already accepted still reach the subscribing focus. The listener runs separately.",
     "parameters": {
       "type": "object",
       "properties": {

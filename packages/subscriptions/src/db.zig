@@ -20,7 +20,11 @@ pub fn open(path: [:0]const u8, flags: c_int) !zqlite.Conn {
     var handle: ?*c.sqlite3 = null;
     const rc = c.sqlite3_open_v2(path.ptr, &handle, flags, null);
     if (rc == c.SQLITE_OK) return .{ .conn = handle.? };
-    if (handle) |db| _ = c.sqlite3_close(db);
+    defer if (handle) |db| {
+        _ = c.sqlite3_close(db);
+    };
+    const message = if (handle) |db| c.sqlite3_errmsg(db) else c.sqlite3_errstr(rc);
+    std.log.err("opening subscription database '{s}': {s}", .{ path, std.mem.span(message) });
     return switch (rc) {
         c.SQLITE_BUSY, c.SQLITE_LOCKED => error.SubscriptionStoreBusy,
         c.SQLITE_FULL => error.SubscriptionStoreFull,

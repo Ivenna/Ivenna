@@ -43,11 +43,15 @@ pub const Session = struct {
     epoch: u64 = 0,
     context: ?Context = null,
     needs_startup: bool = false,
-    state: union(enum) { idle, running: *Activation, interrupted } = .idle,
+    state: union(enum) {
+        idle,
+        running: *Activation,
+        /// A report beyond this sequence counts as fresh input.
+        interrupted: u64,
+    } = .idle,
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
     subscription_through: u64 = 0,
-    noticed_immediate: u64 = 0,
     first_stream: Stream = .ordinary,
 
     /// Only genuinely new work makes an interrupted focus eligible again.
@@ -106,11 +110,8 @@ pub const Registry = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const saved = try self.history.load(a, max_sessions);
-        const expected_catalog = if (saved) |retained| retained.subscription_catalog else null;
-        if (expected_catalog) |expected| {
-            if (!std.mem.eql(u8, &expected, &self.subscription_catalog)) return error.SubscriptionCatalogMismatch;
-        } else if (try subscriptions.isBound()) return error.SubscriptionCatalogMismatch;
         if (saved) |retained| {
+            if (!std.mem.eql(u8, &retained.subscription_catalog, &self.subscription_catalog)) return error.SubscriptionCatalogMismatch;
             const reports = try Reports.Outbox.init(allocator, history, retained.activity_reports);
             self.reports.deinit();
             self.reports = reports;
@@ -154,6 +155,7 @@ pub const Registry = struct {
                 }
             }
         } else {
+            if (try subscriptions.isBound()) return error.SubscriptionCatalogMismatch;
             const core = try allocator.create(Session);
             core.* = .{ .session_id = 1, .role = .core, .needs_startup = true };
             errdefer self.destroySession(core);
@@ -268,10 +270,10 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        try self.collectLocked(work.session, work.activation, try self.subscriptions.latestImmediate(work.session.focus_id));
+        try self.collectLocked(work.session, work.activation, try self.subscriptions.latestSequence(work.session.focus_id));
     }
 
-    fn collectLocked(self: *Registry, session: *Session, activation: *Activation, latest_immediate: u64) !void {
+    fn collectLocked(self: *Registry, session: *Session, activation: *Activation, latest_report: u64) !void {
         const deliveries = &activation.deliveries;
         std.debug.assert(deliveries.items.len == 0);
         // Reports can be reread from their stores. Ordinary arrivals stay in
@@ -280,6 +282,9 @@ pub const Registry = struct {
             _ = self.keepQueued(deliveries.items);
             deliveries.clearRetainingCapacity();
         }
+        activation.subscription_at_collection = latest_report;
+        activation.subscription_read_through = session.subscription_through;
+        activation.activity_reports_read = 0;
         var ordinary = session.pending.items;
         if (ordinary.len != 0 and ordinary[0].event == .startup) {
             try deliveries.append(self.allocator, ordinary[0]);
@@ -291,47 +296,28 @@ pub const Registry = struct {
         while (true) {
             switch (stream) {
                 .ordinary => try deliveries.appendSlice(self.allocator, ordinary),
-                .activity => if (session == self.core) {
-                    _ = try self.appendActivityReports(deliveries, 0);
-                },
-                .subscription => {
-                    var arena: std.heap.ArenaAllocator = .init(self.allocator);
-                    defer arena.deinit();
-                    const reports = try self.subscriptions.pending(arena.allocator(), session.focus_id, session.subscription_through, @min(self.max_pending, report_read_batch));
-                    try deliveries.ensureUnusedCapacity(self.allocator, reports.len);
-                    for (reports) |report| {
-                        const delivery = try Delivery.create(self.allocator, .{ .subscription = .{
-                            .subscription_id = report.reference,
-                            .text = report.text,
-                            .observed_at_unix_ms = report.observed_at_unix_ms,
-                            .source_time_unix_ms = report.source_time_unix_ms,
-                        } }, null);
-                        delivery.admission = .{ .subscription = report.sequence };
-                        deliveries.appendAssumeCapacity(delivery);
-                    }
-                },
+                .activity => if (session == self.core) try self.appendActivityReports(activation),
+                .subscription => try self.appendSubscriptionReports(session.focus_id, activation),
             }
             stream = stream.next();
             if (stream == session.first_stream) break;
         }
         session.pending.clearRetainingCapacity();
-        // An immediate report arriving after the sample counts as fresh if
-        // admission fails, even when it arrived during the reads above.
-        session.noticed_immediate = latest_immediate;
         activation.admitted = deliveries.items.len == 0;
         activation.new_arrival = false;
     }
 
-    /// Extend an unadmitted core batch by one I/O page without invoking the model.
+    /// Extend a batch that still fits by reading the next page from each report source.
     pub fn extendReports(self: *Registry, work: Work) !bool {
-        if (work.session != self.core) return false;
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        std.debug.assert(!work.activation.admitted);
-        var staged: usize = 0;
-        for (work.activation.deliveries.items) |delivery| staged += @intFromBool(delivery.event == .activity);
-        return self.appendActivityReports(&work.activation.deliveries, staged);
+        const activation = work.activation;
+        std.debug.assert(!activation.admitted);
+        const count = activation.deliveries.items.len;
+        try self.appendSubscriptionReports(work.session.focus_id, activation);
+        if (work.session == self.core) try self.appendActivityReports(activation);
+        return activation.deliveries.items.len != count;
     }
 
     /// Already admitted observations live in Context; their receipts have been
@@ -555,8 +541,8 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
-        const finished = !self.hasWork(session) and
-            try self.subscriptions.latestImmediate(session.focus_id) <= session.subscription_through;
+        const finished = !self.hasQueuedWork(session) and
+            try self.subscriptions.latestSequence(session.focus_id) <= session.subscription_through;
         const completed_activity = finished and try self.canEnd(session);
         if (!completed_activity) try history.appendBatch(output, &.{});
         if (session != self.core) try self.reportResponseLocked(session, text, observed_at, completed_activity);
@@ -594,13 +580,13 @@ pub const Registry = struct {
             .observed_at_unix_ms = self.now(),
             .reason = reason,
         } });
-        // Further immediate reports can resume the focus. After admission, the
-        // unadmitted suffix counts; before admission, wait for a new arrival.
-        if (activation.admitted) session.noticed_immediate = session.subscription_through;
-        const ready = activation.new_arrival or (activation.admitted and self.hasWork(session));
+        // After admission the remaining suffix can resume work. A failed
+        // admission waits for an arrival newer than the attempted batch.
+        const resume_after = if (activation.admitted) session.subscription_through else activation.subscription_at_collection;
+        const ready = activation.new_arrival or (activation.admitted and self.hasQueuedWork(session));
         session.pending.insertSliceAssumeCapacity(0, self.keepQueued(activation.deliveries.items));
         activation.deliveries.clearRetainingCapacity();
-        session.state = if (ready) .idle else .interrupted;
+        session.state = if (ready) .idle else .{ .interrupted = resume_after };
         activation.destroy(self.allocator);
         try self.saveLocked();
         unloadActivityContext(session);
@@ -698,11 +684,11 @@ pub const Registry = struct {
         return .{ .id = registration.id, .reference = try a.dupe(u8, registration.reference) };
     }
 
-    pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, reminder: Subscriptions.Reminder, listener: []const u8) !Subscriptions.Created {
+    pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, listener: []const u8) !Subscriptions.Created {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        return self.subscriptions.create(a, work.session.focus_id, name, reminder, listener);
+        return self.subscriptions.create(a, work.session.focus_id, name, listener);
     }
 
     pub fn withdrawSubscription(self: *Registry, work: Work, reference: []const u8) !bool {
@@ -830,21 +816,20 @@ pub const Registry = struct {
         return deliveries[0..count];
     }
 
+    /// Called after checking for work under the lock that guards withdrawal.
+    /// Only an active subscription can accept a report after that check.
     fn canEnd(self: *Registry, session: *Session) !bool {
         if (session == self.core) return false;
         for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) return false;
-        return !try self.subscriptions.hasActive(session.focus_id) and
-            !try self.subscriptions.hasPending(session.focus_id, session.subscription_through);
+        return !try self.subscriptions.hasActive(session.focus_id);
     }
 
     fn takeReady(self: *Registry, session: *Session) !?Work {
         if (session.state == .running) return null;
-        const latest_immediate = try self.subscriptions.latestImmediate(session.focus_id);
+        const latest_report = try self.subscriptions.latestSequence(session.focus_id);
         if (session.state == .interrupted) {
-            if (latest_immediate <= session.noticed_immediate) return null;
-        } else if (!self.hasWork(session) and latest_immediate <= session.subscription_through) {
-            // Withdrawal can retire a sleeping activity. Accepted passive
-            // reports keep it addressable until its next ordinary input.
+            if (latest_report <= session.state.interrupted) return null;
+        } else if (!self.hasQueuedWork(session) and latest_report <= session.subscription_through) {
             if (self.check_sleeping_activities and try self.canEnd(session)) {
                 try self.reportResponseLocked(session, null, self.now(), true);
                 _ = self.sessions.remove(session.session_id);
@@ -859,29 +844,48 @@ pub const Registry = struct {
         const activation = try self.allocator.create(Activation);
         activation.* = .{};
         errdefer activation.destroy(self.allocator);
-        try self.collectLocked(session, activation, latest_immediate);
+        try self.collectLocked(session, activation, latest_report);
         session.state = .{ .running = activation };
         session.borrowed_workers += 1;
         return .{ .session = session, .activation = activation };
     }
 
-    fn appendActivityReports(self: *Registry, deliveries: *std.ArrayList(*Delivery), start: usize) !bool {
+    fn appendSubscriptionReports(self: *Registry, focus_id: []const u8, activation: *Activation) !void {
+        if (activation.subscription_read_through >= activation.subscription_at_collection) return;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const reports = try self.reports.peek(arena.allocator(), start, report_read_batch);
-        try deliveries.ensureUnusedCapacity(self.allocator, reports.len);
+        const reports = try self.subscriptions.pending(arena.allocator(), focus_id, activation.subscription_read_through, activation.subscription_at_collection, report_read_batch);
+        try activation.deliveries.ensureUnusedCapacity(self.allocator, reports.len);
+        for (reports) |report| {
+            const delivery = try Delivery.create(self.allocator, .{ .subscription = .{
+                .subscription_id = report.reference,
+                .text = report.text,
+                .observed_at_unix_ms = report.observed_at_unix_ms,
+                .source_time_unix_ms = report.source_time_unix_ms,
+            } }, null);
+            delivery.admission = .{ .subscription = report.sequence };
+            activation.deliveries.appendAssumeCapacity(delivery);
+            activation.subscription_read_through = report.sequence;
+        }
+    }
+
+    fn appendActivityReports(self: *Registry, activation: *Activation) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const reports = try self.reports.peek(arena.allocator(), activation.activity_reports_read, report_read_batch);
+        try activation.deliveries.ensureUnusedCapacity(self.allocator, reports.len);
         for (reports) |report| {
             const messages: []const Input.ActivityMessage = if (report.content == .assistant) &.{.{
                 .text = report.content.assistant,
                 .observed_at_unix_ms = report.observed_at_unix_ms,
             }} else &.{};
-            deliveries.appendAssumeCapacity(try Delivery.create(self.allocator, .{ .activity = .{
+            activation.deliveries.appendAssumeCapacity(try Delivery.create(self.allocator, .{ .activity = .{
                 .from_focus = report.from_focus,
                 .messages = messages,
                 .ended_at_unix_ms = if (report.content == .ended) report.observed_at_unix_ms else null,
             } }, null));
         }
-        return reports.len != 0;
+        activation.activity_reports_read += reports.len;
     }
 
     fn restoreContextLocked(self: *Registry, session: *Session) !void {
@@ -909,9 +913,8 @@ pub const Registry = struct {
         session.notify();
     }
 
-    fn hasWork(self: *const Registry, session: *const Session) bool {
-        if (session.pending.items.len != 0) return true;
-        return session == self.core and self.reports.pendingEndings() != 0;
+    fn hasQueuedWork(self: *const Registry, session: *const Session) bool {
+        return session.pending.items.len != 0 or (session == self.core and self.reports.pendingEndings() != 0);
     }
 
     fn hasCapacity(self: *Registry, session: *Session) bool {
@@ -1049,15 +1052,15 @@ test "compaction samples the active subscriptions addressed to this focus" {
     var core = try admitTestInput(&registry, a);
     defer core.history.deinit();
     defer registry.endWorker(core.work.session);
-    const core_watch = try registry.subscribe(a, core.work, "releases", .next_input, "Release feed");
+    const core_watch = try registry.subscribe(a, core.work, "releases", "Release feed");
     var plans: std.ArrayList(ForkPlan) = .empty;
     try plans.append(a, try registry.prepareFork(core.work, "research", "Follow revisions."));
     try registry.commitToolRound(core.work, &core.history, &plans);
     var activity = try admitTestInput(&registry, a);
     defer activity.history.deinit();
     defer registry.endWorker(activity.work.session);
-    const activity_watch = try registry.subscribe(a, activity.work, "edits", .immediate, "Document edits");
-    const withdrawn = try registry.subscribe(a, activity.work, "previous", .immediate, "Previous publisher");
+    const activity_watch = try registry.subscribe(a, activity.work, "edits", "Document edits");
+    const withdrawn = try registry.subscribe(a, activity.work, "previous", "Previous publisher");
     try std.testing.expect(try registry.withdrawSubscription(core.work, withdrawn.subscription_id));
 
     const core_sample = try registry.compactionSnapshot(a, core.work.session);

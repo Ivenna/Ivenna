@@ -151,7 +151,7 @@ pub const Snapshot = struct {
 pub const State = struct {
     activities: []const []const u8,
     callbacks: []const PendingCallback,
-    subscriptions: []const []const u8 = &.{},
+    subscriptions: []const []const u8,
 
     pub fn isEmpty(self: State) bool {
         return self.activities.len == 0 and self.callbacks.len == 0 and self.subscriptions.len == 0;

@@ -82,7 +82,7 @@ Execution owns session state and the boundaries at which new observations can af
 
 Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values and cancel and join tasks before releasing their dependencies. The capability manages those resources and publishes their outcomes. The agent manages session lifetimes and routes observations.
 
-Persist the destination of a future observation before returning its reference. A capability binds a callback through the invoking session's registrar. A subscription can close while accepted reports still await admission, so keep their destination available through delivery. See [callback registration](architecture.md#event-sources-and-callback-admission) and [subscription delivery](architecture.md#subscription-delivery).
+Persist the receiving focus before returning a callback or subscription reference. Capabilities register callbacks through the invoking session's registrar. A report can outlive its subscription, so its destination must remain available after withdrawal. See [callback registration](architecture.md#event-sources-and-callback-admission) and [subscription delivery](architecture.md#subscription-delivery).
 
 Keep a session's identity independent of context residency, and retain its history for as long as it can resume. When handling a failure, consider what repeating the operation would do. A fresh inference can revise an unusable summary. A command that already ran has an outcome to preserve. See [runtime availability](design.md#runtime-availability).
 
@@ -104,7 +104,7 @@ Use the Zig version in [`.zig-version`](../.zig-version). From the repository ro
 zig build
 ```
 
-The [root build](../build.zig) installs `ivenna` and `ivenna-report` next to each other in `zig-out/bin`. Building from [apps/ivenna](../apps/ivenna) also installs the pair. To build and test the reporter on its own, run `zig build` and `zig build test` from [apps/ivenna-report](../apps/ivenna-report). The [memory app](../apps/memory) has a Nushell entry point and a Containerfile.
+Both the [root build](../build.zig) and the [kernel application build](../apps/ivenna/build.zig) install `ivenna` and `ivenna-report` in `zig-out/bin`. The kernel locates the reporter beside its own executable when it sets up the host command environment. To build and test the reporter on its own, run `zig build` and `zig build test` from [apps/ivenna-report](../apps/ivenna-report). The [memory app](../apps/memory) has a Nushell entry point and a Containerfile.
 
 Each application owns its entry point. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
 

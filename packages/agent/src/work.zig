@@ -34,6 +34,10 @@ pub const Delivery = struct {
 pub const Activation = struct {
     deliveries: std.ArrayList(*Delivery) = .empty,
     admitted: bool = false,
+    /// Reports published after this sequence belong to a later input.
+    subscription_at_collection: u64 = 0,
+    subscription_read_through: u64 = 0,
+    activity_reports_read: usize = 0,
     /// An observation requesting attention arrived after the last collection.
     new_arrival: bool = false,
 

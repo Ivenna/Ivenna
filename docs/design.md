@@ -70,15 +70,15 @@ A response without tool calls ends the activation when no queued arrivals requir
 
 Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a waiting session. Messages preserve their actual sources for the receiver to weigh against its own evidence and understanding.
 
-The core can arrange observations for later attention. Host commands that outlive their initial tool calls arrange completion observations for the calling activities. Each arrangement binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [returning later](attention.md#returning-later) and [callback observations](attention.md#callback-observations).
+The core can schedule a wakeup for a particular time. A host command that outlives its initial tool call arranges a completion observation for the calling activity. Each callback binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [returning later](attention.md#returning-later) and [callback observations](attention.md#callback-observations).
 
 Activities choose how long to wait for host work before continuing their own reasoning. A bounded default gives brief commands time to return their results in the same exchange, while returning attention from longer commands for further work and coordination. An activity can shorten that wait to regain control sooner, or extend it when obtaining the result is more useful than proceeding immediately. The core and other activities continue while it waits.
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
 
-A focus can subscribe to a source it wants to follow over time. Reports return to the focus that subscribed, so an activity investigating a release can judge the next update in light of what it has already learned. The core can subscribe directly when an interest spans assignments. For each subscription, Ivenna chooses which changes its listener reports and whether those reports should wake the focus or wait for its next ordinary input.
+A focus can subscribe to a source it wants to follow over time. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. Ivenna chooses which changes its listener reports. A report can bring a sleeping focus back to its work, and a working focus can consider several reports together after its current round.
 
-The subscription survives sleep and restart. Its reference stays available through a handover even if the listener has never reported. Ivenna can replace the listener and keep the same subscription. Any focus with the complete reference can withdraw it. Reports accepted before withdrawal keep their destination and reminder. See [subscriptions](attention.md#subscriptions).
+The subscription stays with its focus across sleep, handover, and restart. Any focus with its reference can withdraw it when the source no longer needs attention. Observations already accepted still belong to the focus that subscribed. See [subscriptions](attention.md#subscriptions).
 
 ### Context and continuity
 

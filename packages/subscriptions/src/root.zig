@@ -6,8 +6,7 @@ const Allocator = std.mem.Allocator;
 const Reference = @import("agent_contracts").Reference;
 
 pub const filename = "subscriptions.sqlite3";
-const schema_version = 2;
-pub const Reminder = enum { immediate, next_input };
+const catalog_format = std.mem.readInt(u32, "IVS1", .big);
 
 pub const Created = struct {
     subscription_id: []const u8,
@@ -17,7 +16,6 @@ pub const Subscription = struct {
     subscription_id: []const u8,
     focus_id: []const u8,
     listener: []const u8,
-    reminder: Reminder,
     cursor: ?[]const u8,
 };
 
@@ -60,12 +58,12 @@ pub const Store = struct {
         // Another opener can observe only the empty file or the complete catalog.
         try self.exec("BEGIN IMMEDIATE");
         errdefer self.rollback();
-        const version = try self.integer("PRAGMA user_version", .{});
-        if (version != schema_version) {
-            if (version != 0 or try self.integer("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
+        const format = try self.integer("PRAGMA application_id", .{});
+        if (format != catalog_format) {
+            if (format != 0 or try self.integer("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
                 return error.IncompatibleSubscriptionSchema;
             try self.exec(@embedFile("schema.sql"));
-            try self.exec(std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
+            try self.exec(std.fmt.comptimePrint("PRAGMA application_id={d}", .{catalog_format}));
         }
         try self.exec("COMMIT");
         try self.exec("PRAGMA journal_mode=WAL");
@@ -77,7 +75,7 @@ pub const Store = struct {
     pub fn openExisting(a: Allocator, path: []const u8) !Store {
         var self = try connect(a, path, false);
         errdefer self.close();
-        if (try self.integer("PRAGMA user_version", .{}) != schema_version) return error.IncompatibleSubscriptionSchema;
+        if (try self.integer("PRAGMA application_id", .{}) != catalog_format) return error.IncompatibleSubscriptionSchema;
         return self;
     }
 
@@ -128,11 +126,11 @@ pub const Store = struct {
         return self.db.changes() != 0;
     }
 
-    fn integer(self: *Store, query: [:0]const u8, args: anytype) !u64 {
+    fn integer(self: *Store, query: [:0]const u8, args: anytype) !i64 {
         const s = try self.statement(query, args);
         defer s.deinit();
         if (!try sql.checked(s.step())) return error.InvalidSubscriptionDatabase;
-        return sql.unsigned(s.int(0));
+        return s.int(0);
     }
 
     pub fn identity(self: *Store) ![32]u8 {
@@ -152,13 +150,13 @@ pub const Store = struct {
         _ = try self.change("UPDATE metadata SET bound=1 WHERE singleton=1", .{});
     }
 
-    pub fn create(self: *Store, a: Allocator, focus_id: []const u8, name: []const u8, reminder: Reminder, listener: []const u8) !Created {
+    pub fn create(self: *Store, a: Allocator, focus_id: []const u8, name: []const u8, listener: []const u8) !Created {
         if (!Reference.validName(name) or !validText(listener)) return error.InvalidArguments;
         try self.exec("BEGIN IMMEDIATE");
         errdefer self.rollback();
         const s = try self.statement(
-            "INSERT INTO subscriptions(focus_id,name,reminder,listener) VALUES(?,?,?,?) RETURNING reference",
-            .{ focus_id, name, @tagName(reminder), listener },
+            "INSERT INTO subscriptions(focus_id,name,listener) VALUES(?,?,?) RETURNING reference",
+            .{ focus_id, name, listener },
         );
         defer s.deinit();
         if (!try sql.checked(s.step())) return error.InvalidSubscriptionDatabase;
@@ -181,15 +179,14 @@ pub const Store = struct {
     }
 
     pub fn inspect(self: *Store, a: Allocator, reference: []const u8) !?Subscription {
-        const s = try self.statement("SELECT reference,focus_id,listener,reminder,cursor FROM subscriptions WHERE reference=?", .{reference});
+        const s = try self.statement("SELECT reference,focus_id,listener,cursor FROM subscriptions WHERE reference=?", .{reference});
         defer s.deinit();
         if (!try sql.checked(s.step())) return null;
         return .{
             .subscription_id = try sql.copyText(a, s, 0),
             .focus_id = try sql.copyText(a, s, 1),
             .listener = try sql.copyText(a, s, 2),
-            .reminder = std.meta.stringToEnum(Reminder, try sql.text(s, 3)) orelse return error.InvalidSubscriptionDatabase,
-            .cursor = if (s.columnType(4) == .null) null else try sql.copyText(a, s, 4),
+            .cursor = if (s.columnType(3) == .null) null else try sql.copyText(a, s, 3),
         };
     }
 
@@ -197,8 +194,7 @@ pub const Store = struct {
         return self.change("DELETE FROM subscriptions WHERE reference=?", .{reference});
     }
 
-    /// Capture the registration's destination and reminder together with
-    /// the report, its retry key and any cursor advance.
+    /// Save the report for its receiving focus together with its retry key and any cursor advance.
     pub fn publish(self: *Store, reference: []const u8, report: NewReport, received_unix_ms: i64) !PublishResult {
         if (report.text.len > 2048 or !validText(report.text) or !validText(report.key))
             return error.InvalidArguments;
@@ -220,8 +216,8 @@ pub const Store = struct {
         }
         if (report.cursor) |cursor| try self.advanceCursor(reference, cursor);
         _ = try self.change(
-            \\INSERT INTO reports(reference,focus_id,reminder,text,source_time,received)
-            \\SELECT reference,focus_id,reminder,?,?,? FROM subscriptions WHERE reference=?
+            \\INSERT INTO reports(reference,focus_id,text,source_time,received)
+            \\SELECT reference,focus_id,?,?,? FROM subscriptions WHERE reference=?
         , .{ report.text, report.source_time_unix_ms, received_unix_ms, reference });
         try self.exec("COMMIT");
         return .accepted;
@@ -243,15 +239,11 @@ pub const Store = struct {
             return error.SubscriptionWithdrawn;
     }
 
-    pub fn hasPending(self: *Store, focus_id: []const u8, after: u64) !bool {
-        return try self.integer("SELECT EXISTS(SELECT 1 FROM reports WHERE focus_id=? AND sequence>?)", .{ focus_id, try sql.signed(after) }) != 0;
-    }
-
-    pub fn pending(self: *Store, a: Allocator, focus_id: []const u8, after: u64, limit: usize) ![]const Report {
+    pub fn pending(self: *Store, a: Allocator, focus_id: []const u8, after: u64, through: u64, limit: usize) ![]const Report {
         const s = try self.statement(
             \\SELECT sequence,reference,text,source_time,received
-            \\FROM reports WHERE focus_id=? AND sequence>? ORDER BY sequence LIMIT ?
-        , .{ focus_id, try sql.signed(after), try sql.signed(limit) });
+            \\FROM reports WHERE focus_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?
+        , .{ focus_id, try sql.signed(after), try sql.signed(through), try sql.signed(limit) });
         defer s.deinit();
         var rows: std.ArrayList(Report) = .empty;
         while (try sql.checked(s.step())) try rows.append(a, .{
@@ -264,8 +256,8 @@ pub const Store = struct {
         return rows.toOwnedSlice(a);
     }
 
-    pub fn latestImmediate(self: *Store, focus_id: []const u8) !u64 {
-        return self.integer("SELECT coalesce(max(sequence),0) FROM reports WHERE focus_id=? AND reminder='immediate'", .{focus_id});
+    pub fn latestSequence(self: *Store, focus_id: []const u8) !u64 {
+        return sql.unsigned(try self.integer("SELECT coalesce(max(sequence),0) FROM reports WHERE focus_id=?", .{focus_id}));
     }
 
     pub fn acknowledge(self: *Store, focus_id: []const u8, through: u64) !void {
@@ -277,7 +269,7 @@ fn validText(s: []const u8) bool {
     return s.len != 0 and std.unicode.utf8ValidateSlice(s);
 }
 
-test "independent connections preserve cursors, retries and the reminder at acceptance" {
+test "independent connections preserve cursors, retries and the destination of accepted reports" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -291,25 +283,25 @@ test "independent connections preserve cursors, retries and the reminder at acce
     var producer = try Store.openExisting(a, path);
     defer producer.close();
     const activity = "read-2";
-    const ref = (try kernel.create(a, activity, "feed", .next_input, "watch changes")).subscription_id;
+    const ref = (try kernel.create(a, activity, "feed", "watch changes")).subscription_id;
     if (@hasDecl(std.Io.File.Permissions, "toMode")) {
         for ([_][]const u8{ filename, filename ++ "-wal", filename ++ "-shm" }) |file| {
             const stat = try temporary.dir.statFile(t.io, file, .{});
             try t.expectEqual(0, stat.permissions.toMode() & 0o077);
         }
     }
-    const token: [800]u8 = @splat('x');
-    const first = NewReport{ .key = &token, .text = "First", .cursor = .{ .to = "" }, .source_time_unix_ms = -62_167_219_200_000 };
+    const first = NewReport{ .key = "post-1", .text = "First", .cursor = .{ .to = "" }, .source_time_unix_ms = -62_167_219_200_000 };
     try t.expectEqual(.accepted, try producer.publish(ref, first, 10));
-    const other = (try kernel.create(a, "core-1", "feed", .immediate, "read a second feed")).subscription_id;
-    try t.expectEqual(.accepted, try producer.publish(other, .{ .key = first.key, .text = "For the core", .cursor = .{ .to = "B" } }, 11));
-    try t.expectEqualStrings("B", (try producer.inspect(a, other)).?.cursor.?);
-    const admitted = (try kernel.pending(a, activity, 0, 1))[0];
+    const other = (try kernel.create(a, "core-1", "feed", "read a second feed")).subscription_id;
+    try t.expectEqual(.accepted, try producer.publish(other, .{ .key = first.key, .text = "For the core" }, 11));
+    // Acknowledging a later sequence for another focus leaves this delivery pending.
+    try kernel.acknowledge("core-1", try kernel.latestSequence("core-1"));
+    const admitted = (try kernel.pending(a, activity, 0, try kernel.latestSequence(activity), 1))[0];
     try t.expectEqualStrings("First", admitted.text);
     try kernel.acknowledge(activity, admitted.sequence);
     const retry = NewReport{ .key = first.key, .text = "Edited retry", .cursor = .{ .from = "", .to = "retry cursor" } };
     try t.expectEqual(.duplicate, try producer.publish(ref, retry, 15));
-    try t.expect(!try kernel.hasPending(activity, 0));
+    try t.expectEqual(0, try kernel.latestSequence(activity));
 
     var next = NewReport{ .key = "post-2", .text = "Second", .cursor = .{ .to = "tail" }, .source_time_unix_ms = std.math.maxInt(i64) };
     try t.expectError(error.InvalidArguments, producer.publish(ref, next, 20));
@@ -321,16 +313,17 @@ test "independent connections preserve cursors, retries and the reminder at acce
     try t.expectEqualStrings("tail", (try producer.inspect(a, ref)).?.cursor.?);
 
     try t.expect(try kernel.withdraw(ref));
-    const renewed = (try kernel.create(a, activity, "feed", .immediate, "watch changes")).subscription_id;
+    const renewed = (try kernel.create(a, activity, "feed", "watch changes")).subscription_id;
     try t.expectError(error.SubscriptionWithdrawn, producer.publish(ref, next, 25));
-    try t.expectEqual(0, try kernel.latestImmediate(activity));
+    const through = try kernel.latestSequence(activity);
     try t.expectEqual(.accepted, try producer.publish(renewed, first, 30));
-    const pending_reports = try kernel.pending(a, activity, admitted.sequence, 8);
-    try t.expectEqual(2, pending_reports.len);
-    try t.expectEqualStrings(ref, pending_reports[0].reference);
-    try t.expectEqualStrings("Second", pending_reports[0].text);
-    try t.expectEqualStrings(renewed, pending_reports[1].reference);
-    try t.expectEqual(pending_reports[1].sequence, try kernel.latestImmediate(activity));
+    const sampled = try kernel.pending(a, activity, admitted.sequence, through, 8);
+    try t.expectEqual(1, sampled.len);
+    try t.expectEqualStrings(ref, sampled[0].reference);
+    try t.expectEqualStrings("Second", sampled[0].text);
+    const later = try kernel.pending(a, activity, through, try kernel.latestSequence(activity), 8);
+    try t.expectEqual(1, later.len);
+    try t.expectEqualStrings(renewed, later[0].reference);
 }
 
 test "kernel and producer preserve incompatible catalogs" {
@@ -344,14 +337,12 @@ test "kernel and producer preserve incompatible catalogs" {
     const path = try std.fs.path.join(a, &.{ dir, filename });
     var prior = try Store.connect(a, path, true);
     defer prior.close();
-    try prior.exec("CREATE TABLE reports(sequence INTEGER PRIMARY KEY,reference TEXT,text TEXT) STRICT");
-    try prior.exec("INSERT INTO reports VALUES(1,'feed-1','waiting for delivery')");
-    inline for (.{ 0, 1 }) |version| {
-        try prior.exec(std.fmt.comptimePrint("PRAGMA user_version={d}", .{version}));
-        try t.expectError(error.IncompatibleSubscriptionSchema, Store.openExisting(a, path));
-        try t.expectError(error.IncompatibleSubscriptionSchema, Store.open(a, path));
-        try t.expectEqual(version, try prior.integer("PRAGMA user_version", .{}));
-        try t.expectEqual(1, try prior.integer("SELECT count(*) FROM sqlite_schema", .{}));
-        try t.expectEqual(1, try prior.integer("SELECT count(*) FROM reports WHERE sequence=1 AND reference='feed-1' AND text='waiting for delivery'", .{}));
-    }
+    try prior.exec("CREATE TABLE notes(text TEXT)");
+    try prior.exec("INSERT INTO notes VALUES('keep me')");
+    try prior.exec("PRAGMA user_version=3");
+    try t.expectError(error.IncompatibleSubscriptionSchema, Store.openExisting(a, path));
+    try t.expectError(error.IncompatibleSubscriptionSchema, Store.open(a, path));
+    try t.expectEqual(1, try prior.integer("SELECT count(*) FROM notes WHERE text='keep me'", .{}));
+    try t.expectEqual(0, try prior.integer("PRAGMA application_id", .{}));
+    try t.expectEqual(0, try prior.integer("SELECT journal_mode='wal' FROM pragma_journal_mode", .{}));
 }

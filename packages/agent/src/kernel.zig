@@ -202,7 +202,7 @@ pub const Kernel = struct {
                     break :blk try runtimeResult(a, .{ .callback_id = id });
                 },
                 .subscribe => |args| blk: {
-                    const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.reminder, args.listener) catch |err| return toolFailure(a, err);
+                    const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.listener) catch |err| return toolFailure(a, err);
                     break :blk try runtimeResult(a, subscription);
                 },
                 .withdraw_subscription => |args| blk: {
@@ -417,6 +417,19 @@ const SubscriptionFixture = struct {
         return history;
     }
 
+    /// Leave a subscribed activity sleeping while the core continues its round.
+    fn watchingActivity(instance: *Kernel, a: Allocator, core: Work, history: *Context, name: []const u8) ![]const u8 {
+        var plans: std.ArrayList(Sessions.ForkPlan) = .empty;
+        try plans.append(a, try instance.sessions.prepareFork(core, name, "Watch for updates."));
+        try instance.sessions.commitToolRound(core, history, &plans);
+        const work = try takeWork(instance, a);
+        var activity = try admit(instance, a, work);
+        defer activity.deinit();
+        const sub = try instance.sessions.subscribe(a, work, "updates", "Source listener");
+        try finish(instance, work, &activity);
+        return sub.subscription_id;
+    }
+
     fn finish(instance: *Kernel, work: Work, history: *Context) !void {
         defer instance.sessions.endWorker(work.session);
         try testing.expect(try instance.sessions.commitResponse(work, history, &.{}, null));
@@ -445,7 +458,7 @@ test "an activity can use the reference returned by subscribe to withdraw anothe
     defer core.deinit();
     var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
     defer core_history.deinit();
-    const created = (try Tool.call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed", .reminder = "next_input" })).object.get("result").?;
+    const created = (try Tool.call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed" })).object.get("result").?;
     const core_id = created.object.get("subscription_id").?.string;
     _ = try Tool.call(a, &core, "open_focus", .{ .name = "research", .task = "Watch for releases." });
     try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks);
@@ -494,159 +507,123 @@ test "subscription admission and database acknowledgement survive either outcome
             const core = try SubscriptionFixture.takeWork(&kernel, a);
             var history = try SubscriptionFixture.admit(&kernel, a, core);
             defer history.deinit();
-            const sub = try kernel.sessions.subscribe(a, core, "releases", .next_input, "release listener");
-            try testing.expectEqual(.accepted, try store.publish(sub.subscription_id, .{
-                .key = "first",
-                .text = "first",
-            }, 10));
-            try testing.expect(try kernel.sessions.withdrawSubscription(core, sub.subscription_id));
-            const renewed = try kernel.sessions.subscribe(a, core, "releases", .immediate, "new release listener");
-            try SubscriptionFixture.finish(&kernel, core, &history);
-            try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
-            try testing.expectEqual(.accepted, try store.publish(renewed.subscription_id, .{
-                .key = "second",
-                .text = "second",
-                .source_time_unix_ms = 15,
-            }, 20));
-            const work = try SubscriptionFixture.takeWork(&kernel, a);
-            try testing.expect(try store.withdraw(renewed.subscription_id));
+            const sub = try kernel.sessions.subscribe(a, core, "releases", "release listener");
+            _ = try store.publish(sub.subscription_id, .{ .key = "release", .text = "Release published" }, 10);
+            try testing.expect(!try kernel.sessions.commitResponse(core, &history, &.{}, null));
+            try kernel.sessions.collectPending(core);
             fixture.storage.fail_save = failure;
-            try testing.expectError(error.UnconfirmedCheckpoint, SubscriptionFixture.admit(&kernel, a, work));
-            try testing.expectEqual(2, (try store.pending(a, "core-1", 0, 8)).len);
+            try testing.expectError(error.UnconfirmedCheckpoint, SubscriptionFixture.admit(&kernel, a, core));
         }
         fixture.storage.fail_save = .none;
         var kernel = try fixture.kernel(&engine, &store);
         defer kernel.deinit();
-        const waiting = try store.pending(a, "core-1", 0, 8);
-        try testing.expectEqual(@as(usize, if (failure == .before_commit) 2 else 0), waiting.len);
+        try testing.expectEqual(failure == .before_commit, try store.latestSequence("core-1") != 0);
         const resumed = try SubscriptionFixture.takeWork(&kernel, a);
         var history = try SubscriptionFixture.admit(&kernel, a, resumed);
         defer history.deinit();
-        var reports: std.ArrayList(Input.SubscriptionReport) = .empty;
+        var reports: usize = 0;
         for (history.records()) |entry| {
             if (entry != .record or entry.record != .events) continue;
-            for (entry.record.events.items) |event| if (event == .subscription) try reports.append(a, event.subscription);
+            for (entry.record.events.items) |event| if (event == .subscription) {
+                try testing.expectEqualStrings("Release published", event.subscription.text);
+                reports += 1;
+            };
         }
-        try testing.expectEqual(2, reports.items.len);
-        try testing.expectEqualStrings("first", reports.items[0].text);
-        try testing.expectEqualStrings("second", reports.items[1].text);
-        try testing.expectEqualStrings("releases-1", reports.items[0].subscription_id);
-        try testing.expectEqualStrings("releases-2", reports.items[1].subscription_id);
-        try testing.expectEqual(@as(i64, 15), reports.items[1].source_time_unix_ms.?);
-        try testing.expectEqual(0, (try store.pending(a, "core-1", 0, 1)).len);
+        try testing.expectEqual(1, reports);
         try SubscriptionFixture.finish(&kernel, resumed, &history);
-        try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
     }
 }
 
-test "interleaved focus reports survive another focus withdrawing their registration" {
+test "dispatch retires a withdrawn activity once its accepted reports have been admitted" {
     const testing = std.testing;
-    const Case = enum { empty, restart_empty, restart_passive };
-    for ([_]Case{ .empty, .restart_empty, .restart_passive }) |scenario| {
-        const has_report = scenario == .restart_passive;
+    const Case = enum { live, restart_empty, restart_with_report };
+    for ([_]Case{ .live, .restart_empty, .restart_with_report }) |scenario| {
         var fixture: SubscriptionFixture = .{};
         defer fixture.storage.arena.deinit();
         const a = fixture.storage.arena.allocator();
         var store = try @import("subscriptions").Store.open(a, ":memory:");
         defer store.close();
         var engine: Engine = undefined;
-        const sub = blk: {
-            var kernel = try fixture.kernel(&engine, &store);
-            defer kernel.deinit();
-            const core = try SubscriptionFixture.takeWork(&kernel, a);
-            var core_history = try SubscriptionFixture.admit(&kernel, a, core);
-            defer core_history.deinit();
-            const core_watch = try kernel.sessions.subscribe(a, core, "news", .immediate, "News feed");
-            var plans: std.ArrayList(Sessions.ForkPlan) = .empty;
-            try plans.append(a, try kernel.sessions.prepareFork(core, "watch", "Read the observations."));
-            try plans.append(a, try kernel.sessions.prepareFork(core, "review", "Review changes."));
-            try kernel.sessions.commitToolRound(core, &core_history, &plans);
-            const activities = try kernel.sessions.takeReadyBatch(a);
-            try testing.expectEqual(2, activities.len);
-            var watches: [2]@import("subscriptions").Created = undefined;
-            for (activities, [_]@import("subscriptions").Reminder{ .next_input, .immediate }, &watches) |work, reminder, *watch| {
-                var activity = try SubscriptionFixture.admit(&kernel, a, work);
-                defer activity.deinit();
-                watch.* = try kernel.sessions.subscribe(a, work, "updates", reminder, "Source listener");
-                try SubscriptionFixture.finish(&kernel, work, &activity);
-            }
-            try SubscriptionFixture.finish(&kernel, core, &core_history);
-
-            // The two passive reports surround the core and review reports
-            // in the catalog's insertion order.
-            const passive = watches[0];
-            if (has_report) _ = try store.publish(passive.subscription_id, .{ .key = "first", .text = "first" }, 17);
-            _ = try store.publish(core_watch.subscription_id, .{ .key = "core", .text = "core news" }, 18);
-            _ = try store.publish(watches[1].subscription_id, .{ .key = "review", .text = "review news" }, 19);
-            if (has_report) _ = try store.publish(passive.subscription_id, .{ .key = "second", .text = "second" }, 20);
-            const ready = try kernel.sessions.takeReadyBatch(a);
-            try testing.expectEqual(2, ready.len);
-            try testing.expectEqualStrings("core-1", ready[0].session.focus_id);
-            try testing.expectEqualStrings("review-3", ready[1].session.focus_id);
-            // Admit the later sequence first. Each focus advances only its
-            // own checkpoint and acknowledges only its own reports.
-            for ([_]usize{ 1, 0 }) |index| {
-                const work = ready[index];
-                var history = try SubscriptionFixture.admit(&kernel, a, work);
-                defer history.deinit();
-                const events = history.records()[history.records().len - 1].record.events.items;
-                try testing.expectEqual(1, events.len);
-                try testing.expectEqualStrings(if (index == 1) "review news" else "core news", events[0].subscription.text);
-                if (index == 1) try testing.expect(try kernel.sessions.withdrawSubscription(work, passive.subscription_id));
-                try SubscriptionFixture.finish(&kernel, work, &history);
-            }
-            if (scenario == .empty) {
-                try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
-                try testing.expect(!kernel.sessions.sessions.contains(2));
-            }
-            break :blk passive;
-        };
-        // Startup reconciles a withdrawal even if no dispatch ran after it.
         var kernel = try fixture.kernel(&engine, &store);
         defer kernel.deinit();
         const core = try SubscriptionFixture.takeWork(&kernel, a);
-        var history = try SubscriptionFixture.admit(&kernel, a, core);
-        defer history.deinit();
-        if (has_report) {
-            // The next ordinary turn can take one report. Its remaining
-            // passive sibling must still wait after the model responds.
-            kernel.sessions.max_pending = 1;
-            for ([_][]const u8{ "first", "second" }) |expected| {
-                try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
-                try kernel.sessions.sendFocusMessage(core, "watch-2", "What did the listener see?");
-                const work = try SubscriptionFixture.takeWork(&kernel, a);
-                try testing.expectEqualStrings("watch-2", work.session.focus_id);
-                var activity = try SubscriptionFixture.admit(&kernel, a, work);
-                defer activity.deinit();
-                const events = activity.records()[activity.records().len - 1].record.events.items;
-                for (events) |event| {
-                    if (event != .subscription) continue;
-                    try testing.expectEqualStrings(sub.subscription_id, event.subscription.subscription_id);
-                    try testing.expectEqualStrings(expected, event.subscription.text);
-                    break;
-                } else return error.MissingSubscriptionObservation;
-                try SubscriptionFixture.finish(&kernel, work, &activity);
-            }
+        var core_history = try SubscriptionFixture.admit(&kernel, a, core);
+        defer core_history.deinit();
+        const sub = try SubscriptionFixture.watchingActivity(&kernel, a, core, &core_history, "watch");
+        if (scenario == .restart_with_report) _ = try store.publish(sub, .{ .key = "final", .text = "Final report" }, 100);
+        _ = try kernel.sessions.withdrawSubscription(core, sub);
+        try SubscriptionFixture.finish(&kernel, core, &core_history);
+
+        if (scenario != .live) {
+            const restored = try fixture.kernel(&engine, &store);
+            kernel.deinit();
+            kernel = restored;
         }
-        try testing.expect(!kernel.sessions.sessions.contains(2));
-        // A sleeping focus retired by dispatch may already have supplied the
-        // ending during core admission. A focus with reports ends afterwards.
-        if (has_report) {
-            try testing.expect(!try kernel.sessions.commitResponse(core, &history, &.{}, null));
-            try kernel.sessions.collectPending(core);
-            const ending_history = try SubscriptionFixture.admit(&kernel, a, core);
-            history.deinit();
-            history = ending_history;
-        }
-        const events = history.records()[history.records().len - 1].record.events.items;
-        const ending = events[events.len - 1].activity;
-        try testing.expectEqualStrings("watch-2", ending.from_focus);
-        try testing.expect(ending.ended_at_unix_ms != null);
-        try SubscriptionFixture.finish(&kernel, core, &history);
+        // Retiring an idle activity can notify the core after its dispatch slot.
+        var ready = try kernel.sessions.takeReadyBatch(a);
+        if (ready.len == 0) ready = try kernel.sessions.takeReadyBatch(a);
+        if (scenario == .restart_with_report) {
+            try testing.expectEqual(2, ready.len);
+            var final_report = try SubscriptionFixture.admit(&kernel, a, ready[1]);
+            defer final_report.deinit();
+            const events = final_report.records()[final_report.records().len - 1].record.events.items;
+            try testing.expectEqualStrings("Final report", events[events.len - 1].subscription.text);
+            try SubscriptionFixture.finish(&kernel, ready[1], &final_report);
+        } else try testing.expectEqual(1, ready.len);
+        const ending = ready[0];
+        var received = try SubscriptionFixture.admit(&kernel, a, ending);
+        defer received.deinit();
+        const events = received.records()[received.records().len - 1].record.events.items;
+        const observation = events[events.len - 1].activity;
+        try testing.expectEqualStrings("watch-2", observation.from_focus);
+        try testing.expect(observation.ended_at_unix_ms != null);
+        try SubscriptionFixture.finish(&kernel, ending, &received);
     }
 }
 
-test "a passive backlog leaves another focus schedulable and each source gets a turn under a one-event budget" {
+test "an activity admits its sampled backlog in one input and receives a later report after withdrawal" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    kernel.sessions.max_pending = 1;
+    const core = try SubscriptionFixture.takeWork(&kernel, a);
+    defer kernel.sessions.endWorker(core.session);
+    var core_history = try SubscriptionFixture.admit(&kernel, a, core);
+    defer core_history.deinit();
+    const watch = try SubscriptionFixture.watchingActivity(&kernel, a, core, &core_history, "watch");
+    const backlog = 70;
+    for (0..backlog) |i| {
+        const text = try std.fmt.allocPrint(a, "update {d}", .{i});
+        _ = try store.publish(watch, .{ .key = text, .text = text }, @intCast(i));
+    }
+    const activity = try SubscriptionFixture.takeWork(&kernel, a);
+    // Publication races with admission after the first I/O page was collected.
+    _ = try store.publish(watch, .{ .key = "later", .text = "One more" }, backlog);
+    try testing.expect(try kernel.sessions.withdrawSubscription(core, watch));
+    var received = try SubscriptionFixture.admit(&kernel, a, activity);
+    defer received.deinit();
+    const events = received.records()[received.records().len - 1].record.events.items;
+    try testing.expectEqual(backlog, events.len);
+    for (events, 0..) |event, index| {
+        try testing.expectEqual(@as(i64, @intCast(index)), event.subscription.observed_at_unix_ms);
+    }
+    try testing.expect(!try kernel.sessions.commitResponse(activity, &received, &.{}, null));
+    try kernel.sessions.collectPending(activity);
+    var later = try SubscriptionFixture.admit(&kernel, a, activity);
+    defer later.deinit();
+    const next = later.records()[later.records().len - 1].record.events.items;
+    try testing.expectEqual(1, next.len);
+    try testing.expectEqualStrings("One more", next[0].subscription.text);
+    try SubscriptionFixture.finish(&kernel, activity, &later);
+}
+
+test "a subscription backlog leaves another focus schedulable and each source gets a turn under a one-event budget" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
     defer fixture.storage.arena.deinit();
@@ -661,33 +638,18 @@ test "a passive backlog leaves another focus schedulable and each source gets a 
     var history = try SubscriptionFixture.admit(&kernel, a, core);
     defer history.deinit();
     const wakeup = try kernel.sessions.registerCallback(a, core, "wake", .wakeup);
-    const passive = try kernel.sessions.subscribe(a, core, "stream", .next_input, "listener");
-    var plans: std.ArrayList(Sessions.ForkPlan) = .empty;
-    try plans.append(a, try kernel.sessions.prepareFork(core, "budget-marker", "Watch the build."));
-    try kernel.sessions.commitToolRound(core, &history, &plans);
-    const assignment = try SubscriptionFixture.takeWork(&kernel, a);
-    var activity = try SubscriptionFixture.admit(&kernel, a, assignment);
-    defer activity.deinit();
-    const urgent = try kernel.sessions.subscribe(a, assignment, "build", .immediate, "build listener");
-    try SubscriptionFixture.finish(&kernel, assignment, &activity);
+    const stream = try kernel.sessions.subscribe(a, core, "stream", "listener");
+    const build = try SubscriptionFixture.watchingActivity(&kernel, a, core, &history, "budget-marker");
     try SubscriptionFixture.finish(&kernel, core, &history);
 
-    for (0..4) |index| try testing.expectEqual(.accepted, try store.publish(passive.subscription_id, .{
+    for (0..4) |index| try testing.expectEqual(.accepted, try store.publish(stream.subscription_id, .{
         .key = try std.fmt.allocPrint(a, "report-{d}", .{index}),
         .text = "budget-marker",
     }, @intCast(index)));
-    try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
-    try testing.expectEqual(.accepted, try store.publish(urgent.subscription_id, .{
+    try testing.expectEqual(.accepted, try store.publish(build, .{
         .key = "done",
         .text = "ready",
     }, 90));
-    const work = try SubscriptionFixture.takeWork(&kernel, a);
-    try testing.expectEqualStrings("budget-marker-2", work.session.focus_id);
-    var received = try SubscriptionFixture.admit(&kernel, a, work);
-    defer received.deinit();
-    try testing.expect(try kernel.sessions.withdrawSubscription(work, urgent.subscription_id));
-    try SubscriptionFixture.finish(&kernel, work, &received);
-
     const callback: contracts.Inbox.Incoming = .{
         .content = .{ .callback = .{ .id = wakeup.id, .text = "budget-marker", .observed_at_unix_ms = 100 } },
     };
@@ -696,7 +658,17 @@ test "a passive backlog leaves another focus schedulable and each source gets a 
         .content = .{ .message = .{ .from = &.{"operator"}, .text = "budget-marker", .observed_at_unix_ms = 100 } },
     }));
     kernel.limits.request_bytes = 1;
-    const resumed = try SubscriptionFixture.takeWork(&kernel, a);
+    const ready = try kernel.sessions.takeReadyBatch(a);
+    try testing.expectEqual(2, ready.len);
+    const work = ready[1];
+    try testing.expectEqualStrings("budget-marker-2", work.session.focus_id);
+    var received = try SubscriptionFixture.admit(&kernel, a, work);
+    defer received.deinit();
+    try testing.expect(try kernel.sessions.withdrawSubscription(work, build));
+    try SubscriptionFixture.finish(&kernel, work, &received);
+
+    const resumed = ready[0];
+    try testing.expectEqualStrings("core-1", resumed.session.focus_id);
     defer kernel.sessions.endWorker(resumed.session);
     var served: std.EnumSet(std.meta.Tag(Input.Event)) = .empty;
     for (0..3) |index| {
@@ -712,7 +684,7 @@ test "a passive backlog leaves another focus schedulable and each source gets a 
     try testing.expectEqual(.duplicate, try kernel.sessions.accept(callback));
 }
 
-test "a rejected inference wakes for the unadmitted immediate suffix while failed admission waits for fresh input" {
+test "a rejected inference resumes for remaining reports while failed admission waits for fresh input" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
     defer fixture.storage.arena.deinit();
@@ -725,7 +697,7 @@ test "a rejected inference wakes for the unadmitted immediate suffix while faile
     const startup = try SubscriptionFixture.takeWork(&kernel, a);
     var initial = try SubscriptionFixture.admit(&kernel, a, startup);
     defer initial.deinit();
-    const subscription = try kernel.sessions.subscribe(a, startup, "read", .immediate, "feed listener");
+    const subscription = try kernel.sessions.subscribe(a, startup, "read", "feed listener");
     try SubscriptionFixture.finish(&kernel, startup, &initial);
     for ([_][]const u8{ "first", "second" }) |key| {
         _ = try store.publish(subscription.subscription_id, .{ .key = key, .text = "budget-marker" }, 100);
@@ -738,11 +710,18 @@ test "a rejected inference wakes for the unadmitted immediate suffix while faile
     kernel.sessions.endWorker(first.session);
     const second = try SubscriptionFixture.takeWork(&kernel, a);
     try testing.expectEqual(1, second.activation.deliveries.items.len);
+    const third = @import("subscriptions").NewReport{ .key = "third", .text = "budget-marker" };
+    _ = try store.publish(subscription.subscription_id, third, 110);
     try kernel.sessions.interrupt(second, "The remaining observation could not be admitted.");
     kernel.sessions.endWorker(second.session);
+    const retry = try SubscriptionFixture.takeWork(&kernel, a);
+    try testing.expectEqual(2, retry.activation.deliveries.items.len);
+    try kernel.sessions.interrupt(retry, "The batch still cannot be admitted.");
+    kernel.sessions.endWorker(retry.session);
+    try testing.expectEqual(.duplicate, try store.publish(subscription.subscription_id, third, 120));
     try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
-    _ = try store.publish(subscription.subscription_id, .{ .key = "third", .text = "budget-marker" }, 110);
+    _ = try store.publish(subscription.subscription_id, .{ .key = "fourth", .text = "budget-marker" }, 130);
     const resumed = try SubscriptionFixture.takeWork(&kernel, a);
-    try testing.expectEqual(2, resumed.activation.deliveries.items.len);
+    try testing.expectEqual(3, resumed.activation.deliveries.items.len);
     kernel.sessions.endWorker(resumed.session);
 }

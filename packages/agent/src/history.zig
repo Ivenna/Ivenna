@@ -26,7 +26,7 @@ pub const History = struct {
     pub const Wakeup = struct { id: u64, at_unix_ms: i64, text: []const u8 };
     pub const CallbackRegistration = struct { id: u64, reference: []const u8, session_id: u64, source: contracts.Callback.Source };
 
-    subscription_catalog: ?[32]u8 = null,
+    subscription_catalog: [32]u8,
     next_session_id: u64,
     next_callback_id: u64,
     next_command_id: u64,
@@ -42,7 +42,7 @@ pub const History = struct {
         /// When true, an activity receives startup on restore even with no
         /// pending observations. The core always receives startup.
         was_running: bool,
-        subscription_through: u64 = 0,
+        subscription_through: u64,
         epoch: u64,
         /// Null when unloaded; the confirmed checkpoint retains its selection.
         entries: ?[]const Entry,
@@ -55,7 +55,6 @@ pub const History = struct {
         defer identities.deinit(a);
         var cores: usize = 0;
         for (self.sessions) |session| {
-            if (self.subscription_catalog == null and session.subscription_through != 0) return error.InvalidHistory;
             if (session.session_id == 0 or session.session_id >= self.next_session_id or
                 (try identities.getOrPut(a, session.session_id)).found_existing) return error.InvalidHistory;
             if (contracts.Reference.sequence(session.focus_id) != session.session_id) return error.InvalidHistory;
@@ -96,7 +95,7 @@ pub const History = struct {
 
 /// Each session selects the committed prefix of its current epoch's group.
 const Checkpoint = struct {
-    subscription_catalog: ?[32]u8 = null,
+    subscription_catalog: [32]u8,
     next_session_id: u64,
     next_callback_id: u64,
     next_command_id: u64,
@@ -110,7 +109,7 @@ const Checkpoint = struct {
         focus_id: []const u8,
         role: Input.Role,
         was_running: bool,
-        subscription_through: u64 = 0,
+        subscription_through: u64,
         epoch: u64,
         group: []const u8,
         head: ?Key,

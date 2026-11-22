@@ -56,36 +56,36 @@ The arrangement survives restart. Success returns its complete callback referenc
 
 The text later reaches the core as a callback observation with source `wakeup`. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The core can sleep while waiting. Cancellation is unavailable.
 
+### Callback observations
+
+Scheduled wakeups and [host commands](host.md#command-lifetimes) that outlive their initial call each arrange one callback. Its observation returns to the calling focus with the original reference and source, even after sleep or restart. A callback remains pending until the focus admits its observation. A host command can therefore be finished while its callback still appears in a handover. See the [observation fields](input.md#focus-messages-and-callbacks) and [sampled state](input.md#sampled-state).
+
+The focus admits each callback at most once. The email adapter preserves the first identifiable stored result if the source publishes it again. See [callback delivery](architecture.md#callback-delivery) and [mail retention](running.md#communication-copies).
+
 ## Subscriptions
 
-Call `subscribe` in the focus that should receive the reports. For example, the core can follow release announcements across assignments and ask an activity to set up the listener on the host.
+Call `subscribe` in the focus that should receive the reports. For example, the core can follow release announcements across assignments. The `listener` field describes what to watch and when to report. It can also record where to find the listener's program or configuration.
 
 ```json
 {
   "name": "releases",
-  "listener": "Report each new stable version from the project's release feed.",
-  "reminder": "next_input"
+  "listener": "Report each new stable version from the project's release feed."
 }
 ```
 
-Pass the returned `subscription_id` to the listener.
+The tool returns a reference for that focus's subscription.
 
 ```json
 {"result":{"subscription_id":"releases-1"}}
 ```
 
-The `listener` field records what the program watches and when it should report. It can include the program or configuration path. The listener runs separately and submits observations using the [listener protocol](subscriptions.md).
+Set up the listener separately and give it the complete `subscription_id`. The core can ask an activity to run the listener on the host. The listener decides which updates to publish and can combine them, for example into a daily digest. See the [listener protocol](subscriptions.md).
 
-| Reminder | Effect on the receiving focus |
-| --- | --- |
-| `immediate` | A report can wake the focus. A working focus can read it after the current round. |
-| `next_input` | Wait for the next ordinary input, including a continuation after tools. A sleeping focus stays asleep. |
+An accepted report makes a sleeping focus ready. A working focus can read it after its current model/tool round. One turn can include several reports in acceptance order alongside other observations. Reports beyond the input budget stay queued for later turns. See [subscription observations](input.md#subscription-observations).
 
-Reports that do not fit in one input wait for a later turn. Each [observation](input.md#subscription-observations) carries its subscription reference. During compaction, the runtime records the ID of each active subscription for this focus in the [handover](input.md#sampled-state), even if its listener has never reported.
+Subscriptions survive sleep and restart. The focus can find its active subscription IDs in the [state sampled for a handover](input.md#sampled-state). A replacement listener can use the same reference and [resume from the saved cursor](subscriptions.md#resume-from-a-cursor).
 
-Any focus can call `withdraw_subscription` with the complete `subscription_id`. The result echoes the ID. `changed` is `true` if this call closed an active subscription and `false` otherwise. Reports accepted before withdrawal keep their destination and reminder. Stop the listener separately if needed.
-
-Reconfiguring the listener can change what it reports under the same subscription. To choose a different reminder, register again, give the listener the new reference and withdraw the old subscription. Each registration has its own [cursor and retry keys](subscriptions.md#resume-from-a-cursor).
+Any focus can call `withdraw_subscription` with the complete `subscription_id`. The result echoes the ID. `changed` is `true` if this call closed an active subscription and `false` otherwise. Reports accepted before withdrawal still reach the subscribing focus. Stop the listener separately if needed.
 
 ## Results and errors
 
@@ -101,14 +101,6 @@ These actions return a JSON text part containing either `result` or an operation
 
 `open_focus` reserves an identity; focus messages use the recipient's ordinary event allowance. See [configuration](running.md#configuration) for limits and [focus messages and callbacks](input.md#focus-messages-and-callbacks) for observation fields. Infrastructure failures follow the [availability contract](design.md#runtime-availability).
 
-## Callback observations
-
-Scheduled attention and [host commands](host.md#command-lifetimes) that outlive their initial call deliver registered [callback observations](input.md#focus-messages-and-callbacks), independently of external correspondence. Each callback reference connects an arrangement with its pending state and arriving observation. The runtime keeps that observation bound to the receiving focus and its source. The destination survives sleep, context unloading, and restart, and the observation is admitted at most once even if several mail copies arrive. Repeated publication preserves the first identifiable stored result.
-
-The callback remains pending until its observation is admitted, even if its source has already finished. Its complete reference appears in the registration result and arriving observation. Compaction supplies pending callbacks for recollection and carries them into the handover. Source completion, result delivery, and activity completion are separate events.
-
-The current email adapter stores these observations as [callback mail](architecture.md#callback-delivery). See [delivery and admission](architecture.md#event-sources-and-callback-admission) for registration and resumption, and [communication-copy retention](running.md#communication-copies) for the mail's lifetime.
-
 ## Activity expressions
 
 New assistant text from ordinary activity inferences is collected in order for the core, including text accompanying tool calls. It is retained before those tools execute, so the text may describe intentions whose effects are not yet known. Reasoning, tool replies, compaction output, and inherited history are not collected as new expressions.
@@ -119,12 +111,12 @@ One input can carry reports from several activities alongside other observations
 
 ## Interrupted reasoning
 
-A rejected request, an unusable model response, or an input that cannot fit the context budget can interrupt an activity. The runtime alerts the core with a [`focus_interrupted` observation](input.md#activity-interruptions) giving the reason. The activity keeps its working history, queued observations and registrations. A message from the core, a command completion or a fresh `immediate` subscription report can resume it.
+A rejected request, an unusable model response, or an input that cannot fit the context budget can interrupt an activity. The runtime alerts the core with a [`focus_interrupted` observation](input.md#activity-interruptions) giving the reason. The activity keeps its working history, queued observations and registrations. A message from the core, a command completion or a new subscription report can resume it.
 
 ## Activity completion
 
-A sleeping activity keeps its identity and history while it has a pending callback, an active subscription, or a subscription report awaiting delivery. If its last subscription is withdrawn, an accepted `next_input` report still waits for ordinary input, such as a message from the core.
+An activity with a pending callback or an active subscription can sleep with its identity and history intact. If its last subscription is withdrawn with reports still queued, the activity remains available to receive them.
 
 Withdraw subscriptions when the activity finishes following their sources. When no work or registrations remain, the activity ends and frees its capacity slot. Its ending calls for the core's attention even if it produced no text.
 
-Completed focus references are not reused, and messages to them return `unknown_focus`. Reports keep their source IDs and remain available for core admission after the source focus has ended.
+Completed focus references are not reused, and messages to them return `unknown_focus`. The core can still receive the ended activity's [expressions and ending](input.md#assignments-and-reports) with the original focus ID.

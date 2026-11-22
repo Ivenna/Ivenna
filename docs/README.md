@@ -8,6 +8,7 @@ Choose a guide for your task:
 | --- | --- |
 | Prepare, run, and update the supplied local development environment | [Local development](../dev/README.md) |
 | Run Ivenna, diagnose stalled work, and manage services and retained data | [Running guide](running.md) |
+| Run a listener that keeps collecting while the kernel is stopped | [Subscription listeners](running.md#subscription-listeners) |
 | Send messages and understand reception and responses | [Usage guide](usage.md) |
 
 ## Design and development

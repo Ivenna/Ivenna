@@ -4,29 +4,46 @@ const subscriptions = @import("subscriptions");
 const usage =
     \\Usage: ivenna-report COMMAND SUBSCRIPTION_ID
     \\
-    \\Use the ID returned by subscribe. Set DATA_DIR to the kernel's data directory.
-    \\inspect      Print the registration and cursor, or null for an unknown or withdrawn ID.
-    \\publish      Save an observation and any cursor change together.
-    \\checkpoint   Advance the cursor after processing an item that needs no report.
+    \\Use the complete ID returned by Ivenna's subscribe tool. Host commands inherit
+    \\DATA_DIR (the kernel's data directory) and IVENNA_REPORT (this executable).
+    \\In another shell, set DATA_DIR to the same directory. A relative path resolves
+    \\from the reporter's working directory. Set IVENNA_REPORT to run the examples.
     \\
-    \\Both writes read one JSON object from stdin. Host commands inherit IVENNA_REPORT.
-    \\In another shell, set it to the executable's path to run these examples.
+    \\inspect      Print an object with subscription_id, focus_id, listener and cursor.
+    \\             A new registration has a null cursor. An unknown or withdrawn ID
+    \\             returns JSON null with exit status 0.
+    \\publish      Queue a report for the subscribing focus, even with the kernel
+    \\             stopped. A cursor change can be committed in the same write.
+    \\checkpoint   Save a source position after processing an item that needs no report.
+    \\
+    \\Both writes read one JSON object from stdin. These commands use a new
+    \\subscription with ID releases-1.
     \\  printf '%s\n' '{"key":"release-v2.4.0","text":"Stable release v2.4.0","cursor":{"to":"17"}}' |
     \\    "$IVENNA_REPORT" publish releases-1
+    \\  "$IVENNA_REPORT" inspect releases-1
     \\  printf '%s\n' '{"from":"17","to":"18"}' | "$IVENNA_REPORT" checkpoint releases-1
     \\
-    \\Use a nonempty key for each distinct update and reuse it for retries. Report
-    \\text takes 1–2048 UTF-8 bytes. Other strings can hold up to 4 MiB each.
-    \\Optional source_time_unix_ms gives the source event time in Unix milliseconds.
+    \\The required publish fields are "key" and "text". Give each update a nonempty
+    \\string key within its subscription and reuse it for retries. Report text is
+    \\a string of 1–2048 UTF-8 bytes.
+    \\Optional source_time_unix_ms gives the source time as an integer in Unix
+    \\milliseconds (-62167219200000 through 253402300799000). Omit cursor to
+    \\leave the saved position unchanged.
     \\
-    \\A successful write prints "accepted" or, for a key already accepted by this
-    \\subscription, "duplicate". These JSON errors on stdout have nonzero exit status.
+    \\For a cursor change, "to" is the new position as a string. Set "from" to the
+    \\saved cursor from inspect. Omit "from" or use null to match an unset cursor.
+    \\The CLI's JSON reader limits each string to 4 MiB.
+    \\
+    \\A successful write prints "accepted" on stdout and exits 0. A publish with
+    \\an already accepted key prints "duplicate" and exits 0. The retry queues no
+    \\new report and leaves the cursor in place. Errors on stdout have nonzero exit status.
     \\  "withdrawn"          Stop reporting on this reference.
     \\  "cursor_conflict"    Inspect the saved cursor before advancing it.
     \\  "busy"               Retry after contention subsides.
     \\  "storage_full"       Free storage before retrying.
     \\  "invalid_request"    Correct the arguments or JSON input.
-    \\If a failure leaves no JSON receipt, check stderr for diagnostics.
+    \\If a write returns no complete JSON receipt, check stderr. Retry publish with
+    \\the original key. For checkpoint, inspect the saved position before continuing.
     \\
 ;
 

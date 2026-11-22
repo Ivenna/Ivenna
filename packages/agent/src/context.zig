@@ -248,18 +248,3 @@ test "candidate handover retains sampled references and leaves earlier history a
     };
     try std.testing.expectEqualDeep(expected_state, retained.state);
 }
-
-test "restoring a handover saved before subscription sampling preserves its summary" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const encoded =
-        \\.{ .record = .{ .handover = .{ .focus_id = "core-1", .observed_at_unix_ms = 120,
-        \\    .summary = "Waiting.", .state = .{ .activities = .{}, .callbacks = .{} } } } }
-    ;
-    const entry = try @import("record_codec.zig").decode(Entry, arena.allocator(), encoded);
-    var context = try Context.restore(std.testing.allocator, .{ .session_id = 1, .epoch = 1 }, "core-1", &.{entry});
-    defer context.deinit();
-    const restored = context.records()[0].record.handover;
-    try std.testing.expectEqualStrings("Waiting.", restored.summary);
-    try std.testing.expect(restored.state.isEmpty());
-}
