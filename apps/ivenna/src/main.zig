@@ -5,6 +5,7 @@ const email = @import("email");
 const responses = @import("responses");
 const host = @import("host");
 const memory = @import("memory");
+const subscriptions = @import("subscriptions");
 const Config = @import("config.zig").Config;
 const Service = @import("service.zig").Service;
 
@@ -23,6 +24,9 @@ pub fn main(init: std.process.Init) !void {
     const a = arena.allocator();
     const host_directory = try std.process.currentPathAlloc(io, a);
     const data_directory = try std.fs.path.resolve(a, &.{ host_directory, config.data_dir });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, data_directory, .fromMode(0o700));
+    var subscription_store = try subscriptions.Store.open(init.gpa, try std.fs.path.join(a, &.{ data_directory, subscriptions.filename }));
+    defer subscription_store.close();
     var mail: email.Integration = undefined;
     try mail.init(init.gpa, io, .{
         .session_url = config.mail_session_url,
@@ -32,7 +36,13 @@ pub fn main(init: std.process.Init) !void {
     defer mail.deinit();
     var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
     try memory_client.checkAvailable(a);
-    var host_tools = host.Host.init(init.gpa, io, host_directory, data_directory, init.environ_map, mail.callbackPublisher(), config.max_host_commands);
+    var host_env = try init.environ_map.clone(a);
+    defer host_env.deinit();
+    try host_env.put("DATA_DIR", data_directory);
+    const bin_dir = try std.process.executableDirPathAlloc(io, a);
+    const reporter = comptime "ivenna-report" ++ @import("builtin").target.exeFileExt();
+    try host_env.put("IVENNA_REPORT", try std.fs.path.join(a, &.{ bin_dir, reporter }));
+    var host_tools = host.Host.init(init.gpa, io, host_directory, data_directory, &host_env, mail.callbackPublisher(), config.max_host_commands);
     defer host_tools.deinit();
     var client: std.http.Client = .{ .allocator = init.gpa, .io = io };
     defer client.deinit();
@@ -60,6 +70,7 @@ pub fn main(init: std.process.Init) !void {
         .sender = mail.sender(),
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),
+        .subscriptions = &subscription_store,
     }, .{
         .limits = config.context_limits,
         .poll_interval_ms = config.mail_poll_interval_ms,

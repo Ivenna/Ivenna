@@ -20,7 +20,7 @@ zig build
 zig build test
 ```
 
-The Zig packages selected in the [root build](../build.zig) use Zig's built-in tests. Their package roots include internal test files through `test` blocks in `src/root.zig`; new tests in those files need to be reachable through these imports. Adding a package to this test step also requires a root build entry and a [dependency manifest](../build.zig.zon) entry.
+The [root build](../build.zig) runs the registered Zig library and application tests. Library roots include internal test files through `test` blocks in `src/root.zig`. Adding a package to the test step requires a root build entry and a [dependency manifest](../build.zig.zon) entry.
 
 For the [memory protocol tests](../apps/memory/tests.nu), install Nushell at the version used in the memory [Containerfile](../apps/memory/Containerfile). These tests also use the standard `ln` command:
 
@@ -39,5 +39,9 @@ The email adapter tests use a local HTTP server to drop connections and count th
 Both the email and Responses adapter tests cover cancellation over plain HTTP. The Responses tests also check which parts of a tool result survive an upload failure. To measure how many request bytes reach a TLS peer, exercise the [request writer](architecture.md#model-transport) against a local HTTPS server.
 
 The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The session registry tests use a history store that can report a failed save after receiving the checkpoint. They check that activity completion publishes once and that a later maintenance pass republishes the same selection when confirmation was lost.
+
+The [reporter process test](../apps/ivenna-report/src/report_test.zig) launches the executable against a temporary catalog without starting the kernel. It checks receipts and exit status for successive reports, retries, cursor updates and withdrawal. The [store tests](../packages/subscriptions/src/root.zig) use separate SQLite connections to check cursor conflicts and retries after acknowledgement. They also check when a locally withdrawn registration can be retired after an external follow ends.
+
+The [kernel tests](../packages/agent/src/kernel.zig) exercise which focus receives a report, when it wakes and when it can finish. They reconstruct the kernel against the same store after a simulated checkpoint failure to check that each accepted report enters working history once, whether or not the checkpoint committed.
 
 Restoring a focus after a process restart and communicating with configured services require checking the running application. See [validation across runtime boundaries](development.md#validation) and the [local development guide](../dev/README.md).

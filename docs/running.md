@@ -4,7 +4,7 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 ## Runtime requirements
 
-Use a built `ivenna` executable, `/bin/sh`, and an OpenSSH client in the kernel's execution environment. See the [build instructions](development.md#repository-and-build) to build from source. Host commands run as the kernel's OS account and use the files and programs available in that environment.
+Build or install `ivenna` with its [subscription reporting executable](#subscription-listeners). The kernel's execution environment also needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build). Host commands run as the kernel's OS account and use the files and programs available in that environment.
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, readable `/proc`, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. These facilities establish the controlling terminal and allow cleanup of its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
@@ -33,11 +33,11 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAIL_USERNAME` | Mail login | Required for username/password authentication |
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
-| `MAIL_POLL_INTERVAL_MS` | Delay between mail polls | `2000` |
+| `MAIL_POLL_INTERVAL_MS` | Delay between intake passes for mail and subscription reports | `2000` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
-| `DATA_DIR` | Persistent base directory for host command output in the kernel filesystem | Required |
+| `DATA_DIR` | Persistent directory for the subscription database and host command output | Required |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
@@ -59,7 +59,7 @@ Choose an ordinary reasoning effort for each role from the values supported by y
 
 Choose both byte budgets and the output-token limit together for the configured model and workload. The ordinary budget controls how much history can accumulate before a handover; the larger compaction budget leaves room to summarize history after a complete model/tool round crosses that limit. Byte counts are not token estimates; input and output must also fit the model's token limits.
 
-Handovers carry pending callback references and, for the core, existing activity references alongside the generated summary. Callback registrations have no separate count limit, so pending work can consume a growing share of the budget. A handover has no separate byte limit; the complete continuation request must fit the ordinary budget.
+Handovers carry pending callback references, subscription registrations in scope, and for the core, existing activity references alongside the generated summary. Startup observations also carry the subscription references. These collections grow with outstanding work and count toward the context budgets. The complete continuation request must fit the ordinary budget.
 
 Individual tool results can meet their [content limits](content.md#model-request-checks) while a large batch or inline image exceeds the context budgets. Inline images include base64 encoding overhead. Reduce their size or use image URL references when that overhead would exceed the request budget.
 
@@ -77,7 +77,7 @@ If a summary request exceeds its budget or compaction cannot fit the next ordina
 
 Retained history can include native model output and reasoning data supplied by the model adapter, plus file identifiers supplied by the model service. A replacement service and model must accept those items as well as the configured tools and reasoning settings. File identifiers also require access to the account that owns the uploads. The runtime does not translate retained model output, transfer uploaded files between services, or verify in advance that a replacement model can consume them. Establish compatibility before resuming retained work with the replacement model.
 
-To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MODEL` and any changed service settings, then restart. Keep the existing mail account, `MAIL_ADDRESS`, and memory workspace to retain the material needed for continuation.
+To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MODEL` and any changed service settings, then restart. Keep the existing mail account, `MAIL_ADDRESS`, subscription database and memory workspace to retain the material needed for continuation.
 
 ## Mail service
 
@@ -100,6 +100,12 @@ The kernel reads correspondence awaiting durable admission across the account's 
 Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. The adapter presents the corresponding IDs and complete supported text as an observation. Messages with missing, cross-domain, or unsupported From addresses are excluded from intake. Messages without a complete supported body produce a diagnostic and are skipped. These copies remain unchanged.
 
 Eligible correspondence without the private acknowledgement marker is pending, including existing messages that have been read or archived. Once its complete observation and checkpoint have been saved, Ivenna acknowledges the message and moves its incoming copy to Trash before reasoning about that input. Reading, starring, or moving correspondence does not acknowledge it. The [communication-copy lifecycle](#communication-copies) also applies to existing mail in this dedicated account.
+
+## Subscription listeners
+
+Install `ivenna-report` beside `ivenna`. Both use the subscription store in `DATA_DIR`. Keep this directory private to trusted deployment processes on a local filesystem with SQLite locking. Pending reports occupy disk space until acknowledged. The store retains each accepted report key until the subscription is withdrawn.
+
+An activity can start a listener as a host command. The kernel supplies the absolute paths to `ivenna-report` and the instance directory in `IVENNA_REPORT` and `DATA_DIR`. Host commands stop with the kernel. For collection across shutdown, run the listener under the deployment's service manager and give it the same paths and subscription reference. The [listener protocol](subscriptions.md) covers submitting reports, resuming from a saved cursor, and handling withdrawal.
 
 ## Memory service
 
@@ -194,7 +200,7 @@ If admission keeps failing, check the [context budgets](#context-budgets) and re
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work (including model recovery waits) and host commands, and wait for the runtime's tasks to end. Failure of a required service such as history storage, or an unrecoverable execution error, also stops the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
-Start the executable again with the same mail account and `MAIL_ADDRESS` to load its latest saved working contexts. Working history survives independently of the previous host's `DATA_DIR`. Keep access to the configured memory workspace and to host artifacts still needed for the work.
+Start the executable with the same mail account, `MAIL_ADDRESS`, and subscription store to resume its saved focuses and pending deliveries. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mail account and `DATA_DIR` identify the same instance. When restoring backup data, use a [matched mailbox and subscription store](#backups-and-transfers).
 
 The core receives a fresh startup observation on every restart. A restored activity receives one immediately if it had an unfinished activation or unread internal observations. Other restored activities receive startup with their next event. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
@@ -208,6 +214,8 @@ Restoration requires a [history format](architecture.md#persistent-working-histo
 
 Older configurations may contain `LLM_MAX_ATTEMPTS`. The kernel now ignores this setting and continues retrying temporary inference failures. `LLM_REQUEST_TIMEOUT_MS` limits each attempt. See [model request settings](#model-requests).
 
+A checkpoint from before subscriptions can initialize a fresh local catalog. Subsequent checkpoints identify that catalog for restoration.
+
 Earlier executables cannot restore a checkpoint whose selected history or pending observations include a `focus_interrupted` event. The current executable requires handover records to include the state sampled for the summary and its observation time. Earlier handovers without those fields fail restoration. See [persistent working history](architecture.md#persistent-working-history).
 
 ## Data and retention
@@ -219,6 +227,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
+| `<DATA_DIR>/subscriptions.sqlite3` | Subscription identities, producer progress and keys, and reports awaiting history admission |
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
@@ -270,6 +279,8 @@ Preserve the host artifact or memory entry when it needs to outlive selected wor
 
 ### Backups and transfers
 
+The mailbox holds the focus histories and the subscription store holds reports awaiting acknowledgement. Restore both from the same point in time. Stop the kernel and pause independent listeners while backing up the pair. Use a SQLite-consistent backup of the subscription store, or copy its database and any SQLite journal files together while all writers are stopped. Keep the listener programs and configuration needed to resume collection.
+
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 
 | Applies to | Preserve |
@@ -293,7 +304,5 @@ A mailbox backup preserves stored callbacks and wakeup arrangements, not running
 Set `DATA_DIR` to writable storage that supports ordinary files and subdirectories. An absolute path keeps output storage stable across changes to the kernel's startup directory. Launching a command creates any missing output directories with private permissions.
 
 Host output files remain available after the command and activity session end. Retained material can refer to their paths, so preserve files still needed for continued work. Automatic output cleanup is not implemented.
-
-Changing `DATA_DIR` selects where new output is written; it does not move existing files, mailbox history, memory, or SSH configuration.
 
 Keep provisioning files, credentials, and SSH keys with the deployment configuration. The [local development data reference](../dev/README.md#development-data) lists the Compose volumes and files used by the supplied setup.

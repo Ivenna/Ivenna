@@ -39,7 +39,7 @@ Names must contain 1–32 Unicode code points and no ASCII control characters; s
 
 Each start creates a fresh shell. Its directory and environment changes belong to that command; keep it running in an [input mode](#input-modes) to preserve state across calls. The command string follows the selected shell's syntax, while `cwd` is a literal path resolved before shell startup.
 
-The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
+The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. A subscription listener can use `IVENNA_REPORT` to find the reporting executable and `DATA_DIR` to select the instance. Login initialization can change the environment and working directory. See the [listener protocol](subscriptions.md).
 
 ## Input modes
 

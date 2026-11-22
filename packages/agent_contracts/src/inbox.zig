@@ -28,8 +28,8 @@ pub const Inbox = struct {
         return self.vtable.poll(self.context, a, request);
     }
 
-    /// Release the transport copy after durable admission or when execution
-    /// determines the arrival can be discarded.
+    /// Call after storage has confirmed the complete observation and checkpoint.
+    /// Acknowledgement releases the transport copy; task execution can continue.
     pub fn acknowledge(self: Inbox, a: Allocator, receipt: []const u8) !void {
         return self.vtable.acknowledge(self.context, a, receipt);
     }

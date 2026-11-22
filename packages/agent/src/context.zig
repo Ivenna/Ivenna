@@ -218,6 +218,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     try original.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Keep working on our plan.", .observed_at_unix_ms = 100 } }} } });
     var activity_id = "practice-2".*;
     var command_id = "inspect-7".*;
+    var subscription_id = "releases-4".*;
     const handover: Input.Handover = .{
         .focus_id = "core-1",
         .observed_at_unix_ms = 900,
@@ -225,12 +226,14 @@ test "candidate handover retains sampled references and leaves earlier history a
         .state = .{
             .activities = &.{&activity_id},
             .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = &command_id } } }},
+            .subscriptions = &.{.{ .subscription_id = &subscription_id, .focus_id = &activity_id, .reminder = .next_input, .active = true }},
         },
     };
     var replacement = try original.withHandover(std.testing.allocator, handover);
     defer replacement.deinit();
     @memset(&activity_id, 0);
     @memset(&command_id, 0);
+    @memset(&subscription_id, 0);
 
     try std.testing.expectEqual(@as(usize, 1), original.records().len);
     try std.testing.expectEqualStrings("Keep working on our plan.", original.records()[0].record.events.items[0].input.text);
@@ -241,6 +244,23 @@ test "candidate handover retains sampled references and leaves earlier history a
     const expected_state: Input.State = .{
         .activities = &.{"practice-2"},
         .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = "inspect-7" } } }},
+        .subscriptions = &.{.{ .subscription_id = "releases-4", .focus_id = "practice-2", .reminder = .next_input, .active = true }},
     };
     try std.testing.expectEqualDeep(expected_state, retained.state);
+}
+
+test "startup and handover records saved before subscriptions restore" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const encoded =
+        \\.{
+        \\    .{ .record = .{ .events = .{ .focus_id = "core-1", .items = .{.{ .startup = .{ .observed_at_unix_ms = 100 } }} } } },
+        \\    .{ .record = .{ .handover = .{ .focus_id = "core-1", .observed_at_unix_ms = 120, .summary = "Waiting.", .state = .{ .activities = .{}, .callbacks = .{} } } } },
+        \\}
+    ;
+    const entries = try @import("record_codec.zig").decode([]const Entry, arena.allocator(), encoded);
+    var context = try Context.restore(std.testing.allocator, .{ .session_id = 1, .epoch = 1 }, "core-1", entries);
+    defer context.deinit();
+    try std.testing.expectEqual(0, context.records()[0].record.events.items[0].startup.subscriptions.len);
+    try std.testing.expect(context.records()[1].record.handover.state.isEmpty());
 }

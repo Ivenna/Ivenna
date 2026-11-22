@@ -1,6 +1,7 @@
 const std = @import("std");
 const yaml = @import("yaml");
 const contracts = @import("agent_contracts");
+const Registration = @import("subscriptions").Registration;
 const Allocator = std.mem.Allocator;
 const IncomingMessage = contracts.Communication.IncomingMessage;
 const Time = @import("time.zig");
@@ -65,9 +66,17 @@ pub const Handover = struct {
 
 pub const Startup = struct {
     observed_at_unix_ms: i64,
+    subscriptions: []const Registration = &.{},
 
     pub fn jsonStringify(self: Startup, writer: anytype) !void {
-        try writer.write(.{ .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms } });
+        try writer.beginObject();
+        try writer.objectField("observed_at");
+        try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
+        if (self.subscriptions.len != 0) {
+            try writer.objectField("subscriptions");
+            try writer.write(self.subscriptions);
+        }
+        try writer.endObject();
     }
 };
 
@@ -107,6 +116,32 @@ pub const Callback = struct {
     }
 };
 
+pub const SubscriptionReport = struct {
+    subscription_id: []const u8,
+    delivery_id: u64,
+    text: []const u8,
+    observed_at_unix_ms: i64,
+    source_time_unix_ms: ?i64,
+    handle: ?[]const u8,
+    version: ?[]const u8,
+    truncated: bool,
+    retrieval: @import("subscriptions").Retrieval,
+
+    pub fn jsonStringify(self: SubscriptionReport, writer: anytype) !void {
+        try writer.write(.{
+            .subscription_id = self.subscription_id,
+            .delivery_id = self.delivery_id,
+            .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms },
+            .source_time = if (self.source_time_unix_ms) |time| Time.Instant{ .unix_ms = time } else null,
+            .text = self.text,
+            .handle = self.handle,
+            .version = self.version,
+            .truncated = self.truncated,
+            .retrieval = self.retrieval,
+        });
+    }
+};
+
 /// Identity and observation time accompanying one inference.
 pub const Current = struct {
     focus_id: []const u8,
@@ -124,14 +159,14 @@ pub const Snapshot = struct {
     state: State,
 };
 
-/// Existing activity references for the core and pending callbacks for the
-/// sampled focus.
+/// Runtime references visible to the sampled focus at compaction.
 pub const State = struct {
     activities: []const []const u8,
     callbacks: []const PendingCallback,
+    subscriptions: []const Registration = &.{},
 
     pub fn isEmpty(self: State) bool {
-        return self.activities.len == 0 and self.callbacks.len == 0;
+        return self.activities.len == 0 and self.callbacks.len == 0 and self.subscriptions.len == 0;
     }
 
     pub fn jsonStringify(self: State, writer: anytype) !void {
@@ -144,12 +179,29 @@ pub const State = struct {
             try writer.objectField("callbacks");
             try writer.write(self.callbacks);
         }
+        if (self.subscriptions.len != 0) {
+            try writer.objectField("subscriptions");
+            try writer.write(self.subscriptions);
+        }
         try writer.endObject();
     }
 };
 
 pub fn cloneState(a: Allocator, state: State) !State {
-    return .{ .activities = try cloneIds(a, state.activities), .callbacks = try cloneCallbacks(a, state.callbacks) };
+    return .{
+        .activities = try cloneIds(a, state.activities),
+        .callbacks = try cloneCallbacks(a, state.callbacks),
+        .subscriptions = try cloneRegistrations(a, state.subscriptions),
+    };
+}
+
+fn cloneRegistrations(a: Allocator, values: []const Registration) ![]const Registration {
+    const owned = try a.dupe(Registration, values);
+    for (owned) |*registration| {
+        registration.subscription_id = try a.dupe(u8, registration.subscription_id);
+        registration.focus_id = try a.dupe(u8, registration.focus_id);
+    }
+    return owned;
 }
 
 fn cloneCallbacks(a: Allocator, values: []const PendingCallback) ![]const PendingCallback {
@@ -157,7 +209,7 @@ fn cloneCallbacks(a: Allocator, values: []const PendingCallback) ![]const Pendin
     for (owned) |*callback| {
         callback.callback_id = try a.dupe(u8, callback.callback_id);
         callback.source = switch (callback.source) {
-            .wakeup, .subscription => callback.source,
+            .wakeup => .wakeup,
             .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
         };
     }
@@ -178,6 +230,7 @@ pub const Event = union(enum) {
     focus_message: FocusMessage,
     focus_interrupted: FocusInterrupted,
     callback: Callback,
+    subscription: SubscriptionReport,
 
     pub fn jsonStringify(self: Event, writer: anytype) !void {
         try writer.beginObject();
@@ -199,7 +252,10 @@ pub fn cloneEvents(a: Allocator, events: []const Event) ![]const Event {
 
 pub fn cloneEvent(a: Allocator, event: Event) !Event {
     return switch (event) {
-        .startup => |startup| .{ .startup = startup },
+        .startup => |startup| .{ .startup = .{
+            .observed_at_unix_ms = startup.observed_at_unix_ms,
+            .subscriptions = try cloneRegistrations(a, startup.subscriptions),
+        } },
         .input => |input| blk: {
             const from = try a.alloc([]const u8, input.from.len);
             for (input.from, from) |id, *copy| copy.* = try a.dupe(u8, id);
@@ -217,10 +273,18 @@ pub fn cloneEvent(a: Allocator, event: Event) !Event {
             .observed_at_unix_ms = failure.observed_at_unix_ms,
             .reason = try a.dupe(u8, failure.reason),
         } },
+        .subscription => |report| blk: {
+            var copy = report;
+            copy.subscription_id = try a.dupe(u8, report.subscription_id);
+            copy.text = try a.dupe(u8, report.text);
+            copy.handle = if (report.handle) |handle| try a.dupe(u8, handle) else null;
+            copy.version = if (report.version) |version| try a.dupe(u8, version) else null;
+            break :blk .{ .subscription = copy };
+        },
         .callback => |callback| .{ .callback = .{
             .callback_id = try a.dupe(u8, callback.callback_id),
             .source = switch (callback.source) {
-                .wakeup, .subscription => callback.source,
+                .wakeup => .wakeup,
                 .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
             },
             .observed_at_unix_ms = callback.observed_at_unix_ms,

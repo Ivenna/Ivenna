@@ -6,7 +6,6 @@ const Allocator = std.mem.Allocator;
 pub const Source = union(enum) {
     wakeup,
     host: struct { command_id: []const u8 },
-    subscription: struct { subscription_id: u64 },
 };
 
 /// Internal delivery identity and the complete model-facing association.
@@ -24,13 +23,12 @@ pub const Registrar = struct {
     }
 };
 
-/// The callback identity binds observations to their registering session.
-/// A subscription reuses its callback identity for each report.
+/// The callback identity binds one future observation to its registering
+/// session. Destinations belong to execution, not the transport.
 pub const Message = struct { id: u64, text: []const u8 };
 pub const Observation = struct { id: u64, text: []const u8, observed_at_unix_ms: i64 };
 
-/// Durable callback delivery. Repeating a one-shot publication preserves
-/// the first result. Subscription reports use distinct deliveries.
+/// Durable callback delivery. Repeated publication preserves the first result.
 /// Returned success confirms storage, not model admission or task completion.
 pub const Publisher = struct {
     context: *anyopaque,

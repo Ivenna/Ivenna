@@ -2,6 +2,7 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const History = @import("history.zig").History;
 const Persistence = @import("history.zig").Persistence;
+const Subscriptions = @import("subscriptions");
 const Reports = @import("reports.zig");
 const Input = @import("input.zig");
 const WorkInput = @import("work.zig");
@@ -12,6 +13,27 @@ const contracts = @import("agent_contracts");
 const Model = contracts.Model;
 const Incoming = contracts.Inbox.Incoming;
 const report_read_batch = 64;
+
+const Stream = enum(u8) {
+    ordinary,
+    subscription,
+    activity,
+
+    fn next(self: Stream) Stream {
+        return switch (self) {
+            .ordinary => .subscription,
+            .subscription => .activity,
+            .activity => .ordinary,
+        };
+    }
+    fn of(event: Input.Event) Stream {
+        return switch (event) {
+            .subscription => .subscription,
+            .activity => .activity,
+            else => .ordinary,
+        };
+    }
+};
 
 /// Identity, working context, and pending observations for one session.
 pub const Session = struct {
@@ -24,6 +46,9 @@ pub const Session = struct {
     state: union(enum) { idle, running: *Activation, interrupted } = .idle,
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
+    subscription_through: u64 = 0,
+    noticed_immediate: u64 = 0,
+    first_stream: Stream = .ordinary,
 
     /// Only genuinely new work makes an interrupted focus eligible again.
     fn notify(self: *Session) void {
@@ -43,6 +68,8 @@ pub const Registry = struct {
     io: std.Io,
     max_sessions: usize,
     max_pending: usize,
+    subscriptions: *Subscriptions.Store,
+    subscription_catalog: [32]u8,
     history: Persistence,
     reports: Reports.Outbox,
     mutex: std.Io.Mutex = .init,
@@ -51,21 +78,21 @@ pub const Registry = struct {
     noticed: std.StringHashMapUnmanaged(enum { scheduled, acknowledged }) = .empty,
     wakeups: std.ArrayList(History.Wakeup) = .empty,
     callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
-    subscriptions: std.ArrayList(History.Subscription) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
     next_session_id: u64 = 2,
     next_callback_id: u64 = 1,
-    next_subscription_id: u64 = 1,
     next_command_id: u64 = 1,
     started_at_unix_ms: i64,
 
-    pub fn init(allocator: Allocator, io: std.Io, max_sessions: usize, max_pending: usize, history: contracts.HistoryStore) !Registry {
+    pub fn init(allocator: Allocator, io: std.Io, max_sessions: usize, max_pending: usize, history: contracts.HistoryStore, subscriptions: *Subscriptions.Store) !Registry {
         var self: Registry = .{
             .allocator = allocator,
             .io = io,
             .max_sessions = max_sessions,
             .max_pending = max_pending,
+            .subscriptions = subscriptions,
+            .subscription_catalog = try subscriptions.identity(),
             .history = .init(allocator, history),
             .reports = try Reports.Outbox.init(allocator, history, null),
             .core = undefined,
@@ -76,13 +103,16 @@ pub const Registry = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const saved = try self.history.load(a, max_sessions);
+        const expected_catalog = if (saved) |retained| retained.subscription_catalog else null;
+        if (expected_catalog) |expected| {
+            if (!std.mem.eql(u8, &expected, &self.subscription_catalog)) return error.SubscriptionCatalogMismatch;
+        } else if (try subscriptions.isBound()) return error.SubscriptionCatalogMismatch;
         if (saved) |retained| {
             const reports = try Reports.Outbox.init(allocator, history, retained.activity_reports);
             self.reports.deinit();
             self.reports = reports;
             self.next_session_id = retained.next_session_id;
             self.next_callback_id = retained.next_callback_id;
-            self.next_subscription_id = retained.next_subscription_id;
             self.next_command_id = retained.next_command_id;
             for (retained.sessions) |record| {
                 const session = try allocator.create(Session);
@@ -90,6 +120,7 @@ pub const Registry = struct {
                     .session_id = record.session_id,
                     .role = record.role,
                     .epoch = record.epoch,
+                    .subscription_through = record.subscription_through,
                     .needs_startup = true,
                 };
                 errdefer self.destroySession(session);
@@ -101,12 +132,6 @@ pub const Registry = struct {
             }
             self.core = self.sessions.get(1).?;
             for (retained.callbacks) |callback| try self.restoreCallback(callback);
-            for (retained.subscriptions) |subscription_record| {
-                var owned = subscription_record;
-                owned.reference = try allocator.dupe(u8, subscription_record.reference);
-                errdefer allocator.free(owned.reference);
-                try self.subscriptions.append(allocator, owned);
-            }
             for (retained.wakeups) |wakeup| {
                 const text = try allocator.dupe(u8, wakeup.text);
                 errdefer allocator.free(text);
@@ -136,6 +161,13 @@ pub const Registry = struct {
             self.core = core;
         }
         try self.saveLocked();
+        try subscriptions.markBound();
+        // A prior checkpoint may have committed just before the process stopped.
+        var restored = self.sessions.valueIterator();
+        while (restored.next()) |entry| {
+            const session = entry.*;
+            if (session.subscription_through != 0) try subscriptions.acknowledge(session.session_id, session.subscription_through);
+        }
         return self;
     }
 
@@ -150,8 +182,6 @@ pub const Registry = struct {
         self.wakeups.deinit(self.allocator);
         for (self.callbacks.items) |callback| self.freeCallback(callback);
         self.callbacks.deinit(self.allocator);
-        for (self.subscriptions.items) |subscription_record| self.allocator.free(subscription_record.reference);
-        self.subscriptions.deinit(self.allocator);
         self.queued_callbacks.deinit(self.allocator);
         self.reports.deinit();
         self.history.deinit();
@@ -167,30 +197,21 @@ pub const Registry = struct {
         };
     }
 
-    pub const Intake = enum { accepted, deferred, duplicate, absorbed };
+    pub const Intake = enum { accepted, deferred, duplicate };
 
     pub fn accept(self: *Registry, incoming: Incoming) !Intake {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const notice = if (incoming.receipt) |key| self.noticed.get(key) else null;
         const session, const event = switch (incoming.content) {
             .message => |message| .{ self.core, Input.Event{ .input = message } },
             .callback => |callback| blk: {
-                // Keep one-shot copies pending until their admission and acknowledgement.
+                // Protect all transport copies until the admitted group has
+                // been published and its receipt acknowledged.
                 if (self.queued_callbacks.contains(callback.id)) return .deferred;
-                // A receipt already held by a delivery must wait for its admission.
-                const inactive: Intake = if (notice == .scheduled) .deferred else .absorbed;
                 const registration = self.callbackLocked(callback.id) orelse {
-                    for (self.subscriptions.items) |subscription_record| {
-                        if (subscription_record.callback_id == callback.id) return inactive;
-                    }
                     if (callback.id != 0 and callback.id < self.next_callback_id) return .duplicate;
                     return error.UnknownCallback;
                 };
-                if (registration.source == .subscription) {
-                    const subscription_record = self.subscriptionLocked(registration.source.subscription.subscription_id) orelse return inactive;
-                    if (subscription_record.status == .withdrawn) return inactive;
-                }
                 break :blk .{ self.sessions.get(registration.session_id).?, Input.Event{ .callback = .{
                     .callback_id = registration.reference,
                     .source = registration.source,
@@ -199,13 +220,11 @@ pub const Registry = struct {
                 } } };
             },
         };
-        if (notice != null) return .deferred;
+        if (incoming.receipt) |key| if (self.noticed.contains(key)) return .deferred;
         if (!self.hasCapacity(session)) return .deferred;
         const delivery = try Delivery.create(self.allocator, event, incoming.receipt);
         errdefer delivery.destroy(self.allocator);
-        if (event == .callback and event.callback.source != .subscription) {
-            delivery.callback_id = incoming.content.callback.id;
-        }
+        delivery.callback_id = if (incoming.content == .callback) incoming.content.callback.id else null;
         try self.ensureStartupLocked(session);
         try session.pending.ensureUnusedCapacity(self.allocator, 1);
         const notice_key = if (incoming.receipt) |key| try self.allocator.dupe(u8, key) else null;
@@ -242,18 +261,59 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        std.debug.assert(work.activation.deliveries.items.len == 0);
-        const reports = try self.reportDeliveriesLocked(work.session);
-        defer self.allocator.free(reports);
-        errdefer for (reports) |report| report.destroy(self.allocator);
-        const count = work.session.pending.items.len + reports.len;
-        if (count == 0) return;
-        try work.activation.deliveries.ensureUnusedCapacity(self.allocator, count);
-        work.activation.deliveries.appendSliceAssumeCapacity(work.session.pending.items);
-        work.activation.deliveries.appendSliceAssumeCapacity(reports);
-        work.session.pending.clearRetainingCapacity();
-        work.activation.admitted = false;
-        work.activation.new_arrival = false;
+        try self.collectLocked(work.session, work.activation);
+    }
+
+    fn collectLocked(self: *Registry, session: *Session, activation: *Activation) !void {
+        std.debug.assert(activation.deliveries.items.len == 0);
+        // Sample before reading so an immediate arrival after this point still
+        // counts as fresh if admission or inference is interrupted.
+        session.noticed_immediate = try self.subscriptions.latestImmediate(session.session_id);
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const reports = try self.subscriptions.pending(a, session.session_id, session.subscription_through, @min(self.max_pending, report_read_batch));
+        var subscriptions: std.ArrayList(*Delivery) = .empty;
+        try subscriptions.ensureTotalCapacity(a, reports.len);
+        errdefer for (subscriptions.items) |delivery| delivery.destroy(self.allocator);
+        for (reports) |report| {
+            const delivery = try Delivery.create(self.allocator, .{ .subscription = .{
+                .subscription_id = report.reference,
+                .delivery_id = report.sequence,
+                .text = report.text,
+                .observed_at_unix_ms = report.observed_at_unix_ms,
+                .source_time_unix_ms = report.source_time_unix_ms,
+                .handle = report.handle,
+                .version = report.version,
+                .truncated = report.truncated,
+                .retrieval = report.retrieval,
+            } }, null);
+            subscriptions.appendAssumeCapacity(delivery);
+        }
+        const activity = if (session == self.core) try self.readReportDeliveriesLocked(0) else &.{};
+        defer self.allocator.free(activity);
+        errdefer for (activity) |report| report.destroy(self.allocator);
+        try activation.deliveries.ensureUnusedCapacity(self.allocator, session.pending.items.len + activity.len + reports.len);
+        // Each source has its own arrival order. Rotate who receives the first
+        // part of a bounded input so a permanently busy source cannot crowd
+        // out another. Startup still introduces the first turn of a run.
+        var ordinary = session.pending.items;
+        if (ordinary.len != 0 and ordinary[0].event == .startup) {
+            activation.deliveries.appendAssumeCapacity(ordinary[0]);
+            ordinary = ordinary[1..];
+        }
+        var stream = session.first_stream;
+        for (0..3) |_| {
+            activation.deliveries.appendSliceAssumeCapacity(switch (stream) {
+                .ordinary => ordinary,
+                .subscription => subscriptions.items,
+                .activity => activity,
+            });
+            stream = stream.next();
+        }
+        session.pending.clearRetainingCapacity();
+        activation.admitted = activation.deliveries.items.len == 0;
+        activation.new_arrival = false;
     }
 
     /// Extend an unadmitted core batch by one I/O page without invoking the model.
@@ -289,7 +349,7 @@ pub const Registry = struct {
     }
 
     /// Save a copy of the worker's history, advance the outbox past admitted
-    /// reports, and remove one-shot callback registrations in one checkpoint.
+    /// reports, and remove registrations for admitted callbacks in one checkpoint.
     /// The caller can then acknowledge the deliveries.
     pub fn commitInput(self: *Registry, work: Work, count: usize, history: *const Context) !void {
         var retained = try history.clone(self.allocator);
@@ -309,15 +369,27 @@ pub const Registry = struct {
         };
         try session.pending.ensureUnusedCapacity(self.allocator, suffix.len);
         try self.reports.consume(report_count, endings);
-        session.pending.insertSliceAssumeCapacity(0, suffix);
+        session.pending.insertSliceAssumeCapacity(0, self.keepQueued(suffix));
         deliveries.items.len = count;
         std.mem.swap(Context, &session.context.?, &retained);
         session.epoch = session.context.?.scope.epoch;
         work.activation.admitted = true;
-        for (deliveries.items) |delivery| if (delivery.callback_id) |id| {
-            self.removeCallbackLocked(id);
-        };
+        for (deliveries.items) |delivery| {
+            if (delivery.event == .startup) continue;
+            session.first_stream = Stream.of(delivery.event).next();
+            break;
+        }
+        var admitted_report = false;
+        for (deliveries.items) |delivery| {
+            if (delivery.callback_id) |id| self.completeCallbackLocked(id);
+            if (delivery.event == .subscription) {
+                std.debug.assert(delivery.event.subscription.delivery_id > session.subscription_through);
+                session.subscription_through = delivery.event.subscription.delivery_id;
+                admitted_report = true;
+            }
+        }
         try self.saveLocked();
+        if (admitted_report) try self.subscriptions.acknowledge(session.session_id, session.subscription_through);
     }
 
     pub fn prepareFork(self: *Registry, work: Work, name: []const u8, task: []const u8) !ForkPlan {
@@ -413,19 +485,19 @@ pub const Registry = struct {
                 .focus_id = session.focus_id,
                 .role = session.role,
                 .epoch = session.epoch,
+                .subscription_through = session.subscription_through,
                 .was_running = session.role == .activity and (session.state != .idle or hasStartup(session.pending.items)),
                 .entries = if (session.context) |*context| context.records() else null,
                 .observations = observations.items,
             });
         }
         try self.history.save(a, .{
+            .subscription_catalog = self.subscription_catalog,
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
-            .next_subscription_id = self.next_subscription_id,
             .next_command_id = self.next_command_id,
             .wakeups = self.wakeups.items,
             .callbacks = self.callbacks.items,
-            .subscriptions = self.subscriptions.items,
             .sessions = retained.items,
             .activity_reports = self.reports.checkpoint(),
         });
@@ -451,15 +523,17 @@ pub const Registry = struct {
             std.mem.sort([]const u8, activities.items, {}, lessActivity);
         }
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
-        for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) {
-            try own_callbacks.append(a, .{
-                .callback_id = try a.dupe(u8, callback.reference),
-                .source = try cloneSource(a, callback.source),
-            });
-        };
+        for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
+            .callback_id = try a.dupe(u8, callback.reference),
+            .source = try cloneSource(a, callback.source),
+        });
         return .{
             .current = try self.currentLocked(a, session),
-            .state = .{ .activities = try activities.toOwnedSlice(a), .callbacks = try own_callbacks.toOwnedSlice(a) },
+            .state = .{
+                .activities = try activities.toOwnedSlice(a),
+                .callbacks = try own_callbacks.toOwnedSlice(a),
+                .subscriptions = try self.subscriptions.registrations(a, subscriptionOwner(session)),
+            },
         };
     }
 
@@ -480,8 +554,13 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
-        const finished = !self.hasWork(session);
-        const completed_activity = finished and session != self.core and self.callbackCount(session.session_id) == 0;
+        const can_end = try self.canEnd(session);
+        const more_reports = if (can_end)
+            try self.subscriptions.hasPending(session.session_id, session.subscription_through)
+        else
+            try self.subscriptions.hasImmediate(session.session_id, session.subscription_through);
+        const finished = !self.hasWork(session) and !more_reports;
+        const completed_activity = finished and can_end;
         if (!completed_activity) try history.appendBatch(output, &.{});
         if (session != self.core) try self.reportResponseLocked(session, text, observed_at, completed_activity);
         if (completed_activity) {
@@ -518,10 +597,12 @@ pub const Registry = struct {
             .observed_at_unix_ms = self.now(),
             .reason = reason,
         } });
-        // After successful admission the queued suffix can supply a fresh
-        // input. During admission the same held prefix must wait for a change.
-        const ready = activation.new_arrival or (activation.admitted and self.hasWork(session));
-        session.pending.insertSliceAssumeCapacity(0, activation.deliveries.items);
+        // Further immediate reports can resume the focus. After admission, the
+        // unadmitted suffix counts; before admission, wait for a new arrival.
+        const report_after = if (activation.admitted) session.subscription_through else session.noticed_immediate;
+        const fresh_report = try self.subscriptions.hasImmediate(session.session_id, report_after);
+        const ready = fresh_report or activation.new_arrival or (activation.admitted and self.hasWork(session));
+        session.pending.insertSliceAssumeCapacity(0, self.keepQueued(activation.deliveries.items));
         activation.deliveries.clearRetainingCapacity();
         session.state = if (ready) .idle else .interrupted;
         activation.destroy(self.allocator);
@@ -616,70 +697,29 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        if (source == .subscription) return error.InvalidCallbackSource;
         const registration = try self.registerCallbackLocked(work.session, name, source);
         try self.saveLocked();
         return .{ .id = registration.id, .reference = try a.dupe(u8, registration.reference) };
     }
 
-    /// Persist the choice and its report registration. The reference belongs to a.
-    pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, reminder: History.Subscription.Reminder) ![]const u8 {
+    pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, reminder: Subscriptions.Reminder, listener: []const u8) !Subscriptions.Registration {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        const id = self.next_subscription_id;
-        const next = try std.math.add(u64, id, 1);
-        const reference = try contracts.Reference.create(a, name, id);
-        errdefer a.free(reference);
-        try self.subscriptions.ensureUnusedCapacity(self.allocator, 1);
-        const owned_reference = try self.allocator.dupe(u8, reference);
-        errdefer self.allocator.free(owned_reference);
-        const registration = try self.registerCallbackLocked(work.session, name, .{ .subscription = .{ .subscription_id = id } });
-        errdefer self.freeCallback(self.callbacks.pop().?);
-        self.subscriptions.appendAssumeCapacity(.{
-            .id = id,
-            .reference = owned_reference,
-            .session_id = work.session.session_id,
-            .status = .active,
-            .reminder = reminder,
-            .callback_id = registration.id,
-        });
-        errdefer _ = self.subscriptions.pop();
-        self.next_subscription_id = next;
-        try self.saveLocked();
-        return reference;
+        return self.subscriptions.create(a, work.session.session_id, work.session.focus_id, name, reminder, listener);
     }
 
-    /// Look up an exact reference. The returned reference belongs to a.
-    pub fn subscription(self: *Registry, a: Allocator, reference: []const u8) !?History.Subscription {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        for (self.subscriptions.items) |subscription_record| {
-            if (!std.mem.eql(u8, reference, subscription_record.reference)) continue;
-            var owned = subscription_record;
-            owned.reference = try a.dupe(u8, subscription_record.reference);
-            return owned;
-        }
-        return null;
+    /// The core coordinates interests across focuses. Each activity manages
+    /// its own registrations.
+    fn subscriptionOwner(session: *const Session) ?u64 {
+        return if (session.role == .core) null else session.session_id;
     }
 
-    pub fn withdrawSubscription(self: *Registry, id: u64) !void {
+    pub fn withdrawSubscription(self: *Registry, work: Work, reference: []const u8) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const subscription_record = self.subscriptionLocked(id) orelse return error.UnknownSubscription;
-        if (subscription_record.status == .withdrawn) return self.saveLocked();
-
-        const index = for (self.callbacks.items, 0..) |callback, index| {
-            if (callback.id == subscription_record.callback_id) break index;
-        } else unreachable;
-        const registration = self.callbacks.orderedRemove(index);
-        subscription_record.status = .withdrawn;
-        errdefer {
-            subscription_record.status = .active;
-            self.callbacks.insertAssumeCapacity(index, registration);
-        }
-        try self.saveLocked();
-        self.freeCallback(registration);
+        assertWork(work);
+        return self.subscriptions.withdraw(subscriptionOwner(work.session), reference);
     }
 
     /// Before startup dispatch, these registrations belong to commands from the
@@ -728,12 +768,7 @@ pub const Registry = struct {
         return null;
     }
 
-    fn subscriptionLocked(self: *Registry, id: u64) ?*History.Subscription {
-        for (self.subscriptions.items) |*subscription_record| if (subscription_record.id == id) return subscription_record;
-        return null;
-    }
-
-    fn removeCallbackLocked(self: *Registry, id: u64) void {
+    fn completeCallbackLocked(self: *Registry, id: u64) void {
         for (self.callbacks.items, 0..) |callback, index| if (callback.id == id) {
             self.freeCallback(self.callbacks.orderedRemove(index));
             break;
@@ -788,28 +823,53 @@ pub const Registry = struct {
         try self.reports.append(facts.items);
     }
 
+    /// Unadmitted subscription and activity reports remain in their stores.
+    /// Ordinary deliveries retain their original ownership and order.
+    fn keepQueued(self: *Registry, deliveries: []*Delivery) []*Delivery {
+        var count: usize = 0;
+        for (deliveries) |delivery| {
+            if (delivery.event == .subscription or delivery.event == .activity) {
+                delivery.destroy(self.allocator);
+            } else {
+                deliveries[count] = delivery;
+                count += 1;
+            }
+        }
+        return deliveries[0..count];
+    }
+
+    fn canEnd(self: *Registry, session: *Session) !bool {
+        return session != self.core and self.callbackCount(session.session_id) == 0 and
+            !try self.subscriptions.hasActive(session.session_id);
+    }
+
     fn takeReady(self: *Registry, session: *Session) !?Work {
-        if (session.state != .idle or !self.hasWork(session)) return null;
+        if (session.state == .running) return null;
+        if (session.state == .interrupted) {
+            if (!try self.subscriptions.hasImmediate(session.session_id, session.noticed_immediate)) return null;
+            session.notify();
+        }
+        if (!self.hasWork(session) and !try self.subscriptions.hasImmediate(session.session_id, session.subscription_through)) {
+            // A sleeping activity's last registration may have been withdrawn
+            // by the core, including just before a restart.
+            if (!try self.canEnd(session)) return null;
+            if (!try self.subscriptions.hasPending(session.session_id, session.subscription_through)) {
+                try self.reportResponseLocked(session, null, self.now(), true);
+                _ = self.sessions.remove(session.session_id);
+                self.core.notify();
+                if (session.borrowed_workers == 0) self.destroySession(session);
+                try self.saveLocked();
+                return null;
+            }
+        }
+        try self.ensureStartupLocked(session);
         try self.restoreContextLocked(session);
-        const reports = try self.reportDeliveriesLocked(session);
-        defer self.allocator.free(reports);
-        errdefer for (reports) |report| report.destroy(self.allocator);
-        var deliveries: std.ArrayList(*Delivery) = .empty;
-        defer deliveries.deinit(self.allocator);
-        try deliveries.appendSlice(self.allocator, session.pending.items);
-        try deliveries.appendSlice(self.allocator, reports);
-        const activation = try Activation.create(self.allocator, deliveries.items);
-        activation.admitted = deliveries.items.len == 0;
-        session.pending.clearRetainingCapacity();
+        const activation = try Activation.create(self.allocator, &.{});
+        errdefer activation.destroy(self.allocator);
+        try self.collectLocked(session, activation);
         session.state = .{ .running = activation };
         session.borrowed_workers += 1;
         return .{ .session = session, .activation = activation };
-    }
-
-    fn reportDeliveriesLocked(self: *Registry, session: *Session) ![]*Delivery {
-        if (session != self.core) return self.allocator.alloc(*Delivery, 0);
-        for (session.pending.items) |delivery| if (delivery.event == .activity) return self.allocator.alloc(*Delivery, 0);
-        return self.readReportDeliveriesLocked(0);
     }
 
     fn readReportDeliveriesLocked(self: *Registry, start: usize) ![]*Delivery {
@@ -849,6 +909,7 @@ pub const Registry = struct {
         if (!session.needs_startup) return;
         const delivery = try Delivery.create(self.allocator, .{ .startup = .{ .observed_at_unix_ms = self.started_at_unix_ms } }, null);
         errdefer delivery.destroy(self.allocator);
+        delivery.event.startup.subscriptions = try self.subscriptions.registrations(delivery.arena.allocator(), subscriptionOwner(session));
         try session.pending.insert(self.allocator, 0, delivery);
         session.needs_startup = false;
     }
@@ -863,7 +924,7 @@ pub const Registry = struct {
     }
 
     fn hasWork(self: *const Registry, session: *const Session) bool {
-        for (session.pending.items) |delivery| if (delivery.event != .activity) return true;
+        if (session.pending.items.len != 0) return true;
         return session == self.core and self.reports.pendingEndings() != 0;
     }
 
@@ -896,7 +957,7 @@ fn deliveryCount(deliveries: []const *Delivery) usize {
     var count: usize = 0;
     for (deliveries) |delivery| switch (delivery.event) {
         .input, .assignment, .focus_message, .callback => count += 1,
-        .startup, .activity, .focus_interrupted => {},
+        .startup, .activity, .subscription, .focus_interrupted => {},
     };
     return count;
 }
@@ -909,7 +970,7 @@ fn hasStartup(deliveries: []const *Delivery) bool {
 fn isInternal(event: Input.Event) bool {
     return switch (event) {
         .assignment, .focus_message, .focus_interrupted => true,
-        .startup, .input, .callback, .activity => false,
+        .startup, .input, .callback, .subscription, .activity => false,
     };
 }
 
@@ -927,16 +988,13 @@ fn assertWork(work: Work) void {
 
 fn cloneSource(a: Allocator, source: contracts.Callback.Source) !contracts.Callback.Source {
     return switch (source) {
-        .wakeup, .subscription => source,
+        .wakeup => .wakeup,
         .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
     };
 }
 
 fn freeSource(a: Allocator, source: contracts.Callback.Source) void {
-    switch (source) {
-        .wakeup, .subscription => {},
-        .host => |host| a.free(host.command_id),
-    }
+    if (source == .host) a.free(source.host.command_id);
 }
 
 const TestStorage = struct {
@@ -978,7 +1036,9 @@ const TestStorage = struct {
 
 test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
     var storage: TestStorage = .{};
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port());
+    var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+    defer subscriptions.close();
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
     defer registry.deinit();
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
@@ -1017,7 +1077,7 @@ test "an interrupted activation retains its receipts and only fresh arrivals wak
     registry.endWorker(retry.session);
 }
 
-/// Start the next ready focus and admit its single pending observation.
+/// Start the next ready focus and admit its single startup or assignment.
 fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, history: Context } {
     const work = (try registry.takeReadyBatch(a))[0];
     const deliveries = work.activation.deliveries.items;
@@ -1036,7 +1096,9 @@ test "activity completion publishes once and maintenance republishes the same ch
     const a = scratch.allocator();
     for ([_]bool{ false, true }) |sleeping| {
         var storage: TestStorage = .{};
-        var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port());
+        var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+        defer subscriptions.close();
+        var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
         defer registry.deinit();
         var core = try admitTestInput(&registry, a);
         defer core.history.deinit();
@@ -1067,64 +1129,4 @@ test "activity completion publishes once and maintenance republishes the same ch
             try std.testing.expectEqual(before + 1, storage.checkpoints);
         }
     }
-}
-
-test "a failed withdrawal save leaves the subscription active and its report admissible" {
-    const testing = std.testing;
-    var storage: TestStorage = .{};
-    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port());
-    defer registry.deinit();
-    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-    var initial = try admitTestInput(&registry, a);
-    defer initial.history.deinit();
-    defer registry.endWorker(initial.work.session);
-    const reference = try registry.subscribe(a, initial.work, "listener", .immediate);
-    const subscription = (try registry.subscription(a, reference)).?;
-    const callback_reference = try a.dupe(u8, registry.callbackLocked(subscription.callback_id).?.reference);
-    try testing.expect(try registry.commitResponse(initial.work, &initial.history, &.{}, null));
-
-    storage.fail_save = true;
-    try testing.expectError(error.UnconfirmedCheckpoint, registry.withdrawSubscription(subscription.id));
-    storage.fail_save = false;
-    try testing.expectEqualDeep(subscription, (try registry.subscription(a, reference)).?);
-    const callback = registry.callbackLocked(subscription.callback_id) orelse return error.MissingTestCallback;
-    try testing.expectEqualStrings(callback_reference, callback.reference);
-
-    try testing.expectEqual(Registry.Intake.accepted, try registry.accept(.{
-        .content = .{ .callback = .{ .id = subscription.callback_id, .text = "fresh report", .observed_at_unix_ms = 10 } },
-    }));
-    var resumed = try admitTestInput(&registry, a);
-    defer resumed.history.deinit();
-    defer registry.endWorker(resumed.work.session);
-    try testing.expectEqual(subscription.session_id, resumed.work.session.session_id);
-    const records = resumed.history.records();
-    try testing.expectEqualStrings("fresh report", records[records.len - 1].record.events.items[0].callback.text);
-}
-
-test "a failed subscribe save leaves only the subscription and callback from the retry" {
-    const testing = std.testing;
-    var storage: TestStorage = .{};
-    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port());
-    defer registry.deinit();
-    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-    const work = (try registry.takeReadyBatch(a))[0];
-    defer registry.endWorker(work.session);
-
-    storage.fail_save = true;
-    try testing.expectError(error.UnconfirmedCheckpoint, registry.subscribe(testing.allocator, work, "listener", .immediate));
-    try testing.expectEqual(0, registry.subscriptions.items.len);
-    try testing.expectEqual(0, registry.callbacks.items.len);
-
-    storage.fail_save = false;
-    const reference = try registry.subscribe(a, work, "listener", .immediate);
-    const subscription = (try registry.subscription(a, reference)).?;
-    try testing.expectEqual(1, registry.subscriptions.items.len);
-    try testing.expectEqual(1, registry.callbacks.items.len);
-    const callback = registry.callbacks.items[0];
-    try testing.expectEqual(subscription.callback_id, callback.id);
-    try testing.expectEqual(subscription.id, callback.source.subscription.subscription_id);
 }

@@ -40,6 +40,7 @@ An `events` record has `focus_id: Text` and `items: Event[]`. Each admission ret
 | `focus_message` | `FocusMessage` | Observation sent directly by the core |
 | `focus_interrupted` | `FocusInterrupted` | Runtime observation that an activity could not continue reasoning |
 | `callback` | `Callback` | A registered wakeup or host completion observation |
+| `subscription` | `SubscriptionReport` | A listener's report for the focus that owns the subscription |
 
 #### Incoming messages
 
@@ -55,7 +56,7 @@ Correspondence enters the core as an `input` observation of who said what; it im
 
 #### Startup and restart
 
-`Startup` carries `observed_at: Time`, the beginning of this runtime. On restart, the runtime queues this event for the core and for each activity with an unfinished activation or unread internal observations. Other restored activities receive it with their next event. Newly opened activities start with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
+`Startup.observed_at` records the time the runtime started. The runtime queues this event on restart for the core and for each activity with an unfinished activation or unread internal observations. For other restored activities it queues the event when they next have work. The optional `subscriptions` list captures the registrations in scope when the event is queued, which can be later than `observed_at`. Newly opened activities start with an assignment. See [sampled state](#sampled-state) and [startup and interruption](architecture.md#startup-and-interruption).
 
 #### Assignments and reports
 
@@ -118,6 +119,24 @@ The ID matches the `callback_id` returned by `schedule_attention` or a `run_host
 
 A restored host source can identify an execution in an earlier runtime; its command ID is not a restored control handle. See [command lifetimes](host.md#command-lifetimes) for stored results and interruption observations after restart.
 
+#### Subscription observations
+
+Each `subscription` event presents one listener report to the focus that subscribed. Reports from the same registration share a `subscription_id` and have distinct `delivery_id` values. Several can appear in one turn, even after the focus has withdrawn the subscription.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `subscription_id` | `Text` | Complete reference returned when the focus subscribed |
+| `delivery_id` | Integer | Runtime-assigned identity for this accepted report |
+| `observed_at` | `Time` | Local time when `ivenna-report` received the report |
+| `source_time` | `Time` or null | Time the listener attributes to the upstream event |
+| `text` | `Text` | Listener-supplied observation |
+| `truncated` | Boolean | Whether the listener shortened the source text |
+| `version` | `Text` or null | Listener-supplied source version, when known |
+| `retrieval` | `unavailable`, `current` or `version` | Whether the listener offers no further retrieval, a handle to the current state, or a handle for the observed version |
+| `handle` | `Text` or null | Listener-supplied reference for reopening the material |
+
+The report text enters the receiving focus's working history. A handle depends on the source or archive the listener uses. A `current` handle can return material that has changed since the report, while a `version` handle refers to the revision the listener observed. See [subscription reminders and withdrawal](attention.md#subscriptions).
+
 ### Handovers
 
 A `handover` record contains:
@@ -131,18 +150,21 @@ A `handover` record contains:
 
 #### Sampled state
 
-A `State` contains two collections:
+A `State` can contain the following collections:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `activities` | `Text[]` | Complete references of the core's existing activities, including sleeping activities |
 | `callbacks` | `PendingCallback[]` | Observations arranged for the sampled focus and awaiting admission |
+| `subscriptions` | Registration records | Subscription references in scope, including withdrawn registrations awaiting external closure |
 
-The activity list omits the core itself and is empty for an activity focus. Empty collections are omitted; an absent field means that collection was empty at the sample. When both are empty, the entire `state` field is omitted.
+The activity list omits the core itself and is empty for an activity focus. Empty collections are omitted. When all collections are empty, the entire `state` field is omitted.
+
+Each subscription record contains `subscription_id`, the owning `focus_id`, `reminder` and `active`. The core sees registrations for all focuses. An activity sees its own. An active registration accepts reports locally. An inactive entry means intake has closed and the listener has yet to record that an external follow has ended. Startup observations and handovers preserve these references even for a subscription that has never produced a report. A reference shown as active in an older sample may since have been withdrawn.
 
 Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after its result is published or queued. A pending host source identifies the execution being observed; it does not imply that its process is still running or its handle remains available. Observation text arrives separately as an event. The runtime routes and resumes registered observations without requiring the model to retain their IDs.
 
-The handover's `observed_at`, or the compaction turn's `current.observed_at`, dates this state sample. An activity can end before its ending report enters the core's history, so a later sample can omit an activity whose ending has not yet been admitted. Reports retain their source and original times. Selecting a reference that is no longer addressable returns [`unknown_focus`](attention.md#results-and-errors).
+The handover's `observed_at`, or the compaction turn's `current.observed_at`, dates this state sample. An activity can end before its ending report enters the core's history, so a later sample can omit an activity whose ending has not yet been admitted. Reports retain their source and original times. Sending a focus message to an activity that has ended returns [`unknown_focus`](attention.md#results-and-errors).
 
 For example, the summary can explain the work while sampled state retains the references:
 

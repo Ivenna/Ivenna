@@ -2,6 +2,7 @@ const std = @import("std");
 const contracts = @import("agent_contracts");
 const Input = @import("input.zig");
 const Time = @import("time.zig");
+const Reminder = @import("subscriptions").Reminder;
 const Allocator = std.mem.Allocator;
 
 /// Agent-owned actions share one definition for recognition, arguments, and role
@@ -11,6 +12,8 @@ pub const Request = union(enum) {
     open_focus: struct { name: []const u8, task: []const u8 },
     send_focus_message: struct { focus_id: []const u8, text: []const u8 },
     schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
+    subscribe: struct { name: []const u8, listener: []const u8, reminder: Reminder },
+    withdraw_subscription: struct { subscription_id: []const u8 },
 
     /// Unknown names belong to other capabilities. A recognized action that is
     /// unavailable to this role must not fall through to another implementation.
@@ -28,6 +31,8 @@ pub const Request = union(enum) {
             .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
             .send_focus_message => |args| if (args.focus_id.len == 0 or args.text.len == 0) return error.InvalidToolArguments,
             .schedule_attention => |args| if (!contracts.Reference.validName(args.name) or args.text.len == 0) return error.InvalidToolArguments,
+            .subscribe => {},
+            .withdraw_subscription => |args| if (args.subscription_id.len == 0) return error.InvalidToolArguments,
         }
         return request;
     }
@@ -35,7 +40,7 @@ pub const Request = union(enum) {
 
 fn available(tag: std.meta.Tag(Request), role: Input.Role) bool {
     return switch (tag) {
-        .send_message => true,
+        .send_message, .subscribe, .withdraw_subscription => true,
         .open_focus, .send_focus_message, .schedule_attention => role == .core,
     };
 }

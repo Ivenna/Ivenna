@@ -99,5 +99,46 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "subscribe",
+    "description": "Register this focus to receive reports from a source. Give the returned subscription_id to a listener you arrange separately. An activity can run the executable named by IVENNA_REPORT with --help for the listener commands.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "listener": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Describe what the listener watches, when it reports, and where to find its program and configuration."
+        },
+        "reminder": {
+          "type": "string",
+          "enum": ["immediate", "next_input"],
+          "description": "immediate can wake this focus. next_input brings reports with its next ordinary input, including a continuation after tools."
+        }
+      },
+      "required": ["name", "listener", "reminder"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "withdraw_subscription",
+    "description": "Close a subscription to new reports. The core can withdraw any focus's subscription. Activities can withdraw their own. Previously accepted reports keep their reminder. Arrange any listener shutdown or upstream unfollow separately.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "subscription_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["subscription_id"],
+      "additionalProperties": false
+    }
   }
 ]

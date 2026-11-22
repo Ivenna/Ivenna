@@ -108,7 +108,7 @@ podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml up -d --w
 zig build run
 ```
 
-Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers. `zig build run` builds and runs the kernel. Keep it running in this terminal and use one kernel per mailbox.
+Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers. `zig build run` installs the kernel and its companion `ivenna-report` together, then starts the kernel. Keep the kernel running in this terminal and use one kernel per mailbox.
 
 From a second terminal, check reception at the default listener address:
 
@@ -215,5 +215,6 @@ For another memory deployment, configure capacity at its [service entry point](.
 | `$DEV_INSTANCE_DIR/mail/provision.ndjson` | Private mail configuration plan |
 | `$DEV_INSTANCE_DIR/memory/` | Local memory SSH configuration and keys |
 | `<DATA_DIR>/host/` | Full host command output |
+| `<DATA_DIR>/subscriptions.sqlite3` | Subscription catalog, listener progress, and pending observations |
 
-The example places host output under `$DEV_INSTANCE_DIR/data/`; `DATA_DIR` can select another location. Changing it leaves SSH files and middleware volumes in place. Container removal and recreation preserve the external volumes and private instance files. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.
+The example sets `DATA_DIR` to `$DEV_INSTANCE_DIR/data/`. When moving the instance, [back up the subscription database and mailbox together](../docs/running.md#backups-and-transfers). Container removal and recreation preserve the external volumes and private instance files. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.
