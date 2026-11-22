@@ -4,7 +4,7 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 ## Runtime requirements
 
-Install `ivenna` and `ivenna-report` from the same build in the same directory. On Linux the kernel reads `/proc/self/exe` at startup to locate the reporter beside it. Host commands run as the kernel's OS account. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+Install `ivenna` and `ivenna-report` from the same build in the same directory. The kernel locates the reporter beside its executable and gives host commands its absolute path in `IVENNA_REPORT`. Host commands run as the kernel's OS account. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
@@ -133,7 +133,7 @@ The [local development setup](../dev/README.md#configuring-memory) packages this
 
 ## Starting the kernel
 
-Prepare the configured services and supply the required [environment settings](#configuration). Choose the host workspace and an instance data directory for the subscription database and command output.
+`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` with no arguments from the directory you want host commands to use by default.
 
 ```sh
 cd /path/to/workspace
@@ -141,7 +141,7 @@ export DATA_DIR=/path/to/instance/data
 /path/to/ivenna
 ```
 
-The kernel's startup directory becomes the default directory for host commands. The executable embeds its model-facing resources and can run independently of the source checkout.
+The executable embeds its model-facing resources and can run independently of the source checkout.
 
 Give each kernel its own mailbox and `DATA_DIR`. The kernel binds `SERVICE_ADDRESS` before accessing the account. If the address is in use, startup exits. On Linux, an `AddressInUse` error just after an upgrade can persist until the older executable's connections leave `TIME_WAIT`.
 
@@ -151,9 +151,11 @@ Startup reads and validates all selected session history, including sleeping ses
 
 ## Subscription listeners
 
-Once a focus registers a [subscription](attention.md#subscriptions), give the returned `subscription_id` to the program that watches the source. That program invokes `ivenna-report` to publish observations to the subscribing focus. A listener launched as a host command inherits the reporter and data paths and stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs.
+When a focus registers a [subscription](attention.md#subscriptions), give the returned `subscription_id` to the program that watches the source. The listener invokes `ivenna-report` with that ID to send observations to the subscribing focus.
 
-To keep collecting while the kernel is stopped, launch the listener independently, for example under a service manager. Give it the installed reporter's path and set its `DATA_DIR` to the kernel's data directory. An absolute path works across different working directories. The listener needs write access to that local directory, where SQLite coordinates concurrent access. Keep it private to trusted processes. For a working example and how to resume from a saved cursor, see the [listener protocol](subscriptions.md).
+A listener launched as a host command inherits `IVENNA_REPORT` and `DATA_DIR` and stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs.
+
+To keep collecting while the kernel is stopped, run the listener independently, for example under a service manager on the same host. Give it the installed reporter's path and set `DATA_DIR` to the kernel's data directory. Use an absolute path if the two programs start in different working directories. The listener needs write access to this directory. Keep access limited to trusted processes. For examples of publishing a report and resuming from a saved cursor, see the [listener protocol](subscriptions.md).
 
 ## Service status and reception
 

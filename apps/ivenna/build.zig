@@ -35,5 +35,6 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(reporter.artifact("ivenna-report"));
     const run = b.addRunFile(.{ .relative = .{ .base = .install_bin, .sub_path = "ivenna" } });
     run.step.dependOn(b.getInstallStep());
+    run.addPassthruArgs();
     b.step("run", "Run Ivenna").dependOn(&run.step);
 }

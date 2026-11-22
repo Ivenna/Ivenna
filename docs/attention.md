@@ -64,7 +64,7 @@ The focus admits each callback at most once. The email adapter preserves the fir
 
 ## Subscriptions
 
-Call `subscribe` in the focus that should receive the reports. For example, the core can follow release announcements across assignments. The `listener` field describes what to watch and when to report. It can also record where to find the listener's program or configuration.
+Call `subscribe` in the focus that should receive the reports. Use the `listener` field to describe the source and when to report. The description can include where to find the listener program or its configuration. In this example, the core follows release announcements across assignments.
 
 ```json
 {
@@ -79,7 +79,7 @@ The tool returns a reference for that focus's subscription.
 {"result":{"subscription_id":"releases-1"}}
 ```
 
-Set up the listener separately and give it the complete `subscription_id`. The core can ask an activity to run the listener on the host. The listener decides which updates to publish and can combine them, for example into a daily digest. See the [listener protocol](subscriptions.md).
+Set up the listener separately and give it the complete `subscription_id`. If an activity runs the listener for `releases-1` on the host, its reports still go to the core. The listener can publish selected changes as they happen or combine them into one report, such as a daily digest. See the [listener protocol](subscriptions.md).
 
 An accepted report makes a sleeping focus ready. A working focus can read it after its current model/tool round. One turn can include several reports in acceptance order alongside other observations. Reports beyond the input budget stay queued for later turns. See [subscription observations](input.md#subscription-observations).
 

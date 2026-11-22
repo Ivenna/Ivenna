@@ -1,6 +1,7 @@
 const std = @import("std");
 const subscriptions = @import("subscriptions");
 const testing = std.testing;
+const executable = @import("reporter").executable;
 
 const Listener = struct {
     allocator: std.mem.Allocator,
@@ -10,10 +11,11 @@ const Listener = struct {
     fn request(self: Listener, action: []const u8, input: ?[]const u8, success: bool) !std.json.Value {
         const io = testing.io;
         var child = try std.process.spawn(io, .{
-            .argv = &.{ @import("reporter").executable, action, self.reference },
+            .argv = &.{ executable, action, self.reference },
             .environ_map = self.env,
             .stdin = .pipe,
             .stdout = .pipe,
+            .stderr = if (success) .inherit else .ignore,
         });
         defer child.kill(io);
         if (input) |bytes| try child.stdin.?.writeStreamingAll(io, bytes);
@@ -36,6 +38,33 @@ const Listener = struct {
     }
 };
 
+fn runWithoutConfig(a: std.mem.Allocator, argv: []const []const u8) !std.process.RunResult {
+    const env = std.process.Environ.Map.init(a);
+    return std.process.run(a, testing.io, .{ .argv = argv, .environ_map = &env });
+}
+
+test "listeners can read the protocol and diagnose a mistyped command before configuring a catalog" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const help = try runWithoutConfig(a, &.{ executable, "--help" });
+    const inspect_usage = "ivenna-report inspect SUBSCRIPTION_ID";
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, help.term);
+    try testing.expect(std.mem.indexOf(u8, help.stdout, inspect_usage) != null);
+    try testing.expect(std.mem.indexOf(u8, help.stdout, "\"cursor_conflict\"") != null);
+
+    const publish = try runWithoutConfig(a, &.{ executable, "publish", "-h" });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, publish.term);
+    try testing.expect(std.mem.indexOf(u8, publish.stdout, "\"key\"") != null);
+    try testing.expect(std.mem.indexOf(u8, publish.stdout, inspect_usage) == null);
+
+    const typo = try runWithoutConfig(a, &.{ executable, "publsh", "news-1" });
+    try testing.expect(typo.term == .exited and typo.term.exited != 0);
+    const receipt = try std.json.parseFromSliceLeaky(std.json.Value, a, typo.stdout, .{});
+    try testing.expectEqualStrings("invalid_request", receipt.string);
+    try testing.expect(std.mem.indexOf(u8, typo.stderr, "publsh") != null);
+}
+
 test "the reporter accepts observations while the kernel is stopped and rejects them after withdrawal" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -52,7 +81,7 @@ test "the reporter accepts observations while the kernel is stopped and rejects 
         .reference = blk: {
             var owner = try subscriptions.Store.open(a, path);
             defer owner.close();
-            break :blk (try owner.create(a, "research-2", "news", "test listener")).subscription_id;
+            break :blk (try owner.create(a, "research-2", "-release feed", "test listener")).subscription_id;
         },
     };
     const report = .{ .key = "item-1", .text = "first", .cursor = .{ .to = "1" } };

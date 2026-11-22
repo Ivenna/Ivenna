@@ -118,7 +118,11 @@ curl --include http://127.0.0.1:8090/readyz
 
 Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the URL if you changed the listener. See [service status](../docs/running.md#service-status-and-reception) for startup and reception behavior. The kernel terminal shows [JMAP request failures](../docs/running.md#when-a-mail-request-fails). The mail and memory services write their own logs.
 
-To run the [subscription listener examples](../docs/subscriptions.md) in another terminal, load the same [instance configuration](#configuration). From the repository root, set `export IVENNA_REPORT="$PWD/zig-out/bin/ivenna-report"` and use the ID returned by the subscribing focus.
+To run the [subscription listener examples](../docs/subscriptions.md) in another terminal, export the kernel's `DATA_DIR` from the [instance configuration](#configuration) and use the ID returned by the subscribing focus. From the repository root, set the executable path for the examples.
+
+```sh
+export IVENNA_REPORT="$PWD/zig-out/bin/ivenna-report"
+```
 
 ## Sending a message
 

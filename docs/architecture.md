@@ -20,7 +20,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [packages/subscriptions](../packages/subscriptions/src/root.zig) | Store registrations, listener progress, report keys and pending observations in SQLite |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result text, image, and file content, classify source bytes, and interpret image references |
 
-The kernel and its [HTTP listener](../apps/ivenna/src/service.zig) run in the same process and shut down together. The separate `ivenna-report` executable opens the same subscription store on behalf of local listeners. The kernel reaches the memory app over SSH. Its handler and image sources live in `apps/memory`, and local service orchestration lives in `dev`.
+The kernel and its [HTTP listener](../apps/ivenna/src/service.zig) run in the same process and shut down together. On Linux the kernel uses `/proc/self/exe` to locate `ivenna-report` beside it and supplies that path to host commands. The separate reporter process opens the subscription store on behalf of local listeners. The kernel reaches the memory app over SSH. Its handler and image sources live in `apps/memory`, and local service orchestration lives in `dev`.
 
 The agent and concrete capabilities share `agent_contracts`, which depends only on Content. Content supplies tool-result text, image, and file representation and source classification. YAML rendering belongs to the agent. The build declarations enforce the following module dependencies; each arrow points from a module to one it imports:
 
@@ -178,7 +178,7 @@ Intake resolves the numeric delivery ID through its registration, adds the saved
 
 ## Subscription delivery
 
-The kernel opens the subscription catalog in `DATA_DIR` and creates it on first use. Each invocation of `ivenna-report` opens the existing catalog on its own connection. An independent listener can therefore publish while the kernel is stopped. See the [store implementation](../packages/subscriptions/src/root.zig) and its [SQLite build](../packages/subscriptions/build.zig).
+The kernel creates the subscription catalog in `DATA_DIR` on first use. When a listener queries or updates a subscription, `ivenna-report` opens its own connection to that catalog. This lets an independent listener publish while the kernel is stopped. See the [store implementation](../packages/subscriptions/src/root.zig) and its [SQLite build](../packages/subscriptions/build.zig).
 
 Publication and withdrawal serialize as SQLite writes. Publication copies the subscription reference and receiving focus into the report and commits it with the retry key and any cursor advance. A cursor conflict rolls back the write, leaving the key available. Retrying a committed key has no further effect while the subscription is active. Withdrawal deletes the registration, cursor, and retry keys. Previously accepted reports retain their destination. See the [catalog schema](../packages/subscriptions/src/schema.sql).
 

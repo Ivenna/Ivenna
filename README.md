@@ -21,4 +21,4 @@ Once Ivenna is ready to receive mail, follow [Corresponding with Ivenna](docs/us
 
 ## Development
 
-To build the kernel and its companion program, `ivenna-report`, follow the [development guide](docs/development.md). For package boundaries and how to validate a change, see the [architecture guide](docs/architecture.md) and the [testing guide](docs/testing.md). The [documentation index](docs/README.md) lists the operational and interface guides by task.
+To build the kernel and the subscription reporter, `ivenna-report`, follow the [build instructions](docs/development.md#repository-and-build). For package boundaries and how to validate a change, see the [architecture guide](docs/architecture.md) and the [testing guide](docs/testing.md). The [documentation index](docs/README.md) lists the operational and interface guides by task.

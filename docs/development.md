@@ -98,17 +98,17 @@ Storage failures must not silently replace history with an empty context. [Start
 
 ## Repository and build
 
-Use the Zig version in [`.zig-version`](../.zig-version). From the repository root, build the kernel and its companion CLI together.
+Use the Zig version in [`.zig-version`](../.zig-version). From the repository root, build the kernel (`ivenna`) and the subscription reporter (`ivenna-report`) together.
 
 ```sh
 zig build
 ```
 
-Both the [root build](../build.zig) and the [kernel application build](../apps/ivenna/build.zig) install `ivenna` and `ivenna-report` in `zig-out/bin`. The kernel locates the reporter beside its own executable when it sets up the host command environment. To build and test the reporter on its own, run `zig build` and `zig build test` from [apps/ivenna-report](../apps/ivenna-report). The [memory app](../apps/memory) has a Nushell entry point and a Containerfile.
+The [root build](../build.zig) and the [kernel application build](../apps/ivenna/build.zig) both install the two executables in `zig-out/bin`. From either build directory, `zig build run -- --help` displays the kernel's usage before you configure the services. To build and test just the reporter, run `zig build` and `zig build test` from [apps/ivenna-report](../apps/ivenna-report).
 
-Each application owns its entry point. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
+Each application owns its entry point. The [memory app](../apps/memory) has a Nushell entry point and a Containerfile. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
 
-The kernel executable embeds the [model-facing resources](#model-facing-resources). Rebuild it after editing code or those resources. The [local development guide](../dev/README.md) covers service preparation, running from source, and updating middleware; the [running guide](running.md#starting-the-kernel) covers starting the built executable.
+The kernel embeds its [model-facing resources](#model-facing-resources), and the reporter embeds its [command help](../apps/ivenna-report/src/help). Rebuild the corresponding executable after editing those files. For service preparation and running from source, see the [local development guide](../dev/README.md). For starting the installed kernel, see the [running guide](running.md#starting-the-kernel).
 
 ## Validation
 

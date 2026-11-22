@@ -1,69 +1,54 @@
 # Subscription listener protocol
 
-Give the listener the complete `subscription_id` returned by Ivenna's `subscribe` tool. The listener invokes `ivenna-report` with that ID to send observations to the subscribing focus. The examples use the executable path in `IVENNA_REPORT` and the kernel's data directory in `DATA_DIR`. Host commands inherit both variables. See [subscription registration](attention.md#subscriptions) and [deploying an independent listener](running.md#subscription-listeners).
+A listener uses `ivenna-report` to send observations to the focus that registered a subscription. Give the listener the complete `subscription_id` returned by `subscribe` and pass it as one argument to each command. See [subscription registration](attention.md#subscriptions).
+
+Ivenna's host commands inherit `IVENNA_REPORT`, the path to the executable, and `DATA_DIR`, the kernel's data directory. Run `"$IVENNA_REPORT" --help` for the full protocol or `"$IVENNA_REPORT" publish --help` for a single command. Help works before `DATA_DIR` is set. For an independent listener, see [deployment and configuration](running.md#subscription-listeners).
 
 ## Publish an observation
 
-Suppose a new subscription, `releases-1`, follows a release feed. Item 17 announces a stable release, v2.4.0. The listener can report the release and save its place in the feed in one write.
+Suppose a new subscription, `releases-1`, follows a release feed. Item 17 announces v2.4.0. Give the announcement a key the listener can reproduce if it retries. Include the feed position in the same request.
 
 ```sh
 subscription_id='releases-1'
-printf '%s\n' '{"key":"release-v2.4.0","text":"Stable release v2.4.0 is available","cursor":{"to":"17"}}' |
-  "$IVENNA_REPORT" publish "$subscription_id"
+printf '%s\n' '{
+  "key": "release-v2.4.0",
+  "text": "Stable release v2.4.0 is available",
+  "cursor": {"to": "17"}
+}' | "$IVENNA_REPORT" publish "$subscription_id"
 ```
 
-`publish` returns `"accepted"` once the report and any cursor change commit together, even while the kernel is stopped. The report is queued for the subscribing focus, which can wake to receive it or read it between rounds. See [subscription delivery](attention.md#subscriptions) and the [observation fields](input.md#subscription-observations).
-
-| Field | Use |
-| --- | --- |
-| `key` | Required nonempty string identifying this update within the subscription. Reuse it for retries and choose a new key for a later revision. Separate subscriptions to the same feed may use the same keys. |
-| `text` | Required nonempty string of up to 2,048 UTF-8 bytes describing what the listener observed. Include the revision, where to read more, or any gap in coverage when that matters to the focus. |
-| `source_time_unix_ms` | Optional source event time in integer milliseconds since the Unix epoch, from `0000-01-01T00:00:00.000Z` through `9999-12-31T23:59:59.000Z`. The reporter records the local receipt time. |
-| `cursor` | Optional object with the [cursor change](#resume-from-a-cursor) to commit with the report. A listener that tracks no source position can publish with just `key` and `text`. |
+The JSON receipt `"accepted"` means the reporter queued the observation and saved position `"17"` together. The listener can do this while the kernel is stopped. When the focus receives the observation, it sees the report text and the reporter's local receipt time. A listener that knows when the source event occurred can also supply `source_time_unix_ms`. See the [publish fields and limits](../apps/ivenna-report/src/help/publish.txt) and the [observation delivered to the focus](input.md#subscription-observations).
 
 ## Resume from a cursor
+
+After a restart, inspect the subscription before choosing the next feed item.
 
 ```sh
 "$IVENNA_REPORT" inspect "$subscription_id"
 ```
 
-`inspect` returns the registration and its saved source position. After the example publication, the output for a core subscription would look like this.
+After item 17, the core subscription in this example has the following registration and cursor.
 
 ```json
 {"subscription_id":"releases-1","focus_id":"core-1","listener":"Report each new stable version from the project's release feed.","cursor":"17"}
 ```
 
-A new registration has `"cursor": null`. For a withdrawn or unknown ID, `inspect` prints JSON `null` and exits successfully.
+Resume after item 17. An object with `"cursor": null` means the subscription is active and has no saved position. If the entire result is `null`, the ID is unknown or withdrawn. Both forms are successful reads. See the [inspect output](../apps/ivenna-report/src/help/inspect.txt).
 
-After a restart, the release listener reads the saved cursor `"17"` and asks the feed for later items. A replacement listener can continue on the same subscription if it understands the source position and the keys its predecessor used.
-
-Suppose item 18 is a prerelease that the listener filters out. Use `checkpoint` to record that position without sending an observation. It takes the same cursor change that `publish` accepts in its `cursor` field.
+Suppose item 18 is a prerelease that the listener filters out. Use `checkpoint` to save the new position. The `from` field carries the position just read. For a checkpoint, the cursor change is the whole request.
 
 ```sh
-printf '%s\n' '{"from":"17","to":"18"}' |
-  "$IVENNA_REPORT" checkpoint "$subscription_id"
+printf '%s\n' '{"from":"17","to":"18"}' | "$IVENNA_REPORT" checkpoint "$subscription_id"
 ```
 
-Set `to` to a string containing the new position. The reporter saves it only if `from` matches the stored cursor. Omitting `from` or passing `null` matches a cursor that has never been set. If the saved position is the empty string, pass `"from": ""`.
-
-When `from` no longer matches, a checkpoint or a new report returns `"cursor_conflict"`. A report rejected for this reason leaves its key available for retry. Read the current cursor with `inspect` and check which items still need processing. If the source can no longer replay some items, a report can identify the gap.
-
-## Withdrawal
-
-Withdrawal closes intake on that reference and releases its cursor and retry keys. Reports already accepted remain queued for their original focus until admitted. Registering the same source again gives the listener a fresh reference with its own cursor and keys.
+The position advances only if the saved cursor is still `"17"`. If another listener advanced it first, inspect the current position and work out which items still need processing. A replacement listener can use the same subscription if it understands the saved positions and the keys used for earlier publications. See the [checkpoint command](../apps/ivenna-report/src/help/checkpoint.txt).
 
 ## Command results
 
-Each write reads one JSON object from standard input. The current reporter's JSON reader limits each string to 4 MiB. Read the JSON result from standard output and check the exit status.
+For each write, read the JSON receipt from stdout and check the exit status. If the listener retries item 17 on the same active subscription after checkpointing item 18, the original key returns `"duplicate"` and the cursor stays at `"18"`. See [cursor fields, write receipts and exit statuses](../apps/ivenna-report/src/help/writes.txt).
 
-| Result | Exit | Listener action |
-| --- | --- | --- |
-| `"accepted"` | Zero | The write committed. Continue. |
-| `"duplicate"` | Zero | This subscription already accepted the key, even if the focus has since read the report. The saved cursor stays in place. |
-| `"withdrawn"` | Nonzero | The ID is unknown or the subscription has been withdrawn. Stop reporting on this reference. |
-| `"cursor_conflict"` | Nonzero | Read the saved cursor before continuing. |
-| `"busy"` | Nonzero | Retry after store contention subsides. |
-| `"storage_full"` | Nonzero | Free storage before retrying. |
-| `"invalid_request"` | Nonzero | Correct the arguments or JSON input. |
+A process or I/O failure can interrupt the receipt after a write commits. Check stderr for diagnostics. If the outcome is uncertain, retry a publication with its original key. For a checkpoint, inspect the saved cursor before deciding whether to retry.
 
-A process or I/O failure can leave the listener without a complete JSON receipt, even when the write committed. Check standard error for diagnostics. Retry an uncertain `publish` with its original key. After an uncertain `checkpoint`, use `inspect` to see whether the position changed before deciding how to continue.
+## Withdrawal
+
+Withdrawal closes intake on that ID and releases its cursor and retry keys. The focus can still receive observations accepted before withdrawal. Registering the same source again gives the listener a fresh ID with its own cursor and keys.

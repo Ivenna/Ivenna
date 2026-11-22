@@ -11,11 +11,31 @@ const Service = @import("service.zig").Service;
 
 var stopping: std.atomic.Value(bool) = .init(false);
 
-pub fn main(init: std.process.Init) !void {
-    const config = Config.load(init.environ_map) catch |err| {
-        std.log.err("invalid Ivenna configuration: {s}", .{@errorName(err)});
-        return err;
-    };
+const usage =
+    \\Usage: ivenna [--help]
+    \\
+    \\Run the Ivenna kernel. Host commands start in the current directory by default.
+    \\The kernel reads DATA_DIR and the model, mail and memory settings from the
+    \\environment. See docs/running.md in the source tree for configuration.
+    \\
+    \\  -h, --help   Show this help and exit.
+    \\
+;
+
+pub fn main(init: std.process.Init) !u8 {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1) {
+        const help = std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h");
+        if (help and args.len == 2) {
+            try std.Io.File.stdout().writeStreamingAll(init.io, usage);
+            return 0;
+        }
+        const unexpected = if (help) args[2] else args[1];
+        std.log.err("unexpected argument \"{f}\". See 'ivenna --help'.", .{std.zig.fmtString(unexpected)});
+        return 2;
+    }
+
+    const config = try Config.load(init.environ_map);
     const io = init.io;
     var service = try Service.listen(io, config.service_address);
     defer service.deinit();
@@ -111,6 +131,7 @@ pub fn main(init: std.process.Init) !void {
             std.log.info("stopping Ivenna and waiting for active work", .{});
         },
     }
+    return 0;
 }
 
 fn requestStop(_: std.posix.SIG) callconv(.c) void {
