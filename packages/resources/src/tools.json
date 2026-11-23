@@ -1,0 +1,33 @@
+[
+  {
+    "name": "touch",
+    "description": "Look at a file or directory on the host without changing it. Text returns a byte range and a next offset; images and complete files return native content; a directory lists one level.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path relative to the first configured root, or an absolute path inside any root."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Byte offset for a text range. Must be 0 for images, complete files, and directories."
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 8388608,
+          "default": 262144,
+          "description": "Maximum text bytes to return. Images, complete files, and directories ignore it."
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

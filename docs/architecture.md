@@ -17,6 +17,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [packages/responses](../packages/responses/src/root.zig) | Encode, measure, and decode model exchanges; own model HTTP transport, file uploads, and request content limits |
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, incremental interaction, process cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
+| [packages/resources](../packages/resources/src/root.zig) | Define the host resource tool and own canonical path resolution, root scope, and bounded file and directory observation |
 | [packages/subscriptions](../packages/subscriptions/src/root.zig) | Store registrations, listener progress, report keys and pending observations in SQLite |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result text, image, and file content, classify source bytes, and interpret image references |
 
@@ -32,6 +33,7 @@ flowchart TD
     App --> Responses[packages/responses]
     App --> Host[packages/host]
     App --> Memory[packages/memory]
+    App --> Resources[packages/resources]
     App --> Subscriptions[packages/subscriptions]
     Report[apps/ivenna-report] --> Subscriptions
     Agent --> Subscriptions
@@ -45,6 +47,9 @@ flowchart TD
     Memory --> Contracts
     Host --> Content[packages/content]
     Memory --> Content
+    Resources --> Contracts
+    Resources --> Content
+    Resources --> Host
     Responses --> Content
     Agent --> Content
     Contracts --> Content
@@ -71,7 +76,7 @@ Shared [communication types](../packages/agent_contracts/src/communication.zig) 
 | [HistoryStore](../packages/agent_contracts/src/history.zig) | Load and save the current checkpoint; allocate groups, discover record metadata, read and create records in batches, and maintain the selected history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure encoded requests, and prepare tool results for model input | Responses adapter |
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
-| [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host and Memory |
+| [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host, Memory, and Resources |
 
 The sending adapter resolves recipients and reports what it knows about submission through `Communication.SendResult`. Kernel renders those [sending outcomes](communication.md#sending-a-message) as tool replies. Errors that prevent the adapter from providing a defined outcome propagate to runtime supervision.
 
@@ -373,6 +378,12 @@ Transfers buffer each request and reply. Returned text, image, and file content 
 
 The handler translates selected-entry filesystem and pattern failures into tool outcomes. The adapter translates host source-file failures before transfer, while transport and protocol errors propagate to runtime supervision. The [memory interface](memory.md#results-and-errors) defines the outcomes, infrastructure failures, and uncertain effects.
 
+## Host resources
+
+[Resources](../packages/resources/src/root.zig) defines the shared `touch` capability and applies the deployment's `RESOURCE_ROOTS` scope. Startup resolves each root against the kernel's startup directory, canonicalizes it, and verifies that it is a directory; an unset or empty `RESOURCE_ROOTS` leaves the capability with no roots, so every address is outside scope. A relative address resolves against the first root; an absolute address must lie inside some root. Resolution normalizes `..`, checks the lexical candidate, resolves symbolic links, and checks the canonical path again. Directory listings stop at the shared entry limit and do not follow links for entry metadata.
+
+Files reuse [Reader](../packages/host/src/reader.zig) for complete-source classification and native media and [output.zig](../packages/host/src/output.zig) for bounded text ranges. A text range is aligned to UTF-8 boundaries; an image, PDF header, or binary range selects complete-source reading. Sources over the shared limit return the content `unavailable` diagnostic. The [host resources guide](resources.md) defines arguments, results, and errors.
+
 ## Host execution
 
 [Host](../packages/host/src/root.zig) owns a shared command registry and the operations that launch, observe, and control its processes. Each command retains its arguments and startup configuration independently of the model-round arena. [Shell](../packages/host/src/shell.zig) prepares the environment and log files, resolves the working directory, and launches a fresh shell. See the [host interface](host.md) for modes, arguments, and results.
@@ -409,7 +420,7 @@ Normal completion and timeout report cleanup failures as unavailable outcomes. E
 
 ### Output and delivery
 
-Commands write to private log files. [Reader](../packages/host/src/reader.zig) owns complete-source classification and native media; stderr uses text-only reading. [output.zig](../packages/host/src/output.zig) selects byte ranges and previews. The tool decoder validates the combined encoded budget, and internal readers use its stream allocations. Both host and memory readers use the text-prefix classifier in Content.
+Commands write to private log files. [Reader](../packages/host/src/reader.zig) owns complete-source classification and native media; stderr uses text-only reading. [output.zig](../packages/host/src/output.zig) selects byte ranges and previews. The tool decoder validates the combined encoded budget, and internal readers use its stream allocations. Host, resource, and memory reads use the text-prefix classifier in Content.
 
 Continuation calls consume shared per-stream cursors. They periodically check log-file growth and wait on the condition so completion can wake them immediately. After completion, an image or PDF header or an observed binary range triggers complete-source reading independently of the text cursor. The command's shared media flag is set only after returning native media or a complete-source diagnostic. A text-only observation leaves the allowance available so a later continuation can identify binary content and return the complete file once.
 

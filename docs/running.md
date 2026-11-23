@@ -38,12 +38,13 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
 | `DATA_DIR` | Persistent directory for the subscription database and host command output | Required |
+| `RESOURCE_ROOTS` | Colon-separated roots the `touch` tool may observe | None (`touch` reports `outside_scope`) |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it.
 
-Numeric kernel settings must be positive. Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
+Numeric kernel settings must be positive. Relative `DATA_DIR`, `MEMORY_SSH_CONFIG`, and `RESOURCE_ROOTS` paths resolve from the kernel's startup directory.
 
 ### Model requests
 
@@ -133,7 +134,7 @@ The [local development setup](../dev/README.md#configuring-memory) packages this
 
 ## Starting the kernel
 
-`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` with no arguments from the directory you want host commands to use by default.
+`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` with no arguments from the directory you want host commands and the default resource root to use.
 
 ```sh
 cd /path/to/workspace

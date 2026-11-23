@@ -162,3 +162,39 @@ pub const Engine = struct {
         return selected.toOwnedSlice(a);
     }
 };
+
+fn hasDeclaration(declarations: []const Model.Tool, name: []const u8) bool {
+    for (declarations) |declaration| if (std.mem.eql(u8, declaration.name, name)) return true;
+    return false;
+}
+
+test "shared tools are declared for both roles and activity tools only for activities" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Probes = struct {
+        fn invoke(_: *anyopaque, _: Allocator, _: Tools.Invocation, _: []const u8, _: []const u8) anyerror!?Content {
+            return null;
+        }
+
+        const shared = [_]Model.Tool{.{ .name = "shared_probe", .description = "probe", .parameters = .{ .null = {} } }};
+        const activity = [_]Model.Tool{.{ .name = "activity_probe", .description = "probe", .parameters = .{ .null = {} } }};
+    };
+    var shared_tools = [_]Tools{.{ .context = undefined, .invoke = Probes.invoke, .declarations = &Probes.shared }};
+    var activity_tools = [_]Tools{.{ .context = undefined, .invoke = Probes.invoke, .declarations = &Probes.activity }};
+    var engine: Engine = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .model = undefined,
+        .shared_tools = &shared_tools,
+        .activity_tools = &activity_tools,
+        .reasoning = .{},
+    };
+
+    const core = try engine.toolDeclarations(a, .core);
+    const activity = try engine.toolDeclarations(a, .activity);
+    try std.testing.expect(hasDeclaration(core, "shared_probe"));
+    try std.testing.expect(!hasDeclaration(core, "activity_probe"));
+    try std.testing.expect(hasDeclaration(activity, "shared_probe"));
+    try std.testing.expect(hasDeclaration(activity, "activity_probe"));
+}

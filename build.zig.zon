@@ -13,6 +13,7 @@
         .responses = .{ .path = "packages/responses" },
         .host = .{ .path = "packages/host" },
         .memory = .{ .path = "packages/memory" },
+        .resources = .{ .path = "packages/resources" },
     },
     .paths = .{
         ".zig-version",
@@ -46,6 +47,9 @@
         "packages/memory/build.zig",
         "packages/memory/build.zig.zon",
         "packages/memory/src",
+        "packages/resources/build.zig",
+        "packages/resources/build.zig.zon",
+        "packages/resources/src",
         "packages/content/build.zig",
         "packages/content/build.zig.zon",
         "packages/content/src",

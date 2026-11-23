@@ -18,6 +18,7 @@ pub const Config = struct {
     max_sessions: usize,
     max_pending_events: usize,
     max_host_commands: usize,
+    resource_roots: ?[]const u8,
     context_limits: agent.Kernel.Limits,
     llm_base_url: []const u8,
     llm_api_key: []const u8,
@@ -51,6 +52,7 @@ pub const Config = struct {
             .max_sessions = try number(usize, env, "MAX_SESSIONS", 128),
             .max_pending_events = try number(usize, env, "MAX_PENDING_EVENTS", 64),
             .max_host_commands = try number(usize, env, "MAX_HOST_COMMANDS", 8),
+            .resource_roots = env.get("RESOURCE_ROOTS"),
             .context_limits = .{
                 .request_bytes = try number(u64, env, "CONTEXT_REQUEST_BYTES", default_limits.request_bytes),
                 .compaction_bytes = try number(u64, env, "CONTEXT_COMPACTION_BYTES", default_limits.compaction_bytes),

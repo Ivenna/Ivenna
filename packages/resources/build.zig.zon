@@ -1,0 +1,12 @@
+.{
+    .name = .resources,
+    .fingerprint = 0xef66ebae0be8b7a5,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .agent_contracts = .{ .path = "../agent_contracts" },
+        .content = .{ .path = "../content" },
+        .host = .{ .path = "../host" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

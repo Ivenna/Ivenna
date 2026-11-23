@@ -30,4 +30,5 @@ Choose a guide for your task:
 | Write a listener that reports observations and resumes from a saved cursor | [Subscription listener protocol](subscriptions.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |
 | Run commands and interact with host processes | [Host shell](host.md) |
+| Observe host files and directories within configured roots | [Host resources](resources.md) |
 | Interpret text, images, files, and omitted content | [Tool content](content.md) |

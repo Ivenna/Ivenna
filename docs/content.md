@@ -1,6 +1,6 @@
 # Tool content
 
-Memory reads and host tool results combine an operation description with text, image, or file content. This guide defines shared classification, image references, omission diagnostics, and model-request limits. The [memory](memory.md) and [host](host.md) guides define each tool's arguments, source fields, and continuation rules; the [input contract](input.md#retained-records) covers observations delivered as events.
+Memory reads, resource reads, and host tool results combine an operation description with text, image, or file content. This guide defines shared classification, image references, omission diagnostics, and model-request limits. The [memory](memory.md) and [host](host.md) guides define each tool's arguments, source fields, and continuation rules; the [input contract](input.md#retained-records) covers observations delivered as events.
 
 ## Automatic classification
 
@@ -33,7 +33,7 @@ Recognized images and files retain their native representation, and empty output
 
 ## Content and results
 
-A tool result contains text describing the operation and its source. Images and complete files add a native content part alongside that description. Memory results identify the entry address; host results preserve command state and log paths, including on nonzero exits and timeouts.
+A tool result contains text describing the operation and its source. Images and complete files add a native content part alongside that description. Memory results identify the entry address, resource results identify the canonical host path, and host results preserve command state and log paths, including on nonzero exits and timeouts.
 
 Media descriptions accompany their native content:
 

@@ -5,6 +5,7 @@ const email = @import("email");
 const responses = @import("responses");
 const host = @import("host");
 const memory = @import("memory");
+const resources = @import("resources");
 const subscriptions = @import("subscriptions");
 const Config = @import("config.zig").Config;
 const Service = @import("service.zig").Service;
@@ -74,7 +75,8 @@ pub fn main(init: std.process.Init) !u8 {
         .max_output_tokens = config.llm_max_output_tokens,
         .request_timeout_ms = config.llm_request_timeout_ms,
     };
-    const shared_tools = [_]contracts.Tools{try memory_client.tools(a)};
+    var resource_tools = try resources.Resources.init(io, a, host_directory, config.resource_roots);
+    const shared_tools = [_]contracts.Tools{ try memory_client.tools(a), try resource_tools.tools(a) };
     const activity_tools = [_]contracts.Tools{try host_tools.tools(a)};
     var engine: agent.Engine = .{
         .allocator = init.gpa,

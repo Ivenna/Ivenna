@@ -11,6 +11,10 @@ const Reference = contracts.Reference;
 const finished_command_cache = 8;
 const max_input_characters = 4096;
 
+/// Shared source reading and range selection used by host output and resource reads.
+pub const Reader = @import("reader.zig").Reader;
+pub const output = @import("output.zig");
+
 /// One process registry serves completed calls and background commands.
 pub const Host = struct {
     allocator: Allocator,
