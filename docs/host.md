@@ -16,9 +16,9 @@ Call `run_host_shell` to start a command:
 {"name":"build","command":"make -j4","cwd":"/path/to/project"}
 ```
 
-`yield_ms` bounds how long this call waits for completion: it defaults to `10000` milliseconds, and `0` returns an immediate observation. Returning from the wait leaves unfinished execution running. `timeout_ms` separately limits how long the command may execute before it is stopped.
+`yield_ms` controls how long the caller waits. A command can keep running after the call returns. Set `timeout_ms` to limit its execution time.
 
-If execution and cleanup finish within the wait, the call returns the final outcome with a complete-source output preview. Otherwise it returns a complete `command_id` for interaction and a `callback_id` for one completion observation bound to the calling activity. Both use the supplied name as their prefix and have independently assigned numeric suffixes. The activity can continue reasoning without polling for completion. A returned `callback_id` confirms that registration even if the command has finished by the time its result snapshot is taken.
+If execution and cleanup finish within the wait, the call returns the outcome and an output preview. Otherwise it returns a `command_id` for further interaction and a `callback_id` for the completion observation. Both IDs use the supplied name and have independently assigned numeric suffixes. The calling activity will receive the observation even if the command has already finished by the time the call returns.
 
 The tool wait retains the current activation and context while the core and other activities continue. After the complete model/tool round, the next inference receives the tool reply together with newly admitted observations.
 
@@ -32,12 +32,11 @@ The tool wait retains the current activation and context while the core and othe
 | `mode` | `batch` (default), `pipe`, or `terminal`; see [input modes](#input-modes) |
 | `yield_ms` | This call's wait for completion in milliseconds, from `0` through `4294967295`; omit for `10000`, or use `0` to observe immediately |
 | `timeout_ms` | Optional positive execution deadline in milliseconds, up to `4294967295`; omitted means no execution deadline |
-| `max_output_bytes` | Combined encoded stdout/stderr preview budget, from `512` through `16384` bytes; defaults to `16384`; result metadata and log paths are additional |
-| `interpretation` | Optional `"image_url"` for presenting complete stdout as an [image reference](content.md#image-url-references) once the command has finished |
+| `max_output_bytes` | Combined encoded stdout/stderr preview budget in bytes. Defaults to `4096` and accepts `512` through `16384`. Result metadata and log references are additional. |
 
 Names must contain 1–32 Unicode code points and no ASCII control characters; spaces alone are not accepted.
 
-Each command starts a fresh shell. The kernel treats `cwd` as a literal path. Inside `command`, the shell expands expressions and resolves relative paths from its current directory. A shell running in an interactive [input mode](#input-modes) can retain directory and environment changes across calls.
+Each command starts a fresh shell. The `cwd` and `shell` arguments accept literal paths or local `file://` URIs. Inside `command`, the shell expands expressions and resolves relative paths from its current directory. A shell running in an interactive [input mode](#input-modes) can retain directory and environment changes across calls.
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 
@@ -63,9 +62,9 @@ A terminal starts with 24 rows and 80 columns and can be resized. The tool retur
 
 Use the complete `command_id` returned by a yielded `run_host_shell` call or listed by `inspect_host_shell`. Commands are discoverable across activities, including while the starting activity is still waiting in `run_host_shell`. Input and control do not wait for another observation call's yield deadline.
 
-Call `inspect_host_shell` with `{}` to inspect the default `shell`, startup `cwd`, and the first page of `commands`, or pass `{"command_id":"build-17"}` to select one. Entries include `command_id`, originating `focus_id`, `command_preview` (up to 160 UTF-8 bytes), `state`, `mode`, `stdin_open`, and `input_pending`.
+Call `inspect_host_shell` with `{}` to list commands. The first unfiltered page also gives the default `shell` and startup `cwd`. To inspect one command, pass its ID, for example `{"command_id":"build-17"}`. Each entry in `commands` includes the `command_id`, originating `focus_id`, a `command_preview`, `state`, `mode`, `stdin_open`, and `input_pending`.
 
-The complete inspection reply fits 32 KiB. `offset` defaults to `0`; the result supplies that offset, `total_commands`, and `next_offset`. Pass a non-null `next_offset` as the next call's `offset` to read further entries. At the end, `next_offset` is `null`. An offset beyond the list returns no commands. An exact `command_id` filter applies before pagination. Pages follow the current registry order, which can change as commands retire.
+The result includes the requested `offset` (zero by default) and the number of matching commands in `total_commands`. Pass `next_offset` as the next call's `offset` to read another page. A null `next_offset` marks the end. An offset beyond the list returns no commands. Pages reflect the current registry order, which can change as commands retire.
 
 Call `continue_host_shell` with the selected `command_id`. Omit `action` to read more output:
 
@@ -92,22 +91,20 @@ Interrupt targets the terminal's foreground group, or the command's process grou
 
 ## Output and results
 
-Command observations report the process state and identify its output logs. Nonzero exits, signals, execution timeouts, and an OS failure to start a command are ordinary outcomes.
+Command observations report the process state and any output available in this observation. Nonzero exits, signals, execution timeouts, and an OS failure to start a command are ordinary outcomes.
 
 | Result field | Meaning |
 | --- | --- |
 | `command_id` | Host command identity, returned for a handoff or continuation; usable as a handle only in its originating runtime while retained |
 | `callback_id` | Reference for the completion observation arranged by the initial call |
 | `state.running` | The command is still running |
-| `state.finished` | The final outcome: `completed` with an exit code or other OS termination status, `timed_out`, or `not_started` with a reason |
+| `state.finished` | `completed` with an OS termination status (for example, `{"completed":{"exited":7}}`), `timed_out`, or `not_started` with a reason |
 | `state.unavailable` | The host could not establish a complete outcome; `reason` describes the failure |
 | `elapsed_ms` | Monotonic elapsed time, fixed when Host observes the process outcome |
 | `mode` | The selected `batch`, `pipe`, or `terminal` mode |
 | `stdin` | Whether input is `open`, whether a write is `pending`, and an optional `error` |
-| `stdout`, `stderr` | Each stream identifies its log by host `path` and absolute file `uri`. Successful collection adds `byte_length`, a `content` description, and a `range` for incremental reads. |
-| `output_error` | Reason output collection failed during handoff or callback handling. The result still reports the process state and log references. |
-
-Either focus can pass a log's `uri` to `read_resource` to read beyond the preview, including after the command handle expires. This read leaves the command's output cursor in place. Use the log's `path` in a shell command or as `remember.content.file.path` to copy its bytes into memory. See [local resource reads](resources.md#local-files-and-directories) and [recording a memory](memory.md#recording).
+| `stdout`, `stderr` | A string when the whole log so far fits as text. Partial text and binary output carry the full log's `path` and current `byte_length`. A stream with no new bytes is omitted. |
+| `output_error` | Reason output collection failed. Each stream then supplies its log `path` alongside the observed process state. |
 
 This pipe command printed `ready` before its initial wait expired.
 
@@ -120,47 +117,24 @@ This pipe command printed `ready` before its initial wait expired.
     "elapsed_ms": 10002,
     "mode": "pipe",
     "stdin": {"open": true, "pending": false},
-    "stdout": {
-      "path": "/path/to/instance/data/host/2/example.stdout.log",
-      "uri": "file:///path/to/instance/data/host/2/example.stdout.log",
-      "byte_length": 6,
-      "range": {"offset": 0, "next_offset": 6},
-      "content": {"text": {"text": "ready\n", "truncated": false}}
-    },
-    "stderr": {
-      "path": "/path/to/instance/data/host/2/example.stderr.log",
-      "uri": "file:///path/to/instance/data/host/2/example.stderr.log",
-      "byte_length": 0,
-      "range": {"offset": 0, "next_offset": 0},
-      "content": {"text": {"text": "", "truncated": false}}
-    }
+    "stdout": "ready\n"
   }
 }
 ```
 
-Calls to `continue_host_shell` share one cursor per stream across activities. Each stream's `range` gives the byte `offset` before collection and `next_offset` afterward. Text reads return consecutive UTF-8 content; `truncated: true` means source bytes remain beyond the cursor. Each preview fits its share of the combined encoded budget and at most 2000 source lines. JSON escaping can reduce the text that fits.
+The portion of the log you see depends on how you observe the command.
 
-The initial `run_host_shell` handoff has an independent prefix preview starting at byte `0`. It neither waits for another activity's output read nor advances the shared continuation cursors. A later continue call can therefore repeat output shown in that initial preview.
+| Observation | Output |
+| --- | --- |
+| Initial call with a `callback_id` | Reads from byte zero independently of other activities. A later continuation can show the same bytes. |
+| `continue_host_shell` | Reads forward from one shared cursor per stream. A read by one activity advances the cursor for all activities. |
+| Direct final result or completion callback | Shows the beginning and end of long text with an omitted-byte count, independently of the cursors. The callback identifies the command in `source.host.command_id`. See [callback observations](input.md#focus-messages-and-callbacks). |
 
-When `run_host_shell` returns the final result directly, it supplies a complete-source preview without `command_id` or incremental ranges, independently of output another activity may have read. A large text preview includes the source's beginning and end with an omitted-byte count. For example, exit code `7` appears as `"state":{"finished":{"completed":{"exited":7}}}`.
+On the initial handoff and on continuations, a log object gives the byte `range` read, from `offset` up to but excluding `next_offset`. A text `preview` contains the characters in that range. Binary output omits the preview. Each stream's preview fits its share of `max_output_bytes` after JSON escaping.
 
-Completed stdout can return an image or complete file under the shared [content rules and limits](content.md). Native content is additional to the `max_output_bytes` text budget. Running output and stderr remain text or unavailable-content diagnostics. Use `batch` or `pipe` to preserve file bytes; for example:
+The core or an activity can open a log by its returned `path`, even after the command handle expires. Reading the file leaves the command's cursors in place. A `path` or `cwd` containing non-UTF-8 bytes is returned as a local file URI.
 
-```json
-{"name":"report","command":"cat /path/to/report.pdf"}
-```
-
-To present complete stdout text as an image URL instead, set `interpretation: "image_url"`:
-
-```json
-{"name":"image-reference","command":"printf '%s' 'https://example.com/image.png'","interpretation":"image_url"}
-```
-
-After completion, `continue_host_shell` can return a retained command's complete native stdout once, independently of text already read. Earlier text-only observations do not prevent a later read from supplying the whole file when it encounters binary content. A native result or complete-source diagnostic has no stdout `range` and advances the shared cursor to the end. If the command has already finished at its initial handoff, that result can contain native media and a continuation can still return it.
-
-A completion callback identifies the command in `source.host.command_id`. Its `text` gives the outcome, log references, and a preview or diagnostic for the complete output. An image or file that would accompany a direct result appears here as a description with the marker `media_omission: "asynchronous_media_unavailable"`. The callback leaves the continuation cursors in place. Any unread native content is still available through `continue_host_shell` while the handle is retained. See [callback observations](input.md#focus-messages-and-callbacks).
-
-For incremental `content.unavailable`, its `byte_length` describes the unsupported range. The stream's `byte_length` describes the entire log snapshot. Without a range, the diagnostic concerns the complete source.
+To open a generated PDF, pass the log's `path` to `read_resource` as `location` with `"view":"file"`. To keep it in memory, pass the same path to `remember.content.file.path`. If you need a file even when output is short or empty, redirect the command to a named file, for example `generate-report > report.txt`. See [local reads](resources.md#local-files-and-directories) and [recording a memory](memory.md#recording).
 
 ## Command lifetimes
 

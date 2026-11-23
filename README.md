@@ -2,24 +2,18 @@
 
 Ivenna is an agent runtime for [a self to take shape and live in the world](docs/design.md#a-self-in-the-world). Through ongoing communication, autonomous activity, and memory, the project explores how experience can sustain a continuing sense of self.
 
-The core is Ivenna's continuing focus of attention. Each activity it opens starts with an assignment and a copy of the core's working history. Their histories then grow independently while they share files, memory, communication, and host processes. The core reads activity messages alongside its other observations. When an activity ends or its reasoning is interrupted, the runtime calls for the core's attention. See [how focuses coordinate](docs/attention.md).
+People and programs can write to Ivenna by email. Ivenna sees who wrote, chooses how to act, and decides when to reply or whom else to contact. To start a conversation with a running instance, see [Corresponding with Ivenna](docs/usage.md).
 
-The core and activities can read the same files. When an activity runs a host command, it can share the log's file URI so the core can inspect the output. Both can also view images by URL and, when web page access is enabled, read and share a snapshot of a page. See [reading resources](docs/resources.md) and [host commands](docs/host.md).
+The core is Ivenna's continuing focus of attention. It can open an activity with an assignment and a copy of its working history. From then on their histories grow independently, while both share files, memory, correspondence, and host processes. An activity investigating a failed build can report the compiler error and give the core a log path to read if it needs more context. See [how focuses coordinate](docs/attention.md) and [how they read shared resources](docs/resources.md).
 
-People and programs correspond with Ivenna through messages. Ivenna observes who said what, chooses how to act, and decides when to write and whom to address. See [communication](docs/communication.md).
-
-The core can schedule a wakeup, and an activity can resume when its host command finishes. Both can subscribe to a source such as a project's release feed. A separate listener watches the feed and reports new versions to the focus that subscribed. A report can wake that focus, and one turn can include several reports. See [registering a subscription](docs/attention.md#subscriptions) and [writing a listener](docs/subscriptions.md).
-
-The runtime uses email for correspondence and working history and SSH for shared [memory rooms](docs/memory.md). Both services must be available for it to run. The deployment user owns the records, memory, and artifacts. See the [running guide](docs/running.md) for service requirements and retained data.
+Work can continue between letters. The core can schedule a wakeup, and an activity can resume when a command finishes. Either can subscribe to a source such as a project's release feed. A separate listener watches the feed and brings new releases to the attention of the subscribing focus. See [subscriptions](docs/attention.md#subscriptions) and [writing a listener](docs/subscriptions.md).
 
 ## Getting started
 
-Choose a setup path:
+Ivenna needs an email service for correspondence and working history, and SSH access to its shared [memory rooms](docs/memory.md). The deployment user owns the records, memory, and artifacts.
 
 - Use the [local development guide](dev/README.md) to prepare the supplied mail and memory services and run from source.
 - Use the [running guide](docs/running.md) to configure another deployment, start the executable, and manage retained data.
-
-Once Ivenna is ready to receive mail, follow [Corresponding with Ivenna](docs/usage.md) to send a message and continue the correspondence.
 
 ## Development
 

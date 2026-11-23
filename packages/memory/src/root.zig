@@ -4,6 +4,7 @@ const content = @import("content");
 const Allocator = std.mem.Allocator;
 const Tools = @import("agent_contracts").Tools;
 const Model = @import("agent_contracts").Model;
+const JsonString = @import("agent_contracts").JsonString;
 const Value = std.json.Value;
 const Content = content.Content;
 const Interpretation = content.Interpretation;
@@ -37,55 +38,55 @@ pub const Memory = struct {
     pub const Request = union(enum) {
         inspect_memory_space: struct {},
         visit_memory_room: struct {
-            address: []const u8 = ".",
+            address: JsonString = .{ .bytes = "." },
             recursive_size: bool = false,
             offset: u32 = 0,
             max_results: u16 = 100,
         },
         find_memory: struct {
-            query: []const u8,
-            room: ?[]const u8 = null,
+            query: JsonString,
+            room: ?JsonString = null,
             match_mode: ?enum { literal, glob, regex } = null,
             case_sensitive: ?bool = null,
             offset: u32 = 0,
             max_results: u16 = 100,
         },
         recall_memory: struct {
-            clue: []const u8,
-            room: ?[]const u8 = null,
+            clue: JsonString,
+            room: ?JsonString = null,
             match_mode: ?MatchMode = null,
             case_sensitive: ?bool = null,
             offset: u32 = 0,
             max_results: u16 = 100,
         },
         read_memory: struct {
-            address: []const u8,
+            address: JsonString,
             interpretation: ?Interpretation = null,
             offset: u64 = 0,
             max_bytes: u32 = text_page_limit,
         },
         remember: struct {
-            address: []const u8,
+            address: JsonString,
             content: union(enum) {
-                text: []const u8,
-                file: struct { path: []const u8 },
+                text: JsonString,
+                file: struct { path: @import("agent_contracts").LocalPath.Argument },
             },
             mode: ?enum { create, append, replace } = null,
         },
         revise_memory: struct {
-            address: []const u8,
-            old_text: []const u8,
-            new_text: []const u8,
+            address: JsonString,
+            old_text: JsonString,
+            new_text: JsonString,
             replace_all: ?bool = null,
             match_mode: ?MatchMode = null,
         },
-        create_memory_room: struct { address: []const u8 },
+        create_memory_room: struct { address: JsonString },
         move_memory: struct {
-            address: []const u8,
-            destination: []const u8,
+            address: JsonString,
+            destination: JsonString,
         },
         forget_memory: struct {
-            address: []const u8,
+            address: JsonString,
             recursive: ?bool = null,
         },
 
@@ -97,11 +98,6 @@ pub const Memory = struct {
                     else => return error.InvalidToolArguments,
                 }),
             };
-            if (request == .remember and request.remember.content == .file) {
-                const path = request.remember.content.file.path;
-                if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
-                    return error.InvalidToolArguments;
-            }
             switch (request) {
                 .visit_memory_room => |args| if (args.max_results == 0 or args.max_results > 1000) {
                     return error.InvalidToolArguments;
@@ -134,12 +130,19 @@ pub const Memory = struct {
         defer arena.deinit();
         const scratch = arena.allocator();
         var remote_request = request;
-        if (remote_request == .read_memory and remote_request.read_memory.interpretation != null)
-            remote_request.read_memory.max_bytes = content.reference_size_limit;
+        if (remote_request == .read_memory) {
+            const args = &remote_request.read_memory;
+            const before: u32 = @intCast(@min(3, args.offset));
+            args.offset -= before;
+            args.max_bytes = if (args.interpretation != null) content.reference_size_limit else args.max_bytes + before;
+        }
         var reply = try self.exchange(scratch, remote_request);
         if (request == .read_memory and reply == .result) {
             var read = try Read.parse(scratch, reply.result, remote_request.read_memory);
-            if (read.completeRequest(remote_request.read_memory)) |complete| {
+            // The SSH window may begin up to three bytes before the requested
+            // offset, so the handler can succeed just beyond the entry's end.
+            if (request.read_memory.offset > read.byte_length) return offsetBeyondEnd(allocator);
+            if (read.completeRequest(request.read_memory)) |complete| {
                 // A page can reveal binary after an earlier text prefix. Fetch
                 // from byte zero and classify this new snapshot independently.
                 remote_request.read_memory = complete;
@@ -175,19 +178,17 @@ pub const Memory = struct {
         // bytes rather than a host path. Missing modes retain remote defaults.
         const payload = switch (request) {
             .remember => |args| blk: {
-                const bytes = switch (args.content) {
-                    .text => |text| text,
-                    .file => |source| readSourceFile(self.io, scratch, source.path) catch |err| switch (err) {
-                        error.Canceled, error.OutOfMemory => return err,
-                        error.StreamTooLong => return .{ .@"error" = .{ .code = "entry_too_large", .message = "A memory write can transfer at most 33554432 bytes (32 MiB). No write was sent." } },
-                        else => return .{ .@"error" = .{
-                            .code = "source_unavailable",
-                            .message = try std.fmt.allocPrint(scratch, "Could not read host file '{s}': {s}. This write was not sent to memory.", .{ source.path, @errorName(err) }),
-                        } },
-                    },
+                const bytes = (switch (args.content) {
+                    .text => |text| if (text.bytes.len <= entry_size_limit) text.bytes else error.StreamTooLong,
+                    .file => |source| readSourceFile(self.io, scratch, source.path.bytes),
+                }) catch |err| switch (err) {
+                    error.Canceled, error.OutOfMemory => return err,
+                    error.StreamTooLong => return .{ .@"error" = .{ .code = "entry_too_large", .message = "A memory write can transfer at most 33554432 bytes (32 MiB). No write was sent." } },
+                    else => return .{ .@"error" = .{
+                        .code = "source_unavailable",
+                        .message = try scratch.print("Could not read the host file ({s}). No memory write was sent.", .{@errorName(err)}),
+                    } },
                 };
-                if (bytes.len > entry_size_limit)
-                    return .{ .@"error" = .{ .code = "entry_too_large", .message = "A memory write can transfer at most 33554432 bytes (32 MiB). No write was sent." } };
                 const encoder = std.base64.standard.Encoder;
                 const data = try scratch.alloc(u8, encoder.calcSize(bytes.len));
                 _ = encoder.encode(data, bytes);
@@ -287,18 +288,18 @@ const Read = struct {
     offset: u64,
 
     fn parse(a: Allocator, value: Value, args: @FieldType(Memory.Request, "read_memory")) !Read {
-        const Encoded = struct { address: []const u8, data: []const u8, header: []const u8, byte_length: u64, offset: u64 };
+        const Encoded = struct { address: JsonString, data: JsonString, header: JsonString, byte_length: u64, offset: u64 };
         const encoded = std.json.parseFromValueLeaky(Encoded, a, value, .{}) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.InvalidMemoryReply,
         };
         if (encoded.offset != args.offset or encoded.offset > encoded.byte_length) return error.InvalidMemoryReply;
         const expected = @min(args.max_bytes, encoded.byte_length - encoded.offset);
-        const bytes = try decode(a, encoded.data, expected);
-        const header = try decode(a, encoded.header, @min(32, encoded.byte_length));
+        const bytes = try decode(a, encoded.data.bytes, expected);
+        const header = try decode(a, encoded.header.bytes, @min(32, encoded.byte_length));
         if (encoded.offset == 0 and !std.mem.eql(u8, bytes[0..@min(header.len, bytes.len)], header[0..@min(header.len, bytes.len)]))
             return error.InvalidMemoryReply;
-        return .{ .address = encoded.address, .bytes = bytes, .header = header, .byte_length = encoded.byte_length, .offset = encoded.offset };
+        return .{ .address = encoded.address.bytes, .bytes = bytes, .header = header, .byte_length = encoded.byte_length, .offset = encoded.offset };
     }
 
     fn decode(a: Allocator, data: []const u8, expected: u64) ![]const u8 {
@@ -310,14 +311,18 @@ const Read = struct {
         return bytes;
     }
 
-    fn needsCompleteSource(self: Read) bool {
+    fn needsCompleteSource(self: Read, requested_offset: u64) bool {
+        // Validate a leading continuation from its code point's start. An
+        // offset inside valid text is a range error; malformed bytes are binary.
+        var start: usize = if (self.offset == 0) 0 else @intCast(requested_offset - self.offset);
+        while (start > 0 and start < self.bytes.len and self.bytes[start] & 0xc0 == 0x80) start -= 1;
         return content.requiresCompleteSource(self.header, self.header.len == self.byte_length) or
-            content.requiresCompleteSource(self.bytes, self.offset + self.bytes.len == self.byte_length);
+            content.textPrefixLength(self.bytes[start..], self.offset + self.bytes.len < self.byte_length) == null;
     }
 
     fn completeRequest(self: Read, args: @FieldType(Memory.Request, "read_memory")) ?@FieldType(Memory.Request, "read_memory") {
-        if (!self.needsCompleteSource() or self.byte_length > entry_size_limit or
-            (self.offset == 0 and self.bytes.len == self.byte_length)) return null;
+        if (self.byte_length > entry_size_limit or
+            (self.offset == 0 and self.bytes.len == self.byte_length) or !self.needsCompleteSource(args.offset)) return null;
         var complete = args;
         complete.offset = 0;
         complete.max_bytes = entry_size_limit;
@@ -325,7 +330,7 @@ const Read = struct {
     }
 
     fn render(self: Read, a: Allocator, args: @FieldType(Memory.Request, "read_memory")) !Content {
-        if (self.needsCompleteSource()) {
+        if (self.needsCompleteSource(args.offset)) {
             const image = content.detectFormat(self.header) != null;
             const limit: u64 = if (image) content.image_size_limit else content.file_size_limit;
             if (self.byte_length > limit)
@@ -337,8 +342,7 @@ const Read = struct {
                 return self.unavailable(a, .reference_too_large);
             return self.classified(a, content.interpret(self.bytes, args.interpretation));
         }
-        if (args.offset > self.byte_length)
-            return toolError(a, "invalid_range", "The byte offset is beyond the end of this entry.");
+        if (args.offset > self.byte_length) return offsetBeyondEnd(a);
         const bytes = self.bytes[@intCast(args.offset - self.offset)..];
         if (args.offset != 0 and bytes.len > 0 and bytes[0] & 0xc0 == 0x80)
             return toolError(a, "invalid_range", "The byte offset is inside a UTF-8 character. Resume with a next_offset returned by read_memory.");
@@ -369,26 +373,21 @@ const Read = struct {
     fn classified(self: Read, a: Allocator, value: content.Classified) !Content {
         return switch (value) {
             .text => |text| Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = self.address, .content = text, .byte_length = self.byte_length, .offset = self.offset, .next_offset = @as(?u64, null) } }, .{})),
-            .image => |raw_image| blk: {
-                const image: content.ImageContent = switch (raw_image) {
-                    .data => |data| .{ .data = .{ .format = data.format, .bytes = try a.dupe(u8, data.bytes) } },
-                    .url => |url| .{ .url = try a.dupe(u8, url) },
-                };
-                break :blk Content.fromParts(a, &.{
-                    .{ .text = try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = self.address, .content = .{ .image = image.describe() }, .byte_length = self.byte_length } }, .{}) },
-                    .{ .image = image },
-                });
+            .image => |image| switch (image) {
+                .data => |data| self.attachment(a, .image, data.format, .{ .image = .{ .data = .{
+                    .format = data.format,
+                    .bytes = try a.dupe(u8, data.bytes),
+                } } }),
+                .url => |url| self.attachment(a, .image_url, null, .{ .image = .{ .url = try a.dupe(u8, url) } }),
             },
-            .file => |raw_file| blk: {
-                const file: content.File = .{
-                    .bytes = try a.dupe(u8, raw_file.bytes),
-                };
-                break :blk Content.fromParts(a, &.{
-                    .{ .text = try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = self.address, .content = .{ .file = file.describe() }, .byte_length = self.byte_length } }, .{}) },
-                    .{ .file = file },
-                });
-            },
+            .file => |file| self.attachment(a, .file, null, .{ .file = .{ .bytes = try a.dupe(u8, file.bytes) } }),
         };
+    }
+
+    fn attachment(self: Read, a: Allocator, kind: enum { image, image_url, file }, format: ?content.Image.Format, part: Content.Part) !Content {
+        const source = .{ .address = self.address, .kind = kind, .format = format, .byte_length = self.byte_length };
+        const text = try std.json.Stringify.valueAlloc(a, .{ .result = source }, .{ .emit_null_optional_fields = false });
+        return Content.fromParts(a, &.{ .{ .text = text }, part });
     }
 };
 
@@ -396,11 +395,15 @@ fn toolError(a: Allocator, code: []const u8, message: []const u8) !Content {
     return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .code = code, .message = message } }, .{}));
 }
 
+fn offsetBeyondEnd(a: Allocator) !Content {
+    return toolError(a, "invalid_range", "The byte offset is beyond the end of this entry.");
+}
+
 fn readSourceFile(io: std.Io, a: Allocator, path: []const u8) ![]const u8 {
-    const stat = try std.Io.Dir.cwd().statFile(io, path, .{});
-    if (stat.kind != .file) return error.NotRegularFile;
-    if (stat.size > entry_size_limit) return error.StreamTooLong;
-    return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(entry_size_limit + 1));
+    const source = try content.LocalFile.open(io, path);
+    defer source.file.close(io);
+    if (source.size > entry_size_limit) return error.StreamTooLong;
+    return source.readAll(io, a, entry_size_limit);
 }
 
 fn waitForChild(child: *std.process.Child, io: std.Io) std.process.Child.WaitError!std.process.Child.Term {
@@ -416,6 +419,29 @@ fn waitForDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) std.Io.Cancelab
 fn writeRequest(io: std.Io, file: std.Io.File, payload: []const u8) std.Io.File.Writer.Error!void {
     defer file.close(io);
     try file.writeStreamingAll(io, payload);
+}
+
+test "remember accepts a host file reference and requires a string for inline text" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try t.expectError(error.InvalidToolArguments, Memory.Request.parse(a, "remember",
+        \\{"address":"m","content":{"text":[255,0]}}
+    ));
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = "\xff\x00binary";
+    const name = "report-\xff";
+    try tmp.dir.writeFile(t.io, .{ .sub_path = name, .data = source });
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(t.io, &path_buffer);
+    const path = try std.fs.path.join(a, &.{ path_buffer[0..length], name });
+    const reference = try @import("agent_contracts").LocalPath.reference(a, path);
+    const argument = try std.json.Stringify.valueAlloc(a, .{ .address = "m", .content = .{ .file = .{ .path = reference } } }, .{});
+    const file = (try Memory.Request.parse(a, "remember", argument)).?.remember.content.file;
+    try t.expectEqualSlices(u8, source, try readSourceFile(t.io, a, file.path.bytes));
 }
 
 test "memory supplies complete opaque files with owned bytes" {
@@ -436,18 +462,23 @@ test "memory supplies complete opaque files with owned bytes" {
         _ = encoder.encode(header_data, header);
         const json = try std.json.Stringify.valueAlloc(temporary, .{ .address = "files/original", .data = data, .header = header_data, .byte_length = bytes.len, .offset = 0 }, .{});
         const encoded = try std.json.parseFromSliceLeaky(Value, temporary, json, .{});
-        const read = try Read.parse(temporary, encoded, .{ .address = "files/original", .max_bytes = entry_size_limit });
-        const result = try read.render(a, .{ .address = read.address, .max_bytes = 4 });
+        const read = try Read.parse(temporary, encoded, .{ .address = .{ .bytes = "files/original" }, .max_bytes = entry_size_limit });
+        const result = try read.render(a, .{ .address = .{ .bytes = read.address }, .max_bytes = 4 });
         @memset(bytes, 0);
         @memset(@constCast(read.bytes), 0);
         scratch.deinit();
         try std.testing.expectEqual(@as(usize, 2), result.parts.len);
+        const description = (try std.json.parseFromSliceLeaky(Value, a, result.parts[0].text, .{})).object.get("result").?.object;
+        try std.testing.expectEqualStrings("file", description.get("kind").?.string);
+        try std.testing.expectEqual(@as(i64, @intCast(source.len)), description.get("byte_length").?.integer);
         const file = result.parts[1].file;
         try std.testing.expectEqualSlices(u8, source, file.bytes);
         try std.testing.expectEqual(null, file.reference);
     }
     const incomplete = try std.json.parseFromSliceLeaky(Value, a, "{\"address\":\"files/partial\",\"data\":\"JVBERg==\",\"header\":\"JVBERi0xLjc=\",\"byte_length\":8,\"offset\":0}", .{});
-    try std.testing.expectError(error.InvalidMemoryReply, Read.parse(a, incomplete, .{ .address = "files/partial", .max_bytes = entry_size_limit }));
+    try std.testing.expectError(error.InvalidMemoryReply, Read.parse(a, incomplete, .{ .address = .{ .bytes = "files/partial" }, .max_bytes = entry_size_limit }));
+    const invalid_data = try std.json.parseFromSliceLeaky(Value, a, "{\"address\":\"files/binary\",\"data\":[47,119,61,61],\"header\":\"/w==\",\"byte_length\":1,\"offset\":0}", .{});
+    try std.testing.expectError(error.InvalidMemoryReply, Read.parse(a, invalid_data, .{ .address = .{ .bytes = "files/binary" } }));
 
     var header: [32]u8 = @splat('a');
     @memcpy(header[0..8], "%PDF-1.7");
@@ -455,7 +486,7 @@ test "memory supplies complete opaque files with owned bytes" {
     const header_data = try a.alloc(u8, encoder.calcSize(header.len));
     _ = encoder.encode(header_data, &header);
     const oversized_reply = try std.json.Stringify.valueAlloc(a, .{ .address = "files/large", .data = "JVBERg==", .header = header_data, .byte_length = content.file_size_limit + 1, .offset = 0 }, .{});
-    const oversized_args: @FieldType(Memory.Request, "read_memory") = .{ .address = "files/large", .max_bytes = 4 };
+    const oversized_args: @FieldType(Memory.Request, "read_memory") = .{ .address = .{ .bytes = "files/large" }, .max_bytes = 4 };
     const oversized = try Read.parse(a, try std.json.parseFromSliceLeaky(Value, a, oversized_reply, .{}), oversized_args);
     try std.testing.expectEqual(null, oversized.completeRequest(oversized_args));
     const result = try oversized.render(a, oversized_args);
@@ -463,17 +494,70 @@ test "memory supplies complete opaque files with owned bytes" {
     try std.testing.expectEqualStrings("file_too_large", json.object.get("result").?.object.get("content").?.object.get("unavailable").?.object.get("reason").?.string);
 }
 
-test "memory keeps text pagination" {
+test "a PDF header quoted in the middle of a text entry stays paginated" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const source = "ordinary text";
-    const text: Read = .{ .address = "names/do-not-select-format.pdf", .bytes = source, .header = source, .byte_length = source.len, .offset = 0 };
-    const result = try text.render(a, .{ .address = text.address, .max_bytes = 4 });
-    try std.testing.expectEqual(@as(usize, 1), result.parts.len);
+    const start = "The following line illustrates a PDF signature.\n";
+    const page = "%PDF-1.7";
+    const text: Read = .{ .address = "manual.pdf", .bytes = start[start.len - 3 ..] ++ page, .header = start[0..32], .byte_length = start.len + page.len + 1, .offset = start.len - 3 };
+    const args: @FieldType(Memory.Request, "read_memory") = .{ .address = .{ .bytes = text.address }, .offset = start.len, .max_bytes = page.len };
+    try std.testing.expectEqual(null, text.completeRequest(args));
+    const result = try text.render(a, args);
     const value = (try std.json.parseFromSliceLeaky(Value, a, result.parts[0].text, .{})).object.get("result").?.object;
-    try std.testing.expectEqualStrings(source[0..4], value.get("content").?.string);
-    try std.testing.expectEqual(@as(i64, 4), value.get("next_offset").?.integer);
+    try std.testing.expectEqualStrings(page, value.get("content").?.string);
+    try std.testing.expectEqual(@as(i64, start.len + page.len), value.get("next_offset").?.integer);
+}
+
+test "a split UTF-8 character in a large text entry is a range error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const header: [32]u8 = @splat('a');
+    const read: Read = .{ .address = "notes", .bytes = "🐾abc", .header = &header, .byte_length = entry_size_limit + 1, .offset = 61 };
+    const args: @FieldType(Memory.Request, "read_memory") = .{ .address = .{ .bytes = read.address }, .offset = 64, .max_bytes = 4 };
+    const reply = try read.render(a, args);
+    const json = try std.json.parseFromSliceLeaky(Value, a, reply.parts[0].text, .{});
+    try std.testing.expectEqualStrings("invalid_range", json.object.get("error").?.object.get("code").?.string);
+}
+
+test "an image address stays paged text until interpreted as an image" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const address: JsonString = .{ .bytes = "charts/figure" };
+    const prefix = "data:image/png;base64,";
+    const url = prefix ++ "aGVsbG8=";
+    const source = url ++ "\r\n";
+    const page: Read = .{
+        .address = address.bytes,
+        .bytes = source[prefix.len..][0..4],
+        .header = source,
+        .byte_length = source.len,
+        .offset = prefix.len,
+    };
+    const args: @FieldType(Memory.Request, "read_memory") = .{ .address = address, .offset = page.offset, .max_bytes = 4 };
+    try t.expectEqual(null, page.completeRequest(args));
+    const preview = try page.render(a, args);
+    try t.expectEqual(1, preview.parts.len);
+    const result = (try std.json.parseFromSliceLeaky(Value, a, preview.parts[0].text, .{})).object.get("result").?.object;
+    try t.expectEqualStrings("aGVs", result.get("content").?.string);
+    try t.expectEqual(@as(i64, prefix.len + 4), result.get("next_offset").?.integer);
+
+    const entry: Read = .{ .address = address.bytes, .bytes = source, .header = source, .byte_length = source.len, .offset = 0 };
+    const image_args: @FieldType(Memory.Request, "read_memory") = .{ .address = address, .interpretation = .image_url };
+    const opened = try entry.render(a, image_args);
+    try t.expectEqual(2, opened.parts.len);
+    const description = (try std.json.parseFromSliceLeaky(Value, a, opened.parts[0].text, .{})).object.get("result").?.object;
+    try t.expectEqualStrings("image_url", description.get("kind").?.string);
+    try t.expectEqual(@as(i64, @intCast(source.len)), description.get("byte_length").?.integer);
+    try t.expectEqualStrings(url, opened.parts[1].image.url);
+
+    const invalid = prefix ++ "\xff";
+    const damaged: Read = .{ .address = address.bytes, .bytes = invalid, .header = invalid, .byte_length = invalid.len, .offset = 0 };
+    const file = try damaged.render(a, image_args);
+    try t.expectEqualSlices(u8, invalid, file.parts[1].file.bytes);
 }
 
 test "binary discovered on a later page is fetched from zero and source replacement is reprojected" {
@@ -482,21 +566,25 @@ test "binary discovered on a later page is fetched from zero and source replacem
     const a = arena.allocator();
     const source = try a.alloc(u8, text_page_limit + 4);
     @memset(source, 'a');
-    source[text_page_limit] = 0;
-    const args: @FieldType(Memory.Request, "read_memory") = .{ .address = "files/source", .offset = text_page_limit, .max_bytes = 4 };
-    const page: Read = .{ .address = args.address, .bytes = source[text_page_limit..], .header = source[0..32], .byte_length = source.len, .offset = text_page_limit };
+    source[text_page_limit] = 0x80;
+    const args: @FieldType(Memory.Request, "read_memory") = .{ .address = .{ .bytes = "files/source" }, .offset = text_page_limit, .max_bytes = 4 };
+    const page: Read = .{ .address = args.address.bytes, .bytes = source[text_page_limit - 3 ..], .header = source[0..32], .byte_length = source.len, .offset = text_page_limit - 3 };
     const complete = page.completeRequest(args).?;
     try std.testing.expectEqual(@as(u64, 0), complete.offset);
     try std.testing.expectEqual(entry_size_limit, complete.max_bytes);
-    const snapshot: Read = .{ .address = args.address, .bytes = source, .header = source[0..32], .byte_length = source.len, .offset = 0 };
+    const snapshot: Read = .{ .address = args.address.bytes, .bytes = source, .header = source[0..32], .byte_length = source.len, .offset = 0 };
     const result = try snapshot.render(a, args);
     try std.testing.expectEqualSlices(u8, source, result.parts[1].file.bytes);
 
-    const replacement: Read = .{ .address = args.address, .bytes = "new", .header = "new", .byte_length = 3, .offset = 0 };
+    const shorter_file: Read = .{ .address = args.address.bytes, .bytes = "\x00", .header = "\x00", .byte_length = 1, .offset = 0 };
+    const attachment = try shorter_file.render(a, args);
+    try std.testing.expectEqualSlices(u8, shorter_file.bytes, attachment.parts[1].file.bytes);
+
+    const replacement: Read = .{ .address = args.address.bytes, .bytes = "new", .header = "new", .byte_length = 3, .offset = 0 };
     const invalid = try replacement.render(a, args);
     const diagnostic = try std.json.parseFromSliceLeaky(Value, a, invalid.parts[0].text, .{});
     try std.testing.expectEqualStrings("invalid_range", diagnostic.object.get("error").?.object.get("code").?.string);
-    const text: Read = .{ .address = args.address, .bytes = "prefix page", .header = "prefix page", .byte_length = 11, .offset = 0 };
+    const text: Read = .{ .address = args.address.bytes, .bytes = "prefix page", .header = "prefix page", .byte_length = 11, .offset = 0 };
     const projected = try text.render(a, .{ .address = args.address, .offset = 7, .max_bytes = 4 });
     const value = try std.json.parseFromSliceLeaky(Value, a, projected.parts[0].text, .{});
     try std.testing.expectEqualStrings("page", value.object.get("result").?.object.get("content").?.string);

@@ -143,24 +143,26 @@ test "two focuses can recover from a bad window and reread a snapshot with one f
     const tool = try resources.tools(a);
     // The first call has already paid for the fetch even though the offset
     // falls inside 今. Recovery should use those bytes without another request.
-    const bad = (try read(a, tool, core, .{ .uri = test_url, .view = .{ .offset = 8 } })).get("error").?.object;
+    const bad = (try read(a, tool, core, .{ .location = test_url, .view = .{ .offset = 8 } })).get("error").?.object;
     try testing.expectEqualStrings("invalid_range", bad.get("code").?.string);
     const snapshot = bad.get("uri").?.string;
 
-    const middle = (try read(a, tool, activity, .{ .uri = snapshot, .view = .{ .offset = 7, .limit = 6 } })).get("result").?.object;
-    try testing.expectEqualStrings(test_url, middle.get("source_uri").?.string);
+    const middle = (try read(a, tool, activity, .{ .location = snapshot, .view = .{ .offset = 7, .limit = 6 } })).get("result").?.object;
     try testing.expectEqualStrings(snapshot, middle.get("uri").?.string);
+    try testing.expect(!middle.contains("source_uri") and !middle.contains("title"));
     try testing.expectEqual(7, middle.get("offset").?.integer);
     try testing.expectEqualStrings("今天", middle.get("content").?.string);
-    const tail = (try read(a, tool, core, .{ .uri = snapshot, .view = .{ .offset = middle.get("next_offset").?.integer } })).get("result").?.object;
+    const tail = (try read(a, tool, core, .{ .location = snapshot, .view = .{ .offset = middle.get("next_offset").?.integer } })).get("result").?.object;
     try testing.expectEqualStrings(" 明天", tail.get("content").?.string);
-    try testing.expect(tail.get("next_offset").? == .null);
-    const beginning = (try read(a, tool, core, .{ .uri = snapshot, .view = .{ .limit = 6 } })).get("result").?.object;
+    try testing.expect(tail.get("next_offset") == null);
+    const beginning = (try read(a, tool, core, .{ .location = snapshot, .view = .{ .limit = 6 } })).get("result").?.object;
+    try testing.expectEqualStrings(test_url, beginning.get("source_uri").?.string);
+    try testing.expectEqualStrings("Notes", beginning.get("title").?.string);
     try testing.expectEqualStrings("Header", beginning.get("content").?.string);
 
     var restarted: root.Resources = .{ .allocator = testing.allocator, .io = io, .directory = "/" };
     defer restarted.deinit();
-    const expired = (try read(a, try restarted.tools(a), core, .{ .uri = snapshot })).get("error").?.object;
+    const expired = (try read(a, try restarted.tools(a), core, .{ .location = snapshot })).get("error").?.object;
     try testing.expectEqualStrings("not_found", expired.get("code").?.string);
     try testing.expectEqual(1, fetch_count);
 }

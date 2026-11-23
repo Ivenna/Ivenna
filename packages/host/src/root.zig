@@ -29,17 +29,17 @@ pub const Host = struct {
     pub const Context = Tools.Invocation;
     pub const Action = union(enum) {
         read: struct {},
-        write: struct { text: []const u8, eof: bool = false },
+        write: struct { text: contracts.JsonString, eof: bool = false },
         signal: struct { name: process.Signal },
         resize: struct { rows: u16, cols: u16 },
     };
     pub const Continue = struct {
-        command_id: []const u8,
+        command_id: contracts.JsonString,
         action: Action = .{ .read = .{} },
         yield_ms: u32 = 1000,
-        max_output_bytes: u32 = 16384,
+        max_output_bytes: u32 = Shell.default_output_bytes,
     };
-    pub const Inspect = struct { command_id: ?[]const u8 = null, offset: usize = 0 };
+    pub const Inspect = struct { command_id: ?contracts.JsonString = null, offset: usize = 0 };
     pub const Request = union(enum) {
         inspect_host_shell: Inspect,
         run_host_shell: Shell.Command,
@@ -54,18 +54,16 @@ pub const Host = struct {
             };
             switch (request) {
                 .inspect_host_shell => |args| if (args.command_id) |id| {
-                    if (!validText(id)) return error.InvalidToolArguments;
+                    if (!validText(id.bytes)) return error.InvalidToolArguments;
                 },
                 .run_host_shell => |args| {
-                    if (!Reference.validName(args.name) or !validText(args.command) or !validBudget(args.max_output_bytes) or args.timeout_ms == 0) return error.InvalidToolArguments;
-                    if (args.cwd) |cwd| if (!validText(cwd)) return error.InvalidToolArguments;
-                    if (args.shell) |shell| if (!validText(shell)) return error.InvalidToolArguments;
+                    if (!Reference.validName(args.name.bytes) or !validText(args.command.bytes) or !validBudget(args.max_output_bytes) or args.timeout_ms == 0) return error.InvalidToolArguments;
                 },
                 .continue_host_shell => |args| {
-                    if (!validText(args.command_id) or !validBudget(args.max_output_bytes)) return error.InvalidToolArguments;
+                    if (!validText(args.command_id.bytes) or !validBudget(args.max_output_bytes)) return error.InvalidToolArguments;
                     switch (args.action) {
                         .write => |write| {
-                            const length = std.unicode.utf8CountCodepoints(write.text) catch return error.InvalidToolArguments;
+                            const length = std.unicode.utf8CountCodepoints(write.text.bytes) catch return error.InvalidToolArguments;
                             if (length > max_input_characters) return error.InvalidToolArguments;
                         },
                         .resize => |size| if (size.rows == 0 or size.cols == 0) return error.InvalidToolArguments,
@@ -95,7 +93,6 @@ pub const Host = struct {
         elapsed_ms: u64 = 0,
         completed_sequence: u64 = 0,
         cursors: [2]u64 = .{ 0, 0 }, // Protected by operations, not the registry lock.
-        final_media_collected: bool = false,
         input_pending: bool = false,
         input_error: ?anyerror = null,
         input_open: bool,
@@ -111,40 +108,40 @@ pub const Host = struct {
     const InputStatus = struct { open: bool, pending: bool, @"error": ?[]const u8 };
     const Snapshot = struct { state: PublicState, elapsed_ms: u64, stdin: InputStatus };
     const Create = union(enum) { capacity, unavailable: anyerror, job: *Job };
+    const Collection = union(enum) { complete, initial, incremental: u32 };
     const ToolError = struct { code: []const u8, message: []const u8, effects: []const u8 };
+    const unreadable_output: ToolError = .{
+        .code = "host_unavailable",
+        .message = "Could not read the command output.",
+        .effects = "The result includes the observed command state and log paths. Check uncertain effects before repeating the command.",
+    };
     const Observation = struct {
         command_id: ?[]const u8,
         callback_id: ?[]const u8 = null,
-        asynchronous: bool = false,
         snapshot: Snapshot,
         mode: Shell.Mode,
         streams: Shell.Streams,
+        output_error: ?[]const u8 = null,
 
         fn render(self: Observation, a: Allocator) !Content {
-            return self.renderWithError(a, null);
+            return Content.fromText(a, try self.renderText(a, null));
         }
 
-        fn renderWithError(self: Observation, a: Allocator, failure: ?ToolError) !Content {
-            const result = .{
-                .command_id = self.command_id,
-                .callback_id = self.callback_id,
-                .state = self.snapshot.state,
-                .elapsed_ms = self.snapshot.elapsed_ms,
-                .mode = self.mode,
-                .stdin = self.snapshot.stdin,
-                .stdout = try self.streams.stdout.describe(a),
-                .stderr = try self.streams.stderr.describe(a),
-                .media_omission = if (self.asynchronous and (self.streams.stdout.content == .image or self.streams.stdout.content == .file)) @as(?[]const u8, "asynchronous_media_unavailable") else null,
-            };
-            const text = if (failure) |err|
-                try std.json.Stringify.valueAlloc(a, .{ .@"error" = err, .result = result }, .{ .emit_null_optional_fields = false })
-            else
-                try success(a, result);
-            if (!self.asynchronous and self.streams.stdout.content == .image)
-                return Content.fromParts(a, &.{ .{ .text = text }, .{ .image = self.streams.stdout.content.image } });
-            if (!self.asynchronous and self.streams.stdout.content == .file)
-                return Content.fromParts(a, &.{ .{ .text = text }, .{ .file = self.streams.stdout.content.file } });
-            return Content.fromText(a, text);
+        fn renderText(self: Observation, a: Allocator, failure: ?ToolError) ![]const u8 {
+            return std.json.Stringify.valueAlloc(a, .{
+                .@"error" = failure,
+                .result = .{
+                    .command_id = self.command_id,
+                    .callback_id = self.callback_id,
+                    .state = self.snapshot.state,
+                    .elapsed_ms = self.snapshot.elapsed_ms,
+                    .mode = self.mode,
+                    .stdin = self.snapshot.stdin,
+                    .stdout = self.streams.stdout,
+                    .stderr = self.streams.stderr,
+                    .output_error = self.output_error,
+                },
+            }, .{ .emit_null_optional_fields = false });
         }
     };
 
@@ -200,7 +197,7 @@ pub const Host = struct {
                 self.stopAndWait(job);
                 return self.handoffFailure(a, job, "This call has no receiving focus for command completion.");
             };
-            const registration = try registrar.open(a, args.name, .{ .host = .{ .command_id = job.command_id } });
+            const registration = try registrar.open(a, args.name.bytes, .{ .host = .{ .command_id = job.command_id } });
             try self.mutex.lock(self.shell.io);
             job.callback_id = registration.id;
             job.retained = true;
@@ -209,15 +206,17 @@ pub const Host = struct {
             self.mutex.unlock(self.shell.io);
             errdefer self.retireAndStop(job);
             var observation = self.collect(a, job, .initial, args.max_output_bytes) catch |err|
-                return self.outputFailureResult(a, job, job.command_id, registration.reference, err, .{
+                return Content.fromText(a, try self.outputFailureText(a, job, job.command_id, registration.reference, err, .{
                     .code = "host_unavailable",
                     .message = "Could not read the command's initial background output.",
                     .effects = "The command was handed off successfully, and a completion observation was registered for this focus. Command or input effects may already have occurred.",
-                });
+                }));
             observation.callback_id = registration.reference;
             return observation.render(a);
         }
-        return self.observe(a, job, .complete, args.max_output_bytes);
+        const observation = self.collect(a, job, .complete, args.max_output_bytes) catch |err|
+            return Content.fromText(a, try self.outputFailureText(a, job, null, null, err, unreadable_output));
+        return observation.render(a);
     }
 
     fn createJob(self: *Host, context: Context, args: Shell.Command) !Create {
@@ -251,12 +250,12 @@ pub const Host = struct {
         };
         const owned = arena.allocator();
         var command = args;
-        command.name = try owned.dupe(u8, args.name);
-        command.command = try owned.dupe(u8, args.command);
-        command.cwd = if (args.cwd) |cwd| try owned.dupe(u8, cwd) else null;
-        command.shell = if (args.shell) |shell| try owned.dupe(u8, shell) else null;
+        command.name.bytes = try owned.dupe(u8, args.name.bytes);
+        command.command.bytes = try owned.dupe(u8, args.command.bytes);
+        command.cwd = if (args.cwd) |cwd| .{ .bytes = try owned.dupe(u8, cwd.bytes) } else null;
+        command.shell = if (args.shell) |shell| .{ .bytes = try owned.dupe(u8, shell.bytes) } else null;
         const issuer = context.command_reference orelse return error.MissingCommandReferenceIssuer;
-        const reference = try issuer.create(owned, args.name);
+        const reference = try issuer.create(owned, args.name.bytes);
         const focus_id = try owned.dupe(u8, context.focus_id);
         const invocation = switch (try self.shell.start(owned, context.session_id, command)) {
             .ready => |invocation| invocation,
@@ -285,15 +284,15 @@ pub const Host = struct {
     }
 
     fn continueCommand(self: *Host, a: Allocator, args: Continue) !Content {
-        const job = try self.acquire(args.command_id) orelse return toolError(a, "unknown_command", "This command handle is unknown or retired. Use inspect_host_shell to list current commands. To read this command's logs, pass a previously recorded stdout.uri or stderr.uri to read_resource.");
+        const job = try self.acquire(args.command_id.bytes) orelse return toolError(a, "unknown_command", "This command handle is unknown or retired. Use inspect_host_shell to list current commands.");
         defer self.release(job);
         // Apply input or a signal promptly even when another caller is
         // waiting to collect this command's next output range.
         if (try self.act(a, job, args.action)) |failure| return failure;
         try job.operations.lock(self.shell.io);
         defer job.operations.unlock(self.shell.io);
-        try self.waitForUpdate(job, args.yield_ms);
-        const observation = self.collect(a, job, .incremental, args.max_output_bytes) catch |err| return outputFailure(a, err);
+        const observation = self.collect(a, job, .{ .incremental = args.yield_ms }, args.max_output_bytes) catch |err|
+            return Content.fromText(a, try self.outputFailureText(a, job, job.command_id, null, err, unreadable_output));
         const result = try observation.render(a);
         // Retirement must follow the state returned to this caller. Completion
         // racing with a running snapshot still needs one terminal observation.
@@ -322,7 +321,7 @@ pub const Host = struct {
                     self.mutex.unlock(self.shell.io);
                     return try toolError(a, "input_busy", "The previous input is still being written. Read or wait before submitting more input.");
                 }
-                const bytes = self.allocator.dupe(u8, write.text) catch |err| {
+                const bytes = self.allocator.dupe(u8, write.text.bytes) catch |err| {
                     self.mutex.unlock(self.shell.io);
                     return err;
                 };
@@ -417,40 +416,29 @@ pub const Host = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        var observation = self.collect(a, job, .complete, job.args.max_output_bytes) catch |err| {
-            const failure = try self.outputFailureResult(a, job, null, null, err, .{
-                .code = "host_unavailable",
-                .message = "Could not read the command's final output.",
-                .effects = "The result includes the observed command state and log URIs. Check any uncertain effects before repeating the command.",
-            });
-            return self.publisher.send(a, .{ .id = id, .text = failure.parts[0].text });
+        const observation = self.collect(a, job, .complete, job.args.max_output_bytes) catch |err| {
+            const failure = try self.outputFailureText(a, job, null, null, err, unreadable_output);
+            return self.publisher.send(a, .{ .id = id, .text = failure });
         };
-        observation.asynchronous = true;
-        const result = try observation.render(a);
-        try self.publisher.send(a, .{ .id = id, .text = result.parts[0].text });
+        try self.publisher.send(a, .{ .id = id, .text = try observation.renderText(a, null) });
     }
 
-    fn observe(self: *Host, a: Allocator, job: *Job, kind: Shell.Collection, budget: usize) !Content {
-        const observation = self.collect(a, job, kind, budget) catch |err| return outputFailure(a, err);
-        return observation.render(a);
-    }
-
-    fn collect(self: *Host, a: Allocator, job: *Job, kind: Shell.Collection, budget: usize) !Observation {
+    fn collect(self: *Host, a: Allocator, job: *Job, kind: Collection, budget: usize) !Observation {
+        if (kind == .incremental) try self.waitForUpdate(job, kind.incremental);
         const current = try self.snapshot(job);
         return .{
             .command_id = if (kind == .complete) null else job.command_id,
             .snapshot = current,
             .mode = job.args.mode,
             .streams = switch (kind) {
-                .complete => try job.invocation.complete(a, job.args.interpretation, budget),
+                .complete => try job.invocation.complete(a, budget),
                 .initial => blk: {
                     // The starting call observes its own prefix without waiting
                     // behind another activity or consuming its shared cursor.
                     var cursors: [2]u64 = .{ 0, 0 };
-                    var final_media_collected = false;
-                    break :blk try job.invocation.collect(a, &cursors, &final_media_collected, current.state != .running, job.args.interpretation, budget);
+                    break :blk try job.invocation.incremental(a, &cursors, current.state != .running, budget);
                 },
-                .incremental => try job.invocation.collect(a, &job.cursors, &job.final_media_collected, current.state != .running, job.args.interpretation, budget),
+                .incremental => try job.invocation.incremental(a, &job.cursors, current.state != .running, budget),
             },
         };
     }
@@ -495,40 +483,56 @@ pub const Host = struct {
 
     fn describe(self: *Host, a: Allocator, args: Inspect) !Content {
         const Entry = struct { command_id: []const u8, focus_id: []const u8, command_preview: []const u8, state: PublicState, mode: Shell.Mode, stdin_open: bool, input_pending: bool };
-        const Page = struct { shell: []const u8 = "/bin/sh", cwd: []const u8, commands: []const Entry, offset: usize, next_offset: ?usize, total_commands: usize };
+        const Page = struct {
+            shell: ?[]const u8 = null,
+            cwd: ?[]const u8 = null,
+            commands: []const Entry = &.{},
+            offset: usize,
+            next_offset: std.json.Value = .null,
+            total_commands: usize = 0,
+
+            fn setEntries(page: *@This(), entries: []const Entry) void {
+                page.commands = entries;
+                const end = page.offset + entries.len;
+                page.next_offset = if (end < page.total_commands) .{ .integer = @intCast(end) } else .null;
+            }
+        };
+        const options: std.json.Stringify.Options = .{ .emit_null_optional_fields = false };
+        var page: Page = .{ .offset = args.offset };
+        if (args.command_id == null and args.offset == 0) {
+            page.shell = "/bin/sh";
+            page.cwd = try contracts.LocalPath.reference(a, self.shell.directory);
+        }
         var entries: std.ArrayList(Entry) = .empty;
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
-        var total: usize = 0;
-        for (self.jobs.items) |job| if (args.command_id == null or std.mem.eql(u8, job.command_id, args.command_id.?)) {
-            total += 1;
+        for (self.jobs.items) |job| if (args.command_id == null or std.mem.eql(u8, job.command_id, args.command_id.?.bytes)) {
+            page.total_commands += 1;
         };
-        if (args.command_id != null and total == 0) return toolError(a, "unknown_command", "This command handle is unknown or retired. Omit command_id to find current commands.");
+        if (args.command_id != null and page.total_commands == 0) return toolError(a, "unknown_command", "This command handle is unknown or retired. Omit command_id to find current commands.");
         var position: usize = 0;
         for (self.jobs.items) |job| {
             const id = job.command_id;
-            if (args.command_id) |selected| if (!std.mem.eql(u8, id, selected)) continue;
+            if (args.command_id) |selected| if (!std.mem.eql(u8, id, selected.bytes)) continue;
             if (position < args.offset) {
                 position += 1;
                 continue;
             }
-            var preview_end = @min(job.args.command.len, 160);
-            while (preview_end > 0 and preview_end < job.args.command.len and job.args.command[preview_end] & 0xc0 == 0x80) preview_end -= 1;
-            try entries.append(a, .{ .command_id = id, .focus_id = job.focus_id, .command_preview = job.args.command[0..preview_end], .state = switch (job.state) {
+            var preview_end = @min(job.args.command.bytes.len, 160);
+            while (preview_end > 0 and preview_end < job.args.command.bytes.len and job.args.command.bytes[preview_end] & 0xc0 == 0x80) preview_end -= 1;
+            try entries.append(a, .{ .command_id = id, .focus_id = job.focus_id, .command_preview = job.args.command.bytes[0..preview_end], .state = switch (job.state) {
                 .running => .running,
                 .finished => |outcome| .{ .finished = outcome },
                 .failed => |err| .{ .unavailable = .{ .reason = @errorName(err) } },
             }, .mode = job.args.mode, .stdin_open = job.input_open and job.state == .running, .input_pending = job.input_pending });
-            const end = args.offset + entries.items.len;
-            const page: Page = .{ .cwd = self.shell.directory, .commands = entries.items, .offset = args.offset, .next_offset = if (end < total) end else null, .total_commands = total };
-            if (encodedLength(.{ .result = page }) > 32768) {
+            page.setEntries(entries.items);
+            if (std.fmt.count("{f}", .{std.json.fmt(.{ .result = page }, options)}) > 32768) {
                 _ = entries.pop();
+                page.setEntries(entries.items);
                 break;
             }
         }
-        const end = args.offset + entries.items.len;
-        const page: Page = .{ .cwd = self.shell.directory, .commands = entries.items, .offset = args.offset, .next_offset = if (end < total) end else null, .total_commands = total };
-        return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = page }, .{}));
+        return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = page }, options));
     }
 
     fn handoffFailure(self: *Host, a: Allocator, job: *Job, reason: []const u8) !Content {
@@ -538,30 +542,27 @@ pub const Host = struct {
             .effects = "The command started, but no completion callback was registered. It has now finished or been stopped and reaped; effects already produced remain.",
         };
         const observation = self.collect(a, job, .complete, job.args.max_output_bytes) catch |err|
-            return self.outputFailureResult(a, job, null, null, err, failure);
-        return observation.renderWithError(a, failure);
+            return Content.fromText(a, try self.outputFailureText(a, job, null, null, err, failure));
+        return Content.fromText(a, try observation.renderText(a, failure));
     }
 
-    fn outputFailureResult(self: *Host, a: Allocator, job: *Job, command_id: ?[]const u8, callback_id: ?[]const u8, err: anyerror, failure: ToolError) !Content {
+    fn outputFailureText(self: *Host, a: Allocator, job: *Job, command_id: ?[]const u8, callback_id: ?[]const u8, err: anyerror, failure: ToolError) ![]const u8 {
         switch (err) {
             error.Canceled, error.OutOfMemory => return err,
             else => {},
         }
-        const current = try self.snapshot(job);
-        return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
-            .@"error" = failure,
-            .result = .{
-                .command_id = command_id,
-                .callback_id = callback_id,
-                .state = current.state,
-                .elapsed_ms = current.elapsed_ms,
-                .mode = job.args.mode,
-                .stdin = current.stdin,
-                .stdout = try Shell.logReference(a, job.invocation.stdout_path),
-                .stderr = try Shell.logReference(a, job.invocation.stderr_path),
-                .output_error = @errorName(err),
+        const observation: Observation = .{
+            .command_id = command_id,
+            .callback_id = callback_id,
+            .snapshot = try self.snapshot(job),
+            .mode = job.args.mode,
+            .streams = .{
+                .stdout = .{ .log = .{ .path = job.invocation.stdout_reference } },
+                .stderr = .{ .log = .{ .path = job.invocation.stderr_reference } },
             },
-        }, .{ .emit_null_optional_fields = false }));
+            .output_error = @errorName(err),
+        };
+        return observation.renderText(a, failure);
     }
 
     fn acquire(self: *Host, id: []const u8) !?*Job {
@@ -630,9 +631,6 @@ pub const Host = struct {
     }
 };
 
-fn success(a: Allocator, value: anytype) ![]const u8 {
-    return std.json.Stringify.valueAlloc(a, .{ .result = value }, .{ .emit_null_optional_fields = false });
-}
 fn toolError(a: Allocator, code: []const u8, message: []const u8) !Content {
     return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .code = code, .message = message } }, .{}));
 }
@@ -643,46 +641,95 @@ fn validBudget(budget: u32) bool {
     return budget >= 512 and budget <= 16384;
 }
 
-fn outputFailure(a: Allocator, err: anyerror) !Content {
-    return switch (err) {
-        error.Canceled, error.OutOfMemory => err,
-        else => toolError(a, "host_unavailable", try std.fmt.allocPrint(a, "Could not read the command output: {s}. Command or input effects may already have occurred.", .{@errorName(err)})),
-    };
-}
-fn encodedLength(value: anytype) usize {
-    var buffer: [128]u8 = undefined;
-    var discard: std.Io.Writer.Discarding = .init(&buffer);
-    std.json.Stringify.value(value, .{}, &discard.writer) catch unreachable;
-    return @intCast(discard.fullCount());
-}
-
-test "file results preserve source descriptions and asynchronous omissions" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+test "shell defaults appear only on the first unfiltered inspection" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const file: @import("content").File = .{ .bytes = "%PDF-1.7\n\x00\xfforiginal" };
-    var observation: Host.Observation = .{
-        .command_id = "read-1",
-        .snapshot = .{ .state = .{ .finished = .{ .completed = .{ .exited = 0 } } }, .elapsed_ms = 1, .stdin = .{ .open = false, .pending = false, .@"error" = null } },
-        .mode = .batch,
-        .streams = .{
-            .stdout = .{ .path = "/logs/a b%20#?/stdout", .byte_length = file.bytes.len, .content = .{ .file = file } },
-            .stderr = .{ .path = "/logs/stderr", .byte_length = 0, .content = .{ .text = .{ .text = "", .truncated = false } } },
-        },
+    const env = std.process.Environ.Map.init(a);
+    var host = Host.init(a, t.io, "/workspace", "/data", &env, undefined, 1);
+    var job: Host.Job = .{
+        .arena = undefined,
+        .invocation = undefined,
+        .args = .{ .name = .{ .bytes = "build" }, .command = .{ .bytes = "make" } },
+        .command_id = "build-1",
+        .focus_id = "activity-1",
+        .retained = true,
+        .state = .running,
+        .input_open = false,
     };
-    const result = try observation.render(a);
-    try std.testing.expectEqual(@as(usize, 2), result.parts.len);
-    try std.testing.expectEqualSlices(u8, file.bytes, result.parts[1].file.bytes);
-    const source = try std.json.parseFromSliceLeaky(std.json.Value, a, result.parts[0].text, .{});
-    const stdout = source.object.get("result").?.object.get("stdout").?.object;
-    try std.testing.expectEqualStrings("/logs/a b%20#?/stdout", stdout.get("path").?.string);
-    const log_uri = stdout.get("uri").?.string;
-    try std.testing.expectEqualStrings("file:///logs/a%20b%2520%23%3F/stdout", log_uri);
-    try std.testing.expectEqual(@as(i64, @intCast(file.bytes.len)), stdout.get("content").?.object.get("file").?.object.get("byte_length").?.integer);
-    observation.asynchronous = true;
-    const callback = try observation.render(a);
-    try std.testing.expectEqual(@as(usize, 1), callback.parts.len);
-    const diagnostic = try std.json.parseFromSliceLeaky(std.json.Value, a, callback.parts[0].text, .{});
-    try std.testing.expectEqualStrings("asynchronous_media_unavailable", diagnostic.object.get("result").?.object.get("media_omission").?.string);
-    try std.testing.expectEqualStrings(log_uri, diagnostic.object.get("result").?.object.get("stdout").?.object.get("uri").?.string);
+    try host.jobs.append(a, &job);
+    for ([_]Host.Inspect{ .{}, .{ .command_id = .{ .bytes = job.command_id } }, .{ .offset = 1 } }, 0..) |args, i| {
+        const result = try host.describe(a, args);
+        const value = try std.json.parseFromSliceLeaky(std.json.Value, a, result.parts[0].text, .{});
+        const fields = value.object.get("result").?.object;
+        try t.expectEqual(i == 0, fields.contains("shell"));
+        try t.expectEqual(i == 0, fields.contains("cwd"));
+        try t.expectEqual(@as(usize, 1) - args.offset, fields.get("commands").?.array.items.len);
+        try t.expect(fields.get("next_offset").? == .null);
+    }
+}
+
+test "binary output exposes its log path and a printed data URL stays inline" {
+    const t = std.testing;
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = "%PDF-1.7\nplain ASCII PDF content";
+    const line = "data:image/png;base64,aGk=";
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &buffer);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    const shell: Shell = .{
+        .io = io,
+        .environ = &env,
+        .directory = buffer[0..n],
+        .data_directory = try std.fs.path.join(a, &.{ buffer[0..n], "a b%20#?\xff" }),
+    };
+    var invocation = (try shell.start(a, 1, .{
+        .name = .{ .bytes = "render" },
+        .command = .{ .bytes = "printf '%s' '" ++ bytes ++ "'; printf '%s\\n' '" ++ line ++ "' >&2; exit 1" },
+    })).ready;
+    defer invocation.deinit();
+    const outcome = try invocation.backend.process.wait(io, null);
+
+    const complete: Host.Observation = .{
+        .command_id = null,
+        .snapshot = .{ .state = .{ .finished = outcome }, .elapsed_ms = 1, .stdin = .{ .open = false, .pending = false, .@"error" = null } },
+        .mode = .batch,
+        .streams = try invocation.complete(a, 512),
+    };
+    const result = try complete.render(a);
+    try t.expectEqual(1, result.parts.len);
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, a, result.parts[0].text, .{});
+    const description = value.object.get("result").?.object;
+    const stdout = description.get("stdout").?.object;
+    const reference = stdout.get("path").?.string;
+    const path = try contracts.LocalPath.fromReference(a, reference);
+    try t.expectEqualStrings(bytes, try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(bytes.len + 1)));
+    try t.expectEqual(@as(i64, bytes.len), stdout.get("byte_length").?.integer);
+    try t.expect(!stdout.contains("uri") and !stdout.contains("preview"));
+    try t.expectEqualStrings(line ++ "\n", description.get("stderr").?.string);
+
+    var cursors: [2]u64 = .{ 0, 0 };
+    const next = try invocation.incremental(a, &cursors, true, 512);
+    try t.expectEqual(bytes.len, next.stdout.?.log.range.?.next_offset);
+    try t.expectEqualStrings(line ++ "\n", next.stderr.?.text);
+    try t.expect(try invocation.drained(cursors));
+    const empty = try invocation.incremental(a, &cursors, true, 512);
+    const encoded = try std.json.Stringify.valueAlloc(a, empty, .{ .emit_null_optional_fields = false });
+    try t.expectEqualStrings("{}", encoded);
+}
+
+test "the shell accepts only text for a path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectError(error.InvalidToolArguments, Host.Request.parse(a, "run_host_shell",
+        \\{"name":"job","command":"pwd","cwd":[47,255]}
+    ));
 }

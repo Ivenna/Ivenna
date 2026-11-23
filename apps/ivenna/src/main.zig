@@ -15,8 +15,8 @@ var stopping: std.atomic.Value(bool) = .init(false);
 const usage =
     \\Usage: ivenna [--help]
     \\
-    \\Run the Ivenna kernel. File browsing and host commands start in the current
-    \\directory by default.
+    \\Run the Ivenna kernel. The current directory is the default location for
+    \\directory listings and the default working directory for host commands.
     \\
     \\The kernel reads DATA_DIR and its service settings from the environment.
     \\See docs/running.md in the source tree for configuration.

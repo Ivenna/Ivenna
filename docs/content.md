@@ -1,74 +1,61 @@
 # Tool content
 
-Tool results can carry text, images, or complete files into a focus's working history. For the source and reading options, see [resource reads](resources.md), [memory reads](memory.md#reading), and [host command output](host.md#output-and-results). For observations delivered as events, see the [input contract](input.md#retained-records).
+Tool results can carry text, images, or complete files into the calling focus's working history. A focus can ask to see an image by supplying its location. The reader returns the image as a separate part of the tool result. Observations delivered as events have their own [input contract](input.md#retained-records).
 
 ## Automatic classification
 
-When reading a local file, a memory entry, or a completed command's stdout, the reader recognizes JPEG, PNG, GIF, and WebP by their byte signatures. A PDF header selects a file attachment even when the rest of the document is valid text. Other content is text if it is valid UTF-8 and contains no NUL bytes. Otherwise the reader returns a file attachment.
+Readers recognize JPEG, PNG, GIF, and WebP by signature and PDF by its header. Other bytes qualify as text when they are valid UTF-8 and contain no NULs. A window can show text before a later window encounters binary data.
 
-Classification covers only the bytes inspected. One window can return text while a later window reveals binary data. Once the reader recognizes an image or file, it returns the whole source if it fits the [source limit](#content-and-results).
-
-Host stderr and running output supply a text preview or an unavailable-content diagnostic. The command's input mode determines whether streams are separate and whether terminal processing can alter their bytes. See [host input modes](host.md#input-modes).
+- A local resource preview returns a passage of text or a reference to the image or file. Open the suggested view to receive the media. See [resource views](resources.md#local-files-and-directories).
+- A host command returns complete short text inline. Partial text and binary output include a path to the full log. See [command output](host.md#output-and-results).
+- Reading a memory entry returns a passage of text, a complete image, or a complete file. See [memory reads](memory.md#reading).
 
 ## Content and results
 
-The text part describes the operation and its source. A resource read identifies the resource by URI, a memory read by entry address, and a command result by its state and log references. When the tool supplies media, the description identifies a separate content part.
+When a tool supplies media, a text part identifies the source. An image part carries either the image bytes or an image URL. In a model request, the Responses adapter sends image bytes as a Base64 data URL in the image part. A file part carries the complete source for [upload](#complete-files).
 
-| Description | Fields | Native part |
-| --- | --- | --- |
-| `image.data` | `format` and `byte_length` | Encoded image bytes |
-| `image.url` | Empty object | The supplied URL |
-| `file` | `byte_length` | Complete source bytes |
-
-When a source exceeds its size limit or a text-only stream contains binary data, the reader returns an `unavailable` description with the `byte_length` and reason.
+When the reader identifies an oversized source, `content.unavailable` gives its `byte_length` and the reason.
 
 | Reason | Meaning |
 | --- | --- |
-| `unsupported_binary` | Binary bytes were encountered in a result that can only supply text, such as stderr or running output |
-| `image_too_large` | Recognized image data exceeds 32 MiB |
-| `reference_too_large` | The source selected for image-reference interpretation exceeds 16 KiB |
-| `file_too_large` | A source to be supplied as a complete file exceeds 32 MiB |
-
-The surrounding result identifies the source and whether the diagnostic covers the whole source or a selected range.
+| `image_too_large` | Image data exceeds 32 MiB |
+| `reference_too_large` | A source containing an image URL exceeds 16 KiB |
+| `file_too_large` | A file attachment exceeds 32 MiB |
 
 ## Complete files
 
-The Responses adapter uploads new file attachments to the configured model service for parsing, up to the [file count limit](#model-request-checks). It uses the returned file reference in the current request and retains it for later turns. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for supported inputs, parsing behavior, and service limits.
+The Responses adapter uploads a new file attachment to the configured model service for parsing. It uses the returned file reference in the current request and reuses it on later turns. For supported inputs and service limits, see DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/).
 
-If the upload ends without a usable reference, a JSON text part replaces the attachment. It gives the original `file.byte_length` and an `error` with a code and message. Other parts still describe the operation, including the exit status and log paths of a completed host command.
+If the upload ends without a usable reference, a text part replaces the attachment. It gives the original `file.byte_length` and an `error` with a code and message. The rest of the tool result is still available.
 
 | Code | What happened |
 | --- | --- |
 | `file_upload_failed` | The adapter could not send the file, or the file service rejected it. A rejection includes `error.http_status`. |
-| `file_upload_uncertain` | The adapter received no usable reference. The file service may already have stored the file. |
+| `file_upload_uncertain` | The adapter could not confirm whether the service stored the file. A new upload could create another copy. |
 
 See [upload handling](architecture.md#tool-results) for how the adapter handles these outcomes.
 
 ## Image URL references
 
-A focus can supply a direct HTTP(S) image URL using the `"image"` view in [resource reads](resources.md#remote-images). The adapter sends the URL to the model service if it passes the [model request checks](#model-request-checks).
-
-If a memory entry or a command's final stdout contains an image address, `interpretation: "image_url"` treats the entire nonempty text as one reference when it fits the [source limit](#content-and-results). The reader preserves the text as supplied. Empty output stays text, and recognized images and files keep their native representation. See [memory reads](memory.md#reading) and [host results](host.md#output-and-results).
+An HTTP(S) image reference asks the model service to retrieve the image during inference. An image data URL already contains the image. If a command writes a data URL to a file, the focus can open the path in the image view. See [remote images](resources.md#remote-images), [local file views](resources.md#local-files-and-directories), and [image addresses in memory](memory.md#reading).
 
 ## Model request checks
 
-The Responses adapter checks new media against these local limits while accounting for retained content:
+Media that fit the reader's source limits must also fit in the model request. The Responses adapter includes retained media when checking new tool results against the focus's request budget and the provider's limits for [images](https://api-docs.deepseek.com/guides/vision/#limits) and [documents](https://api-docs.deepseek.com/guides/document_parsing/).
 
 | Check | Limit |
 | --- | --- |
 | HTTP(S) image URL length | 8192 Unicode code points |
 | Image count, including retained images and URL references | 600 |
 | File references, including retained references | 20 |
-| Serialized request body, including history, tools, base64 images, and file references | 48 MiB |
+| Serialized request body when adding images, including history, tools, and file references | The smaller of `CONTEXT_REQUEST_BYTES` and 48 MiB |
 
-A data URL read from memory or stdout counts toward both the source size limit and the serialized request size.
+An image data URL opened from a file or memory counts toward both the reference size limit and the serialized request size.
 
-The adapter omits new HTTP(S) image URL parts that exceed the code point limit, then keeps new images and files in order up to their count limits. Files beyond the count limit are omitted before upload. If the serialized request exceeds the byte limit, it omits new images from the end until the request fits or no new images remain. Each omitted part becomes a text part containing an `error` with code `content_limit`. The operation description, source, and other parts remain available.
-
-These checks only remove new media. Retained content, text, or file-reference metadata can still leave the request above the serialized byte limit. Before inference, the kernel checks the remaining request against its configured [context budgets](running.md#context-budgets).
+When new media exceed a count limit, earlier parts take priority. Files beyond the limit are omitted before upload. A new image can also be omitted to fit the request budget. Each omitted part reports `content_limit` alongside the source and the other results. Before inference, the kernel measures the actual request, including retained history and newly arrived observations, against its [context budget](running.md#context-budgets).
 
 ## Context and continuity
 
-Working history retains accepted image and file bytes for later requests and restart, independently of changes to the source. Opaque file upload references are retained with their bytes. URL references retain the supplied address; the referenced content can change or become unavailable.
+Working history retains accepted image and file bytes across turns and restarts, along with any file upload reference. For an image supplied by HTTP(S) URL, history retains the address. The remote image can change or become unavailable.
 
-Unloading a context preserves its retained content. Compaction can remove media from working history, so preserve an artifact or memory address in the handover when it may need to be read again. Uploaded files have a separate [model-service retention lifecycle](running.md#uploaded-model-files). See [startup and interruption](architecture.md#startup-and-interruption) for what restart retains.
+Unloading a context preserves its retained content. Compaction can remove media from working history. A handover can carry the host path or memory address so the focus can reopen the source later. Uploaded files have a separate [model-service retention lifecycle](running.md#uploaded-model-files).

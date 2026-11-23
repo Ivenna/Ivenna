@@ -19,24 +19,25 @@ const Snapshot = struct {
 
     // Called under the cache lock. The serialized result belongs to the turn
     // and either focus can keep it after this snapshot is evicted.
-    fn render(self: Snapshot, a: Allocator, window: Window) !Content {
+    fn render(self: Snapshot, a: Allocator, window: Window, include_source: bool) !Content {
         const uri = try locator.snapshotUri(a, self.id);
         const source = self.bytes[self.title_end..];
         if (window.offset > source.len or (window.offset < source.len and source[@intCast(window.offset)] & 0xc0 == 0x80)) {
             return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{
                 .code = "invalid_range",
-                .message = "Read the existing snapshot by passing error.uri as uri. Omit view to start at the beginning, or set view.offset to a UTF-8 character boundary in the Markdown.",
+                .message = "Pass error.uri as location to reuse this snapshot. Omit view to start at byte zero, or set view.offset to a UTF-8 character boundary in the Markdown.",
                 .uri = uri,
             } }, .{}));
         }
-        const text = windows.utf8Prefix(source[@intCast(window.offset)..], window.count(windows.text_byte_limit));
+        const title = self.bytes[self.uri_end..self.title_end];
+        const text = windows.utf8Prefix(source[@intCast(window.offset)..], window.textBytes());
         const next = window.offset + text.len;
         return result.success(a, .{
             .uri = uri,
-            .source_uri = self.bytes[0..self.uri_end],
+            .source_uri = if (include_source) @as(?[]const u8, self.bytes[0..self.uri_end]) else null,
             .kind = "webpage",
-            .title = self.bytes[self.uri_end..self.title_end],
-            .title_truncated = self.title_truncated,
+            .title = if (include_source and title.len > 0) @as(?[]const u8, title) else null,
+            .title_truncated = if (include_source and self.title_truncated) @as(?bool, true) else null,
             .content = text,
             .byte_length = source.len,
             .offset = window.offset,
@@ -87,14 +88,14 @@ pub const Cache = struct {
         };
         self.snapshots.appendAssumeCapacity(snapshot);
         self.retained_bytes += bytes.len;
-        return snapshot.render(turn, window);
+        return snapshot.render(turn, window, true);
     }
 
     pub fn read(self: *Cache, io: std.Io, turn: Allocator, id: u64, window: Window) !?Content {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         const snapshot = self.find(id) orelse return null;
-        return try snapshot.render(turn, window);
+        return try snapshot.render(turn, window, window.offset == 0);
     }
 
     fn find(self: *const Cache, id: u64) ?Snapshot {
@@ -109,10 +110,11 @@ test "a new fetch of the same URL preserves the previous version until eviction"
     defer arena.deinit();
     const a = arena.allocator();
     const url = "https://example.org/update";
-    var cache: Cache = .{ .byte_limit = 2 * (url.len + "旧".len) };
+    var cache: Cache = .{ .byte_limit = 2 * (url.len + "旧A".len) };
     defer cache.deinit(t.allocator);
-    const first = try cache.open(t.io, t.allocator, a, url, .{ .title = "", .markdown = "旧" }, .{});
+    const first = try cache.open(t.io, t.allocator, a, url, .{ .title = "", .markdown = "旧A" }, .{ .offset = "旧".len });
     const fields = (try std.json.parseFromSliceLeaky(std.json.Value, a, first.parts[0].text, .{})).object.get("result").?.object;
+    try t.expectEqualStrings(url, fields.get("source_uri").?.string);
     const id = (try locator.parse(a, fields.get("uri").?.string)).snapshot;
 
     const oversized = try cache.open(t.io, t.allocator, a, url, .{ .title = "This title and its source URL exceed the budget", .markdown = "" }, .{});

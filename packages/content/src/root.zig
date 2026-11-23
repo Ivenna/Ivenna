@@ -24,56 +24,37 @@ pub const Content = struct {
 pub const ImageContent = union(enum) {
     data: Image,
     url: []const u8,
-
-    pub const Description = union(enum) {
-        data: struct { format: Image.Format, byte_length: u64 },
-        url: struct {},
-    };
-
-    pub fn describe(self: ImageContent) Description {
-        return switch (self) {
-            .data => |image| .{ .data = .{ .format = image.format, .byte_length = image.bytes.len } },
-            .url => .{ .url = .{} },
-        };
-    }
 };
 
 pub const Image = @import("image.zig").Image;
+pub const LocalFile = @import("local_file.zig");
 
 /// Complete opaque file bytes. The model service owns format recognition.
 pub const File = struct {
     bytes: []const u8,
     reference: ?[]const u8 = null,
-
-    pub const Description = struct { byte_length: u64 };
-
-    pub fn describe(self: File) Description {
-        return .{ .byte_length = self.bytes.len };
-    }
 };
 
 pub const image_size_limit = 32 * 1024 * 1024;
 pub const file_size_limit = 32 * 1024 * 1024;
 pub const reference_size_limit = 16 * 1024;
 
+pub fn withoutLineEnding(bytes: []const u8) []const u8 {
+    return std.mem.cutSuffix(u8, bytes, "\r\n") orelse std.mem.cutSuffix(u8, bytes, "\n") orelse bytes;
+}
+
 /// Explicit interpretation of a complete text source as a resource reference.
 pub const Interpretation = enum { image_url };
 
 pub const Unavailable = struct {
     byte_length: u64,
-    reason: enum { unsupported_binary, image_too_large, file_too_large, reference_too_large },
+    reason: enum { image_too_large, file_too_large, reference_too_large },
 };
 
 pub const Classified = union(enum) {
     text: []const u8,
     image: ImageContent,
     file: File,
-};
-
-pub const Media = union(enum) {
-    image: ImageContent,
-    file: File,
-    unavailable: Unavailable,
 };
 
 /// Recognize encoded image signatures without decoding pixels.
@@ -93,7 +74,7 @@ pub fn requiresCompleteSource(prefix: []const u8, complete: bool) bool {
     return detectFormat(prefix) != null or hasPdfHeader(prefix) or textPrefixLength(prefix, !complete) == null;
 }
 
-fn hasPdfHeader(bytes: []const u8) bool {
+pub fn hasPdfHeader(bytes: []const u8) bool {
     return bytes.len >= 8 and std.mem.startsWith(u8, bytes, "%PDF-") and
         std.ascii.isDigit(bytes[5]) and bytes[6] == '.' and std.ascii.isDigit(bytes[7]);
 }
@@ -111,61 +92,11 @@ pub fn classify(bytes: []const u8) Classified {
 /// Recognized media keep their data representation; empty text stays text.
 pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Classified {
     const classified = classify(bytes);
-    if (interpretation == .image_url and classified == .text and bytes.len != 0)
-        return .{ .image = .{ .url = bytes } };
-    return classified;
-}
-
-pub const FileMediaRequest = union(enum) {
-    detect: struct { interpretation: ?Interpretation = null, binary_observed: bool = false },
-    image,
-};
-
-/// Return the complete source when it matches the request. A later text
-/// window can reveal binary content that the first bytes did not identify.
-pub fn readFileMedia(io: std.Io, a: std.mem.Allocator, file: std.Io.File, length: u64, request: FileMediaRequest) !?Media {
-    var header: [32]u8 = undefined;
-    const header_read = try file.readPositionalAll(io, &header, 0);
-    if (detectFormat(header[0..header_read]) != null) {
-        if (length > image_size_limit)
-            return .{ .unavailable = .{ .byte_length = length, .reason = .image_too_large } };
-    } else switch (request) {
-        .image => return null,
-        .detect => |options| if (options.binary_observed or requiresCompleteSource(header[0..header_read], header_read == length)) {
-            if (length > file_size_limit)
-                return .{ .unavailable = .{ .byte_length = length, .reason = .file_too_large } };
-        } else {
-            if (options.interpretation == null) return null;
-            if (length > reference_size_limit)
-                return .{ .unavailable = .{ .byte_length = length, .reason = .reference_too_large } };
-        },
+    if (interpretation == .image_url and classified == .text) {
+        const url = withoutLineEnding(bytes);
+        if (url.len > 0) return .{ .image = .{ .url = url } };
     }
-    const bytes = try a.alloc(u8, @intCast(length));
-    var retained = false;
-    defer if (!retained) a.free(bytes);
-    const count = try file.readPositionalAll(io, bytes, 0);
-    // A size reported before reading can describe a changing or virtual file.
-    // An attachment and an image URL both require the complete source.
-    var extra: [1]u8 = undefined;
-    if (count != bytes.len or try file.readPositionalAll(io, &extra, length) != 0) return error.IncompleteMedia;
-    const interpretation = switch (request) {
-        .detect => |options| options.interpretation,
-        .image => null,
-    };
-    return switch (interpret(bytes, interpretation)) {
-        .text => null,
-        .image => |image| blk: {
-            if (image == .url and image.url.len > reference_size_limit)
-                break :blk .{ .unavailable = .{ .byte_length = image.url.len, .reason = .reference_too_large } };
-            retained = true;
-            break :blk .{ .image = image };
-        },
-        .file => |document| blk: {
-            if (request == .image) return null;
-            retained = true;
-            break :blk .{ .file = document };
-        },
-    };
+    return classified;
 }
 
 pub fn isText(bytes: []const u8) bool {
@@ -201,10 +132,10 @@ pub fn textPrefixLength(bytes: []const u8, allow_partial: bool) ?usize {
     return if (std.unicode.utf8ValidateSlice(bytes[0..start])) start else null;
 }
 
-test "image references require explicit interpretation and preserve source representation" {
+test "explicit image references accept a trailing line ending" {
     const source = "https://example.com/image.png\n";
     try std.testing.expectEqualStrings(source, classify(source).text);
-    try std.testing.expectEqualStrings(source, interpret(source, .image_url).image.url);
+    try std.testing.expectEqualStrings("https://example.com/image.png", interpret(source, .image_url).image.url);
     try std.testing.expectEqualStrings("", interpret("", .image_url).text);
 
     const png = "\x89PNG\r\n\x1a\n";
@@ -251,24 +182,4 @@ test "streaming text rejects malformed bytes rather than retaining them as an in
         try std.testing.expectEqual(null, textPrefixLength(bytes, true));
         try std.testing.expectEqual(null, textPrefixLength(bytes, false));
     }
-}
-
-test "a prior binary observation still applies the limit to a replacement image reference" {
-    const io = std.testing.io;
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const reference = try a.alloc(u8, reference_size_limit + 1);
-    @memset(reference, 'a');
-    try temporary.dir.writeFile(io, .{ .sub_path = "stdout", .data = reference });
-    const file = try temporary.dir.openFile(io, "stdout", .{});
-    defer file.close(io);
-
-    // The earlier binary observation selects whole-source reading, but that
-    // source may now be text interpreted as a URL with its own smaller limit.
-    const result = (try readFileMedia(io, a, file, reference.len, .{ .detect = .{ .interpretation = .image_url, .binary_observed = true } })).?;
-    try std.testing.expectEqual(.reference_too_large, result.unavailable.reason);
-    try std.testing.expectEqual(reference.len, result.unavailable.byte_length);
 }

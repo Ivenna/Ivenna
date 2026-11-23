@@ -7,37 +7,20 @@ pub fn success(a: Allocator, value: anytype) !Content {
     return Content.fromText(a, try encode(a, value));
 }
 
-pub fn imageUrl(a: Allocator, url: []const u8) !Content {
-    const image: content.ImageContent = .{ .url = url };
-    const text = try encode(a, .{ .uri = image.url, .kind = "image_url", .content = .{ .image = image.describe() } });
-    return Content.fromParts(a, &.{ .{ .text = text }, .{ .image = image } });
+pub fn attachment(a: Allocator, source: anytype, part: Content.Part) !Content {
+    return Content.fromParts(a, &.{ .{ .text = try encode(a, source) }, part });
 }
 
-pub fn fileMedia(a: Allocator, uri: []const u8, media: content.Media) !Content {
-    return switch (media) {
-        .image => |image| {
-            const length = switch (image) {
-                .data => |data| data.bytes.len,
-                .url => |url| url.len,
-            };
-            return fileAttachment(a, uri, length, .image, image);
-        },
-        .file => |file| fileAttachment(a, uri, file.bytes.len, .file, file),
-        .unavailable => |reason| success(a, .{ .uri = uri, .kind = "file", .content = .{ .unavailable = reason }, .byte_length = reason.byte_length }),
-    };
+pub fn imageUrl(a: Allocator, uri: []const u8, url: []const u8) !Content {
+    return attachment(a, .{ .uri = uri, .kind = "image_url" }, .{ .image = .{ .url = url } });
 }
 
-fn fileAttachment(a: Allocator, uri: []const u8, length: u64, comptime tag: enum { image, file }, value: @FieldType(Content.Part, @tagName(tag))) !Content {
-    const description = switch (tag) {
-        .image => .{ .image = value.describe() },
-        .file => .{ .file = value.describe() },
-    };
-    const text = try encode(a, .{ .uri = uri, .kind = "file", .content = description, .byte_length = length });
-    return Content.fromParts(a, &.{ .{ .text = text }, @unionInit(Content.Part, @tagName(tag), value) });
+pub fn unavailable(a: Allocator, uri: []const u8, omitted: content.Unavailable) !Content {
+    return success(a, .{ .uri = uri, .kind = "file", .content = .{ .unavailable = omitted } });
 }
 
 fn encode(a: Allocator, value: anytype) ![]const u8 {
-    return std.json.Stringify.valueAlloc(a, .{ .result = value }, .{});
+    return std.json.Stringify.valueAlloc(a, .{ .result = value }, .{ .emit_null_optional_fields = false });
 }
 
 pub fn failure(a: Allocator, code: []const u8, message: []const u8) !Content {

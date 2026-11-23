@@ -1,6 +1,8 @@
 # Runtime user messages
 
-This contract defines the agent's runtime-generated `role=user` messages: retained events, handovers, and inference turns. Native model output and tool replies are encoded separately by the model adapter; [tool content](content.md) describes the text, images, and files returned by tools. See [message assembly](architecture.md#working-history-and-user-messages).
+The agent renders retained events, handovers, and inference turns as YAML messages with the `user` role. This guide defines those messages and their fields. See [message assembly](architecture.md#working-history-and-user-messages).
+
+Tools return their own text, images, and files. When the Responses adapter uses a user-role message to present an uploaded file, it identifies the tool call that supplied it. See [tool content](content.md) and [how tool results are encoded](architecture.md#tool-results).
 
 The [Input definitions and renderers](../packages/agent/src/input.zig) own the data and its model-facing presentation. All focuses use the same [system prompt](../packages/agent/src/system.md), which explains model interpretation; current identity, observations, and available tools identify each focus's circumstances and possible actions.
 

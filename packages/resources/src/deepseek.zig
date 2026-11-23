@@ -1,19 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const JsonString = @import("agent_contracts").JsonString;
 
 const web = @import("web.zig");
 const Outcome = web.Outcome;
-
-const JsonString = struct {
-    bytes: []const u8,
-
-    // A Zig byte slice also accepts an array of integers. The service's text
-    // fields must be JSON strings so every returned range contains UTF-8.
-    pub fn jsonParse(a: Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!JsonString {
-        if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
-        return .{ .bytes = try std.json.innerParse([]const u8, a, source, options) };
-    }
-};
 
 const Error = error{
     FetchTimeout,

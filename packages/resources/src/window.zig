@@ -1,20 +1,30 @@
 const std = @import("std");
 const content = @import("content");
 
+pub const default_text_bytes = 4 * 1024;
 pub const text_byte_limit = 16 * 1024;
 
 pub const View = union(enum) {
     window: Window,
     image,
+    file,
 
     pub fn parse(value: std.json.Value) !View {
-        if (value == .string and std.mem.eql(u8, value.string, "image")) return .image;
+        if (value == .string) {
+            if (std.mem.eql(u8, value.string, "image")) return .image;
+            if (std.mem.eql(u8, value.string, "file")) return .file;
+            return error.InvalidToolArguments;
+        }
         if (value != .object) return error.InvalidToolArguments;
         var window: Window = .{};
         var fields = value.object.iterator();
         while (fields.next()) |field| {
             const name = field.key_ptr.*;
             const input = field.value_ptr.*;
+            if (std.mem.eql(u8, name, "metadata") and input == .bool) {
+                window.metadata = input.bool;
+                continue;
+            }
             if (input != .integer) return error.InvalidToolArguments;
             if (std.mem.eql(u8, name, "offset") and input.integer >= 0) {
                 window.offset = @intCast(input.integer);
@@ -29,9 +39,10 @@ pub const View = union(enum) {
 pub const Window = struct {
     offset: u64 = 0,
     limit: ?usize = null,
+    metadata: bool = false,
 
-    pub fn count(self: Window, maximum: usize) usize {
-        return @min(self.limit orelse maximum, maximum);
+    pub fn textBytes(self: Window) usize {
+        return @min(self.limit orelse default_text_bytes, text_byte_limit);
     }
 };
 

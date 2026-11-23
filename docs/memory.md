@@ -12,7 +12,7 @@ Names consisting only of three or more dots, such as `...`, are unsupported. The
 
 ## Result pages and shared state
 
-Room visits, find, and recall replies are paginated. `offset` defaults to `0`, and `max_results` defaults to `100` (from `1` through `1000`). Replies include `offset`, `total`, and `next_offset`; pass a non-null `next_offset` as the next call's `offset` to continue. Results are sorted by address, then by line for content matches. The 32768-byte encoded JSON limit can shorten a page before `max_results` is reached. A single result whose metadata cannot fit returns `result_too_large`.
+Room visits, find, and recall replies are paginated. Results are sorted by address, then by line for content matches. Use `max_results` to request up to that many items. A page can contain fewer items even when more remain. Each reply includes its `offset` and the `total` number of results. Pass a non-null `next_offset` as the next call's `offset` to continue. A single result too large to return gives `result_too_large`.
 
 Each reply describes memory at that call. A sequence of calls reserves neither entries nor capacity between requests: another session can change them. Changes between pages can alter offsets, results, and totals; pagination does not preserve a snapshot across calls. [Text reads](#reading) have their own byte offsets and page sizes.
 
@@ -61,7 +61,7 @@ Both tools default to literal, case-insensitive matching. Set `case_sensitive: t
 {"query":"*.md","room":"languages","match_mode":"glob"}
 ```
 
-`recall_memory` follows a textual clue through entry content with `literal` or `regex` matching. It does not retrieve by semantic similarity. It returns one record per matching line, with `address`, a `line` number starting at 1, a `text` preview of at most 2048 UTF-8 bytes, and `text_truncated` to identify an omitted suffix. Use `read_memory` for complete text. For example, search text throughout the room with:
+`recall_memory` searches entry contents and returns a `text` preview for each matching line. The `address` identifies the memory and `line` gives its line number, starting at 1. When `text_truncated` is true, `read_memory` can open the entry for more context. This call searches the `languages` room and its children.
 
 ```json
 {"clue":"French","room":"languages"}
@@ -69,48 +69,44 @@ Both tools default to literal, case-insensitive matching. Set `case_sensitive: t
 
 ## Reading
 
-Call `read_memory` with an entry address:
+Call `read_memory` with an entry's `address`. For text, `max_bytes` sets the page size. This call asks for the first eight bytes.
 
 ```json
-{"address":"languages/progress.md"}
+{"address":"languages/progress.md","max_bytes":8}
 ```
 
-Text reads return a byte page. `offset` defaults to `0` and must be at a UTF-8 character boundary; `max_bytes` defaults to `8192` and accepts `4` through `8192`. The result includes the entry's total `byte_length`, the page's `offset`, and `next_offset`. Use a non-null `next_offset` as the next call's `offset` to continue; `null` means the end was reached. A page can end within a long line but preserves complete UTF-8 characters. An offset beyond the entry or inside a character returns `invalid_range`.
+The reply gives the page's text alongside the total size of the entry in bytes.
 
 ```json
-{"result":{"address":"languages/progress.md","content":"French: practice twice a week.","byte_length":30,"offset":0,"next_offset":null}}
+{"result":{"address":"languages/progress.md","content":"French: ","byte_length":30,"offset":0,"next_offset":8}}
 ```
 
-The encoded text reply is at most 32768 bytes. Escaping control characters or a long address can shorten a page further.
+Pass `next_offset` as the next call's `offset` to continue. A null `next_offset` marks the end. A page can be shorter than requested and can end within a line. It always preserves whole UTF-8 characters. An offset beyond the entry or inside a character returns `invalid_range`.
 
-The shared [content rules](content.md#automatic-classification) determine whether a read returns text, an image, or a file. `offset` and `max_bytes` select text pages; native images and files contain the complete entry. A page can therefore return text while a later page reveals binary content and returns the whole file. Omitted text bytes have not necessarily been classified.
+When a read identifies an image or file, it returns the complete entry as a native part. The accompanying text gives its `address`, `byte_length`, and `kind` (`image` or `file`). An image also includes its `format`. A later text page can reveal binary data and return the whole file. Each read uses the entry as it exists at the time. See [automatic classification](content.md#automatic-classification).
 
-Media results retain the entry's `address` and total `byte_length`. An image adds a `content.image` description and native image part. A file adds `content.file` with its `byte_length` and a native file part. For example, read a stored report through the ordinary operation:
-
-```json
-{"address":"reports/annual.pdf"}
-```
-
-Set `interpretation: "image_url"` with `offset: 0` to present the complete entry text as an [image reference](content.md#image-url-references):
+An entry containing an image URL is text by default. To view the image, read it from offset zero with `interpretation: "image_url"`. The result has `kind: "image_url"` and gives the size of the stored entry. The image part carries the URL. See [image URL references](content.md#image-url-references).
 
 ```json
 {"address":"references/chart","interpretation":"image_url"}
 ```
 
-Each result describes the content observed by that call. If an entry changes while a read is being completed, a resulting text page uses the requested offset and budget; an offset beyond the observed end returns `invalid_range`. Media remain complete entries, regardless of the text offset.
-
-Content that cannot be supplied returns `content.unavailable` with `byte_length` and `reason`. The shared [content guide](content.md#content-and-results) defines media descriptions, source limits, and unavailable-content diagnostics.
+If the entry exceeds the size limit for that image, file, or URL reference, `content.unavailable` gives the `byte_length` and `reason`. See [content limits](content.md#content-and-results).
 
 ## Recording
 
-`remember.content` selects exactly one source:
+`remember` writes one source to an `address` relative to the memory entrance.
 
 | Content | Meaning |
 | --- | --- |
 | `{"text":"..."}` | Write the supplied text as UTF-8 |
 | `{"file":{"path":"..."}}` | Copy a file's original bytes from Ivenna's host filesystem |
 
-A source file path can be absolute or relative to Ivenna's startup directory and must identify a regular file. Its bytes are copied from Ivenna's host to the memory workspace; the destination `address` remains relative to the memory entrance.
+For a file copy, `path` must identify a regular file on the host. It can be an absolute path, a path relative to the kernel's startup directory, or a local `file://` URI. This call copies a host report into the `reports` memory room.
+
+```json
+{"address":"reports/annual.pdf","content":{"file":{"path":"/srv/reports/annual.pdf"}}}
+```
 
 `remember.mode` controls how the bytes are stored:
 
@@ -149,8 +145,6 @@ Set `match_mode: "regex"` to use a regular expression. Replacement text can refe
 ```json
 {"address":"languages/progress.md","old_text":"(French|Japanese):","new_text":"${1} study:","replace_all":true,"match_mode":"regex"}
 ```
-
-With `replace_all: true`, regex revision can require working memory beyond the entry's 32 MiB limit. See the [architecture guide](architecture.md#writes-and-capacity) for this implementation limit.
 
 ## Moving and removing
 

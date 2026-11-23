@@ -1,37 +1,40 @@
 # Reading resources
 
-The core and activities can both call `read_resource`. Pass an absolute `uri` to open a local file, a directory, or a web resource. With no arguments, the tool lists the kernel's startup directory. The result enters the calling focus's working history.
-
-An HTTP(S) URL must have a host and omit embedded usernames and passwords. With the default view, the tool requests [page text](#web-pages) when web page access is enabled. With the `"image"` view, it passes a [direct image URL](#remote-images) to the configured model service for retrieval.
+Both the core and activities can call `read_resource`. Set `location` to an absolute host path, a file URI, an HTTP(S) URL, or a web page snapshot URI. Omit it to list the kernel's startup directory.
 
 ## Reading a window
 
-`view.offset` defaults to zero. `view.limit` requests a positive number of bytes or entries. For example, `{"view":{"limit":10}}` lists up to ten entries from the startup directory.
+Omit `view` to read the first page. To request a particular page size, set `view.limit`. For text files and web pages, the size and offset count UTF-8 bytes. For directories, they count entries. For example, `{"view":{"limit":10}}` lists up to ten entries from the startup directory.
 
-| Source | Unit | Default and maximum window |
-| --- | --- | --- |
-| Text file or web page snapshot | UTF-8 bytes | 16 KiB |
-| Directory listing | Entries | 100 entries |
-
-To continue, pass `result.uri` and use `result.next_offset` as the next `view.offset`. A null `next_offset` means the reader reached the end. Text windows preserve whole characters, even when the first character exceeds the requested limit.
+A page can be shorter than requested even when more remains. Text pages preserve whole characters, so the first character can exceed a small byte request. To continue, pass `result.uri` as `location` and `result.next_offset` as `view.offset`. The final page omits `next_offset`.
 
 Starting exactly at the end of the text or listing returns an empty window. An offset beyond the end or inside a UTF-8 character returns `invalid_range`.
 
 ## Local files and directories
 
-To open a directory entry or a command log, pass its returned `uri`. The reader follows symbolic links with the kernel's OS permissions. Each read sees the current filesystem, so edits can shift the offsets in a file or directory listing. See [host command results](host.md#output-and-results).
+Pass a [command log's path](host.md#output-and-results) directly as `location`. The reader follows symbolic links when opening a path. Each read sees the current filesystem, so edits between reads can shift offsets.
 
-To construct a file URI, use an absolute path with an empty host or `localhost`. Percent-encode spaces and literal `%`, `?`, or `#` in filenames. For example, `file:///srv/notes%20today.md` opens `/srv/notes today.md`. A link to `draft.md` in that file resolves to `file:///srv/draft.md`.
+Opening a text file in the default view returns a passage in `result.content`, with `byte_length` when known. If the reader encounters a recognized image, a PDF, or binary data, the preview gives the file's `uri`, `byte_length`, and the `view` to use. To receive the media, pass that URI as `location` with the suggested view. An oversized source gives its size and reason in `content.unavailable`. See [source limits](content.md#content-and-results).
 
-- **Directories.** `entries` lists one level, sorted by filename bytes. If a name contains invalid UTF-8, `name` is null and the entry's `uri` remains usable. Each entry reports its own `kind` (`file`, `directory`, `symlink`, or `other`), its modification time (`modified_ms`, in milliseconds since the Unix epoch), and its `byte_length` if it is a regular file. Unavailable metadata is null.
-- **Text files.** `content` holds the selected text. `byte_length` is null until the reader knows the file's length.
-- **Images and files.** Start at offset zero for a known image or binary file. A recognized image or file arrives whole if it fits the source limit. The `"image"` view requests a recognized image explicitly, as in `{"uri":"file:///srv/chart.png","view":"image"}`. See [content classification](content.md#automatic-classification) and [source limits](content.md#content-and-results).
+You can also request the view directly. For example, this call attaches a complete local file for the model service to parse.
+
+```json
+{"location":"/srv/report.pdf","view":"file"}
+```
+
+Use `"image"` to open a recognized image file. If a file contains only a direct HTTP(S) image URL or an image data URL, the default view reads the address as text. The image view reads the complete address as an image reference and accepts a single trailing LF or CRLF.
+
+Opening a directory lists its entries in filename byte order. Each entry has a reusable `uri`, a `name` when it is valid UTF-8, and a `kind` when known. Long paths can shorten a page. To include modification times (`metadata.modified_ms`, milliseconds since the Unix epoch) and regular-file sizes (`metadata.byte_length`) when available, request `{"view":{"metadata":true}}`.
+
+Absolute paths are literal, so `/srv/reports/Q4 #1%.pdf` opens the file with exactly that name. A file URI has an empty host or `localhost` and uses percent escapes for spaces and literal `%`, `?`, or `#` in filenames. The reader can return a URI such as `file:///srv/reports/Q4-%FF.pdf` for a name containing non-UTF-8 bytes.
 
 ## Web pages
 
-Pass a page's HTTP(S) URL to request a fresh copy as Markdown. The tool description names the page service and discloses any potential charge. See [web page access](running.md#web-page-access).
+Opening an HTTP(S) URL in the default view fetches the page as Markdown when web page access is enabled. The URL must have a host and omit embedded usernames and passwords. The tool description names the page service and any potential charge. See [web page access](running.md#web-page-access).
 
-For example, `{"uri":"https://example.org/guide","view":{"limit":6}}` might return the heading of a page.
+In the initial result, `result.uri` starts with `ivenna:fetch/` and identifies the copy held by this kernel. Both the core and activities can reopen it without another web request. `result.source_uri` is the original URL. Opening it fetches a fresh copy, which may have changed.
+
+For example, `{"location":"https://example.org/guide","view":{"limit":6}}` might return the heading of a page.
 
 ```json
 {
@@ -40,7 +43,6 @@ For example, `{"uri":"https://example.org/guide","view":{"limit":6}}` might retu
     "source_uri": "https://example.org/guide",
     "kind": "webpage",
     "title": "One",
-    "title_truncated": false,
     "content": "# One\n",
     "byte_length": 37,
     "offset": 0,
@@ -49,13 +51,13 @@ For example, `{"uri":"https://example.org/guide","view":{"limit":6}}` might retu
 }
 ```
 
-Here `source_uri` is the requested URL and `byte_length` is the full length of the Markdown. The title is a preview when `title_truncated` is true. Either focus can use the snapshot's `uri` to continue reading the same version without another fetch.
+This window contains the first six bytes of a 37-byte snapshot. Continue from `next_offset` using the snapshot URI.
 
 ```json
-{"uri":"ivenna:fetch/7198a8e09ae74b1c","view":{"offset":6}}
+{"location":"ivenna:fetch/7198a8e09ae74b1c","view":{"offset":6}}
 ```
 
-Snapshots expire when the kernel restarts or needs room for newer pages. Reading `source_uri` again may return a different version.
+The initial fetch and a snapshot read from offset zero include the original URL and the title when available. A shortened title carries `title_truncated: true`. Later windows omit these fields. Snapshots expire when the kernel restarts or needs room for newer pages.
 
 To follow a link in the Markdown, pass its destination URL. Resolve a relative link against the page's base URL when known.
 
@@ -64,10 +66,10 @@ To follow a link in the Markdown, pass its destination URL. Resolve a relative l
 To view a screenshot from a letter or an illustration linked in Markdown, pass the direct HTTP(S) URL with `"view":"image"`. This view also works when web page access is disabled.
 
 ```json
-{"uri":"https://example.org/figures/weekly-rainfall","view":"image"}
+{"location":"https://example.org/figures/weekly-rainfall","view":"image"}
 ```
 
-The result has `kind: "image_url"` and identifies the supplied URL in `uri`. The model service handles image retrieval during inference. That request can fail if the service cannot reach the address or the model lacks image support. Working history retains the URL, so the image may change or become unavailable between turns. See [image URL references](content.md#image-url-references).
+The result identifies the URL in `uri` and supplies it as an image reference. The model service retrieves the image during inference. Viewing it requires a reachable URL and a model with image support. See [image URL references](content.md#image-url-references).
 
 ## Failure results
 
@@ -75,12 +77,13 @@ A failed read returns an `error` with a `code` and a `message`.
 
 | Code | Meaning or next action |
 | --- | --- |
-| `invalid_arguments` | Check the argument shape. Put window fields inside a `view` object, or use the string `"image"` for the whole image. |
+| `invalid_arguments` | Check the argument shape. Use a window object, `"image"`, or `"file"` for `view`. |
+| `invalid_path` | Supply an absolute host path with no NUL bytes. |
 | `invalid_uri`, `unsupported_scheme` | Correct the reference or use a URI returned by an earlier read. |
-| `unsupported_view` | The local source or Markdown snapshot cannot supply an image. Omit `view` for an ordinary read. |
+| `unsupported_view` | The source cannot provide the requested view. See the message for the available read. |
 | `invalid_range` | Resume at a returned `next_offset` or omit `view` to start at zero. For a web page, use `error.uri` to read the snapshot already retrieved. |
 | `not_found` | The local entry or snapshot is missing. For an expired snapshot, open the original `source_uri` to fetch a fresh copy. |
-| `not_readable` | The source could not be read. The message gives the reason known to the reader. |
+| `not_readable` | Check the message for the cause, such as a file exceeding the view's size limit during the read. |
 | `rate_limited`, `read_timeout` | The service is limiting requests or the read timed out. A later read may succeed. |
 | `page_too_large` | The page is too large to retrieve or retain. A smaller reading window still requires the whole page. |
 | `web_unavailable` | Check the message for details about page access, the local request, or the page service. |

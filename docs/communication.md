@@ -46,6 +46,6 @@ The adapter maps message From addresses to correspondent IDs, relying on the [ma
 
 ## Incoming email text
 
-An eligible correspondence email becomes one [`input` observation](input.md#incoming-messages). Its `text` contains the subject, a blank line, and the selected body; an empty subject leaves the body alone. The adapter uses decoded plain text when the message lists a plain-text body, otherwise HTML source. Multiple selected body parts are joined with a newline. Attachments do not enter the observation.
+An eligible correspondence email becomes one [`input` observation](input.md#incoming-messages). Its `text` contains the subject, a blank line, and the selected body. With an empty subject, it contains just the body. The adapter uses decoded plain text when the message lists a plain-text body, otherwise HTML source. It joins multiple selected body parts with a newline and skips attachments. For ways to share a file or web page by letter, see [sharing material to read](usage.md#sharing-material-to-read).
 
 The selected body must be complete and decoded without encoding errors. Unsupported or incomplete bodies are skipped, leaving the original mail copy unchanged. Eligible text enters the observation in full and is subject to [request-budget admission](architecture.md#activation-admission).

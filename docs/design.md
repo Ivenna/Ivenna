@@ -28,7 +28,7 @@ Model-facing inputs describe current attention, observations, and possible actio
 
 Reasoning can lose details, confuse references, or choose unsuccessful actions. Operation results, observations, and discoverable command handles support recognition and recovery. The runtime retains the references and routing state needed for delivery and resumption independently of Ivenna's recollection or generated summaries. Ivenna can reconsider an action from its outcome.
 
-Capabilities keep operation outcomes connected to their sources and supported content. When a tool returns a preview, it gives Ivenna a way to inspect the rest. Identifying omitted content lets Ivenna distinguish it from an empty source.
+An operation should report enough for Ivenna to decide what to do next. Short text can fit directly in the result. For a longer source, a passage and a reference let Ivenna choose what to read. Ivenna can also give another tool a file's location and let the runtime transfer the bytes. When it chooses to inspect an image or a document, the tool can bring the content into its next inference.
 
 Changes to shared memory require a clear target. An edit that could select several occurrences requires an explicit choice, and the previous entry remains intact until its replacement is ready. Ivenna can refine an intended change without losing the memory it was trying to revise.
 
@@ -46,14 +46,12 @@ Core and activity focuses use the same system prompt. Each receives observations
 | Schedule a wakeup | Yes | — |
 | Subscribe to observations for the current focus | Yes | Yes |
 | Withdraw a subscription by its complete reference | Yes | Yes |
-| [Read a resource by URI](resources.md) | Yes | Yes |
+| [Read a local or web resource](resources.md) | Yes | Yes |
 | Run and interact with host programs | — | Yes |
 
 The core can [open an activity focus](attention.md#opening-a-focus) with a free-form assignment. It carries the core's retained understanding, relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
 
-The runtime collects what activities say for the core's next ordinary input. This lets the core follow concurrent work without waking for each update. One input can present messages from several activities while preserving each activity's message order and observation times. To establish what an activity's tools did, the core needs evidence of their effects.
-
-An activity that quotes a web page can include the snapshot URI in its report. The core can then read the passage in context, in the version the activity saw.
+The core receives what activities say alongside its next ordinary observations. Several activities can report together, so the core can follow concurrent work without waking for each update. Each activity's tool results stay in its own history. A report can summarize a finding and point to a shared source, leaving the core to decide how much evidence to inspect.
 
 An activity that ends calls for the core's attention even if it said nothing. When an activity's reasoning is interrupted, the core receives the reason and can reach the activity again while it exists. The core remains free to pursue its own work. See [how focuses coordinate](attention.md) and [how the runtime schedules them](architecture.md#scheduling-and-capacity).
 
@@ -99,7 +97,7 @@ Model changes should support this same developing life by preserving access to i
 
 A failure interrupts the work that depends on it. During a temporary model outage, the runtime can repeat an inference with the same observations. If the request is rejected or the response cannot be used, the focus retains its history and can resume when a fresh observation calls for its attention.
 
-A lost response can leave an action's effects uncertain. The runtime can repeat a mailbox read or check stored records to confirm a write. If it still cannot tell whether the mail service accepted a message, the [sending result](communication.md#sending-a-message) tells Ivenna that sending again could produce a duplicate. If the response to a file upload is lost after a command finishes, Ivenna keeps the other command results and learns that the file service may already have stored the output.
+A lost response can leave an action's effects uncertain. The runtime can repeat a mailbox read or check stored records to confirm a write. If it still cannot tell whether the mail service accepted a message, the [sending result](communication.md#sending-a-message) tells Ivenna that sending again could produce a duplicate. If the response to a file upload is lost, the tool result still identifies the source and tells Ivenna that the file service may already have stored it.
 
 The receiving mail service checks the kernel's readiness before accepting correspondence. Reception opens after initialization and stays open while a focus waits for inference. If the kernel loses required access to its configured model, communication, memory, or working history, it closes reception and stops. The sender decides whether to queue or retry a letter it could not deliver. See [reception readiness](running.md#service-status-and-reception).
 

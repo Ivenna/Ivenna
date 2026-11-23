@@ -1,32 +1,38 @@
 [
   {
     "name": "read_resource",
-    "description": "Read a file or list a directory on this host, or view an image from an HTTP(S) URL.",
+    "description": "Read a local file, list a directory, or view an image.",
     "parameters": {
       "type": "object",
       "properties": {
-        "uri": {
+        "location": {
           "type": "string",
           "minLength": 1,
-          "description": "Absolute URI of the resource, such as file:///srv/notes.md. Omit to use the kernel's startup directory."
+          "description": "Absolute host path, local file URI, HTTP(S) URL, or result.uri from an earlier read. Omit to list the startup directory."
         },
         "view": {
           "default": {},
-          "description": "Omit to read from the beginning. Text and directories are read in windows. Recognized local media is read whole.",
+          "description": "To open media identified by a preview, use result.view.",
           "anyOf": [
             {
               "type": "object",
+              "description": "Preview a page. Offsets and sizes count UTF-8 bytes in text or entries in a directory.",
               "properties": {
                 "offset": {
                   "type": "integer",
                   "minimum": 0,
                   "default": 0,
-                  "description": "UTF-8 byte offset in text or entry index in a directory. If result.next_offset is non-null, use it with result.uri to continue."
+                  "description": "To continue, use result.next_offset."
                 },
                 "limit": {
                   "type": "integer",
                   "minimum": 1,
-                  "description": "Requested number of text bytes or directory entries. A text window includes at least one whole character when text remains."
+                  "description": "Requested page size. Omit to let the reader choose."
+                },
+                "metadata": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Include modification times and regular-file sizes in directory listings when available."
                 }
               },
               "required": [],
@@ -34,8 +40,8 @@
             },
             {
               "type": "string",
-              "enum": ["image"],
-              "description": "For a local image, return its bytes. For an HTTP(S) image URL, pass the URL to the model service for retrieval during inference."
+              "enum": ["image", "file"],
+              "description": "The image view sends local image content or an image URL to the model service. A local file can hold the URL. The file view attaches a whole local file for parsing."
             }
           ]
         }

@@ -32,7 +32,7 @@ const Fixture = struct {
         return error.UnexpectedMeasurement;
     }
 
-    fn limitToolReplies(_: *anyopaque, _: Allocator, _: Model.Request, _: []Model.Item) anyerror!void {
+    fn limitToolReplies(_: *anyopaque, _: Allocator, _: Model.Request, _: []Model.Item, _: u64) anyerror!void {
         return error.UnexpectedToolBatch;
     }
 

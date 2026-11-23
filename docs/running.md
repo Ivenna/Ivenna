@@ -50,9 +50,9 @@ Numeric kernel settings must be positive. Relative `DATA_DIR` and `MEMORY_SSH_CO
 
 ### Web page access
 
-Set `DEEPSEEK_API_KEY` to enable web page retrieval. Requesting a page as Markdown sends its full URL, including the query string, to DeepSeek Fetch even when another service handles inference. To use the same DeepSeek key for retrieval and inference, set both `DEEPSEEK_API_KEY` and `LLM_API_KEY` to that key.
+Set `DEEPSEEK_API_KEY` to let `read_resource` fetch web pages as Markdown. DeepSeek receives the full page URL, including its query string, whichever service handles inference. If one DeepSeek key serves both purposes, assign it to both `DEEPSEEK_API_KEY` and `LLM_API_KEY`.
 
-DeepSeek bills successful Fetch requests that return page content. Reading another passage through the returned snapshot URI uses the copy in kernel memory without another Fetch request. See [web page snapshots](resources.md#web-pages) and [DeepSeek's billing terms](https://api-docs.deepseek.com/guides/search/#billing).
+Opening the original URL again starts a new Fetch request. DeepSeek charges for each successful request that returns page content. To read another passage from the same copy, use the returned snapshot URI. See [web page snapshots](resources.md#web-pages) and [DeepSeek's billing terms](https://api-docs.deepseek.com/guides/search/#billing).
 
 Viewing an image by URL sends that URL to the configured model service. A service that supports remote images can retrieve the image even with web page access disabled. See [remote images](resources.md#remote-images).
 
@@ -72,7 +72,7 @@ Choose both byte budgets and the output-token limit together for the configured 
 
 Handovers carry the focus's pending callback and active subscription references alongside the generated summary. Core handovers also carry existing activity references. These collections grow with outstanding work and count toward both the summary request and the ordinary requests that retain the handover.
 
-Individual tool results can meet their [content limits](content.md#model-request-checks) while a large batch or inline image exceeds the context budgets. Inline images include base64 encoding overhead. Reduce their size or use image URL references when that overhead would exceed the request budget.
+Inline images count at their encoded size, including base64 overhead. If a tool result reports that an image was omitted to fit the request, a smaller image or a direct image URL may fit. Retained history, new text and runtime observations can still require compaction. See [model request checks](content.md#model-request-checks).
 
 For files, the byte budgets measure identifiers and source descriptions. The model service expands those references, so a request within Ivenna's budget can still exceed the service's context limits. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) and [when model work stalls](#when-model-work-stalls).
 
@@ -94,7 +94,7 @@ To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MO
 
 Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks` and `Ivenna History` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
 
-Set `MAIL_SESSION_URL` to the URL of the JMAP session document. The kernel follows up to three redirects that keep the same scheme, host, and effective port. If any redirect changes one of these, set `MAIL_SESSION_URL` directly to the final session URL.
+Set `MAIL_SESSION_URL` to the URL of the JMAP session document. Discovery follows up to three redirects within the same scheme, host, and effective port. For a longer chain or a change of origin, configure the final session URL directly.
 
 Set `MAIL_ADDRESS` and authentication settings for the kernel account. Give correspondents separate accounts in the same domain as `MAIL_ADDRESS`. For example, with `MAIL_ADDRESS=ivenna@ivenna.test`, the ID `operator` resolves to `operator@ivenna.test`. Changing the domain changes where messages to retained IDs are sent. See [supported email addresses](communication.md#current-email-addressing).
 
@@ -247,7 +247,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | `<DATA_DIR>/subscriptions.sqlite3` | Subscription registrations, listener cursors, accepted report keys, and reports awaiting history admission |
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
-Restarting the kernel clears its web page snapshots. Saved tool results retain the excerpts already read. Reaching an unread passage requires fetching the source URL again, and the page may have changed. See [web page snapshots](resources.md#web-pages).
+Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).
 
 Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
 

@@ -61,7 +61,7 @@ Treat prompts and tool descriptions as editable interfaces:
 | [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
 | [Agent tools](../packages/agent/src/tools.json) | Send messages, open and reach focuses, schedule wakeups, and manage subscriptions |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
-| [Resource reader](../packages/resources/src/tools.json) | Base description and arguments for `read_resource`. When web page retrieval is enabled, [Resources](../packages/resources/src/root.zig) adds the configured reader's disclosure to the description. |
+| [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. The configured [web reader](../packages/resources/src/web.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | Understanding to carry into a handover |
 

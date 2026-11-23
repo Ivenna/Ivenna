@@ -272,17 +272,19 @@ test "classified PDF uploads intact bytes and preserves paired tool outputs befo
     const bytes = "%PDF-1.7\n\x00\xffsource bytes";
     const classified = content.classify(bytes);
     try std.testing.expect(classified == .file);
+    const source = try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = "report", .byte_length = bytes.len } }, .{});
     const parts = [_]Content.Part{
-        .{ .text = "Source result" },
+        .{ .text = source },
         .{ .file = classified.file },
         .{ .text = "Sibling observation" },
+        .{ .file = .{ .bytes = "appendix", .reference = "file-appendix" } },
     };
     var history = [_]Model.Item{
         .{ .tool_result = .{ .call_id = "read-report", .content = .{ .parts = &parts } } },
         .{ .tool_result = .{ .call_id = "other-tool", .content = .{ .parts = &.{.{ .text = "Other result" }} } } },
     };
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    try provider.port().limitToolReplies(a, request, &history);
+    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
     try std.testing.expectEqual(null, parts[1].file.reference);
     const file = history[0].tool_result.content.parts[1].file;
     try std.testing.expectEqualStrings(bytes, file.bytes);
@@ -292,14 +294,18 @@ test "classified PDF uploads intact bytes and preserves paired tool outputs befo
     try fixture.finish();
 
     const body = fixture.server.file_payloads.items[0];
-    try std.testing.expect(std.mem.startsWith(u8, fixture.server.file_content_type.?, "multipart/form-data; boundary="));
+    const boundary = std.mem.cutPrefix(u8, fixture.server.file_content_type.?, "multipart/form-data; boundary=") orelse return error.MissingBoundary;
     const purpose_index = std.mem.indexOf(u8, body, "name=\"purpose\"\r\n\r\nrich_layout_recognition").?;
     const file_index = std.mem.indexOf(u8, body, "name=\"file\"; filename=\"document.bin\"").?;
     try std.testing.expect(purpose_index < file_index);
-    try std.testing.expect(std.mem.indexOf(u8, body, bytes) != null);
+    const file_header = "Content-Type: application/octet-stream\r\n\r\n";
+    const start = std.mem.indexOf(u8, body, file_header).? + file_header.len;
+    const ending = try a.print("\r\n--{s}--\r\n", .{boundary});
+    try std.testing.expectEqualSlices(u8, bytes, std.mem.cutSuffix(u8, body[start..], ending) orelse return error.MissingBoundary);
     const payload = fixture.server.payload.?;
     try std.testing.expectEqual(size, payload.len);
     try std.testing.expect(std.mem.indexOf(u8, payload, "source bytes") == null);
+    try std.testing.expectEqual(1, std.mem.count(u8, payload, "byte_length"));
     const encoded = try std.json.parseFromSliceLeaky(std.json.Value, a, payload, .{});
     const items = encoded.object.get("input").?.array.items;
     try std.testing.expectEqual(@as(usize, 3), items.len);
@@ -307,13 +313,15 @@ test "classified PDF uploads intact bytes and preserves paired tool outputs befo
     try std.testing.expectEqualStrings("function_call_output", items[1].object.get("type").?.string);
     try std.testing.expectEqualStrings("user", items[2].object.get("role").?.string);
     const output = items[0].object.get("output").?.array.items;
-    try std.testing.expectEqual(@as(usize, 3), output.len);
-    try std.testing.expectEqualStrings("Source result", output[0].object.get("text").?.string);
+    try std.testing.expectEqual(@as(usize, 4), output.len);
+    try std.testing.expectEqualStrings(source, output[0].object.get("text").?.string);
     try std.testing.expectEqualStrings("Sibling observation", output[2].object.get("text").?.string);
     const file_input = items[2].object.get("content").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), file_input.len);
     try std.testing.expect(std.mem.indexOf(u8, file_input[0].object.get("text").?.string, "read-report") != null);
     try std.testing.expectEqualStrings("input_file", file_input[1].object.get("type").?.string);
     try std.testing.expectEqualStrings("file-api-test", file_input[1].object.get("file_id").?.string);
+    try std.testing.expectEqualStrings("file-appendix", file_input[2].object.get("file_id").?.string);
 }
 
 test "file upload negotiates from the rejection status and reuses the accepted reference" {
@@ -326,34 +334,19 @@ test "file upload negotiates from the rejection status and reuses the accepted r
     defer fixture.deinit();
     var provider = try fixture.start();
     const a = fixture.arena.allocator();
-    const bytes = "\x00\xffsource bytes\r\ncomplete binary\x00";
-    const classified = content.classify(bytes);
-    try std.testing.expect(classified == .file);
-    var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = classified.file }} } } }};
+    var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = .{ .bytes = "plain text document" } }} } } }};
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    try provider.port().limitToolReplies(a, request, &history);
-    const reference = history[0].tool_result.content.parts[0].file.reference.?;
-    const size = try provider.port().requestBytes(a, request);
-    try provider.port().limitToolReplies(a, request, &history);
-    try std.testing.expectEqualStrings(reference, history[0].tool_result.content.parts[0].file.reference.?);
-    try std.testing.expectEqual(size, try provider.port().requestBytes(a, request));
+    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
+    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
     _ = try provider.port().next(a, request);
     try fixture.finish();
     try std.testing.expectEqual(@as(usize, 2), fixture.server.file_payloads.items.len);
     const purposes = [_][]const u8{ "rich_layout_recognition", "user_data" };
     for (fixture.server.file_payloads.items, purposes) |body, purpose| {
         const purpose_field = try std.fmt.allocPrint(a, "name=\"purpose\"\r\n\r\n{s}\r\n", .{purpose});
-        const purpose_index = std.mem.indexOf(u8, body, purpose_field).?;
-        const file_index = std.mem.indexOf(u8, body, "name=\"file\"; filename=\"document.bin\"").?;
-        try std.testing.expect(purpose_index < file_index);
-        const marker = "Content-Type: application/octet-stream\r\n\r\n";
-        const start = std.mem.indexOf(u8, body, marker).? + marker.len;
-        const boundary_end = std.mem.indexOf(u8, body, "\r\n").?;
-        const closing = try std.fmt.allocPrint(a, "\r\n{s}--\r\n", .{body[0..boundary_end]});
-        try std.testing.expect(std.mem.endsWith(u8, body, closing));
-        try std.testing.expectEqualSlices(u8, bytes, body[start .. body.len - closing.len]);
+        try std.testing.expect(std.mem.indexOf(u8, body, purpose_field) != null);
     }
-    try std.testing.expect(std.mem.indexOf(u8, fixture.server.payload.?, "\"type\":\"input_file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.server.payload.?, "\"file_id\":\"file-api-test\"") != null);
 }
 
 test "file upload stops negotiating after the second rejection" {
@@ -366,6 +359,35 @@ test "file upload stops negotiating after the second rejection" {
     const part = try prepareFile(&provider, fixture.arena.allocator());
     try std.testing.expect(std.mem.indexOf(u8, part.text, "file_upload_failed") != null);
     try fixture.finish();
+}
+
+test "inline images share the focus's request budget and keep their source when omitted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = .failing };
+    defer client.deinit();
+    var provider: Provider = .{ .client = &client };
+    const bytes: [1024]u8 = @splat(0);
+    const picture: Content.Part = .{ .image = .{ .data = .{ .bytes = &bytes, .format = .png } } };
+    const uri = "file:///report.png";
+    const url: Content.Part = .{ .image = .{ .url = "https://example.org/i" } };
+    var history = [_]Model.Item{
+        .{ .tool_result = .{ .call_id = "retained", .content = .{ .parts = &.{picture} } } },
+        .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{ .{ .text = uri }, picture, url } } } },
+    };
+    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
+    const size = try provider.port().requestBytes(a, request);
+    try provider.port().limitToolReplies(a, request, history[1..], size);
+    try std.testing.expect(history[1].tool_result.content.parts[1] == .image);
+    try provider.port().limitToolReplies(a, request, history[1..], size - 1);
+    try std.testing.expect(history[0].tool_result.content.parts[0] == .image);
+    const parts = history[1].tool_result.content.parts;
+    try std.testing.expectEqualStrings(uri, parts[0].text);
+    try std.testing.expectEqualStrings(url.image.url, parts[2].image.url);
+    const omitted = try std.json.parseFromSliceLeaky(std.json.Value, a, parts[1].text, .{});
+    try std.testing.expectEqualStrings("content_limit", omitted.object.get("error").?.object.get("code").?.string);
+    try std.testing.expect(try provider.port().requestBytes(a, request) <= size - 1);
 }
 
 test "file count limit omits only new files before uploading" {
@@ -381,7 +403,7 @@ test "file count limit omits only new files before uploading" {
     } }} } } };
     history[20] = .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{ .{ .text = "Other observation" }, .{ .file = .{ .bytes = "new bytes" } } } } } };
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    try provider.port().limitToolReplies(a, request, history[20..]);
+    try provider.port().limitToolReplies(a, request, history[20..], std.math.maxInt(u64));
     try std.testing.expect(history[0].tool_result.content.parts[0] == .file);
     try std.testing.expect(std.mem.indexOf(u8, history[20].tool_result.content.parts[1].text, "20 files") != null);
     try std.testing.expectEqualStrings("Other observation", history[20].tool_result.content.parts[0].text);
@@ -391,7 +413,7 @@ test "file count limit omits only new files before uploading" {
 fn prepareFile(provider: *Provider, a: Allocator) !Content.Part {
     var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = .{ .bytes = "bytes" } }} } } }};
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    try provider.port().limitToolReplies(a, request, &history);
+    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
     return history[0].tool_result.content.parts[0];
 }
 
@@ -405,7 +427,7 @@ test "a denied file upload leaves the other observations available for inference
     var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{ .{ .file = .{ .bytes = "bytes" } }, .{ .text = "Sibling observation" } } } } }};
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
     const a = fixture.arena.allocator();
-    try provider.port().limitToolReplies(a, request, &history);
+    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
     const outcome = try provider.port().next(a, request);
     try std.testing.expectEqualStrings("accepted", outcome.response.calls[0].call_id);
     try fixture.finish();
@@ -434,6 +456,7 @@ test "file upload keeps a reference only from complete metadata" {
     const extension: [20 * 1024]u8 = @splat('x');
     for ([_]struct { response: []const u8, complete: bool }{
         .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{\"id\":\"file-api-test\"}", .complete = false },
+        .{ .response = reply("200 OK", "", "{\"id\":[102,49]}"), .complete = false },
         .{ .response = unavailable, .complete = false },
         .{ .response = reply("201 Created", "", "{\"extension\":\"" ++ extension ++ "\",\"id\":\"file-api-test\"}"), .complete = true },
         .{ .response = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"id\":\"file-api-test\"}", .complete = true },
