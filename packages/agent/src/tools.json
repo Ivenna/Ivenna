@@ -1,7 +1,7 @@
 [
   {
     "name": "send_message",
-    "description": "Write to correspondents by ID. A reference means the sending service accepted your message for delivery.",
+    "description": "Write to correspondents by ID. A reference means the sending service accepted your message for delivery. Omit channel to use the default one.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -14,6 +14,10 @@
           }
         },
         "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channel": {
           "type": "string",
           "minLength": 1
         }

@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 /// Agent-owned actions share one definition for recognition, arguments, and role
 /// selection. Kernel owns their effects within the calling model/tool round.
 pub const Request = union(enum) {
-    send_message: contracts.Communication.Message,
+    send_message: struct { recipients: []const []const u8, text: []const u8, channel: ?[]const u8 = null },
     open_focus: struct { name: []const u8, task: []const u8 },
     send_focus_message: struct { focus_id: []const u8, text: []const u8 },
     schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
@@ -27,7 +27,7 @@ pub const Request = union(enum) {
             inline else => |active| @unionInit(Request, @tagName(active), try parseArguments(@FieldType(Request, @tagName(active)), a, value)),
         };
         switch (request) {
-            .send_message => |args| if (args.recipients.len == 0 or args.text.len == 0) return error.InvalidToolArguments,
+            .send_message => |args| if (args.recipients.len == 0 or args.text.len == 0 or (args.channel != null and args.channel.?.len == 0)) return error.InvalidToolArguments,
             .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
             .send_focus_message => |args| if (args.focus_id.len == 0 or args.text.len == 0) return error.InvalidToolArguments,
             .schedule_attention => |args| if (!contracts.Reference.validName(args.name) or args.text.len == 0) return error.InvalidToolArguments,
@@ -46,23 +46,40 @@ fn string(value: std.json.Value) ![]const u8 {
 // byte slice would also accept an array of integers as the same reference.
 fn parseArguments(comptime T: type, a: Allocator, value: std.json.Value) !T {
     const fields = @typeInfo(T).@"struct";
-    if (value != .object or value.object.count() != fields.field_names.len) return error.InvalidToolArguments;
+    if (value != .object or value.object.count() > fields.field_names.len) return error.InvalidToolArguments;
     var result: T = undefined;
     inline for (fields.field_names, fields.field_types) |name, Field| {
-        const argument = value.object.get(name) orelse return error.InvalidToolArguments;
-        @field(result, name) = switch (Field) {
-            []const u8 => try string(argument),
-            Time.Instant => Time.parse(try string(argument)) catch return error.InvalidToolArguments,
-            []const []const u8 => items: {
-                if (argument != .array) return error.InvalidToolArguments;
-                const items = try a.alloc([]const u8, argument.array.items.len);
-                for (items, argument.array.items) |*item, element| item.* = try string(element);
-                break :items items;
+        const argument = value.object.get(name);
+        switch (@typeInfo(Field)) {
+            // An optional argument may be absent or null; both leave it null.
+            .optional => |optional| {
+                @field(result, name) = if (argument) |present| try optionalValue(optional.child, present) else null;
             },
-            else => @compileError("unsupported tool argument type: " ++ @typeName(Field)),
-        };
+            else => {
+                const present = argument orelse return error.InvalidToolArguments;
+                @field(result, name) = switch (Field) {
+                    []const u8 => try string(present),
+                    Time.Instant => Time.parse(try string(present)) catch return error.InvalidToolArguments,
+                    []const []const u8 => items: {
+                        if (present != .array) return error.InvalidToolArguments;
+                        const items = try a.alloc([]const u8, present.array.items.len);
+                        for (items, present.array.items) |*item, element| item.* = try string(element);
+                        break :items items;
+                    },
+                    else => @compileError("unsupported tool argument type: " ++ @typeName(Field)),
+                };
+            },
+        }
     }
     return result;
+}
+
+fn optionalValue(comptime T: type, value: std.json.Value) !?T {
+    if (value == .null) return null;
+    return switch (T) {
+        []const u8 => try string(value),
+        else => @compileError("unsupported optional tool argument type: " ++ @typeName(T)),
+    };
 }
 
 fn available(tag: std.meta.Tag(Request), role: Input.Role) bool {
@@ -89,4 +106,15 @@ test "a subscription reference must be supplied as a JSON string" {
     try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "withdraw_subscription",
         \\{"subscription_id":[102,101,101,100,45,49]}
     ));
+}
+
+test "a send_message call may omit the channel" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain = (try Request.parse(a, .core, "send_message", "{\"recipients\":[\"operator\"],\"text\":\"hello\"}")).?;
+    try std.testing.expect(plain.send_message.channel == null);
+    const named = (try Request.parse(a, .core, "send_message", "{\"recipients\":[\"operator\"],\"text\":\"hello\",\"channel\":\"qq\"}")).?;
+    try std.testing.expectEqualStrings("qq", named.send_message.channel.?);
+    try std.testing.expectError(error.InvalidToolArguments, Request.parse(a, .core, "send_message", "{\"recipients\":[\"operator\"],\"text\":\"hello\",\"channel\":\"\"}"));
 }

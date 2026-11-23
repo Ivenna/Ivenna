@@ -20,7 +20,7 @@ pub const Kernel = struct {
     io: std.Io,
     engine: *Engine,
     inbox: contracts.Inbox,
-    sender: Communication.Sender,
+    channels: Communication.Roster,
     callbacks: contracts.Callback.Publisher,
     limits: Limits,
     poll_interval_ms: u32,
@@ -35,7 +35,7 @@ pub const Kernel = struct {
     pub const Dependencies = struct {
         engine: *Engine,
         inbox: contracts.Inbox,
-        sender: Communication.Sender,
+        channels: Communication.Roster,
         callbacks: contracts.Callback.Publisher,
         history: contracts.HistoryStore,
         subscriptions: *@import("subscriptions").Store,
@@ -54,7 +54,7 @@ pub const Kernel = struct {
             .io = io,
             .engine = dependencies.engine,
             .inbox = dependencies.inbox,
-            .sender = dependencies.sender,
+            .channels = dependencies.channels,
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
             .poll_interval_ms = config.poll_interval_ms,
@@ -189,11 +189,15 @@ pub const Kernel = struct {
         fn invoke(context: *anyopaque, a: Allocator, request: AgentTools.Request) anyerror!Content {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
             return switch (request) {
-                .send_message => |message| switch (try self.kernel.sender.send(a, message)) {
-                    .submitted => |submission| try runtimeResult(a, submission),
-                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "At least one recipient ID is unsupported. No message was submitted."),
-                    .not_submitted => try runtimeError(a, "not_submitted", "Preparation stopped before any attempt to submit this message."),
-                    .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
+                .send_message => |message| blk: {
+                    const channel = self.kernel.channels.resolve(message.channel) orelse
+                        break :blk try runtimeError(a, "unknown_channel", "No configured channel carries that name. Omit the channel to use the default one.");
+                    switch (try channel.send(a, .{ .recipients = message.recipients, .text = message.text })) {
+                        .submitted => |submission| try runtimeResult(a, submission),
+                        .invalid_recipient => try runtimeError(a, "invalid_recipient", "At least one recipient ID is unsupported. No message was submitted."),
+                        .not_submitted => try runtimeError(a, "not_submitted", "Preparation stopped before any attempt to submit this message."),
+                        .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
+                    }
                 },
                 .send_focus_message => |message| blk: {
                     self.kernel.sessions.sendFocusMessage(self.work, message.focus_id, message.text) catch |err| return try toolFailure(a, err);
@@ -494,7 +498,7 @@ const SubscriptionFixture = struct {
             .engine = engine,
             .subscriptions = subscriptions,
             .inbox = undefined,
-            .sender = undefined,
+            .channels = .{ .channels = &.{} },
             .callbacks = undefined,
             .history = self.storage.port(),
         }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });

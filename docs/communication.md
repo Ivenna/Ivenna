@@ -10,7 +10,7 @@ Ivenna chooses what to retain about correspondence in its understanding and shar
 
 ## Sending a message
 
-Call `send_message` with one or more correspondent IDs in `recipients` and nonempty `text`. The email adapter prepares one standalone message addressed to everyone listed, with subject `Ivenna` and the supplied text as its body. See the [tool declaration](../packages/agent/src/tools.json).
+Call `send_message` with one or more correspondent IDs in `recipients` and nonempty `text`. The optional `channel` names the service to deliver through; omitting it uses the default channel. The current deployment registers one channel, `email`, so every message travels over email. The email adapter prepares one standalone message addressed to everyone listed, with subject `Ivenna` and the supplied text as its body. See the [tool declaration](../packages/agent/src/tools.json).
 
 ```json
 {
@@ -29,7 +29,8 @@ Tool errors carry an `error.code` and a human-readable `error.message`.
 
 | `error.code` | Meaning |
 | --- | --- |
-| `invalid_arguments` | The call could not be parsed, the recipient list was empty, or the message text was empty. |
+| `invalid_arguments` | The call could not be parsed, the recipient list was empty, the message text was empty, or the channel name was empty. |
+| `unknown_channel` | No configured channel carries that name. The tool submitted no message. |
 | `invalid_recipient` | At least one recipient ID was unsupported. The tool submitted no message. |
 | `not_submitted` | Preparation stopped before the tool attempted submission. |
 | `submission_unknown` | The tool attempted submission and could not confirm the outcome. The service may already have accepted the message, so sending it again could produce a duplicate. |

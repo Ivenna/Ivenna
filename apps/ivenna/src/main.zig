@@ -95,10 +95,13 @@ pub fn main(init: std.process.Init) !u8 {
         .activity_tools = &activity_tools,
         .reasoning = config.llm_reasoning,
     };
+    const outbound_channels = [_]contracts.Communication.Channel{
+        .{ .name = "email", .sender = mail.sender() },
+    };
     var kernel = try agent.Kernel.init(init.gpa, io, .{
         .engine = &engine,
         .inbox = mail.inbox(),
-        .sender = mail.sender(),
+        .channels = .{ .channels = &outbound_channels },
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),
         .subscriptions = &subscription_store,
