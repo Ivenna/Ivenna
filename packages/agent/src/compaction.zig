@@ -5,6 +5,15 @@ const Input = @import("input.zig");
 const Context = @import("context.zig").Context;
 const Allocator = std.mem.Allocator;
 
+/// Summary requests carry no tools: measure them exactly that way.
+const SummaryMeasurer = struct {
+    engine: *Engine,
+
+    pub fn measure(self: *const SummaryMeasurer, a: Allocator, items: []const Model.Item) !u64 {
+        return self.engine.model.requestBytes(a, .{ .history = items, .tools = &.{}, .reasoning_effort = .high });
+    }
+};
+
 pub const Rejection = enum {
     empty_summary,
     unexpected_tool_call,
@@ -32,10 +41,11 @@ pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, sna
         try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ @embedFile("compaction.md"), reason.description() })
     else
         @embedFile("compaction.md");
-    const messages = try context.summaryRequest(arena, snapshot, instructions);
+    const messages = switch (try context.summaryRequestFitted(arena, snapshot, instructions, max_request_bytes, &SummaryMeasurer{ .engine = engine })) {
+        .fitted => |fitted| fitted.items,
+        .over_budget => |omissions| return .{ .interrupted = try std.fmt.allocPrint(arena, "The summary request of {d} bytes exceeds the {d}-byte compaction budget even after omitting retained content.", .{ omissions.measured_after, max_request_bytes }) },
+    };
     const request: Model.Request = .{ .history = messages, .tools = &.{}, .reasoning_effort = .high };
-    if (try engine.model.requestBytes(arena, request) > max_request_bytes)
-        return .{ .interrupted = "The summary request exceeds the compaction budget." };
     var inference = switch (try engine.infer(context.focus_id, request)) {
         .ready => |result| result,
         .interrupted => |reason| return .{ .interrupted = reason },

@@ -52,7 +52,7 @@ test "inference honors the model's recovery delay and resumes the original reque
         var engine: Engine = .{
             .allocator = std.testing.allocator,
             .io = .{ .userdata = &fixture, .vtable = &io_vtable },
-            .model = .{ .context = &fixture, .vtable = &.{
+            .model = .{ .context = &fixture, .request_ceiling_bytes = std.math.maxInt(u64), .vtable = &.{
                 .next = Fixture.next,
                 .requestBytes = Fixture.requestBytes,
                 .limitToolReplies = Fixture.limitToolReplies,

@@ -132,6 +132,18 @@ pub const Engine = struct {
         return error.UnknownTool;
     }
 
+    /// Adapter for `Context.fitTurn`: measures one candidate history with this
+    /// engine's role-specific tools and reasoning settings, using exactly the
+    /// encoding the adapter will send.
+    pub const Measurer = struct {
+        engine: *Engine,
+        role: Input.Role,
+
+        pub fn measure(self: *const Measurer, a: Allocator, items: []const Model.Item) !u64 {
+            return self.engine.requestBytes(a, items, self.role);
+        }
+    };
+
     pub fn requestBytes(self: *Engine, a: Allocator, history: []const Model.Item, role: Input.Role) !u64 {
         return self.model.requestBytes(a, try self.modelRequest(a, history, role));
     }

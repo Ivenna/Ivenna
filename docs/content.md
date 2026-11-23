@@ -41,18 +41,18 @@ An HTTP(S) image reference asks the model service to retrieve the image during i
 
 ## Model request checks
 
-Media that fit the reader's source limits must also fit in the model request. The Responses adapter includes retained media when checking new tool results against the focus's request budget and the provider's limits for [images](https://api-docs.deepseek.com/guides/vision/#limits) and [documents](https://api-docs.deepseek.com/guides/document_parsing/).
+Media that fit the reader's source limits must also fit in the model request. The Responses adapter includes retained media when checking new tool results against its own serialization ceiling and the provider's limits for [images](https://api-docs.deepseek.com/guides/vision/#limits) and [documents](https://api-docs.deepseek.com/guides/document_parsing/). The ceiling is a capability of the adapter; the kernel's request budget is a separate policy and is never passed down as an attachment limit.
 
 | Check | Limit |
 | --- | --- |
 | HTTP(S) image URL length | 8192 Unicode code points |
 | Image count, including retained images and URL references | 600 |
 | File references, including retained references | 20 |
-| Serialized request body when adding images, including history, tools, and file references | The smaller of `CONTEXT_REQUEST_BYTES` and 48 MiB |
+| Serialized request body when adding images, including history, tools, and file references | The adapter's serialization ceiling (48 MiB by default) |
 
 An image data URL opened from a file or memory counts toward both the reference size limit and the serialized request size.
 
-When new media exceed a count limit, earlier parts take priority. Files beyond the limit are omitted before upload. A new image can also be omitted to fit the request budget. Each omitted part reports `content_limit` alongside the source and the other results. Before inference, the kernel measures the actual request, including retained history and newly arrived observations, against its [context budget](running.md#context-budgets).
+When new media exceed a count limit, earlier parts take priority. Files beyond the limit are omitted before upload. A new image can also be omitted to fit the adapter ceiling. Every omission records `content_limit` with the ceiling, the number and bytes of dropped parts, and the source when one is known. If the batch still exceeds the ceiling, the largest tool result is replaced by such a record; if it still does not fit, the round fails instead of sending an oversized request. Each omitted part reports `content_limit` alongside the source and the other results. Before inference, the kernel measures the actual request, including retained history and newly arrived observations, against its [context budget](running.md#context-budgets).
 
 ## Context and continuity
 

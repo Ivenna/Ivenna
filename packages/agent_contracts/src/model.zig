@@ -56,6 +56,10 @@ pub const Request = struct {
 pub const Port = struct {
     context: *anyopaque,
     vtable: *const VTable,
+    /// The adapter's serialization ceiling: the largest encoded request this
+    /// adapter can send. This is a capability, not a policy budget; budgeting
+    /// and content omission belong to the caller.
+    request_ceiling_bytes: u64,
 
     pub const VTable = struct {
         next: *const fn (*anyopaque, Allocator, Request) anyerror!Outcome,
@@ -75,8 +79,9 @@ pub const Port = struct {
 
     /// Prepare the newly appended tool_result items for the next inference.
     /// replies is their mutable slice at the end of request.history.
-    /// max_request_bytes is the calling focus's ordinary request budget.
-    pub fn limitToolReplies(self: Port, a: Allocator, request: Request, replies: []Item, max_request_bytes: u64) !void {
-        return self.vtable.limitToolReplies(self.context, a, request, replies, max_request_bytes);
+    /// ceiling_bytes is the adapter's serialization ceiling, never a policy
+    /// budget: budgeting and content omission belong to the caller.
+    pub fn limitToolReplies(self: Port, a: Allocator, request: Request, replies: []Item, ceiling_bytes: u64) !void {
+        return self.vtable.limitToolReplies(self.context, a, request, replies, ceiling_bytes);
     }
 };

@@ -26,6 +26,9 @@ pub const Kernel = struct {
     poll_interval_ms: u32,
     sessions: Sessions.Registry,
     reception: std.atomic.Value(enum(u8) { starting, open, closed }) = .init(.starting),
+    /// Measured size of the last request that could not be fitted even after
+    /// every permitted omission. Used so budget failures can quote real numbers.
+    over_budget_bytes: ?u64 = null,
 
     pub const Limits = struct {
         request_bytes: u64 = 1024 * 1024,
@@ -257,10 +260,17 @@ pub const Kernel = struct {
             }, &round, .{
                 .context = &runtime,
                 .invoke = RuntimeRound.invoke,
-            }, self.limits.request_bytes);
+            }, self.toolCeiling());
             try history.appendBatch(response.output, replies);
             try self.sessions.commitToolRound(work, &history, &runtime.forks);
         }
+    }
+
+    /// The adapter trims tool replies to its own serialization ceiling. The
+    /// kernel's request budget is a separate policy and must never be handed
+    /// down as an attachment limit (see issue #14).
+    fn toolCeiling(self: *const Kernel) u64 {
+        return self.engine.model.request_ceiling_bytes;
     }
 
     const Selection = struct { count: usize, events: []const Input.Event };
@@ -305,7 +315,7 @@ pub const Kernel = struct {
     fn prepareRequest(self: *Kernel, a: Allocator, work: Work, history: *Context) !FocusResult([]const Model.Item) {
         if (try self.fitRequest(a, work, history, false)) |input| return .{ .ready = input };
         if (history.records().len == 0)
-            return .{ .interrupted = "The next request exceeds the context budget even with no retained history." };
+            return .{ .interrupted = try std.fmt.allocPrint(a, "The next request needs {d} bytes, but the context budget is {d} and no retained history is left to drop.", .{ self.over_budget_bytes orelse 0, self.limits.request_bytes }) };
 
         var rejection: ?Compaction.Rejection = null;
         for (0..max_summary_attempts) |_| {
@@ -326,22 +336,31 @@ pub const Kernel = struct {
                 },
             }
         }
-        return .{ .interrupted = rejection.?.description() };
+        return .{ .interrupted = switch (rejection.?) {
+            .too_large => try std.fmt.allocPrint(a, "The proposed handover left the next request over the {d}-byte context budget.", .{self.limits.request_bytes}),
+            else => rejection.?.description(),
+        } };
     }
 
     /// The returned input borrows history. Render selected events in the current
     /// turn before appending them to history so this request presents them once.
     fn fitRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, compacted: bool) !?[]const Model.Item {
+        self.over_budget_bytes = null;
         const current = try self.sessions.current(a, work.session);
         const selection = if (work.activation.deliveries.items.len != 0)
             try self.selectEvents(a, work, history, current) orelse return null
         else
             null;
-        const input = try history.request(a, current, if (selection) |selected| selected.events else &.{});
-        if (selection == null) {
-            if (try self.engine.requestBytes(a, input, work.session.role) > self.limits.request_bytes) return null;
-            if (!compacted) return input;
-        }
+        var measurer: Engine.Measurer = .{ .engine = self.engine, .role = work.session.role };
+        const input = switch (try history.requestFitted(a, current, if (selection) |selected| selected.events else &.{}, self.limits.request_bytes, &measurer)) {
+            .fitted => |fitted| fitted.items,
+            // Nothing left that policy may drop: the caller compacts or reports.
+            .over_budget => |omissions| {
+                self.over_budget_bytes = omissions.measured_after;
+                return null;
+            },
+        };
+        if (selection == null and !compacted) return input;
         if (selection) |selected| {
             try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = selected.events } });
         }
@@ -386,7 +405,7 @@ const SubscriptionFixture = struct {
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
-            .model = .{ .context = self, .vtable = &.{ .requestBytes = requestBytes, .next = undefined, .limitToolReplies = undefined } },
+            .model = .{ .context = self, .request_ceiling_bytes = std.math.maxInt(u64), .vtable = &.{ .requestBytes = requestBytes, .next = undefined, .limitToolReplies = undefined } },
             .shared_tools = &.{},
             .activity_tools = &.{},
         };
@@ -724,4 +743,24 @@ test "a rejected inference resumes for remaining reports while failed admission 
     const resumed = try SubscriptionFixture.takeWork(&kernel, a);
     try testing.expectEqual(3, resumed.activation.deliveries.items.len);
     kernel.sessions.endWorker(resumed.session);
+}
+
+test "the adapter receives its serialization ceiling, never the request budget" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.storage.arena.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+
+    // A budget far below the ceiling: with the old wiring this is what the
+    // adapter would have been told to trim tool replies to.
+    kernel.limits.request_bytes = 1;
+    engine.model.request_ceiling_bytes = 4096;
+
+    try testing.expectEqual(@as(u64, 4096), kernel.toolCeiling());
+    try testing.expect(kernel.toolCeiling() != kernel.limits.request_bytes);
 }

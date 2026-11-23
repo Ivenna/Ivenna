@@ -14,6 +14,9 @@ pub const Provider = struct {
     pub const default_model = "deepseek-flash";
     pub const default_max_output_tokens: u32 = 65536;
     pub const default_request_timeout_ms: u32 = 600000;
+    /// Largest request body this adapter will serialize and send. A capability
+    /// ceiling, not a budgeting policy: callers own the policy budget.
+    pub const default_ceiling_bytes: u64 = 48 * 1024 * 1024;
 
     client: *std.http.Client,
     base_url: []const u8 = default_base_url,
@@ -22,9 +25,11 @@ pub const Provider = struct {
     max_output_tokens: u32 = default_max_output_tokens,
     /// Deadline in milliseconds for one inference attempt or one file upload.
     request_timeout_ms: u32 = default_request_timeout_ms,
+    /// Serialization ceiling reported through Model.Port.
+    request_ceiling_bytes: u64 = default_ceiling_bytes,
 
     pub fn port(self: *Provider) Model.Port {
-        return .{ .context = self, .vtable = &.{
+        return .{ .context = self, .request_ceiling_bytes = self.request_ceiling_bytes, .vtable = &.{
             .next = next,
             .requestBytes = requestBytes,
             .limitToolReplies = limitToolReplies,
@@ -48,14 +53,15 @@ pub const Provider = struct {
         return counter.fullCount();
     }
 
-    /// Prepare file input and apply request limits only to the new reply parts.
-    /// Retained history and the caller's other observations remain unchanged.
-    fn limitToolReplies(context: *anyopaque, arena: Allocator, request: Model.Request, replies: []Model.Item, max_request_bytes: u64) anyerror!void {
+    /// Prepare file input and enforce this adapter's serialization ceiling.
+    /// Uploading belongs here; budgeting and content omission belong to the
+    /// caller, which knows the whole request and its policy.
+    fn limitToolReplies(context: *anyopaque, arena: Allocator, request: Model.Request, replies: []Model.Item, ceiling_bytes: u64) anyerror!void {
         const self: *Provider = @ptrCast(@alignCast(context));
+        const byte_limit = @min(ceiling_bytes, self.request_ceiling_bytes);
         const earlier = request.history[0 .. request.history.len - replies.len];
         var count = imageCount(earlier);
         var files = fileCount(earlier);
-        var has_image = false;
         for (replies) |*reply| {
             const parts = try arena.dupe(Content.Part, reply.tool_result.content.parts);
             reply.tool_result.content.parts = parts;
@@ -91,16 +97,15 @@ pub const Provider = struct {
                     part.* = try contentLimitPart(arena, "Image omitted: the model request would contain more than 600 images.");
                 } else {
                     count += 1;
-                    has_image = true;
                 }
             }
         }
-        if (!has_image) return;
-        const byte_limit = @min(max_request_bytes, 48 * 1024 * 1024);
+        // A batch without images can still exceed the ceiling, so the encoded
+        // request is measured instead of trusting the part kinds.
         var size = try requestBytes(context, arena, request);
         if (size <= byte_limit) return;
-        const omission = try contentLimitPart(arena, try arena.print("Image omitted because the model request would exceed {d} bytes.", .{byte_limit}));
-        const omission_size = try encodedPartBytes(arena, omission);
+        var dropped: usize = 0;
+        var dropped_bytes: usize = 0;
         var index = replies.len;
         while (index > 0) {
             index -= 1;
@@ -110,15 +115,59 @@ pub const Provider = struct {
             while (part_index > 0) {
                 part_index -= 1;
                 if (parts[part_index] != .image) continue;
-                // Both encodings occupy one array element. A short URL can
-                // cost less space than explaining its omission.
                 const image_size = try encodedPartBytes(arena, parts[part_index]);
-                if (image_size <= omission_size) continue;
+                const source: ?[]const u8 = switch (parts[part_index].image) {
+                    .url => |url| url,
+                    .data => null,
+                };
+                const omission = try omissionPart(arena, .{
+                    .byte_limit = byte_limit,
+                    .dropped_images = dropped + 1,
+                    .dropped_bytes = dropped_bytes + image_size,
+                    .retained_images = count,
+                    .source = source,
+                });
+                const omission_size = try encodedPartBytes(arena, omission);
+                // Both encodings occupy one array element. A short URL can cost
+                // less space than explaining its omission.
+                if (omission_size >= image_size) continue;
                 parts[part_index] = omission;
                 size -= image_size - omission_size;
+                dropped += 1;
+                dropped_bytes += image_size;
                 if (size <= byte_limit) return;
             }
         }
+        // Images alone were not enough: replace the largest reply with a
+        // bounded omission record so the round can still continue and the
+        // failure stays observable with numbers.
+        if (replies.len != 0) {
+            var largest: usize = 0;
+            var largest_size: usize = 0;
+            for (replies, 0..) |reply, reply_index| {
+                var reply_size: usize = 0;
+                for (reply.tool_result.content.parts) |part| reply_size += try encodedPartBytes(arena, part);
+                if (reply_size > largest_size) {
+                    largest_size = reply_size;
+                    largest = reply_index;
+                }
+            }
+            const notice = try omissionPart(arena, .{
+                .byte_limit = byte_limit,
+                .dropped_images = dropped,
+                .dropped_bytes = dropped_bytes,
+                .retained_images = count,
+                .source = @as(?[]const u8, null),
+            });
+            const reply_parts = try arena.alloc(Content.Part, 1);
+            reply_parts[0] = notice;
+            replies[largest].tool_result.content.parts = reply_parts;
+            size = try requestBytes(context, arena, request);
+            if (size <= byte_limit) return;
+        }
+        // Nothing left may be dropped and the request still does not fit: fail
+        // distinguishably instead of sending it anyway.
+        return error.RequestExceedsCeiling;
     }
 
     const WireTool = struct {
@@ -356,7 +405,14 @@ pub const Provider = struct {
                 .request_timeout, .too_many_requests => {},
                 else => switch (status.class()) {
                     .success, .informational => return .{ .rejected = .invalid_response },
-                    .client_error => return .{ .rejected = .request_rejected },
+                    .client_error => {
+                        if (try clientErrorDetail(temporary, &response)) |detail| {
+                            std.log.warn("model service rejected the request: status={d} code={s} message={s}", .{
+                                @backingInt(status), detail.code orelse "-", detail.message orelse "-",
+                            });
+                        }
+                        return .{ .rejected = .request_rejected };
+                    },
                     .redirect => return error.ModelHttpFailure,
                     .server_error => {},
                 },
@@ -511,6 +567,21 @@ fn contentLimitPart(arena: Allocator, message: []const u8) !Content.Part {
     }, .{}) };
 }
 
+/// Omission record: what was dropped, how much it cost, and where it came from.
+fn omissionPart(arena: Allocator, detail: anytype) !Content.Part {
+    return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
+        .@"error" = .{
+            .code = "content_limit",
+            .message = "Image omitted to fit the adapter request ceiling.",
+            .byte_limit = detail.byte_limit,
+            .dropped_images = detail.dropped_images,
+            .dropped_bytes = detail.dropped_bytes,
+            .retained_images = detail.retained_images,
+            .source = detail.source,
+        },
+    }, .{ .emit_null_optional_fields = false }) };
+}
+
 fn imageCount(history: []const Model.Item) usize {
     var count: usize = 0;
     for (history) |item| {
@@ -610,6 +681,17 @@ fn exhaustedQuota(arena: Allocator, response: *std.http.Client.Response) !bool {
     };
     return std.mem.eql(u8, diagnostic.@"error".code orelse "", "insufficient_quota") or
         std.mem.eql(u8, diagnostic.@"error".type orelse "", "insufficient_quota");
+}
+
+const ErrorDetail = struct { code: ?[]const u8 = null, message: ?[]const u8 = null };
+
+/// Read a bounded service diagnostic so a rejection is not reduced to a bare
+/// status. The body is logged, never echoed into a request or a credential log.
+fn clientErrorDetail(arena: Allocator, response: *std.http.Client.Response) !?ErrorDetail {
+    const bytes = response.reader(&.{}).allocRemaining(arena, .limited(512)) catch return null;
+    const Diagnostic = struct { @"error": struct { code: ?[]const u8 = null, message: ?[]const u8 = null } = .{} };
+    const parsed = std.json.parseFromSliceLeaky(Diagnostic, arena, bytes, .{ .ignore_unknown_fields = true }) catch return null;
+    return .{ .code = parsed.@"error".code, .message = parsed.@"error".message };
 }
 
 fn invalidEnvelope(err: anyerror) bool {

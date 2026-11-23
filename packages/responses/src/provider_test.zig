@@ -361,7 +361,7 @@ test "file upload stops negotiating after the second rejection" {
     try fixture.finish();
 }
 
-test "inline images share the focus's request budget and keep their source when omitted" {
+test "inline images are trimmed to the adapter ceiling and keep their source when omitted" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -387,6 +387,30 @@ test "inline images share the focus's request budget and keep their source when 
     try std.testing.expectEqualStrings(url.image.url, parts[2].image.url);
     const omitted = try std.json.parseFromSliceLeaky(std.json.Value, a, parts[1].text, .{});
     try std.testing.expectEqualStrings("content_limit", omitted.object.get("error").?.object.get("code").?.string);
+    try std.testing.expect(try provider.port().requestBytes(a, request) <= size - 1);
+}
+
+test "an oversized reply without images reports the ceiling and what was dropped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = .failing };
+    defer client.deinit();
+    var provider: Provider = .{ .client = &client };
+    const body = try a.alloc(u8, 4096);
+    @memset(body, 'x');
+    var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "one", .content = .{ .parts = &.{.{ .text = body }} } } }};
+    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
+    const size = try provider.port().requestBytes(a, request);
+    // A reply without any image still has to be measured against the ceiling.
+    try provider.port().limitToolReplies(a, request, &history, size);
+    try provider.port().limitToolReplies(a, request, &history, size - 1);
+    const parts = history[0].tool_result.content.parts;
+    try std.testing.expectEqual(@as(usize, 1), parts.len);
+    const omitted = try std.json.parseFromSliceLeaky(std.json.Value, a, parts[0].text, .{});
+    const detail = omitted.object.get("error").?.object;
+    try std.testing.expectEqualStrings("content_limit", detail.get("code").?.string);
+    try std.testing.expectEqual(@as(i64, @intCast(size - 1)), detail.get("byte_limit").?.integer);
     try std.testing.expect(try provider.port().requestBytes(a, request) <= size - 1);
 }
 
