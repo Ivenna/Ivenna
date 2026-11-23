@@ -22,6 +22,7 @@ const Error = error{
     PageTooLarge,
     Canceled,
     OutOfMemory,
+    ConcurrencyUnavailable,
 };
 
 const response_limit = 32 * 1024 * 1024;
@@ -34,7 +35,7 @@ pub const Client = struct {
     pub fn reader(self: *const Client) web.Reader {
         return .{
             .context = self,
-            .disclosure = "Reading a web page sends its URL to DeepSeek Fetch and may incur a charge.",
+            .disclosure = "DeepSeek Fetch receives the page URL and may charge for each fetch.",
             .fetch = fetch,
         };
     }
@@ -49,6 +50,7 @@ pub const Client = struct {
             error.FetchTimeout => .failed(.read_timeout, "The web reader timed out while retrieving this page."),
             error.InvalidFetchResponse => .failed(.web_unavailable, "The web service returned an unusable response."),
             error.FetchUnavailable => .failed(.web_unavailable, "Could not reach the web service or complete the read."),
+            error.ConcurrencyUnavailable => .failed(.web_unavailable, "The runtime could not start the web request."),
         };
     }
 
@@ -59,8 +61,8 @@ pub const Client = struct {
         var events: [2]Event = undefined;
         var select = std.Io.Select(Event).init(io, &events);
         defer select.cancelDiscard();
-        select.concurrent(.response, exchange, .{ self, arena, url }) catch return error.FetchUnavailable;
-        select.concurrent(.deadline, std.Io.sleep, .{ io, .fromSeconds(60), .awake }) catch return error.FetchUnavailable;
+        try select.concurrent(.deadline, std.Io.sleep, .{ io, .fromSeconds(60), .awake });
+        try select.concurrent(.response, exchange, .{ self, arena, url });
         switch (try select.await()) {
             .response => |result| return result,
             .deadline => |result| {

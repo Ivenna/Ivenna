@@ -4,9 +4,9 @@ Tool results can carry text, images, or complete files into a focus's working hi
 
 ## Automatic classification
 
-Readers recognize JPEG, PNG, GIF, and WebP images by their byte signatures. This identifies the format before any pixels are decoded. A PDF header selects a file attachment even when the rest of the file is valid text. For other bytes, readers return UTF-8 text when it contains no NUL bytes and a file attachment when they encounter binary content.
+When reading a local file, a memory entry, or a completed command's stdout, the reader recognizes JPEG, PNG, GIF, and WebP by their byte signatures. A PDF header selects a file attachment even when the rest of the document is valid text. Other content is text if it is valid UTF-8 and contains no NUL bytes. Otherwise the reader returns a file attachment.
 
-Classification covers the bytes inspected. A text window can therefore return text even though a later window reveals binary data. Once a reader recognizes media in a host file, memory entry, or completed command's stdout, it returns the whole image or file, subject to the source size limit.
+Classification covers only the bytes inspected. One window can return text while a later window reveals binary data. Once the reader recognizes an image or file, it returns the whole source if it fits the [source limit](#content-and-results).
 
 Host stderr and running output supply a text preview or an unavailable-content diagnostic. The command's input mode determines whether streams are separate and whether terminal processing can alter their bytes. See [host input modes](host.md#input-modes).
 
@@ -29,11 +29,11 @@ When a source exceeds its size limit or a text-only stream contains binary data,
 | `reference_too_large` | The source selected for image-reference interpretation exceeds 16 KiB |
 | `file_too_large` | A source to be supplied as a complete file exceeds 32 MiB |
 
-The surrounding result identifies whether the diagnostic concerns a complete source or a selected range. It preserves the operation outcome and the reference to the source.
+The surrounding result identifies the source and whether the diagnostic covers the whole source or a selected range.
 
 ## Complete files
 
-The adapter uploads a new file attachment to the configured model service for parsing and uses the returned file reference in the model request. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for supported inputs, parsing behavior, and service limits.
+The Responses adapter uploads new file attachments to the configured model service for parsing, up to the [file count limit](#model-request-checks). It uses the returned file reference in the current request and retains it for later turns. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for supported inputs, parsing behavior, and service limits.
 
 If the upload ends without a usable reference, a JSON text part replaces the attachment. It gives the original `file.byte_length` and an `error` with a code and message. Other parts still describe the operation, including the exit status and log paths of a completed host command.
 
@@ -46,9 +46,9 @@ See [upload handling](architecture.md#tool-results) for how the adapter handles 
 
 ## Image URL references
 
-For an HTTP(S) image reference that passes the [model request checks](#model-request-checks), the adapter sends the URL to the configured model service for retrieval. A focus can supply the URL directly through the image view in [resource reads](resources.md#remote-images).
+A focus can supply a direct HTTP(S) image URL using the `"image"` view in [resource reads](resources.md#remote-images). The adapter sends the URL to the model service if it passes the [model request checks](#model-request-checks).
 
-A memory entry or a command's final stdout can itself contain an image URL. With `interpretation: "image_url"`, the reader passes the entire nonempty text as one reference if it fits the source limit. Empty output stays text, and recognized images and files keep their native representation. See [source limits](#content-and-results), [memory reads](memory.md#reading), and [host results](host.md#output-and-results).
+If a memory entry or a command's final stdout contains an image address, `interpretation: "image_url"` treats the entire nonempty text as one reference when it fits the [source limit](#content-and-results). The reader preserves the text as supplied. Empty output stays text, and recognized images and files keep their native representation. See [memory reads](memory.md#reading) and [host results](host.md#output-and-results).
 
 ## Model request checks
 

@@ -4,7 +4,7 @@ Ivenna is an agent runtime for [a self to take shape and live in the world](docs
 
 The core is Ivenna's continuing focus of attention. Each activity it opens starts with an assignment and a copy of the core's working history. Their histories then grow independently while they share files, memory, communication, and host processes. The core reads activity messages alongside its other observations. When an activity ends or its reasoning is interrupted, the runtime calls for the core's attention. See [how focuses coordinate](docs/attention.md).
 
-Either focus can read host files and view images by URL. With web page access enabled, both can also read pages as Markdown. An activity can run a host command and give the core the URI of its output log. See [reading resources](docs/resources.md) and [host commands](docs/host.md).
+The core and activities can read the same files. When an activity runs a host command, it can share the log's file URI so the core can inspect the output. Both can also view images by URL and, when web page access is enabled, read and share a snapshot of a page. See [reading resources](docs/resources.md) and [host commands](docs/host.md).
 
 People and programs correspond with Ivenna through messages. Ivenna observes who said what, chooses how to act, and decides when to write and whom to address. See [communication](docs/communication.md).
 

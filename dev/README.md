@@ -19,7 +19,9 @@ dev/prepare.sh
 
 The preparation script copies [.env.example](../.env.example) to `$DEV_INSTANCE_DIR/.env` and the [mail plan example](mail/provision.example.ndjson) to `$DEV_INSTANCE_DIR/mail/provision.ndjson`. Running it again preserves existing private files.
 
-Edit the instance's `.env` to set `LLM_API_KEY` and configure the mail and memory connections. Set matching account credentials in `.env` and the private mail plan as described in [mail setup](#configuring-mail). The kernel authenticates with `MAIL_*`; the [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`.
+In the instance's `.env`, set `LLM_API_KEY` for inference. To enable [web page retrieval](../docs/running.md#web-page-access), also set `DEEPSEEK_API_KEY`.
+
+Configure the mail and memory connections in the same file. Match the kernel and operator credentials to the accounts in the [private mail plan](#configuring-mail). The [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`.
 
 The kernel requires `DATA_DIR`; the example sets it to `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. The sample connections match the local services below. To use another [mail service](../docs/running.md#mail-service) or [memory workspace](../docs/running.md#memory-service), configure those connections and prepare only the services you run locally.
 

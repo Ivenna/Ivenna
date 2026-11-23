@@ -29,6 +29,6 @@ Choose a guide for your task:
 | Coordinate focuses, schedule wakeups, and manage subscriptions | [Attention](attention.md) |
 | Write a listener that reports observations and resumes from a saved cursor | [Subscription listener protocol](subscriptions.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |
-| Browse the host filesystem or open a web page or image by URL | [Reading resources](resources.md) |
+| Browse host files and directories, read web pages, or view images by URL | [Reading resources](resources.md) |
 | Run commands and interact with host processes | [Host shell](host.md) |
 | Interpret text, images, files, and omitted content | [Tool content](content.md) |

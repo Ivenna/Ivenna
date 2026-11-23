@@ -15,9 +15,11 @@ var stopping: std.atomic.Value(bool) = .init(false);
 const usage =
     \\Usage: ivenna [--help]
     \\
-    \\Run the Ivenna kernel. Host commands start in the current directory by default.
-    \\The kernel reads DATA_DIR and the model, mail and memory settings from the
-    \\environment. See docs/running.md in the source tree for configuration.
+    \\Run the Ivenna kernel. File browsing and host commands start in the current
+    \\directory by default.
+    \\
+    \\The kernel reads DATA_DIR and its service settings from the environment.
+    \\See docs/running.md in the source tree for configuration.
     \\
     \\  -h, --help   Show this help and exit.
     \\

@@ -49,11 +49,11 @@ Core and activity focuses use the same system prompt. Each receives observations
 | [Read a resource by URI](resources.md) | Yes | Yes |
 | Run and interact with host programs | — | Yes |
 
-An activity can share a page's snapshot URI with the core. The core can then read the surrounding text in the same version the activity cited.
-
 The core can [open an activity focus](attention.md#opening-a-focus) with a free-form assignment. It carries the core's retained understanding, relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
 
 The runtime collects what activities say for the core's next ordinary input. This lets the core follow concurrent work without waking for each update. One input can present messages from several activities while preserving each activity's message order and observation times. To establish what an activity's tools did, the core needs evidence of their effects.
+
+An activity that quotes a web page can include the snapshot URI in its report. The core can then read the passage in context, in the version the activity saw.
 
 An activity that ends calls for the core's attention even if it said nothing. When an activity's reasoning is interrupted, the core receives the reason and can reach the activity again while it exists. The core remains free to pursue its own work. See [how focuses coordinate](attention.md) and [how the runtime schedules them](architecture.md#scheduling-and-capacity).
 

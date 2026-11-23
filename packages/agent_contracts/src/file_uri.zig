@@ -14,9 +14,9 @@ pub fn fromPath(a: std.mem.Allocator, path: []const u8, kind: enum { file, direc
 pub fn toPath(arena: std.mem.Allocator, uri: std.Uri) ![]const u8 {
     if (!std.ascii.eqlIgnoreCase(uri.scheme, "file") or uri.user != null or uri.password != null or
         uri.port != null or uri.query != null or uri.fragment != null) return error.InvalidFileUri;
-    if (uri.host) |host| switch (host) {
-        inline else => |bytes| if (!std.ascii.eqlIgnoreCase(bytes, "localhost")) return error.InvalidFileUri,
-    };
+    if (uri.host) |host| {
+        if (!std.ascii.eqlIgnoreCase(try host.toRawMaybeAlloc(arena), "localhost")) return error.InvalidFileUri;
+    }
     switch (uri.path) {
         inline else => |bytes| if (!std.mem.startsWith(u8, bytes, "/")) return error.InvalidFileUri,
     }

@@ -23,7 +23,7 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. If the wait ends before completion, the result includes a command handle and a callback ID for this focus. Pass stdout.uri or stderr.uri to read_resource to read beyond a preview. Final stdout can include a complete image or file.",
+    "description": "Run a command in a fresh shell. If the command outlasts the wait, the result includes a command handle and the ID of this focus's completion callback. Final stdout can include a complete image or file. Any focus can open stdout.uri or stderr.uri with read_resource to read beyond a preview.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -39,7 +39,7 @@
         "cwd": {
           "type": "string",
           "minLength": 1,
-          "description": "Working directory on the host. Omit to use the kernel's startup directory, or supply an absolute path or a path relative to that directory."
+          "description": "Defaults to the kernel's startup directory. Relative paths resolve there."
         },
         "shell": {
           "type": "string",

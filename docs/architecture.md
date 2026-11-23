@@ -305,6 +305,8 @@ The [mail service](running.md#mail-service) checks which From addresses a sender
 
 The [JMAP client](../packages/email/src/jmap.zig) sets one 60-second monotonic deadline per call, including any retry. Reads and updates that assign fixed folder and keyword values to known Email IDs can reuse connections. If the connection fails, the client can repeat either operation once on a fresh connection. Creates, including submissions, use fresh connections and can retry once only if the connection fails before transmission begins. The client logs the method, phase, and cause of a broken exchange, closes its connection, and joins canceled work.
 
+During [session discovery](running.md#mail-service), the client resolves each `Location` against the current URL. It checks the origin before sending another authenticated GET and closes the redirect connection without waiting for its body. A connection retry resumes at the current URL with the remaining redirects. The session document supplies the `apiUrl` for subsequent JMAP calls.
+
 At startup the adapter locates `Ivenna Callbacks` and `Ivenna History` by their exact top-level names and null roles. It locates Trash by its `trash` role. If a folder is missing, it creates it. If the create outcome is uncertain, the adapter lists folders again and applies the same selection. Startup needs a matching folder to proceed.
 
 ### Outgoing mail
@@ -379,11 +381,11 @@ The handler translates selected-entry filesystem and pattern failures into tool 
 
 ## Resource reads
 
-[Resources](../packages/resources/src/root.zig) serves both focuses. The application gives it the same startup directory as Host. Host uses the shared [file URI contract](../packages/agent_contracts/src/file_uri.zig) to identify command logs, and Resources uses it to open local paths and return directory entries. The [local reader](../packages/resources/src/local.zig) uses Content to recognize images and read their bytes.
+[Resources](../packages/resources/src/root.zig) provides `read_resource` to the core and every activity. The application gives Resources and Host the same startup directory. A shared [file URI contract](../packages/agent_contracts/src/file_uri.zig) lets Resources open command log URIs from Host and return URIs for directory entries. The [local reader](../packages/resources/src/local.zig) reads text windows and uses Content to recognize and read complete images and binary files.
 
-An HTTP(S) image read returns the URL as an image content part for the model service. When page retrieval is enabled, the application supplies a [web reader](../packages/resources/src/web.zig). Its service and billing notice appears in the tool declaration. The [DeepSeek adapter](../packages/resources/src/deepseek.zig) sends the authenticated Fetch request and returns the title and Markdown or a retrieval error. It bounds one exchange to 60 seconds and the response body to 32 MiB.
+For an HTTP(S) image, Resources returns an image content part carrying the URL to the model service. For web pages, the application can supply a [reader](../packages/resources/src/web.zig) that retrieves the page title and Markdown. Resources includes the reader's service and billing notice in the tool description. The [DeepSeek adapter](../packages/resources/src/deepseek.zig) sends an authenticated Fetch request with a 60-second deadline and a 32 MiB response body limit.
 
-The [snapshot store](../packages/resources/src/pages.zig) assigns each fetched page its own URI. Later reads from either focus use the retained Markdown. The store holds up to 256 snapshots in kernel memory and budgets 32 MiB for their source URLs, title previews, and Markdown combined. It evicts the oldest snapshots first. See [reading a web page](resources.md#web-pages).
+One [snapshot store](../packages/resources/src/pages.zig) serves all focuses. It gives each retained page its own URI and serves subsequent reads of that URI from kernel memory. It evicts the oldest snapshots first to keep at most 256 pages and at most 32 MiB of source URLs, title previews, and Markdown combined. See [reading a web page](resources.md#web-pages).
 
 ## Host execution
 

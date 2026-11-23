@@ -24,13 +24,13 @@ For a command to verify the supplied local environment, see [sending a developme
 
 ### Sharing material to read
 
-Put short passages in the body of your letter. Ivenna reads the plain-text body when available, uses the HTML source for HTML-only letters, and skips attachments.
+Put a short passage directly in the body of your letter. Ivenna reads the message body and skips attachments. See [incoming email text](communication.md#incoming-email-text) for how it handles plain text and HTML.
 
-- For a file on Ivenna's host, give its absolute file URI, such as `file:///srv/notes.md`.
-- For a screenshot, send a direct link to the image that Ivenna's model service can open. Say what you want Ivenna to look for.
-- For an article, send the page URL. Ivenna can read it when web page access is enabled. See [web pages](resources.md#web-pages).
+- For a file that Ivenna can read on its host, give an absolute file URI such as `file:///srv/notes.md`.
+- For a screenshot, include a direct HTTP(S) link that Ivenna's model service can open.
+- For an article, include its URL. Ivenna can send it to a page reader when the deployment enables [web page access](running.md#web-page-access).
 
-If a letter and the context needed to read it exceed the model request budget even after compaction, the letter stays in the mailbox and later correspondence waits behind it. See the operator's guide to [resolving an admission failure](running.md#recovering-from-an-admission-failure).
+A link can also help keep a long letter within the model's request budget. If the letter and its required context still exceed that budget after compaction, the letter stays in the mailbox and delays later correspondence. See [resolving an admission failure](running.md#recovering-from-an-admission-failure).
 
 ## Continuing correspondence
 

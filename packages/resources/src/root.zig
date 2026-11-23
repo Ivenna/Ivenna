@@ -53,7 +53,7 @@ pub const Resources = struct {
     pub fn tools(self: *Resources, a: Allocator) !contracts.Tools {
         const declarations = try std.json.parseFromSliceLeaky([]contracts.Model.Tool, a, @embedFile("tools.json"), .{});
         if (self.web) |web|
-            declarations[0].description = try a.print("{s} {s} Use the returned snapshot URI to read more of the same page. To visit another page, open a link from the Markdown.", .{ declarations[0].description, web.disclosure });
+            declarations[0].description = try a.print("{s} With the default view, an HTTP(S) URL returns a Markdown snapshot. {s} Any focus can reread the snapshot at result.uri without another fetch.", .{ declarations[0].description, web.disclosure });
         return .{
             .context = self,
             .invoke = invoke,
@@ -68,10 +68,10 @@ pub const Resources = struct {
 
         const source: locator.Locator = if (args.uri) |uri| locator.parse(a, uri) catch |err| switch (err) {
             error.InvalidUri => return try result.failure(a, "invalid_uri", "Use an absolute resource URI with valid percent escapes, such as file:///path."),
-            error.InvalidFileUri => return try result.failure(a, "invalid_uri", "Use a local file URI with an absolute path, such as file:///path. Encode literal ? and # in a filename."),
+            error.InvalidFileUri => return try result.failure(a, "invalid_uri", "Use a local file URI with an absolute path, such as file:///path. Encode a literal ? as %3F and # as %23 in a filename."),
             error.InvalidWebUrl => return try result.failure(a, "invalid_uri", "Use an HTTP(S) URL with a host and no embedded username or password."),
             error.InvalidSnapshotUri => return try result.failure(a, "invalid_uri", "Use the complete snapshot URI returned by a web read."),
-            error.UnsupportedScheme => return try result.failure(a, "unsupported_scheme", "This URI scheme is unsupported. For a host file or directory, use a file URI such as file:///path."),
+            error.UnsupportedScheme => return try result.failure(a, "unsupported_scheme", "Use a local file URI, an HTTP(S) URL, or a snapshot URI returned by read_resource."),
             else => return err,
         } else .{ .file = self.directory };
         return switch (source) {

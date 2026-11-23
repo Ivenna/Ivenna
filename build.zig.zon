@@ -19,6 +19,7 @@
         ".zig-version",
         "build.zig",
         "build.zig.zon",
+        "tests",
         "apps/ivenna/build.zig",
         "apps/ivenna/build.zig.zon",
         "apps/ivenna/src",

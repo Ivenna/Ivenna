@@ -2,7 +2,7 @@
 
 The core and activities are focuses of one Ivenna. Each focus has its own identity, working history, and event queue. A `focus_id` identifies it in observations, tool results, and retained history; it survives sleep and restart. Correspondent IDs belong to [external communication](communication.md), not to this internal coordination.
 
-The [agent tools](../packages/agent/src/tools.json) let each focus decide what to attend to.
+These [attention tools](../packages/agent/src/tools.json) let each focus decide what to attend to. The [role overview](design.md#core-and-concurrent-attention) covers the other actions available to each focus.
 
 | Action | Tool | Available to |
 | --- | --- | --- |
@@ -11,8 +11,6 @@ The [agent tools](../packages/agent/src/tools.json) let each focus decide what t
 | Return to something later | `schedule_attention` | Core |
 | Receive [recurring observations](#subscriptions) in this focus | `subscribe` | Core and activities |
 | Stop accepting reports for a subscription | `withdraw_subscription` | Core and activities |
-
-Both roles can also [communicate externally](communication.md) and [maintain memory](memory.md). Activities have [host tools](host.md). The [design intent](design.md#core-and-concurrent-attention) explains these roles.
 
 Names may repeat. Use the complete reference when addressing a focus or subscription. The core's reference is `core-1`. Names must contain 1–32 Unicode code points and exclude ASCII control characters. Spaces alone are invalid.
 

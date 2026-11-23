@@ -285,7 +285,7 @@ pub const Host = struct {
     }
 
     fn continueCommand(self: *Host, a: Allocator, args: Continue) !Content {
-        const job = try self.acquire(args.command_id) orelse return toolError(a, "unknown_command", "This command handle is unknown or retired. Use inspect_host_shell to find current commands; recorded log paths remain available independently.");
+        const job = try self.acquire(args.command_id) orelse return toolError(a, "unknown_command", "This command handle is unknown or retired. Use inspect_host_shell to list current commands. To read this command's logs, pass a previously recorded stdout.uri or stderr.uri to read_resource.");
         defer self.release(job);
         // Apply input or a signal promptly even when another caller is
         // waiting to collect this command's next output range.
@@ -421,7 +421,7 @@ pub const Host = struct {
             const failure = try self.outputFailureResult(a, job, null, null, err, .{
                 .code = "host_unavailable",
                 .message = "Could not read the command's final output.",
-                .effects = "The command's observed state and log paths are included below; inspect uncertain effects before repeating work.",
+                .effects = "The result includes the observed command state and log URIs. Check any uncertain effects before repeating the command.",
             });
             return self.publisher.send(a, .{ .id = id, .text = failure.parts[0].text });
         };

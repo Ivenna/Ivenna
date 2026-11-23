@@ -556,8 +556,8 @@ fn runUntil(comptime T: type, io: std.Io, deadline: std.Io.Clock.Timestamp, comp
     var buffer: [2]Result = undefined;
     var select = std.Io.Select(Result).init(io, &buffer);
     defer select.cancelDiscard();
-    try select.concurrent(.exchange, operation, args);
     try select.concurrent(.timeout, std.Io.Clock.Timestamp.wait, .{ deadline, io });
+    try select.concurrent(.exchange, operation, args);
     switch (try select.await()) {
         .exchange => |result| return try result,
         .timeout => |result| {

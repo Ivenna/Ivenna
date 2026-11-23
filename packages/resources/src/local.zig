@@ -64,7 +64,7 @@ fn readPath(io: std.Io, a: Allocator, path: []const u8, view: View) !Content {
                 },
             };
         },
-        else => return if (view == .image) error.UnsupportedImage else error.NotRegular,
+        else => return error.NotRegular,
     }
 }
 

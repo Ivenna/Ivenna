@@ -35,9 +35,7 @@ fn serveOnce(listener: *std.Io.net.Server, reply: []const u8, wait_for_close: ?*
     try writer.interface.flush();
     if (wait_for_close) |event| {
         event.set(io);
-        var data: [1]u8 = undefined;
-        var buffers = [_][]u8{&data};
-        try testing.expectEqual(0, try stream.read(io, &buffers));
+        try @import("http_test").expectPeerClosed(&reader);
     }
 }
 
@@ -84,9 +82,9 @@ test "fetch reads a bounded Markdown response and leaves provider redirects unfo
     try testing.expectEqual(.web_unavailable, redirect.failure.code);
     try testing.expect(std.mem.indexOf(u8, redirect.failure.message, "307") != null);
     try testing.expectError(error.Canceled, watching.cancel(io));
-    const empty = try fetchReply(fetcher, &arena, &listener, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"title\":\"Empty\",\"content\":\"\"}");
-    try testing.expectEqualStrings("Empty", empty.page.title);
-    try testing.expectEqualStrings("", empty.page.markdown);
+    const article = try fetchReply(fetcher, &arena, &listener, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"title\":\"Article\",\"content\":\"# Notes\\n今天\"}");
+    try testing.expectEqualStrings("Article", article.page.title);
+    try testing.expectEqualStrings("# Notes\n今天", article.page.markdown);
 }
 
 test "a canceled fetch releases an incomplete provider response" {
@@ -111,12 +109,14 @@ test "a canceled fetch releases an incomplete provider response" {
     try serving.await(io);
 }
 
-test "one fetch supports seeking, replay, and recovery from a bad window while the provider is offline" {
+test "two focuses can recover from a bad window and reread a snapshot with one fetch" {
     const Tool = @import("agent_contracts").Tools;
+    const core: Tool.Invocation = .{ .session_id = 1, .focus_id = "core" };
+    const activity: Tool.Invocation = .{ .session_id = 2, .focus_id = "activity-2" };
     const read = struct {
-        fn call(a: Allocator, tool: Tool, role: []const u8, args: anytype) !std.json.ObjectMap {
+        fn call(a: Allocator, tool: Tool, invocation: Tool.Invocation, args: anytype) !std.json.ObjectMap {
             const input = try std.json.Stringify.valueAlloc(a, args, .{});
-            const reply = (try tool.invoke(tool.context, a, .{ .session_id = 1, .focus_id = role }, "read_resource", input)).?;
+            const reply = (try tool.invoke(tool.context, a, invocation, "read_resource", input)).?;
             return (try std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{})).object;
         }
     }.call;
@@ -124,44 +124,43 @@ test "one fetch supports seeking, replay, and recovery from a bad window while t
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var http: std.http.Client = .{ .allocator = testing.allocator, .io = io };
-    defer http.deinit();
-    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
-    var listener = try address.listen(io, .{});
-    var listening = true;
-    defer if (listening) listener.deinit(io);
-    const endpoint = try std.Uri.parse(try a.print("http://{f}/v1/tools/fetch", .{listener.socket.address}));
-    const markdown = "Header\n今天 明天";
-    const payload = try std.json.Stringify.valueAlloc(a, .{ .title = "Notes", .content = markdown }, .{});
-    const response = try a.print("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {d}\r\n\r\n{s}", .{ payload.len, payload });
-    const fetcher: Client = .{ .http = &http, .endpoint = endpoint, .api_key = "test-key" };
-    var resources: root.Resources = .{ .allocator = testing.allocator, .io = io, .directory = "/", .web = fetcher.reader() };
+    var fetch_count: usize = 0;
+    const page = struct {
+        fn fetch(context: *const anyopaque, scratch: Allocator, url: []const u8) error{OutOfMemory}!Outcome {
+            const count: *usize = @ptrCast(@alignCast(@constCast(context)));
+            count.* += 1;
+            if (!std.mem.eql(u8, test_url, url)) return .failed(.invalid_uri, "Unexpected test URL.");
+            return .{ .page = .{ .title = "Notes", .markdown = try scratch.dupe(u8, "Header\n今天 明天") } };
+        }
+    };
+    var resources: root.Resources = .{
+        .allocator = testing.allocator,
+        .io = io,
+        .directory = "/",
+        .web = .{ .context = &fetch_count, .disclosure = "Test page reader.", .fetch = page.fetch },
+    };
     defer resources.deinit();
     const tool = try resources.tools(a);
-    var serving = try io.concurrent(serveOnce, .{ &listener, response, null });
-    defer serving.cancel(io) catch {};
     // The first call has already paid for the fetch even though the offset
     // falls inside 今. Recovery should use those bytes without another request.
-    const bad = (try read(a, tool, "core", .{ .uri = test_url, .view = .{ .offset = 8 } })).get("error").?.object;
+    const bad = (try read(a, tool, core, .{ .uri = test_url, .view = .{ .offset = 8 } })).get("error").?.object;
     try testing.expectEqualStrings("invalid_range", bad.get("code").?.string);
     const snapshot = bad.get("uri").?.string;
-    try serving.await(io);
-    listener.deinit(io);
-    listening = false;
 
-    const middle = (try read(a, tool, "activity", .{ .uri = snapshot, .view = .{ .offset = 7, .limit = 6 } })).get("result").?.object;
+    const middle = (try read(a, tool, activity, .{ .uri = snapshot, .view = .{ .offset = 7, .limit = 6 } })).get("result").?.object;
     try testing.expectEqualStrings(test_url, middle.get("source_uri").?.string);
     try testing.expectEqualStrings(snapshot, middle.get("uri").?.string);
     try testing.expectEqual(7, middle.get("offset").?.integer);
     try testing.expectEqualStrings("今天", middle.get("content").?.string);
-    const tail = (try read(a, tool, "core", .{ .uri = snapshot, .view = .{ .offset = middle.get("next_offset").?.integer } })).get("result").?.object;
+    const tail = (try read(a, tool, core, .{ .uri = snapshot, .view = .{ .offset = middle.get("next_offset").?.integer } })).get("result").?.object;
     try testing.expectEqualStrings(" 明天", tail.get("content").?.string);
     try testing.expect(tail.get("next_offset").? == .null);
-    const beginning = (try read(a, tool, "core", .{ .uri = snapshot, .view = .{ .limit = 6 } })).get("result").?.object;
+    const beginning = (try read(a, tool, core, .{ .uri = snapshot, .view = .{ .limit = 6 } })).get("result").?.object;
     try testing.expectEqualStrings("Header", beginning.get("content").?.string);
 
     var restarted: root.Resources = .{ .allocator = testing.allocator, .io = io, .directory = "/" };
     defer restarted.deinit();
-    const expired = (try read(a, try restarted.tools(a), "core", .{ .uri = snapshot })).get("error").?.object;
+    const expired = (try read(a, try restarted.tools(a), core, .{ .uri = snapshot })).get("error").?.object;
     try testing.expectEqualStrings("not_found", expired.get("code").?.string);
+    try testing.expectEqual(1, fetch_count);
 }

@@ -43,7 +43,7 @@ test "local file URIs round trip filesystem bytes and keep traversal order" {
     try std.testing.expectEqualStrings("file:///", try FileUri.fromPath(a, "/", .directory));
     try std.testing.expectEqualStrings("file:///a%2520/", try FileUri.fromPath(a, "/a%20//", .directory));
     try std.testing.expectEqualStrings("/work/link/../file", (try parse(a, "file:///work/link/../file")).file);
-    try std.testing.expectEqualStrings("/tmp/a", (try parse(a, "FILE://LOCALHOST/tmp/a")).file);
+    try std.testing.expectEqualStrings("/tmp/a", (try parse(a, "FILE://%6cOCALHOST/tmp/a")).file);
     const web = "https://example.com/a%2Fb?q=x%20y#fragment";
     try std.testing.expectEqualStrings(web, (try parse(a, web)).web);
     try std.testing.expectError(error.InvalidWebUrl, parse(a, "https:///missing-host"));

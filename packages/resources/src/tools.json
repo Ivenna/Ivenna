@@ -26,7 +26,7 @@
                 "limit": {
                   "type": "integer",
                   "minimum": 1,
-                  "description": "Requested number of text bytes or directory entries. Each text window preserves whole characters."
+                  "description": "Requested number of text bytes or directory entries. A text window includes at least one whole character when text remains."
                 }
               },
               "required": [],
@@ -35,7 +35,7 @@
             {
               "type": "string",
               "enum": ["image"],
-              "description": "View the whole image. A local image supplies its bytes. For a remote image, the tool passes the URL to the configured model service for retrieval."
+              "description": "For a local image, return its bytes. For an HTTP(S) image URL, pass the URL to the model service for retrieval during inference."
             }
           ]
         }

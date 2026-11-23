@@ -26,7 +26,7 @@ The tool wait retains the current activation and context while the core and othe
 | --- | --- |
 | `name` | Required short name; the runtime appends a number to form the command reference; names may repeat |
 | `command` | Required command text, interpreted by the selected shell |
-| `cwd` | Initial working directory. A relative path starts at the kernel's startup directory. Omit `cwd` to start in that directory. |
+| `cwd` | Initial working directory. Defaults to the kernel's startup directory. Relative values resolve from that directory. |
 | `shell` | Shell executable accepting `-c`; defaults to `/bin/sh` |
 | `login` | Use `-lc` for the selected shell's login initialization; defaults to `false` |
 | `mode` | `batch` (default), `pipe`, or `terminal`; see [input modes](#input-modes) |
@@ -37,7 +37,7 @@ The tool wait retains the current activation and context while the core and othe
 
 Names must contain 1–32 Unicode code points and no ASCII control characters; spaces alone are not accepted.
 
-Each command starts a fresh shell. Host treats `cwd` as a literal path. Inside `command`, the shell interprets expressions and resolves relative paths from its current working directory. Changes to the directory or environment last for that shell's lifetime. To keep them across calls, run the shell in an interactive [input mode](#input-modes).
+Each command starts a fresh shell. The kernel treats `cwd` as a literal path. Inside `command`, the shell expands expressions and resolves relative paths from its current directory. A shell running in an interactive [input mode](#input-modes) can retain directory and environment changes across calls.
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 
@@ -107,7 +107,7 @@ Command observations report the process state and identify its output logs. Nonz
 | `stdout`, `stderr` | Each stream identifies its log by host `path` and absolute file `uri`. Successful collection adds `byte_length`, a `content` description, and a `range` for incremental reads. |
 | `output_error` | Reason output collection failed during handoff or callback handling. The result still reports the process state and log references. |
 
-Either focus can open a log's `uri` with `read_resource` to read beyond the preview without advancing the command's output cursor. Use the log's `path` in a shell command or to copy it into memory with `remember`. See [local resource reads](resources.md#local-files-and-directories) and [recording a memory](memory.md#recording).
+Either focus can pass a log's `uri` to `read_resource` to read beyond the preview, including after the command handle expires. This read leaves the command's output cursor in place. Use the log's `path` in a shell command or as `remember.content.file.path` to copy its bytes into memory. See [local resource reads](resources.md#local-files-and-directories) and [recording a memory](memory.md#recording).
 
 This pipe command printed `ready` before its initial wait expired.
 
@@ -158,9 +158,9 @@ To present complete stdout text as an image URL instead, set `interpretation: "i
 
 After completion, `continue_host_shell` can return a retained command's complete native stdout once, independently of text already read. Earlier text-only observations do not prevent a later read from supplying the whole file when it encounters binary content. A native result or complete-source diagnostic has no stdout `range` and advances the shared cursor to the end. If the command has already finished at its initial handoff, that result can contain native media and a continuation can still return it.
 
-A registered completion arrives as a [callback observation](input.md#focus-messages-and-callbacks). Its `source.host.command_id` identifies the command, so the result in `text` omits the `command_id` field. It carries an independent complete-source preview or diagnostic, the log references, and any media descriptions. The text-only callback marks omitted native content with `media_omission: "asynchronous_media_unavailable"`. Continuation cursors and the allowance for native media are independent of callback delivery. Ivenna uses the reported outcome to assess whether the assigned task succeeded.
+A completion callback identifies the command in `source.host.command_id`. Its `text` gives the outcome, log references, and a preview or diagnostic for the complete output. An image or file that would accompany a direct result appears here as a description with the marker `media_omission: "asynchronous_media_unavailable"`. The callback leaves the continuation cursors in place. Any unread native content is still available through `continue_host_shell` while the handle is retained. See [callback observations](input.md#focus-messages-and-callbacks).
 
-For incremental `content.unavailable`, its `byte_length` describes the unsupported range. The stream's `byte_length` describes the entire log snapshot. Without a range, the diagnostic concerns the complete source. Full logs remain under `<DATA_DIR>/host/` after the command handle expires.
+For incremental `content.unavailable`, its `byte_length` describes the unsupported range. The stream's `byte_length` describes the entire log snapshot. Without a range, the diagnostic concerns the complete source.
 
 ## Command lifetimes
 
