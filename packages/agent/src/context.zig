@@ -84,7 +84,6 @@ pub const Context = struct {
         return messages;
     }
 
-
     /// One request plus the accounted omissions applied to it.
     pub const Fitted = struct { items: []const Model.Item, omissions: Omissions };
     pub const FitResult = union(enum) { fitted: Fitted, over_budget: Omissions };

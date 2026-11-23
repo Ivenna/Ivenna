@@ -47,10 +47,8 @@ pub const Omissions = struct {
         if (!self.any()) return null;
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(a);
-        try out.appendSlice(a, try std.fmt.allocPrint(a,
-            "Context note: this request was reduced to fit the {d}-byte budget ({d} bytes measured before, {d} after). " ++
-                "Omitted content is still in the retained history; nothing was destroyed.",
-            .{ self.budget, self.measured_before, self.measured_after }));
+        try out.appendSlice(a, try std.fmt.allocPrint(a, "Context note: this request was reduced to fit the {d}-byte budget ({d} bytes measured before, {d} after). " ++
+            "Omitted content is still in the retained history; nothing was destroyed.", .{ self.budget, self.measured_before, self.measured_after }));
         if (self.truncated_text_bytes != 0)
             try out.appendSlice(a, try std.fmt.allocPrint(a, " Tool output text truncated: {d} bytes.", .{self.truncated_text_bytes}));
         if (self.dropped_files != 0)
