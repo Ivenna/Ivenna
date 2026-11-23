@@ -192,12 +192,12 @@ pub const Kernel = struct {
                 .send_message => |message| blk: {
                     const channel = self.kernel.channels.resolve(message.channel) orelse
                         break :blk try runtimeError(a, "unknown_channel", "No configured channel carries that name. Omit the channel to use the default one.");
-                    switch (try channel.send(a, .{ .recipients = message.recipients, .text = message.text })) {
+                    break :blk switch (try channel.sender.send(a, .{ .recipients = message.recipients, .text = message.text })) {
                         .submitted => |submission| try runtimeResult(a, submission),
                         .invalid_recipient => try runtimeError(a, "invalid_recipient", "At least one recipient ID is unsupported. No message was submitted."),
                         .not_submitted => try runtimeError(a, "not_submitted", "Preparation stopped before any attempt to submit this message."),
                         .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
-                    }
+                    };
                 },
                 .send_focus_message => |message| blk: {
                     self.kernel.sessions.sendFocusMessage(self.work, message.focus_id, message.text) catch |err| return try toolFailure(a, err);
