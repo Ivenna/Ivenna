@@ -5,3 +5,5 @@ pub const Model = @import("model.zig");
 pub const Tools = @import("tool.zig").Tools;
 pub const Callback = @import("callback.zig");
 pub const Reference = @import("reference.zig");
+pub const LocalPath = @import("local_path.zig");
+pub const JsonString = @import("json_string.zig");

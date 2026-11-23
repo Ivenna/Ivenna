@@ -23,7 +23,7 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. Returns its outcome, or a command handle and a completion callback for this focus when execution outlasts the wait. Text output is previewed; final stdout can include complete images or files.",
+    "description": "Run a command in a fresh shell. Short text appears inline. Partial or binary output includes a log path. A command still running after the initial wait returns a handle and schedules a completion callback for this focus.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -39,12 +39,13 @@
         "cwd": {
           "type": "string",
           "minLength": 1,
-          "description": "Relative paths and omission use the runtime's startup directory."
+          "description": "Host path or local file URI. The startup directory is the default and the base for relative paths."
         },
         "shell": {
           "type": "string",
           "minLength": 1,
-          "default": "/bin/sh"
+          "default": "/bin/sh",
+          "description": "Shell executable accepting -c, as a path or local file URI."
         },
         "login": {
           "type": "boolean",
@@ -70,15 +71,8 @@
           "type": "integer",
           "minimum": 512,
           "maximum": 16384,
-          "default": 16384,
-          "description": "Combined byte budget for JSON-encoded stdout/stderr text; metadata, images, and files are additional."
-        },
-        "interpretation": {
-          "type": "string",
-          "enum": [
-            "image_url"
-          ],
-          "description": "Treat complete final stdout text of up to 16 KiB as an image URL."
+          "default": 4096,
+          "description": "Combined byte budget for JSON-encoded stdout and stderr previews."
         },
         "yield_ms": {
           "type": "integer",
@@ -97,7 +91,7 @@
   },
   {
     "name": "continue_host_shell",
-    "description": "Read more output or interact with a command. Reads advance shared stdout/stderr positions across activities, independently of initial previews and completion observations. Final stdout can supply a complete image or file once across continuations. Draining a finished command retires its handle.",
+    "description": "Read output or interact with a command by its handle. Activities share one read position per stream, starting at byte zero. Initial previews and callbacks leave those positions in place. Draining a finished command retires its handle.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -224,8 +218,8 @@
           "type": "integer",
           "minimum": 512,
           "maximum": 16384,
-          "default": 16384,
-          "description": "Combined byte budget for JSON-encoded stdout/stderr text; metadata, images, and files are additional."
+          "default": 4096,
+          "description": "Combined byte budget for JSON-encoded stdout and stderr previews."
         }
       },
       "required": [

@@ -24,44 +24,31 @@ pub const Content = struct {
 pub const ImageContent = union(enum) {
     data: Image,
     url: []const u8,
-
-    pub const Description = union(enum) {
-        data: struct { format: Image.Format, byte_length: u64 },
-        url: struct {},
-    };
-
-    pub fn describe(self: ImageContent) Description {
-        return switch (self) {
-            .data => |image| .{ .data = .{ .format = image.format, .byte_length = image.bytes.len } },
-            .url => .{ .url = .{} },
-        };
-    }
 };
 
 pub const Image = @import("image.zig").Image;
+pub const LocalFile = @import("local_file.zig");
 
 /// Complete opaque file bytes. The model service owns format recognition.
 pub const File = struct {
     bytes: []const u8,
     reference: ?[]const u8 = null,
-
-    pub const Description = struct { byte_length: u64 };
-
-    pub fn describe(self: File) Description {
-        return .{ .byte_length = self.bytes.len };
-    }
 };
 
 pub const image_size_limit = 32 * 1024 * 1024;
 pub const file_size_limit = 32 * 1024 * 1024;
 pub const reference_size_limit = 16 * 1024;
 
+pub fn withoutLineEnding(bytes: []const u8) []const u8 {
+    return std.mem.cutSuffix(u8, bytes, "\r\n") orelse std.mem.cutSuffix(u8, bytes, "\n") orelse bytes;
+}
+
 /// Explicit interpretation of a complete text source as a resource reference.
 pub const Interpretation = enum { image_url };
 
 pub const Unavailable = struct {
     byte_length: u64,
-    reason: enum { unsupported_binary, image_too_large, file_too_large, reference_too_large },
+    reason: enum { image_too_large, file_too_large, reference_too_large },
 };
 
 pub const Classified = union(enum) {
@@ -87,7 +74,7 @@ pub fn requiresCompleteSource(prefix: []const u8, complete: bool) bool {
     return detectFormat(prefix) != null or hasPdfHeader(prefix) or textPrefixLength(prefix, !complete) == null;
 }
 
-fn hasPdfHeader(bytes: []const u8) bool {
+pub fn hasPdfHeader(bytes: []const u8) bool {
     return bytes.len >= 8 and std.mem.startsWith(u8, bytes, "%PDF-") and
         std.ascii.isDigit(bytes[5]) and bytes[6] == '.' and std.ascii.isDigit(bytes[7]);
 }
@@ -105,8 +92,10 @@ pub fn classify(bytes: []const u8) Classified {
 /// Recognized media keep their data representation; empty text stays text.
 pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Classified {
     const classified = classify(bytes);
-    if (interpretation == .image_url and classified == .text and bytes.len != 0)
-        return .{ .image = .{ .url = bytes } };
+    if (interpretation == .image_url and classified == .text) {
+        const url = withoutLineEnding(bytes);
+        if (url.len > 0) return .{ .image = .{ .url = url } };
+    }
     return classified;
 }
 
@@ -143,10 +132,10 @@ pub fn textPrefixLength(bytes: []const u8, allow_partial: bool) ?usize {
     return if (std.unicode.utf8ValidateSlice(bytes[0..start])) start else null;
 }
 
-test "image references require explicit interpretation and preserve source representation" {
+test "explicit image references accept a trailing line ending" {
     const source = "https://example.com/image.png\n";
     try std.testing.expectEqualStrings(source, classify(source).text);
-    try std.testing.expectEqualStrings(source, interpret(source, .image_url).image.url);
+    try std.testing.expectEqualStrings("https://example.com/image.png", interpret(source, .image_url).image.url);
     try std.testing.expectEqualStrings("", interpret("", .image_url).text);
 
     const png = "\x89PNG\r\n\x1a\n";

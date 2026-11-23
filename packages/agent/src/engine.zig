@@ -95,7 +95,7 @@ pub const Engine = struct {
 
     /// Execute the decoded batch in order, retaining its complete request for
     /// the provider's tool-content limits. Replies belong to a.
-    pub fn executeTools(self: *Engine, a: Allocator, invocation: Tools.Invocation, round: *const Round, runtime_tools: ?RuntimeTools) ![]const Model.Item {
+    pub fn executeTools(self: *Engine, a: Allocator, invocation: Tools.Invocation, round: *const Round, runtime_tools: ?RuntimeTools, max_request_bytes: u64) ![]const Model.Item {
         var request = round.request;
         const response = round.inference.response;
         var messages: std.ArrayList(Model.Item) = .empty;
@@ -115,7 +115,7 @@ pub const Engine = struct {
             try messages.append(a, .{ .tool_result = .{ .call_id = call.call_id, .content = content } });
         }
         request.history = messages.items;
-        try self.model.limitToolReplies(a, request, messages.items[reply_start..]);
+        try self.model.limitToolReplies(a, request, messages.items[reply_start..], max_request_bytes);
         return messages.items[reply_start..];
     }
 

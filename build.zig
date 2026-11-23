@@ -21,7 +21,11 @@ pub fn build(b: *std.Build) void {
     kernel_help.expectStdOutMatch("--help");
     tests.dependOn(&kernel_help.step);
 
-    inline for (.{ "agent", "email", "content", "responses", "host", "memory", "subscriptions" }) |name| {
+    const http_test = b.createModule(.{ .root_source_file = b.path("tests/http.zig") });
+    inline for (.{ "email", "responses", "resources" }) |name| {
+        b.dependency(name, options).module(name).addImport("http_test", http_test);
+    }
+    inline for (.{ "agent", "email", "content", "responses", "host", "memory", "resources", "subscriptions" }) |name| {
         const module = b.dependency(name, options).module(name);
         const unit_tests = b.addTest(.{ .name = name, .root_module = module });
         tests.dependOn(&b.addRunArtifact(unit_tests).step);

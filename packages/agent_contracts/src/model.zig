@@ -60,7 +60,7 @@ pub const Port = struct {
     pub const VTable = struct {
         next: *const fn (*anyopaque, Allocator, Request) anyerror!Outcome,
         requestBytes: *const fn (*anyopaque, Allocator, Request) anyerror!u64,
-        limitToolReplies: *const fn (*anyopaque, Allocator, Request, []Item) anyerror!void,
+        limitToolReplies: *const fn (*anyopaque, Allocator, Request, []Item, u64) anyerror!void,
     };
 
     /// Returned output, calls, and text belong to a.
@@ -73,10 +73,10 @@ pub const Port = struct {
         return self.vtable.requestBytes(self.context, a, request);
     }
 
-    /// Prepare a complete tool batch for model input and apply content limits.
-    /// replies aliases the mutable tail of request.history; newly allocated
-    /// content uses a.
-    pub fn limitToolReplies(self: Port, a: Allocator, request: Request, replies: []Item) !void {
-        return self.vtable.limitToolReplies(self.context, a, request, replies);
+    /// Prepare the newly appended tool_result items for the next inference.
+    /// replies is their mutable slice at the end of request.history.
+    /// max_request_bytes is the calling focus's ordinary request budget.
+    pub fn limitToolReplies(self: Port, a: Allocator, request: Request, replies: []Item, max_request_bytes: u64) !void {
+        return self.vtable.limitToolReplies(self.context, a, request, replies, max_request_bytes);
     }
 };

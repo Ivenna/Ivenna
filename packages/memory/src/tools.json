@@ -142,7 +142,7 @@
           "enum": [
             "image_url"
           ],
-          "description": "Use the memory's complete text, up to 16 KiB, as an image URL; requires offset 0."
+          "description": "Open the URL stored in the entry as an image. Read from offset 0."
         },
         "offset": {
           "type": "integer",
@@ -199,7 +199,7 @@
                     "path": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Regular source file on Ivenna's host, absolute or relative to its startup directory."
+                      "description": "Path to a regular host file, or its local file URI. Relative paths resolve from the startup directory."
                     }
                   },
                   "required": [

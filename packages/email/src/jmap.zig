@@ -83,8 +83,8 @@ pub const Jmap = struct {
             var buffer: [2]Result = undefined;
             var select = std.Io.Select(Result).init(runtime_io, &buffer);
             defer select.cancelDiscard();
-            try select.concurrent(.response, exchange, .{ self, a, operation, url, payload, &phase });
             try select.concurrent(.timeout, std.Io.Clock.Timestamp.wait, .{ deadline, runtime_io });
+            try select.concurrent(.response, exchange, .{ self, a, operation, url, payload, &phase });
             switch (try select.await()) {
                 .response => |result| return result,
                 .timeout => |result| try result,
@@ -95,47 +95,59 @@ pub const Jmap = struct {
     }
 
     fn exchange(self: *Jmap, a: Allocator, operation: Operation, url: []const u8, payload: ?[]const u8, phase: *Phase) !Value {
+        const uri = std.Uri.parse(url) catch |err| return operation.failure(.connect, err);
+        var target: RequestTarget = .{ .uri = uri, .arena = .init(self.allocator()) };
+        defer target.arena.deinit();
         const replayable = operation.effect() != .create;
         const client = if (replayable) &self.pooled else &self.fresh;
-        return self.attempt(client, a, operation, url, payload, phase) catch |err| {
+        return self.attempt(client, a, operation, &target, payload, phase) catch |err| {
             if (!connectionFailure(err) or (!replayable and phase.* != .connect))
                 return operation.failure(phase.*, err);
             std.log.warn("JMAP {s} failed during {s} with {s}. Retrying on a fresh connection", .{
                 operation.method(), @tagName(phase.*), @errorName(err),
             });
-            return self.attempt(&self.fresh, a, operation, url, payload, phase) catch |second| return operation.failure(phase.*, second);
+            return self.attempt(&self.fresh, a, operation, &target, payload, phase) catch |second| return operation.failure(phase.*, second);
         };
     }
 
-    fn attempt(self: *Jmap, client: *std.http.Client, a: Allocator, operation: Operation, url: []const u8, payload: ?[]const u8, phase: *Phase) !Value {
-        phase.* = .connect;
-        try client.io.checkCancel();
-        var output: std.Io.Writer.Allocating = .init(a);
-        defer output.deinit();
-        var request = try client.request(if (operation == .session) .GET else .POST, try std.Uri.parse(url), .{
-            .headers = .{
-                .authorization = .{ .override = self.authorization },
-                .content_type = if (payload != null) .{ .override = "application/json" } else .omit,
-                .accept_encoding = .{ .override = "identity" },
-            },
-            .keep_alive = client == &self.pooled,
-            .redirect_behavior = if (operation == .session) .init(3) else .unhandled,
-        });
-        defer request.deinit();
-        // Closing skips the unread-body drain, including on cancellation.
-        errdefer if (request.connection) |connection| {
-            connection.closing = true;
-        };
+    fn attempt(self: *Jmap, client: *std.http.Client, a: Allocator, operation: Operation, target: *RequestTarget, payload: ?[]const u8, phase: *Phase) !Value {
+        while (true) {
+            phase.* = .connect;
+            try client.io.checkCancel();
+            var request = try client.request(if (operation == .session) .GET else .POST, target.uri, .{
+                .headers = .{
+                    .authorization = .{ .override = self.authorization },
+                    .content_type = if (payload != null) .{ .override = "application/json" } else .omit,
+                    .accept_encoding = .{ .override = "identity" },
+                },
+                .keep_alive = client == &self.pooled,
+                .redirect_behavior = .unhandled,
+            });
+            defer request.deinit();
+            // Closing skips the unread-body drain, including on cancellation.
+            errdefer if (request.connection) |connection| {
+                connection.closing = true;
+            };
 
-        phase.* = .send;
-        if (payload) |bytes| {
-            sendBody(&request, bytes) catch |err| return transportError(&request, err);
-        } else {
-            request.sendBodiless() catch |err| return transportError(&request, err);
+            phase.* = .send;
+            if (payload) |bytes| {
+                sendBody(&request, bytes) catch |err| return transportError(&request, err);
+            } else {
+                request.sendBodiless() catch |err| return transportError(&request, err);
+            }
+            phase.* = .response_head;
+            var response = request.receiveHead(&.{}) catch |err| return transportError(&request, err);
+            if (operation == .session and response.head.status.class() == .redirect and response.head.status != .not_modified) {
+                // Only Location is needed. Close the unread response before the next GET.
+                request.connection.?.closing = true;
+                try target.follow(response.head.location);
+                continue;
+            }
+            return readResponse(a, operation, &response, phase);
         }
-        phase.* = .response_head;
-        var redirect_buffer: [8192]u8 = undefined;
-        var response = request.receiveHead(&redirect_buffer) catch |err| return transportError(&request, err);
+    }
+
+    fn readResponse(a: Allocator, operation: Operation, response: *std.http.Client.Response, phase: *Phase) !Value {
         if (response.head.status != .ok) {
             std.log.warn("JMAP {s} returned HTTP {d}", .{ operation.method(), @backingInt(response.head.status) });
             // A rejection applies to the whole JMAP request. A gateway
@@ -150,15 +162,17 @@ pub const Jmap = struct {
         if (response.head.content_encoding != .identity) return error.UnsupportedMailEncoding;
         const content_length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
         const reader = response.reader(&.{});
+        var output: std.Io.Writer.Allocating = .init(a);
+        defer output.deinit();
         if (content_length) |length| {
             reader.streamExact64(&output.writer, length) catch |err| {
                 if (err == error.WriteFailed) return error.OutOfMemory;
-                return transportError(&request, err);
+                return transportError(response.request, err);
             };
         } else {
             _ = reader.streamRemaining(&output.writer) catch |err| {
                 if (err == error.WriteFailed) return error.OutOfMemory;
-                return transportError(&request, err);
+                return transportError(response.request, err);
             };
         }
         phase.* = .decode;
@@ -204,6 +218,37 @@ const Operation = enum {
             error.MailHttpFailure, error.MailMethodUnavailable, error.MailMethodFailed, error.MailObjectFailed, error.OutOfMemory => err,
             else => error.MailMutationUnconfirmed,
         };
+    }
+};
+
+/// Discovery's current URL and remaining redirects survive a connection retry.
+const RequestTarget = struct {
+    uri: std.Uri,
+    arena: std.heap.ArenaAllocator,
+    redirects_left: u8 = 3,
+
+    fn follow(self: *RequestTarget, location: ?[]const u8) !void {
+        if (self.redirects_left == 0) return error.TooManyHttpRedirects;
+        const target = location orelse return error.HttpRedirectLocationMissing;
+        const base = self.uri;
+        // resolveInPlace stores Location and, for a relative path, the merged path after it.
+        const merge_capacity = base.path.percent_encoded.len + 1 + target.len;
+        var space = try self.arena.allocator().alloc(u8, target.len + merge_capacity);
+        @memcpy(space[0..target.len], target);
+        var next = base.resolveInPlace(target.len, &space) catch return error.HttpRedirectLocationInvalid;
+
+        if (!std.ascii.eqlIgnoreCase(base.scheme, next.scheme)) return error.CrossOriginMailRedirect;
+        const protocol = std.http.Client.Protocol.fromUri(base) orelse return error.UnsupportedUriScheme;
+        const default_port: u16 = if (protocol == .tls) 443 else 80;
+        var base_host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        var next_host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        const base_host = try std.Io.net.HostName.fromUri(base, &base_host_buffer);
+        const next_host = std.Io.net.HostName.fromUri(next, &next_host_buffer) catch return error.HttpRedirectLocationInvalid;
+        if (!base_host.eql(next_host) or (base.port orelse default_port) != (next.port orelse default_port))
+            return error.CrossOriginMailRedirect;
+        next.scheme = base.scheme;
+        self.uri = next;
+        self.redirects_left -= 1;
     }
 };
 
@@ -288,7 +333,7 @@ const TestHttpServer = struct {
     listener: std.Io.net.Server,
     response: []const u8,
     close_after_response: bool = false,
-    received: std.Io.Event = .unset,
+    response_flushed: std.Io.Event = .unset,
     requests: usize = 0,
 
     fn init(io: std.Io, response: []const u8) !TestHttpServer {
@@ -305,6 +350,10 @@ const TestHttpServer = struct {
     }
 
     fn serve(self: *TestHttpServer) !void {
+        return self.serveRequest(null);
+    }
+
+    fn serveRequest(self: *TestHttpServer, expected_session_target: ?[]const u8) !void {
         const connection = try self.listener.accept(self.io);
         defer connection.close(self.io);
         var read_buffer: [4096]u8 = undefined;
@@ -313,16 +362,24 @@ const TestHttpServer = struct {
         var writer = connection.writer(self.io, &write_buffer);
         var server = std.http.Server.init(&reader.interface, &writer.interface);
         var request = try server.receiveHead();
-        _ = try request.readerExpectNone(&.{}).discardRemaining();
+        if (expected_session_target) |target| {
+            try std.testing.expectEqual(.GET, request.head.method);
+            try std.testing.expectEqualStrings(target, request.head.target);
+            var headers = request.iterateHeaders();
+            while (headers.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                    try std.testing.expectEqualStrings("test", header.value);
+                    break;
+                }
+            } else return error.MissingAuthorization;
+        }
+        if (request.head.method.requestHasBody()) _ = try request.readerExpectNone(&.{}).discardRemaining();
         self.requests += 1;
         try writer.interface.writeAll(self.response);
         try writer.interface.flush();
-        self.received.set(self.io);
+        self.response_flushed.set(self.io);
         if (self.close_after_response) return;
-        // Keep an incomplete response open until the client closes it.
-        var buffer: [1]u8 = undefined;
-        var buffers = [_][]u8{&buffer};
-        if (try connection.read(self.io, &buffers) != 0) return error.UnexpectedRequestReplay;
+        try @import("http_test").expectPeerClosed(&reader);
     }
 };
 
@@ -343,6 +400,7 @@ test "mail HTTP deadline closes connections stalled on response headers or body"
         defer jmap.deinit();
         const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .awake });
         try std.testing.expectError(error.MailRequestTimedOut, jmap.httpBefore(a, .@"Email/query", try server.url(a), "{}", deadline));
+        try server.response_flushed.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
         try serving.await(io);
     }
 }
@@ -364,7 +422,7 @@ test "mail HTTP cancellation closes connections stalled on response headers or b
         defer jmap.deinit();
         var request = try io.concurrent(Jmap.http, .{ &jmap, a, .@"Email/set", try server.url(a), "{}" });
         defer _ = request.cancel(io) catch {};
-        try server.received.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+        try server.response_flushed.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
         try std.testing.expectError(error.Canceled, request.cancel(io));
         try serving.await(io);
     }
@@ -454,4 +512,76 @@ test "a lost response permits one read retry and leaves a sent mutation unconfir
         serving.cancel(io) catch |err| if (err != error.Canceled) return err;
         try std.testing.expectEqual(case[2], server.requests);
     }
+}
+
+test "session discovery closes redirect bodies and retries the final authenticated GET" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var server = try TestHttpServer.init(io, "");
+    defer server.listener.deinit(io);
+    const absolute = try a.print("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{f}/mail/v2/start\r\nContent-Length: 0\r\n\r\n", .{server.listener.socket.address});
+    const serve = struct {
+        fn chain(peer: *TestHttpServer, absolute_redirect: []const u8) !void {
+            peer.response = "HTTP/1.1 302 Found\r\nLocation: discover/start\r\nContent-Length: 100\r\n\r\n";
+            try peer.serveRequest("/jmap");
+            peer.response = absolute_redirect;
+            try peer.serveRequest("/discover/start");
+            peer.response = "HTTP/1.1 303 See Other\r\nLocation: ../session\r\nContent-Length: 0\r\n\r\n";
+            try peer.serveRequest("/mail/v2/start");
+            // Drop the final GET once. The retry must resume at the resolved session URL.
+            peer.response = "";
+            peer.close_after_response = true;
+            try peer.serveRequest("/mail/session");
+            peer.response = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 4\r\n\r\ntrue";
+            try peer.serveRequest("/mail/session");
+        }
+    }.chain;
+    var serving = try io.concurrent(serve, .{ &server, absolute });
+    defer serving.cancel(io) catch {};
+    var jmap: Jmap = .init(std.testing.allocator, io, "test");
+    defer jmap.deinit();
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake });
+    try std.testing.expect((try jmap.httpBefore(a, .session, try server.url(a), null, deadline)).bool);
+    try serving.await(io);
+}
+
+test "session redirects compare the scheme, decoded host name and effective port" {
+    var target: RequestTarget = .{ .uri = try std.Uri.parse("https://mail.example/start"), .arena = .init(std.testing.allocator) };
+    defer target.arena.deinit();
+    try target.follow("HTTPS://%6dAIL.EXAMPLE:443/session");
+    try std.testing.expectEqualStrings("https", target.uri.scheme);
+    for ([_][]const u8{ "http://mail.example:443/", "//api.example/", "//mail.example:444/" }) |location|
+        try std.testing.expectError(error.CrossOriginMailRedirect, target.follow(location));
+}
+
+test "session discovery stops after three redirects and keeps credentials at the configured origin" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var destination = try TestHttpServer.init(io, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}");
+    defer destination.listener.deinit(io);
+    destination.close_after_response = true;
+    var watching = try io.concurrent(TestHttpServer.serveUntilCanceled, .{&destination});
+    defer watching.cancel(io) catch {};
+    const other_origin = try a.print("HTTP/1.1 302 Found\r\nLocation: {s}\r\nContent-Length: 0\r\n\r\n", .{try destination.url(a)});
+    for ([_]struct { reply: []const u8, err: anyerror, requests: usize }{
+        .{ .reply = "HTTP/1.1 301 Moved Permanently\r\nLocation: /jmap\r\nContent-Length: 0\r\n\r\n", .err = error.TooManyHttpRedirects, .requests = 4 },
+        .{ .reply = other_origin, .err = error.CrossOriginMailRedirect, .requests = 1 },
+    }) |case| {
+        var server = try TestHttpServer.init(io, case.reply);
+        defer server.listener.deinit(io);
+        var serving = try io.concurrent(TestHttpServer.serveUntilCanceled, .{&server});
+        defer serving.cancel(io) catch {};
+        var jmap: Jmap = .init(std.testing.allocator, io, "test");
+        defer jmap.deinit();
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake });
+        try std.testing.expectError(case.err, jmap.httpBefore(a, .session, try server.url(a), null, deadline));
+        try std.testing.expectError(error.Canceled, serving.cancel(io));
+        try std.testing.expectEqual(case.requests, server.requests);
+    }
+    try std.testing.expectError(error.Canceled, watching.cancel(io));
+    try std.testing.expectEqual(0, destination.requests);
 }

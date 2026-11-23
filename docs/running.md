@@ -4,7 +4,9 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 ## Runtime requirements
 
-Install `ivenna` and `ivenna-report` from the same build in the same directory so the kernel can locate the reporter for host commands. Host commands run as the kernel's OS account. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+Install `ivenna` and `ivenna-report` from the same build in the same directory so the kernel can locate the reporter for host commands. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+
+The core and activities can read regular files and list directories wherever the kernel's OS account has access. Choose the account and filesystem mounts accordingly. Host commands run as the same account.
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
@@ -25,10 +27,11 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_REQUEST_TIMEOUT_MS` | Time limit for one inference attempt or one file upload, including upload negotiation | `600000` (10 minutes) |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
 | `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
+| `DEEPSEEK_API_KEY` | DeepSeek Fetch credential for [web page access](#web-page-access) | Web page retrieval disabled |
 | `CONTEXT_REQUEST_BYTES` | Maximum complete serialized ordinary model request | `1048576` (1 MiB) |
 | `CONTEXT_COMPACTION_BYTES` | Maximum complete serialized summary request | `2097152` (2 MiB) |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
-| `MAIL_SESSION_URL` | JMAP session URL | `http://127.0.0.1:8088/jmap/session` |
+| `MAIL_SESSION_URL` | URL for [JMAP session discovery](#mail-service) | `http://127.0.0.1:8088/jmap/session` |
 | `MAIL_ADDRESS` | Kernel address and sending identity; its domain resolves correspondent IDs | Required |
 | `MAIL_USERNAME` | Mail login | Required for username/password authentication |
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
@@ -44,6 +47,14 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it.
 
 Numeric kernel settings must be positive. Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
+
+### Web page access
+
+Set `DEEPSEEK_API_KEY` to let `read_resource` fetch web pages as Markdown. DeepSeek receives the full page URL, including its query string, whichever service handles inference. If one DeepSeek key serves both purposes, assign it to both `DEEPSEEK_API_KEY` and `LLM_API_KEY`.
+
+Opening the original URL again starts a new Fetch request. DeepSeek charges for each successful request that returns page content. To read another passage from the same copy, use the returned snapshot URI. See [web page snapshots](resources.md#web-pages) and [DeepSeek's billing terms](https://api-docs.deepseek.com/guides/search/#billing).
+
+Viewing an image by URL sends that URL to the configured model service. A service that supports remote images can retrieve the image even with web page access disabled. See [remote images](resources.md#remote-images).
 
 ### Model requests
 
@@ -61,7 +72,7 @@ Choose both byte budgets and the output-token limit together for the configured 
 
 Handovers carry the focus's pending callback and active subscription references alongside the generated summary. Core handovers also carry existing activity references. These collections grow with outstanding work and count toward both the summary request and the ordinary requests that retain the handover.
 
-Individual tool results can meet their [content limits](content.md#model-request-checks) while a large batch or inline image exceeds the context budgets. Inline images include base64 encoding overhead. Reduce their size or use image URL references when that overhead would exceed the request budget.
+Inline images count at their encoded size, including base64 overhead. If a tool result reports that an image was omitted to fit the request, a smaller image or a direct image URL may fit. Retained history, new text and runtime observations can still require compaction. See [model request checks](content.md#model-request-checks).
 
 For files, the byte budgets measure identifiers and source descriptions. The model service expands those references, so a request within Ivenna's budget can still exceed the service's context limits. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) and [when model work stalls](#when-model-work-stalls).
 
@@ -83,7 +94,9 @@ To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MO
 
 Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks` and `Ivenna History` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
 
-Set `MAIL_SESSION_URL`, `MAIL_ADDRESS`, and authentication settings in the kernel's environment. Give correspondents separate accounts in the same domain as `MAIL_ADDRESS`. For example, with `MAIL_ADDRESS=ivenna@ivenna.test`, the ID `operator` resolves to `operator@ivenna.test`. Changing the domain changes where messages to retained IDs are sent. See [supported email addresses](communication.md#current-email-addressing).
+Set `MAIL_SESSION_URL` to the URL of the JMAP session document. Discovery follows up to three redirects within the same scheme, host, and effective port. For a longer chain or a change of origin, configure the final session URL directly.
+
+Set `MAIL_ADDRESS` and authentication settings for the kernel account. Give correspondents separate accounts in the same domain as `MAIL_ADDRESS`. For example, with `MAIL_ADDRESS=ivenna@ivenna.test`, the ID `operator` resolves to `operator@ivenna.test`. Changing the domain changes where messages to retained IDs are sent. See [supported email addresses](communication.md#current-email-addressing).
 
 For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks when presenting correspondent IDs. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
@@ -133,7 +146,7 @@ The [local development setup](../dev/README.md#configuring-memory) packages this
 
 ## Starting the kernel
 
-`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` with no arguments from the directory you want host commands to use by default.
+`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` from the directory where you want file browsing and host commands to start by default.
 
 ```sh
 cd /path/to/workspace
@@ -234,6 +247,8 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | `<DATA_DIR>/subscriptions.sqlite3` | Subscription registrations, listener cursors, accepted report keys, and reports awaiting history admission |
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
+Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).
+
 Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
@@ -269,7 +284,7 @@ Ivenna cleans up the history folder at startup and periodically while it runs. B
 
 Forks store independent copies of inherited history; include these copies when sizing runtime memory and the mailbox. Compaction replaces detailed observations and exchanges with a handover containing the generated summary and sampled runtime state. This changes only that session's selected history, allowing its previous records to move to Trash while other sessions keep their own copies.
 
-Each complete model/tool round must fit the mail service's advertised `maxSizeRequest` when saved. File bytes and encoding overhead count toward that history request, so meeting the [source limits](content.md#automatic-classification) does not guarantee that a file or batch can be saved. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`; any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See the [history storage protocol](architecture.md#history-storage) for the encoding and batching mechanism.
+Each complete model/tool round must fit the mail service's advertised `maxSizeRequest` when saved. File bytes and encoding overhead count toward that history request, so a file or batch within the [source limits](content.md#content-and-results) can still exceed the mailbox limit. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`. Any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See the [history storage protocol](architecture.md#history-storage) for the encoding and batching mechanism.
 
 A sleeping activity retains its history even when its context is unloaded. When the activity ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. The activity's messages and ending remain available to the core until they enter the core's history. Shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 

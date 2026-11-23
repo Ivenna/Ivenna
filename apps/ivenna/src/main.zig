@@ -5,6 +5,7 @@ const email = @import("email");
 const responses = @import("responses");
 const host = @import("host");
 const memory = @import("memory");
+const resources = @import("resources");
 const subscriptions = @import("subscriptions");
 const Config = @import("config.zig").Config;
 const Service = @import("service.zig").Service;
@@ -14,9 +15,11 @@ var stopping: std.atomic.Value(bool) = .init(false);
 const usage =
     \\Usage: ivenna [--help]
     \\
-    \\Run the Ivenna kernel. Host commands start in the current directory by default.
-    \\The kernel reads DATA_DIR and the model, mail and memory settings from the
-    \\environment. See docs/running.md in the source tree for configuration.
+    \\Run the Ivenna kernel. The current directory is the default location for
+    \\directory listings and the default working directory for host commands.
+    \\
+    \\The kernel reads DATA_DIR and its service settings from the environment.
+    \\See docs/running.md in the source tree for configuration.
     \\
     \\  -h, --help   Show this help and exit.
     \\
@@ -74,7 +77,15 @@ pub fn main(init: std.process.Init) !u8 {
         .max_output_tokens = config.llm_max_output_tokens,
         .request_timeout_ms = config.llm_request_timeout_ms,
     };
-    const shared_tools = [_]contracts.Tools{try memory_client.tools(a)};
+    const fetcher: ?resources.DeepSeek = if (config.deepseek_api_key) |key| .{ .http = &client, .api_key = key } else null;
+    var resource_tools: resources.Resources = .{
+        .allocator = init.gpa,
+        .io = io,
+        .directory = host_directory,
+        .web = if (fetcher) |*service_client| service_client.reader() else null,
+    };
+    defer resource_tools.deinit();
+    const shared_tools = [_]contracts.Tools{ try memory_client.tools(a), try resource_tools.tools(a) };
     const activity_tools = [_]contracts.Tools{try host_tools.tools(a)};
     var engine: agent.Engine = .{
         .allocator = init.gpa,

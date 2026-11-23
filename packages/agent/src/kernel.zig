@@ -257,7 +257,7 @@ pub const Kernel = struct {
             }, &round, .{
                 .context = &runtime,
                 .invoke = RuntimeRound.invoke,
-            });
+            }, self.limits.request_bytes);
             try history.appendBatch(response.output, replies);
             try self.sessions.commitToolRound(work, &history, &runtime.forks);
         }

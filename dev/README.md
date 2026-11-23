@@ -19,9 +19,11 @@ dev/prepare.sh
 
 The preparation script copies [.env.example](../.env.example) to `$DEV_INSTANCE_DIR/.env` and the [mail plan example](mail/provision.example.ndjson) to `$DEV_INSTANCE_DIR/mail/provision.ndjson`. Running it again preserves existing private files.
 
-Edit the instance's `.env` to set `LLM_API_KEY` and configure the mail and memory connections. Set matching account credentials in `.env` and the private mail plan as described in [mail setup](#configuring-mail). The kernel authenticates with `MAIL_*`; the [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`.
+In the instance's `.env`, set `LLM_API_KEY` for inference and configure the mail and memory connections. Match the kernel and operator credentials to the accounts in the [private mail plan](#configuring-mail). The [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`.
 
 The kernel requires `DATA_DIR`; the example sets it to `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. The sample connections match the local services below. To use another [mail service](../docs/running.md#mail-service) or [memory workspace](../docs/running.md#memory-service), configure those connections and prepare only the services you run locally.
+
+To enable optional web page retrieval, set `DEEPSEEK_API_KEY` in the same file. See [web page access](../docs/running.md#web-page-access).
 
 In each terminal used for development commands, export your chosen `DEV_INSTANCE_DIR` and load its `.env` file. Reload it after editing its values:
 
@@ -173,7 +175,7 @@ Keep the same instance directory and [load its configuration](#configuration) fo
 
 The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Check the [storage format requirements](../docs/running.md#updating-the-executable) before updating an existing instance. After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild both executables and restart it.
 
-To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Point any independent listeners at the new checkout's `zig-out/bin/ivenna-report`. Rebuild memory if its sources changed. The new checkout becomes the default directory for host commands.
+To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Point any independent listeners at the new checkout's `zig-out/bin/ivenna-report`. Rebuild memory if its sources changed. Launching from the new checkout makes it the starting directory for file browsing and host commands.
 
 ### Memory
 

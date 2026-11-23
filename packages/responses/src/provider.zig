@@ -1,6 +1,7 @@
 const std = @import("std");
 const zdt = @import("zdt");
 const Model = @import("agent_contracts").Model;
+const JsonString = @import("agent_contracts").JsonString;
 const Content = @import("content").Content;
 const File = @import("content").File;
 const Allocator = std.mem.Allocator;
@@ -38,7 +39,9 @@ pub const Provider = struct {
     /// Measure exactly the same payload that next serializes and sends.
     fn requestBytes(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!u64 {
         const self: *Provider = @ptrCast(@alignCast(context));
-        const payload = try self.requestPayload(arena, request);
+        var scratch = std.heap.ArenaAllocator.init(arena);
+        defer scratch.deinit();
+        const payload = try self.requestPayload(scratch.allocator(), request);
         var buffer: [4096]u8 = undefined;
         var counter = std.Io.Writer.Discarding.init(&buffer);
         try std.json.Stringify.value(payload, .{}, &counter.writer);
@@ -47,14 +50,13 @@ pub const Provider = struct {
 
     /// Prepare file input and apply request limits only to the new reply parts.
     /// Retained history and the caller's other observations remain unchanged.
-    fn limitToolReplies(context: *anyopaque, arena: Allocator, request: Model.Request, replies: []Model.Item) anyerror!void {
+    fn limitToolReplies(context: *anyopaque, arena: Allocator, request: Model.Request, replies: []Model.Item, max_request_bytes: u64) anyerror!void {
         const self: *Provider = @ptrCast(@alignCast(context));
         const earlier = request.history[0 .. request.history.len - replies.len];
         var count = imageCount(earlier);
         var files = fileCount(earlier);
         var has_image = false;
         for (replies) |*reply| {
-            if (reply.* != .tool_result) continue;
             const parts = try arena.dupe(Content.Part, reply.tool_result.content.parts);
             reply.tool_result.content.parts = parts;
             for (parts) |*part| {
@@ -93,19 +95,28 @@ pub const Provider = struct {
                 }
             }
         }
-        if (!has_image or try requestBytes(context, arena, request) <= 48 * 1024 * 1024) return;
+        if (!has_image) return;
+        const byte_limit = @min(max_request_bytes, 48 * 1024 * 1024);
+        var size = try requestBytes(context, arena, request);
+        if (size <= byte_limit) return;
+        const omission = try contentLimitPart(arena, try arena.print("Image omitted because the model request would exceed {d} bytes.", .{byte_limit}));
+        const omission_size = try encodedPartBytes(arena, omission);
         var index = replies.len;
         while (index > 0) {
             index -= 1;
-            if (replies[index] != .tool_result) continue;
             // All tool result parts were copied above and belong to arena.
             const parts = @constCast(replies[index].tool_result.content.parts);
             var part_index = parts.len;
             while (part_index > 0) {
                 part_index -= 1;
                 if (parts[part_index] != .image) continue;
-                parts[part_index] = try contentLimitPart(arena, "Image omitted: the model request would exceed 48 MiB.");
-                if (try requestBytes(context, arena, request) <= 48 * 1024 * 1024) return;
+                // Both encodings occupy one array element. A short URL can
+                // cost less space than explaining its omission.
+                const image_size = try encodedPartBytes(arena, parts[part_index]);
+                if (image_size <= omission_size) continue;
+                parts[part_index] = omission;
+                size -= image_size - omission_size;
+                if (size <= byte_limit) return;
             }
         }
     }
@@ -143,12 +154,11 @@ pub const Provider = struct {
             defer files.deinit(arena);
             for (item.tool_result.content.parts) |part| {
                 if (part != .file) continue;
-                try files.append(arena, try encodeContentPart(arena, .{
-                    .text = try std.json.Stringify.valueAlloc(arena, .{
-                        .source = .{ .tool_call_id = item.tool_result.call_id },
-                        .file = part.file.describe(),
-                    }, .{}),
-                }));
+                if (files.items.len == 0) {
+                    try files.append(arena, try encodeContentPart(arena, .{
+                        .text = try std.json.Stringify.valueAlloc(arena, .{ .source = .{ .tool_call_id = item.tool_result.call_id } }, .{}),
+                    }));
+                }
                 var fields: std.json.ObjectMap = .empty;
                 try fields.put(arena, "type", .{ .string = "input_file" });
                 try fields.put(arena, "file_id", .{ .string = part.file.reference orelse return error.UnpreparedModelFile });
@@ -188,7 +198,7 @@ pub const Provider = struct {
         fn part(self: UploadFailure, arena: Allocator, file: File) !Content.Part {
             const http_status: ?u16 = if (self == .rejected) @backingInt(self.rejected) else null;
             return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
-                .file = file.describe(),
+                .file = .{ .byte_length = file.bytes.len },
                 .@"error" = .{
                     .code = if (self == .uncertain) "file_upload_uncertain" else "file_upload_failed",
                     .message = switch (self) {
@@ -274,7 +284,7 @@ pub const Provider = struct {
         var buffer: [4096]u8 = undefined;
         var json = std.json.Reader.init(temporary, response.reader(&buffer));
         defer json.deinit();
-        const uploaded = std.json.parseFromTokenSourceLeaky(struct { id: []const u8 }, temporary, &json, .{ .ignore_unknown_fields = true }) catch |err| {
+        const uploaded = std.json.parseFromTokenSourceLeaky(struct { id: JsonString }, temporary, &json, .{ .ignore_unknown_fields = true }) catch |err| {
             request.connection.?.closing = true;
             return switch (err) {
                 error.OutOfMemory => err,
@@ -283,11 +293,11 @@ pub const Provider = struct {
             };
         };
         // A complete JSON object may still precede a premature connection close.
-        if (request.reader.state == .body_remaining_content_length or uploaded.id.len == 0) {
+        if (request.reader.state == .body_remaining_content_length or uploaded.id.bytes.len == 0) {
             request.connection.?.closing = true;
             return .{ .failure = .uncertain };
         }
-        return .{ .reference = try arena.dupe(u8, uploaded.id) };
+        return .{ .reference = try arena.dupe(u8, uploaded.id.bytes) };
     }
 
     fn send(self: Provider, arena: Allocator, request_payload: Payload) !Model.Outcome {
@@ -480,14 +490,19 @@ fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
             try encoded.put(arena, "type", .{ .string = "input_image" });
             try encoded.put(arena, "image_url", .{ .string = url });
         },
-        .file => |file| {
+        .file => {
             try encoded.put(arena, "type", .{ .string = "input_text" });
-            try encoded.put(arena, "text", .{ .string = try std.json.Stringify.valueAlloc(arena, .{
-                .file = file.describe(),
-            }, .{}) });
+            try encoded.put(arena, "text", .{ .string = "File attached." });
         },
     }
     return .{ .object = encoded };
+}
+
+fn encodedPartBytes(a: Allocator, part: Content.Part) !usize {
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const encoded = try encodeContentPart(scratch.allocator(), part);
+    return std.fmt.count("{f}", .{std.json.fmt(encoded, .{})});
 }
 
 fn contentLimitPart(arena: Allocator, message: []const u8) !Content.Part {
@@ -556,8 +571,8 @@ fn runUntil(comptime T: type, io: std.Io, deadline: std.Io.Clock.Timestamp, comp
     var buffer: [2]Result = undefined;
     var select = std.Io.Select(Result).init(io, &buffer);
     defer select.cancelDiscard();
-    try select.concurrent(.exchange, operation, args);
     try select.concurrent(.timeout, std.Io.Clock.Timestamp.wait, .{ deadline, io });
+    try select.concurrent(.exchange, operation, args);
     switch (try select.await()) {
         .exchange => |result| return try result,
         .timeout => |result| {

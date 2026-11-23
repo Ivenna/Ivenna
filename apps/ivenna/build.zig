@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
     const responses = b.dependency("responses", options).module("responses");
     const host = b.dependency("host", options).module("host");
     const memory = b.dependency("memory", options).module("memory");
+    const resources = b.dependency("resources", options).module("resources");
     const app = b.addExecutable(.{
         .name = "ivenna",
         .root_module = b.createModule(.{
@@ -26,6 +27,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "responses", .module = responses },
                 .{ .name = "host", .module = host },
                 .{ .name = "memory", .module = memory },
+                .{ .name = "resources", .module = resources },
             },
         }),
     });

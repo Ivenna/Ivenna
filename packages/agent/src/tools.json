@@ -27,7 +27,7 @@
   },
   {
     "name": "open_focus",
-    "description": "Open another focus of your attention to pursue a task while the core continues. The activity can write to correspondents, use shared memory, and run shell commands on the host.",
+    "description": "Open an activity to pursue a task while the core continues. The activity can run host commands and report what it finds to the core.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -102,7 +102,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Create a subscription for this focus. Each call returns a new subscription_id to give to a listener you set up separately. A report can wake this focus, and one turn can include several reports. An activity can run \"$IVENNA_REPORT\" --help for reporting commands and examples.",
+    "description": "Create a subscription whose reports can wake this focus. Give the new subscription_id to a listener you set up separately. An activity can run \"$IVENNA_REPORT\" --help for reporting commands and examples.",
     "parameters": {
       "type": "object",
       "properties": {

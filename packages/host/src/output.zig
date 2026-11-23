@@ -4,31 +4,47 @@ const content = @import("content");
 const Allocator = std.mem.Allocator;
 
 pub const preview_line_limit = 2000;
-pub const minimum_budget = 128;
-const marker_format = "\n[... {d} bytes omitted; read the full log ...]\n";
+const marker_format = "\n[... {d} bytes omitted ...]\n";
 const marker_reserve = std.fmt.count(marker_format, .{std.math.maxInt(u64)});
 
 pub const Preview = struct { text: []const u8, truncated: bool };
+
+pub const StreamContent = union(enum) {
+    text: Preview,
+    binary,
+};
 
 pub const Chunk = struct {
     offset: u64,
     next_offset: u64,
     byte_length: u64,
-    content: Content,
-
-    pub const Content = union(enum) {
-        text: Preview,
-        unavailable: struct { byte_length: u64, reason: enum { unsupported_binary } },
-    };
+    content: StreamContent,
 };
 
-/// Return consecutive bytes without inserting a marker or skipping source text.
-/// `max_bytes` bounds the encoded content object, including its variant tag.
+fn mediaHeader(prefix: []const u8) bool {
+    return content.detectFormat(prefix) != null or content.hasPdfHeader(prefix);
+}
+
+/// Read a consecutive range and classify its bytes as text or binary.
+/// `max_bytes` bounds the JSON-encoded text.
 /// A running stream's incomplete final character remains at the next cursor.
-pub fn chunk(a: Allocator, io: std.Io, file: std.Io.File, offset: u64, max_bytes: usize, finished: bool) !Chunk {
+pub fn chunk(a: Allocator, io: std.Io, file: std.Io.File, offset: u64, length: u64, max_bytes: usize, finished: bool) !Chunk {
     const budget = max_bytes;
-    const length = try file.length(io);
     if (offset > length) return error.InvalidOutputOffset;
+    if (offset == length) return .{
+        .offset = offset,
+        .next_offset = offset,
+        .byte_length = length,
+        .content = .{ .text = .{ .text = "", .truncated = false } },
+    };
+    var header: [32]u8 = undefined;
+    const count = try file.readPositionalAll(io, header[0..@intCast(@min(header.len, length))], 0);
+    if (mediaHeader(header[0..count])) return .{
+        .offset = offset,
+        .next_offset = length,
+        .byte_length = length,
+        .content = .binary,
+    };
     const capacity: usize = @intCast(@min(length - offset, budget));
     const bytes = try a.alloc(u8, capacity);
     errdefer a.free(bytes);
@@ -41,19 +57,19 @@ pub fn chunk(a: Allocator, io: std.Io, file: std.Io.File, offset: u64, max_bytes
             .offset = offset,
             .next_offset = offset + window.len,
             .byte_length = length,
-            .content = .{ .unavailable = .{ .byte_length = window.len, .reason = .unsupported_binary } },
+            .content = .binary,
         };
     };
     var end = prefix;
     while (true) {
         const next = offset + end;
-        const selected: Chunk.Content = .{ .text = .{ .text = bytes[0..end], .truncated = next < length } };
-        const encoded = encodedLength(selected);
+        const text = bytes[0..end];
+        const encoded = encodedLength(text);
         if (encoded <= budget) return .{
             .offset = offset,
             .next_offset = next,
             .byte_length = length,
-            .content = selected,
+            .content = .{ .text = .{ .text = text, .truncated = next < length } },
         };
         // The prefix is valid UTF-8. Shrink only at complete characters and
         // leave all omitted bytes available at the returned cursor.
@@ -62,26 +78,25 @@ pub fn chunk(a: Allocator, io: std.Io, file: std.Io.File, offset: u64, max_bytes
     }
 }
 
-/// Return a beginning/end preview whose encoded JSON object fits `max_bytes`.
-pub fn previewLimit(a: Allocator, io: std.Io, file: std.Io.File, max_bytes: usize) !Preview {
-    const budget = max_bytes;
-    const length = try file.length(io);
+/// Return a beginning/end preview whose encoded text fits the budget.
+pub fn preview(a: Allocator, io: std.Io, file: std.Io.File, length: u64, budget: usize) !StreamContent {
+    if (length == 0) return .{ .text = .{ .text = "", .truncated = false } };
     if (length <= budget) {
         const bytes = try a.alloc(u8, @intCast(length));
         const read = try file.readPositionalAll(io, bytes, 0);
         const value = bytes[0..read];
-        if (!content.isText(value)) return error.UnsupportedBinary;
+        if (mediaHeader(value) or !content.isText(value)) return .binary;
         const lines = std.mem.count(u8, value, "\n") + @intFromBool(value.len != 0 and value[value.len - 1] != '\n');
-        const complete: Preview = .{ .text = value, .truncated = false };
-        if (lines <= preview_line_limit and encodedLength(complete) <= budget) return complete;
+        if (lines <= preview_line_limit and encodedLength(value) <= budget) return .{ .text = .{ .text = value, .truncated = false } };
         return truncatedPreview(a, value, value, length, budget);
     }
 
     const head_length = (budget - marker_reserve) / 2;
     const tail_length = budget - marker_reserve - head_length;
     const head = try a.alloc(u8, head_length);
-    const tail = try a.alloc(u8, tail_length);
     const head_read = try file.readPositionalAll(io, head, 0);
+    if (mediaHeader(head[0..head_read])) return .binary;
+    const tail = try a.alloc(u8, tail_length);
     const tail_read = try file.readPositionalAll(io, tail, length - tail_length);
     return truncatedPreview(a, head[0..head_read], tail[0..tail_read], length, budget);
 }
@@ -97,24 +112,20 @@ pub fn readable(io: std.Io, file: std.Io.File, offset: u64) !bool {
     return if (content.textPrefixLength(bytes[0..count], true)) |prefix| prefix != 0 else true;
 }
 
-fn truncatedPreview(a: Allocator, head: []const u8, tail: []const u8, length: u64, budget: usize) !Preview {
+fn truncatedPreview(a: Allocator, head: []const u8, tail: []const u8, length: u64, budget: usize) !StreamContent {
     var capacity: usize = @intCast(@min(budget - marker_reserve, length));
     while (true) {
         const head_capacity = capacity / 2;
         const tail_capacity = capacity - head_capacity;
         const head_text = headLines(completePrefix(head[0..@min(head.len, head_capacity)]));
         const tail_text = tailLines(completeSuffix(tail[tail.len - @min(tail.len, tail_capacity) ..]));
-        if (!content.isText(head_text) or !content.isText(tail_text)) return error.UnsupportedBinary;
+        if (!content.isText(head_text) or !content.isText(tail_text)) return .binary;
         const selected = head_text.len + tail_text.len;
         var marker_buffer: [marker_reserve]u8 = undefined;
         const marker = std.fmt.bufPrint(&marker_buffer, marker_format, .{length - selected}) catch unreachable;
         const text = try std.mem.concat(a, u8, &.{ head_text, marker, tail_text });
-        const result: Preview = .{ .text = text, .truncated = true };
-        // JSON escaping can expand one valid UTF-8 byte into six bytes. Bound
-        // the actual preview object so two diagnostic streams stay bounded
-        // when the shell result is serialized into a model tool message.
-        const encoded = encodedLength(result);
-        if (encoded <= budget) return result;
+        const encoded = encodedLength(text);
+        if (encoded <= budget) return .{ .text = .{ .text = text, .truncated = true } };
         a.free(text);
         capacity = @min(capacity - 1, selected * budget / encoded);
     }
@@ -178,4 +189,24 @@ fn completeSuffix(bytes: []const u8) []const u8 {
     var start: usize = 0;
     while (start < @min(bytes.len, 3) and bytes[start] & 0xc0 == 0x80) start += 1;
     return bytes[start..];
+}
+
+test "incremental reads recover text following a binary range" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const tail = "conversion complete\n";
+    const budget = 128;
+    var bytes: [budget + tail.len]u8 = @splat(0);
+    @memcpy(bytes[budget..], tail);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "mixed", .data = &bytes });
+    const file = try tmp.dir.openFile(t.io, "mixed", .{});
+    defer file.close(t.io);
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const first = try chunk(arena.allocator(), t.io, file, 0, bytes.len, budget, true);
+    try t.expect(first.content == .binary);
+    try t.expectEqual(budget, first.next_offset);
+    const rest = try chunk(arena.allocator(), t.io, file, first.next_offset, bytes.len, budget, true);
+    try t.expectEqualStrings(tail, rest.content.text.text);
 }

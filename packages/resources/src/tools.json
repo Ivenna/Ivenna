@@ -1,0 +1,53 @@
+[
+  {
+    "name": "read_resource",
+    "description": "Read a local file, list a directory, or view an image.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute host path, local file URI, HTTP(S) URL, or result.uri from an earlier read. Omit to list the startup directory."
+        },
+        "view": {
+          "default": {},
+          "description": "To open media identified by a preview, use result.view.",
+          "anyOf": [
+            {
+              "type": "object",
+              "description": "Preview a page. Offsets and sizes count UTF-8 bytes in text or entries in a directory.",
+              "properties": {
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "To continue, use result.next_offset."
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Requested page size. Omit to let the reader choose."
+                },
+                "metadata": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Include modification times and regular-file sizes in directory listings when available."
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            {
+              "type": "string",
+              "enum": ["image", "file"],
+              "description": "The image view sends local image content or an image URL to the model service. A local file can hold the URL. The file view attaches a whole local file for parsing."
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+]
