@@ -26,7 +26,7 @@ Put a short passage in the body of your letter. Ivenna skips email attachments. 
 - For a screenshot, include a direct HTTP(S) link that Ivenna's model service can open.
 - For an article, include its URL. Ivenna can send it to a page reader when the deployment enables [web page access](running.md#web-page-access).
 
-If the letter and its required context still exceed the model's request budget after history compaction, the letter stays in the mailbox and can delay later mail. See [recovering from an admission failure](running.md#recovering-from-an-admission-failure).
+If Ivenna cannot fit your letter when preparing a request, it stays in the mailbox and can delay later mail. Once admitted, the letter is saved in working history even if the model service rejects the request. See [recovering from an admission failure](running.md#recovering-from-an-admission-failure).
 
 ## Continuing correspondence
 

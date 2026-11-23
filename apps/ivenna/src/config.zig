@@ -55,8 +55,8 @@ pub const Config = struct {
             .max_host_commands = try number(usize, env, "MAX_HOST_COMMANDS", 8),
             .deepseek_api_key = if (fetch_key.len > 0) fetch_key else null,
             .context_limits = .{
-                .request_bytes = try number(u64, env, "CONTEXT_REQUEST_BYTES", default_limits.request_bytes),
-                .compaction_bytes = try number(u64, env, "CONTEXT_COMPACTION_BYTES", default_limits.compaction_bytes),
+                .compact_at_tokens = try number(u64, env, "CONTEXT_COMPACT_AT_TOKENS", default_limits.compact_at_tokens),
+                .compact_at_bytes = try number(u64, env, "CONTEXT_COMPACT_AT_BYTES", default_limits.compact_at_bytes),
             },
             .llm_base_url = try nonempty(env, "LLM_BASE_URL", responses.Provider.default_base_url),
             .llm_api_key = try nonempty(env, "LLM_API_KEY", ""),

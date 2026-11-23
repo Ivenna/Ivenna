@@ -24,7 +24,7 @@ When the reader identifies an oversized source, `content.unavailable` gives its 
 
 ## Complete files
 
-The Responses adapter uploads a new file attachment to the configured model service for parsing. It uses the returned file reference in the current request and reuses it on later turns. For supported inputs and service limits, see DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/).
+The Responses adapter uploads a new file attachment to the configured model service for parsing. The returned file reference travels with the tool result and is reused on later turns. The service can expand the reference into text and images during inference. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/).
 
 If the upload ends without a usable reference, a text part replaces the attachment. It gives the original `file.byte_length` and an `error` with a code and message. The rest of the tool result is still available.
 
@@ -39,20 +39,19 @@ See [upload handling](architecture.md#tool-results) for how the adapter handles 
 
 An HTTP(S) image reference asks the model service to retrieve the image during inference. An image data URL already contains the image. If a command writes a data URL to a file, the focus can open the path in the image view. See [remote images](resources.md#remote-images), [local file views](resources.md#local-files-and-directories), and [image addresses in memory](memory.md#reading).
 
+When preparing a new tool reply, the adapter replaces an HTTP(S) image URL longer than 8192 Unicode code points with a `content_limit` result part. The result still identifies the source. An image data URL opened from a file or memory counts toward both the reader's reference limit and the encoded request size.
+
 ## Model request checks
 
-Media that fit the reader's source limits must also fit in the model request. The Responses adapter includes retained media when checking new tool results against its own serialization ceiling and the provider's limits for [images](https://api-docs.deepseek.com/guides/vision/#limits) and [documents](https://api-docs.deepseek.com/guides/document_parsing/). The ceiling is a capability of the adapter; the kernel's request budget is a separate policy and is never passed down as an attachment limit.
+The Responses adapter checks the complete request, including retained and newly produced tool results. See DeepSeek's [image limits](https://api-docs.deepseek.com/guides/vision/#limits) and [document parsing limits](https://api-docs.deepseek.com/guides/document_parsing/).
 
 | Check | Limit |
 | --- | --- |
-| HTTP(S) image URL length | 8192 Unicode code points |
-| Image count, including retained images and URL references | 600 |
-| File references, including retained references | 20 |
-| Serialized request body when adding images, including history, tools, and file references | The adapter's serialization ceiling (48 MiB by default) |
+| Inline images and image URL references | 600 |
+| File references | 20 |
+| Encoded request body | 48 MiB |
 
-An image data URL opened from a file or memory counts toward both the reference size limit and the serialized request size.
-
-When new media exceed a count limit, earlier parts take priority. Files beyond the limit are omitted before upload. A new image can also be omitted to fit the adapter ceiling. Every omission records `content_limit` with the ceiling, the number and bytes of dropped parts, and the source when one is known. If the batch still exceeds the ceiling, the largest tool result is replaced by such a record; if it still does not fit, the round fails instead of sending an oversized request. Each omitted part reports `content_limit` alongside the source and the other results. Before inference, the kernel measures the actual request, including retained history and newly arrived observations, against its [context budget](running.md#context-budgets).
+Compaction can make room for the latest complete tool exchange. A summary can use descriptions in place of media when its request exceeds a limit. If the ordinary request still cannot fit, the focus pauses with its saved tool results intact. See [how compaction works](architecture.md#bounded-model-context).
 
 ## Context and continuity
 

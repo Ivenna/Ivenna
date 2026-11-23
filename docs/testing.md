@@ -46,8 +46,14 @@ The CLI tests invoke both executables in an empty environment to verify that hel
 
 For process restart and communication through the configured services, exercise the running application in the [local development environment](../dev/README.md). See [validation across runtime boundaries](development.md#validation).
 
+### Evaluating compaction
+
+When evaluating a change to [context settings](running.md#context-budgets), replay representative work from the same starting history with the deployed model in a test instance. Check whether the focus carries a commitment and a correction through a handover, can find the original evidence, and resumes an activity when its callback or subscription report arrives.
+
+The kernel advances the [focus's saved epoch](architecture.md#persistent-working-history) when it commits a handover. Compare epoch changes across runs and check stderr for requests that interrupt a focus.
+
 ### Subscription delivery
 
 - **Listener process.** Each request runs the reporter in a separate process against a temporary on-disk catalog. The tests check receipts and exit status for publication, same-key retries, cursor changes, invalid fields, and publication after withdrawal. See the [reporter process tests](../apps/ivenna-report/src/report_test.zig).
 - **Subscription store.** Two SQLite connections exercise publication and withdrawal. The tests check that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. See the [store tests](../packages/subscriptions/src/root.zig).
-- **Focus history.** The kernel tests cover ordered admission across pages, later arrivals, tight input budgets, interrupted admission, and withdrawal of a sleeping activity's last subscription. To exercise recovery, they inject a failure before checkpoint commit or a lost confirmation after commit. In each case they rebuild the kernel against the same test history store and in-memory SQLite catalog and check that the receiving history contains the report exactly once. See the [kernel tests](../packages/agent/src/kernel.zig).
+- **Focus history.** The kernel tests cover ordered admission across pages, later arrivals, tight request limits, interrupted admission, and withdrawal of a sleeping activity's last subscription. To exercise recovery, they inject a failure before checkpoint commit or a lost confirmation after commit. In each case they rebuild the kernel against the same test history store and in-memory SQLite catalog and check that the receiving history contains the report exactly once. See the [kernel tests](../packages/agent/src/kernel.zig).

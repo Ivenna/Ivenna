@@ -42,6 +42,8 @@ pub const Session = struct {
     role: Input.Role,
     epoch: u64 = 0,
     context: ?Context = null,
+    /// Input usage from the latest committed ordinary inference in this epoch.
+    last_input_tokens: ?u64 = null,
     needs_startup: bool = false,
     state: union(enum) {
         idle,
@@ -346,7 +348,7 @@ pub const Registry = struct {
         assertWork(work);
         const session = work.session;
         const deliveries = &work.activation.deliveries;
-        std.debug.assert(count != 0 or deliveries.items.len == 0);
+        const deferred_all = count == 0 and deliveries.items.len != 0;
         const suffix = deliveries.items[count..];
         var report_count: usize = 0;
         var endings: usize = 0;
@@ -359,8 +361,11 @@ pub const Registry = struct {
         session.pending.insertSliceAssumeCapacity(0, self.keepQueued(suffix));
         deliveries.items.len = count;
         std.mem.swap(Context, &session.context.?, &retained);
-        session.epoch = session.context.?.scope.epoch;
-        work.activation.admitted = true;
+        if (session.epoch != history.scope.epoch) {
+            session.epoch = history.scope.epoch;
+            session.last_input_tokens = null;
+        }
+        work.activation.admitted = !deferred_all;
         for (deliveries.items) |delivery| {
             if (delivery.event == .startup) continue;
             session.first_stream = Stream.of(delivery.event).next();
@@ -408,7 +413,7 @@ pub const Registry = struct {
 
     /// Publish the completed context and its forks together. On every return
     /// the caller owns the context left in `completed` and any remaining plans.
-    pub fn commitToolRound(self: *Registry, work: Work, completed: *Context, plans: *std.ArrayList(ForkPlan)) !void {
+    pub fn commitToolRound(self: *Registry, work: Work, completed: *Context, plans: *std.ArrayList(ForkPlan), input_tokens: ?u64) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
@@ -424,6 +429,7 @@ pub const Registry = struct {
         }
         plans.clearRetainingCapacity();
         try self.saveLocked();
+        session.last_input_tokens = input_tokens;
     }
 
     pub fn snapshot(self: *Registry, session: *Session) !Context {
@@ -535,7 +541,7 @@ pub const Registry = struct {
     /// Commit the outcome of a round without tool calls. Returns true when
     /// the activation has finished. On every return the caller owns the
     /// context left in `history`.
-    pub fn commitResponse(self: *Registry, work: Work, history: *Context, output: []const Model.Item, text: ?[]const u8) !bool {
+    pub fn commitResponse(self: *Registry, work: Work, history: *Context, response: Model.Response) !bool {
         const observed_at = self.now();
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -544,8 +550,8 @@ pub const Registry = struct {
         const finished = !self.hasQueuedWork(session) and
             try self.subscriptions.latestSequence(session.focus_id) <= session.subscription_through;
         const completed_activity = finished and try self.canEnd(session);
-        if (!completed_activity) try history.appendBatch(output, &.{});
-        if (session != self.core) try self.reportResponseLocked(session, text, observed_at, completed_activity);
+        if (!completed_activity) try history.appendBatch(response.output, &.{});
+        if (session != self.core) try self.reportResponseLocked(session, response.text, observed_at, completed_activity);
         if (completed_activity) {
             const removed = self.sessions.remove(session.session_id);
             std.debug.assert(removed);
@@ -558,6 +564,7 @@ pub const Registry = struct {
             work.activation.destroy(self.allocator);
         }
         try self.saveLocked();
+        session.last_input_tokens = response.input_tokens;
         if (finished and !completed_activity) unloadActivityContext(session);
         return finished;
     }
@@ -1055,7 +1062,7 @@ test "compaction samples the active subscriptions addressed to this focus" {
     const core_watch = try registry.subscribe(a, core.work, "releases", "Release feed");
     var plans: std.ArrayList(ForkPlan) = .empty;
     try plans.append(a, try registry.prepareFork(core.work, "research", "Follow revisions."));
-    try registry.commitToolRound(core.work, &core.history, &plans);
+    try registry.commitToolRound(core.work, &core.history, &plans, null);
     var activity = try admitTestInput(&registry, a);
     defer activity.history.deinit();
     defer registry.endWorker(activity.work.session);
@@ -1067,7 +1074,7 @@ test "compaction samples the active subscriptions addressed to this focus" {
     try std.testing.expectEqualDeep(@as([]const []const u8, &.{core_watch.subscription_id}), core_sample.state.subscriptions);
     const activity_sample = try registry.compactionSnapshot(a, activity.work.session);
     try std.testing.expectEqualDeep(@as([]const []const u8, &.{activity_watch.subscription_id}), activity_sample.state.subscriptions);
-    const request = try activity.history.summaryRequest(a, activity_sample, "Summarize.");
+    const request = try activity.history.summaryRequest(a, activity_sample, "Summarize.", .keep_latest_tool_round);
     try std.testing.expect(std.mem.indexOf(u8, request[request.len - 1].message.text, activity_watch.subscription_id) != null);
 }
 
@@ -1090,14 +1097,14 @@ test "activity completion publishes once and maintenance republishes the same ch
         try core.history.appendBatch(&.{.{ .continuation = "open_focus" }}, &.{.{
             .tool_result = .{ .call_id = "open", .content = .{ .parts = &.{} } },
         }});
-        try registry.commitToolRound(core.work, &core.history, &plans);
+        try registry.commitToolRound(core.work, &core.history, &plans, null);
         var activity = try admitTestInput(&registry, a);
         defer activity.history.deinit();
-        const output: []const Model.Item = &.{.{ .continuation = "final response" }};
+        const response: Model.Response = .{ .output = &.{.{ .continuation = "final response" }}, .calls = &.{}, .text = "Read the notes." };
         if (sleeping) {
             _ = try registry.registerCallback(a, activity.work, "read", .{ .host = .{ .command_id = "read-1" } });
             storage.fail_save = .after_commit;
-            try std.testing.expectError(error.UnconfirmedCheckpoint, registry.commitResponse(activity.work, &activity.history, output, "Read the notes."));
+            try std.testing.expectError(error.UnconfirmedCheckpoint, registry.commitResponse(activity.work, &activity.history, response));
             registry.endWorker(activity.work.session);
             const unconfirmed = storage.checkpoint.?;
             const before = storage.saves;
@@ -1108,7 +1115,7 @@ test "activity completion publishes once and maintenance republishes the same ch
         } else {
             defer registry.endWorker(activity.work.session);
             const before = storage.saves;
-            try std.testing.expect(try registry.commitResponse(activity.work, &activity.history, output, "Read the notes."));
+            try std.testing.expect(try registry.commitResponse(activity.work, &activity.history, response));
             try std.testing.expectEqual(before + 1, storage.saves);
         }
     }

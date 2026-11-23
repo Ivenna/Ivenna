@@ -14,9 +14,11 @@ pub const Provider = struct {
     pub const default_model = "deepseek-flash";
     pub const default_max_output_tokens: u32 = 65536;
     pub const default_request_timeout_ms: u32 = 600000;
-    /// Largest request body this adapter will serialize and send. A capability
-    /// ceiling, not a budgeting policy: callers own the policy budget.
+    /// The default ceiling uses DeepSeek's published request body limit for vision.
     pub const default_ceiling_bytes: u64 = 48 * 1024 * 1024;
+    const max_images: u64 = 600;
+    const max_files: u64 = 20;
+    const max_image_url_codepoints = 8192;
 
     client: *std.http.Client,
     base_url: []const u8 = default_base_url,
@@ -25,149 +27,79 @@ pub const Provider = struct {
     max_output_tokens: u32 = default_max_output_tokens,
     /// Deadline in milliseconds for one inference attempt or one file upload.
     request_timeout_ms: u32 = default_request_timeout_ms,
-    /// Serialization ceiling reported through Model.Port.
     request_ceiling_bytes: u64 = default_ceiling_bytes,
 
     pub fn port(self: *Provider) Model.Port {
-        return .{ .context = self, .request_ceiling_bytes = self.request_ceiling_bytes, .vtable = &.{
+        return .{ .context = self, .vtable = &.{
             .next = next,
-            .requestBytes = requestBytes,
-            .limitToolReplies = limitToolReplies,
+            .measure = measure,
+            .prepareToolReplies = prepareToolReplies,
         } };
     }
 
     fn next(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!Model.Outcome {
         const self: *Provider = @ptrCast(@alignCast(context));
-        return self.send(arena, try self.requestPayload(arena, request));
+        return self.send(arena, request);
     }
 
-    /// Measure exactly the same payload that next serializes and sends.
-    fn requestBytes(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!u64 {
+    fn measure(context: *anyopaque, a: Allocator, request: Model.Request) anyerror!Model.Measurement {
         const self: *Provider = @ptrCast(@alignCast(context));
-        var scratch = std.heap.ArenaAllocator.init(arena);
+        var scratch = std.heap.ArenaAllocator.init(a);
         defer scratch.deinit();
         const payload = try self.requestPayload(scratch.allocator(), request);
         var buffer: [4096]u8 = undefined;
         var counter = std.Io.Writer.Discarding.init(&buffer);
         try std.json.Stringify.value(payload, .{}, &counter.writer);
-        return counter.fullCount();
+        const bytes = counter.fullCount();
+        return .{ .bytes = bytes, .violation = self.requestLimit(bytes, request.history) };
     }
 
-    /// Prepare file input and enforce this adapter's serialization ceiling.
-    /// Uploading belongs here; budgeting and content omission belong to the
-    /// caller, which knows the whole request and its policy.
-    fn limitToolReplies(context: *anyopaque, arena: Allocator, request: Model.Request, replies: []Model.Item, ceiling_bytes: u64) anyerror!void {
+    fn requestLimit(self: Provider, bytes: u64, history: []const Model.Item) ?Model.Limit {
+        if (bytes > self.request_ceiling_bytes)
+            return .{ .kind = .request_bytes, .actual = bytes, .maximum = self.request_ceiling_bytes };
+        var images: u64 = 0;
+        var files: u64 = 0;
+        for (history) |item| {
+            if (item != .tool_result) continue;
+            for (item.tool_result.content.parts) |part| switch (part) {
+                .image => images += 1,
+                .file => files += 1,
+                .text => {},
+            };
+        }
+        if (images > max_images) return .{ .kind = .images, .actual = images, .maximum = max_images };
+        if (files > max_files) return .{ .kind = .files, .actual = files, .maximum = max_files };
+        return null;
+    }
+
+    fn prepareToolReplies(context: *anyopaque, arena: Allocator, replies: []Model.Item) anyerror!void {
         const self: *Provider = @ptrCast(@alignCast(context));
-        const byte_limit = @min(ceiling_bytes, self.request_ceiling_bytes);
-        const earlier = request.history[0 .. request.history.len - replies.len];
-        var count = imageCount(earlier);
-        var files = fileCount(earlier);
         for (replies) |*reply| {
             const parts = try arena.dupe(Content.Part, reply.tool_result.content.parts);
             reply.tool_result.content.parts = parts;
-            for (parts) |*part| {
-                if (part.* == .file) {
-                    if (files >= 20) {
-                        part.* = try contentLimitPart(arena, "File omitted: adding it would exceed the limit of 20 files per request.");
-                        continue;
+            for (parts) |*part| switch (part.*) {
+                .text => {},
+                .file => |*file| {
+                    if (file.reference != null) continue;
+                    switch (try self.uploadFile(arena, file.*)) {
+                        .reference => |reference| file.reference = reference,
+                        .failure => |failure| part.* = try failure.part(arena, file.*),
                     }
-                    if (part.file.reference == null) {
-                        switch (try self.uploadFile(arena, part.file)) {
-                            .reference => |reference| part.file.reference = reference,
-                            .failure => |failure| {
-                                part.* = try failure.part(arena, part.file);
-                                continue;
-                            },
-                        }
-                    }
-                    files += 1;
-                    continue;
-                }
-                if (part.* != .image) continue;
-                if (part.image == .url) {
-                    const url = part.image.url;
+                },
+                .image => |image| {
+                    if (image != .url) continue;
+                    const url = image.url;
                     if ((std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://")) and
-                        try std.unicode.utf8CountCodepoints(url) > 8192)
+                        try std.unicode.utf8CountCodepoints(url) > max_image_url_codepoints)
                     {
-                        part.* = try contentLimitPart(arena, "Image omitted: the HTTP(S) image URL exceeds 8192 Unicode code points.");
-                        continue;
+                        part.* = try contentLimitPart(arena, std.fmt.comptimePrint(
+                            "The image was omitted because its HTTP(S) URL exceeds {d} Unicode code points.",
+                            .{max_image_url_codepoints},
+                        ));
                     }
-                }
-                if (count >= 600) {
-                    part.* = try contentLimitPart(arena, "Image omitted: the model request would contain more than 600 images.");
-                } else {
-                    count += 1;
-                }
-            }
+                },
+            };
         }
-        // A batch without images can still exceed the ceiling, so the encoded
-        // request is measured instead of trusting the part kinds.
-        var size = try requestBytes(context, arena, request);
-        if (size <= byte_limit) return;
-        var dropped: usize = 0;
-        var dropped_bytes: usize = 0;
-        var index = replies.len;
-        while (index > 0) {
-            index -= 1;
-            // All tool result parts were copied above and belong to arena.
-            const parts = @constCast(replies[index].tool_result.content.parts);
-            var part_index = parts.len;
-            while (part_index > 0) {
-                part_index -= 1;
-                if (parts[part_index] != .image) continue;
-                const image_size = try encodedPartBytes(arena, parts[part_index]);
-                const source: ?[]const u8 = switch (parts[part_index].image) {
-                    .url => |url| url,
-                    .data => null,
-                };
-                const omission = try omissionPart(arena, .{
-                    .byte_limit = byte_limit,
-                    .dropped_images = dropped + 1,
-                    .dropped_bytes = dropped_bytes + image_size,
-                    .retained_images = count,
-                    .source = source,
-                });
-                const omission_size = try encodedPartBytes(arena, omission);
-                // Both encodings occupy one array element. A short URL can cost
-                // less space than explaining its omission.
-                if (omission_size >= image_size) continue;
-                parts[part_index] = omission;
-                size -= image_size - omission_size;
-                dropped += 1;
-                dropped_bytes += image_size;
-                if (size <= byte_limit) return;
-            }
-        }
-        // Images alone were not enough: replace the largest reply with a
-        // bounded omission record so the round can still continue and the
-        // failure stays observable with numbers.
-        if (replies.len != 0) {
-            var largest: usize = 0;
-            var largest_size: usize = 0;
-            for (replies, 0..) |reply, reply_index| {
-                var reply_size: usize = 0;
-                for (reply.tool_result.content.parts) |part| reply_size += try encodedPartBytes(arena, part);
-                if (reply_size > largest_size) {
-                    largest_size = reply_size;
-                    largest = reply_index;
-                }
-            }
-            const notice = try omissionPart(arena, .{
-                .byte_limit = byte_limit,
-                .dropped_images = dropped,
-                .dropped_bytes = dropped_bytes,
-                .retained_images = count,
-                .source = @as(?[]const u8, null),
-            });
-            const reply_parts = try arena.alloc(Content.Part, 1);
-            reply_parts[0] = notice;
-            replies[largest].tool_result.content.parts = reply_parts;
-            size = try requestBytes(context, arena, request);
-            if (size <= byte_limit) return;
-        }
-        // Nothing left may be dropped and the request still does not fit: fail
-        // distinguishably instead of sending it anyway.
-        return error.RequestExceedsCeiling;
     }
 
     const WireTool = struct {
@@ -349,14 +281,18 @@ pub const Provider = struct {
         return .{ .reference = try arena.dupe(u8, uploaded.id.bytes) };
     }
 
-    fn send(self: Provider, arena: Allocator, request_payload: Payload) !Model.Outcome {
+    fn send(self: Provider, arena: Allocator, request: Model.Request) !Model.Outcome {
         const io = self.client.io;
         try io.checkCancel();
         const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
             .raw = .fromMilliseconds(self.request_timeout_ms),
             .clock = .awake,
         });
-        const payload = try std.json.Stringify.valueAlloc(arena, request_payload, .{});
+        var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
+        defer scratch.deinit();
+        const temporary = scratch.allocator();
+        const payload = try std.json.Stringify.valueAlloc(temporary, try self.requestPayload(temporary, request), .{});
+        if (self.requestLimit(payload.len, request.history)) |limit| return .{ .rejected = .{ .limit = limit } };
         const url = try std.fmt.allocPrint(arena, "{s}/responses", .{std.mem.trimEnd(u8, self.base_url, "/")});
         const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{self.api_key});
 
@@ -406,12 +342,11 @@ pub const Provider = struct {
                 else => switch (status.class()) {
                     .success, .informational => return .{ .rejected = .invalid_response },
                     .client_error => {
-                        if (try clientErrorDetail(temporary, &response)) |detail| {
-                            std.log.warn("model service rejected the request: status={d} code={s} message={s}", .{
-                                @backingInt(status), detail.code orelse "-", detail.message orelse "-",
-                            });
-                        }
-                        return .{ .rejected = .request_rejected };
+                        on_timeout.* = requestRejected(status, false);
+                        const diagnostic = try serviceDiagnostic(temporary, &response) orelse return on_timeout.*;
+                        if (diagnostic.logCode()) |code|
+                            std.log.warn("model request rejection code={s}", .{code});
+                        return requestRejected(status, diagnostic.matches("context_length_exceeded"));
                     },
                     .redirect => return error.ModelHttpFailure,
                     .server_error => {},
@@ -420,7 +355,9 @@ pub const Provider = struct {
             const disposition = retryDisposition(response.head, self.client.io);
             if (status == .too_many_requests) {
                 on_timeout.* = disposition;
-                if (try exhaustedQuota(temporary, &response)) return error.ModelQuotaExhausted;
+                if (try serviceDiagnostic(temporary, &response)) |diagnostic| {
+                    if (diagnostic.matches("insufficient_quota")) return error.ModelQuotaExhausted;
+                }
             }
             return disposition;
         }
@@ -453,6 +390,7 @@ pub const Provider = struct {
         const decoded = std.json.parseFromSliceLeaky(struct {
             status: []const u8,
             output: []const Value,
+            usage: Value = .null,
         }, arena, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.InvalidModelResponse,
@@ -498,6 +436,7 @@ pub const Provider = struct {
             .output = output,
             .calls = try calls.toOwnedSlice(arena),
             .text = if (has_text) try text.toOwnedSlice() else null,
+            .input_tokens = inputTokens(decoded.usage),
         };
     }
 };
@@ -554,54 +493,10 @@ fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
     return .{ .object = encoded };
 }
 
-fn encodedPartBytes(a: Allocator, part: Content.Part) !usize {
-    var scratch = std.heap.ArenaAllocator.init(a);
-    defer scratch.deinit();
-    const encoded = try encodeContentPart(scratch.allocator(), part);
-    return std.fmt.count("{f}", .{std.json.fmt(encoded, .{})});
-}
-
 fn contentLimitPart(arena: Allocator, message: []const u8) !Content.Part {
     return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
         .@"error" = .{ .code = "content_limit", .message = message },
     }, .{}) };
-}
-
-/// Omission record: what was dropped, how much it cost, and where it came from.
-fn omissionPart(arena: Allocator, detail: anytype) !Content.Part {
-    return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
-        .@"error" = .{
-            .code = "content_limit",
-            .message = "Image omitted to fit the adapter request ceiling.",
-            .byte_limit = detail.byte_limit,
-            .dropped_images = detail.dropped_images,
-            .dropped_bytes = detail.dropped_bytes,
-            .retained_images = detail.retained_images,
-            .source = detail.source,
-        },
-    }, .{ .emit_null_optional_fields = false }) };
-}
-
-fn imageCount(history: []const Model.Item) usize {
-    var count: usize = 0;
-    for (history) |item| {
-        if (item != .tool_result) continue;
-        for (item.tool_result.content.parts) |part| {
-            if (part == .image) count += 1;
-        }
-    }
-    return count;
-}
-
-fn fileCount(history: []const Model.Item) usize {
-    var count: usize = 0;
-    for (history) |item| {
-        if (item != .tool_result) continue;
-        for (item.tool_result.content.parts) |part| {
-            if (part == .file) count += 1;
-        }
-    }
-    return count;
 }
 
 fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {
@@ -658,40 +553,50 @@ fn completeRepresentation(head: std.http.Client.Response.Head) bool {
         head.status != .partial_content and head.content_encoding == .identity;
 }
 
+const ServiceDiagnostic = struct {
+    code: ?[]const u8 = null,
+    type: ?[]const u8 = null,
+
+    fn matches(self: ServiceDiagnostic, code: []const u8) bool {
+        return std.mem.eql(u8, self.code orelse "", code) or std.mem.eql(u8, self.type orelse "", code);
+    }
+
+    fn logCode(self: ServiceDiagnostic) ?[]const u8 {
+        const code = self.code orelse self.type orelse return null;
+        if (code.len == 0 or code.len > 96) return null;
+        for (code) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return null;
+        }
+        return code;
+    }
+};
+
 /// An incomplete or oversized optional diagnostic leaves the status and retry headers in force.
-fn exhaustedQuota(arena: Allocator, response: *std.http.Client.Response) !bool {
+fn serviceDiagnostic(arena: Allocator, response: *std.http.Client.Response) !?ServiceDiagnostic {
     const limit = 16 * 1024;
-    if (response.head.content_encoding != .identity) return false;
+    if (response.head.content_encoding != .identity) return null;
     const length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
-    if (length) |len| if (len > limit) return false;
+    if (length) |len| if (len > limit) return null;
     const bytes = response.reader(&.{}).allocRemaining(arena, .limited(limit)) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        error.StreamTooLong => return false,
+        error.StreamTooLong => return null,
         error.ReadFailed => {
             const cause = transportError(response.request, err);
             if (cause == error.Canceled) return cause;
-            return false;
+            return null;
         },
     };
-    if (length) |len| if (bytes.len != len) return false;
-    const Diagnostic = struct { @"error": struct { code: ?[]const u8 = null, type: ?[]const u8 = null } };
+    if (length) |len| if (bytes.len != len) return null;
+    const Diagnostic = struct { @"error": ServiceDiagnostic };
     const diagnostic = std.json.parseFromSliceLeaky(Diagnostic, arena, bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => return false,
+        else => return null,
     };
-    return std.mem.eql(u8, diagnostic.@"error".code orelse "", "insufficient_quota") or
-        std.mem.eql(u8, diagnostic.@"error".type orelse "", "insufficient_quota");
+    return diagnostic.@"error";
 }
 
-const ErrorDetail = struct { code: ?[]const u8 = null, message: ?[]const u8 = null };
-
-/// Read a bounded service diagnostic so a rejection is not reduced to a bare
-/// status. The body is logged, never echoed into a request or a credential log.
-fn clientErrorDetail(arena: Allocator, response: *std.http.Client.Response) !?ErrorDetail {
-    const bytes = response.reader(&.{}).allocRemaining(arena, .limited(512)) catch return null;
-    const Diagnostic = struct { @"error": struct { code: ?[]const u8 = null, message: ?[]const u8 = null } = .{} };
-    const parsed = std.json.parseFromSliceLeaky(Diagnostic, arena, bytes, .{ .ignore_unknown_fields = true }) catch return null;
-    return .{ .code = parsed.@"error".code, .message = parsed.@"error".message };
+fn requestRejected(status: std.http.Status, context_length: bool) Model.Outcome {
+    return .{ .rejected = .{ .request_rejected = .{ .status = @backingInt(status), .context_length = context_length } } };
 }
 
 fn invalidEnvelope(err: anyerror) bool {
@@ -729,7 +634,7 @@ fn retryDisposition(head: std.http.Client.Response.Head, io: std.Io) Model.Outco
     var headers = head.iterateHeaders();
     while (headers.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "x-should-retry") and std.ascii.eqlIgnoreCase(header.value, "false"))
-            return .{ .rejected = .request_rejected };
+            return requestRejected(head.status, false);
         if (std.ascii.eqlIgnoreCase(header.name, "retry-after"))
             after_ms = retryAfterMilliseconds(header.value, std.Io.Clock.real.now(io).toMilliseconds());
     }
@@ -787,4 +692,13 @@ fn textField(value: Value, name: []const u8) error{InvalidModelResponse}![]const
     const found = try field(value, name);
     if (found != .string) return error.InvalidModelResponse;
     return found.string;
+}
+
+fn inputTokens(usage: Value) ?u64 {
+    const count = field(usage, "input_tokens") catch return null;
+    return switch (count) {
+        .integer => |value| std.math.cast(u64, value),
+        .number_string => |value| std.fmt.parseUnsigned(u64, value, 10) catch null,
+        else => null,
+    };
 }

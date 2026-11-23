@@ -50,7 +50,7 @@ Keep mail identifiers, headers, folders, and thread grouping out of scheduling a
 
 Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
-The agent selects tools and reasoning per request; the model adapter encodes and measures the complete payload with those settings. Use the same encoder for measurement and inference, including tool-result limiting, without mutating a shared provider.
+The agent chooses tools and reasoning for each request and decides which history and observations to include. The model adapter prepares tool content, reports request measurements and limits, and checks the payload before sending it. Use the same encoder for measurement and inference without mutating a shared provider. See [bounded model context](architecture.md#bounded-model-context).
 
 ### Model-facing resources
 
@@ -89,7 +89,7 @@ Keep a session's identity independent of context residency, and retain its histo
 
 ### Working history
 
-Context owns the observations, complete model/tool exchanges, and handovers retained for continued reasoning. Admission retains received observations; round commit retains complete exchanges. Candidate measurement leaves history unchanged. Compaction supplies retained history and sampled runtime state to the summary inference, then carries that same state into the handover independently of the generated text. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
+Context owns the observations, complete model/tool exchanges, and handovers retained for continued reasoning. Admission retains observations, and round commit retains complete exchanges. Candidate measurement leaves history unchanged. The runtime carries sampled state into a handover independently of generated text. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
 
 Persistence changes must keep the saved context, admitted observations, and pending registrations consistent, including when saving succeeds but acknowledgement does not. The agent owns history encoding and retention selection; `HistoryStore` adapters own native representation and protocol limits. The [history contract](architecture.md#persistent-working-history) explains publication, restoration, and retirement.
 

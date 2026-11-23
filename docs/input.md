@@ -78,7 +78,7 @@ Messages and an ending can appear in the same report. An ending without further 
 
 Each ordinary activity inference that returns assistant text produces one message. Absent text records no message. Reasoning, tool replies, compaction output, and inherited history do not produce new messages. The text records what the activity expressed, not whether its proposed actions took effect.
 
-One ordinary core input, including a tool continuation, can contain ordinary events and reports from several activities. Newly admitted messages for the same focus are grouped once, and groups follow the focus's first appearance in the selected observations. Each focus's message order and recorded times are preserved; the grouping does not encode the order between focuses. Persistence, restart, and later admission preserve the original message and ending times. The encoded request budget determines how much can enter one input.
+One ordinary core input, including a tool continuation, can contain events and reports from several activities. Newly admitted messages for the same focus are grouped once. Each group's position follows that focus's first appearance in the selected observations, and messages within it keep their original order. Use the observation times for messages and endings from different focuses. Those times survive waiting, persistence, and restart.
 
 The attention guide explains when the core reads these messages and what an ending means. See [activity expressions](attention.md#activity-expressions) and [activity completion](attention.md#activity-completion).
 
@@ -221,8 +221,8 @@ Each event carries the reference returned by the tool that arranged it. The rele
 
 ## Handover generation and replacement
 
-A compaction inference receives the common system prompt, complete retained history, and a turn with `current` and `summarize`. Tools are disabled. Observations awaiting admission remain outside the request. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary of the understanding and unfinished work worth carrying forward.
+A compaction request contains the common system prompt, the history to summarize, and a turn with `current` and `summarize`. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary. Tools are disabled, and observations awaiting admission stay queued. Tool results in this request can describe omitted attachments in place of the file or image parts. If the runtime requests a revised summary, `summarize.instructions` includes the reason for revision.
 
-When the runtime asks for a revised summary, `summarize.instructions` explains what needs to change. The model sees the original history again. Only an accepted summary enters history, paired with the state and observation time supplied to that inference. The next ordinary turn adds its own identity, time, and newly admitted events.
+An accepted summary becomes a `handover` with the sampled state and observation time of that attempt. The next ordinary request presents the handover, any observations and complete exchanges carried forward from the earlier history, and a turn with the focus's current identity, time, and newly admitted events.
 
-See [bounded model context](architecture.md#bounded-model-context) for the acceptance checks, retry conditions, and handling of an input that still cannot fit.
+See [bounded model context](architecture.md#bounded-model-context) for which history is summarized or carried forward and when a handover replaces it.

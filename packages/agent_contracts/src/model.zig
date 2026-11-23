@@ -24,6 +24,8 @@ pub const Response = struct {
     /// Null when output contains no assistant text items; otherwise their
     /// combined text, which may be empty.
     text: ?[]const u8,
+    /// Total input tokens reported for this request, including cached input.
+    input_tokens: ?u64 = null,
 };
 
 /// Outcome of one inference attempt. Only a complete response exposes calls.
@@ -34,7 +36,36 @@ pub const Outcome = union(enum) {
     rejected: Rejection,
 };
 
-pub const Rejection = enum { request_rejected, invalid_response, incomplete_response };
+pub const Rejection = union(enum) {
+    request_rejected: struct { status: u16, context_length: bool = false },
+    limit: Limit,
+    invalid_response,
+    incomplete_response,
+};
+
+pub const Limit = struct {
+    kind: enum { request_bytes, images, files },
+    actual: u64,
+    maximum: u64,
+
+    pub fn description(self: Limit, a: Allocator) ![]const u8 {
+        const units = switch (self.kind) {
+            .request_bytes => "encoded bytes",
+            .images => "images",
+            .files => "file references",
+        };
+        return std.fmt.allocPrint(a, "The model request exceeds the adapter limit by {d} {s} ({d} measured, {d} allowed).", .{
+            self.actual -| self.maximum, units, self.actual, self.maximum,
+        });
+    }
+};
+
+/// Size of the encoded request and the first known adapter limit it violates.
+/// The model service can apply additional limits after decoding the payload.
+pub const Measurement = struct {
+    bytes: u64,
+    violation: ?Limit = null,
+};
 
 pub const Tool = struct {
     name: []const u8,
@@ -56,15 +87,10 @@ pub const Request = struct {
 pub const Port = struct {
     context: *anyopaque,
     vtable: *const VTable,
-    /// The adapter's serialization ceiling: the largest encoded request this
-    /// adapter can send. This is a capability, not a policy budget; budgeting
-    /// and content omission belong to the caller.
-    request_ceiling_bytes: u64,
-
     pub const VTable = struct {
         next: *const fn (*anyopaque, Allocator, Request) anyerror!Outcome,
-        requestBytes: *const fn (*anyopaque, Allocator, Request) anyerror!u64,
-        limitToolReplies: *const fn (*anyopaque, Allocator, Request, []Item, u64) anyerror!void,
+        measure: *const fn (*anyopaque, Allocator, Request) anyerror!Measurement,
+        prepareToolReplies: *const fn (*anyopaque, Allocator, []Item) anyerror!void,
     };
 
     /// Returned output, calls, and text belong to a.
@@ -72,16 +98,14 @@ pub const Port = struct {
         return self.vtable.next(self.context, a, request);
     }
 
-    /// Measure the complete request using the same encoding as next.
-    pub fn requestBytes(self: Port, a: Allocator, request: Request) !u64 {
-        return self.vtable.requestBytes(self.context, a, request);
+    /// Measure the complete request using the encoding and limits of next.
+    pub fn measure(self: Port, a: Allocator, request: Request) !Measurement {
+        return self.vtable.measure(self.context, a, request);
     }
 
-    /// Prepare the newly appended tool_result items for the next inference.
-    /// replies is their mutable slice at the end of request.history.
-    /// ceiling_bytes is the adapter's serialization ceiling, never a policy
-    /// budget: budgeting and content omission belong to the caller.
-    pub fn limitToolReplies(self: Port, a: Allocator, request: Request, replies: []Item, ceiling_bytes: u64) !void {
-        return self.vtable.limitToolReplies(self.context, a, request, replies, ceiling_bytes);
+    /// Prepare individual tool_result items for retention and inference.
+    /// Aggregate limits are checked on each assembled request.
+    pub fn prepareToolReplies(self: Port, a: Allocator, replies: []Item) !void {
+        return self.vtable.prepareToolReplies(self.context, a, replies);
     }
 };

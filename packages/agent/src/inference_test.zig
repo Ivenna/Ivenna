@@ -28,11 +28,11 @@ const Fixture = struct {
 
     fn checkCancel(_: ?*anyopaque) std.Io.Cancelable!void {}
 
-    fn requestBytes(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!u64 {
+    fn measure(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Measurement {
         return error.UnexpectedMeasurement;
     }
 
-    fn limitToolReplies(_: *anyopaque, _: Allocator, _: Model.Request, _: []Model.Item, _: u64) anyerror!void {
+    fn prepareToolReplies(_: *anyopaque, _: Allocator, _: []Model.Item) anyerror!void {
         return error.UnexpectedToolBatch;
     }
 
@@ -52,19 +52,19 @@ test "inference honors the model's recovery delay and resumes the original reque
         var engine: Engine = .{
             .allocator = std.testing.allocator,
             .io = .{ .userdata = &fixture, .vtable = &io_vtable },
-            .model = .{ .context = &fixture, .request_ceiling_bytes = std.math.maxInt(u64), .vtable = &.{
+            .model = .{ .context = &fixture, .vtable = &.{
                 .next = Fixture.next,
-                .requestBytes = Fixture.requestBytes,
-                .limitToolReplies = Fixture.limitToolReplies,
+                .measure = Fixture.measure,
+                .prepareToolReplies = Fixture.prepareToolReplies,
             } },
             .shared_tools = &.{},
             .activity_tools = &.{},
         };
         if (cancel_wait) {
-            try std.testing.expectError(error.Canceled, engine.infer("activity-2", request));
+            try std.testing.expectError(error.Canceled, engine.infer(std.testing.allocator, "activity-2", request, .wait_for_service));
             try std.testing.expectEqual(1, fixture.attempts);
         } else {
-            var inference = (try engine.infer("activity-2", request)).ready;
+            var inference = (try engine.infer(std.testing.allocator, "activity-2", request, .wait_for_service)).ready;
             defer inference.deinit();
             try std.testing.expectEqualStrings("Resumed.", inference.response.text.?);
             try std.testing.expectEqual(2, fixture.attempts);

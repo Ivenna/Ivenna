@@ -4,7 +4,6 @@ const Entry = @import("history.zig").Entry;
 const Scope = @import("history.zig").Scope;
 const Model = @import("agent_contracts").Model;
 const Content = @import("content").Content;
-const Omissions = @import("omissions.zig").Omissions;
 const Allocator = std.mem.Allocator;
 
 /// Owned working history and its model-message view. Registry synchronizes
@@ -16,6 +15,9 @@ pub const Context = struct {
     focus_id: []const u8,
     entries: std.ArrayList(Entry) = .empty,
     messages: std.ArrayList(Model.Item) = .empty,
+
+    pub const CompactionScope = enum { keep_latest_tool_round, keep_recent_rounds, all_history };
+    const recent_completed_rounds = 2;
 
     pub fn init(allocator: Allocator, scope: Scope, focus_id: []const u8) !Context {
         return restore(allocator, scope, focus_id, &.{});
@@ -63,198 +65,169 @@ pub const Context = struct {
     /// Present new observations once alongside the retained history. The
     /// request borrows self through inference and owns its rendered turn in a.
     pub fn request(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event) ![]const Model.Item {
-        return self.buildRequest(a, .{ .current = current, .purpose = .{ .work = events } });
+        return buildRequest(a, self.messages.items, .{ .current = current, .purpose = .{ .work = events } });
     }
 
-    /// Assemble a summary request from retained history and sampled state;
-    /// pending events stay outside.
-    pub fn summaryRequest(self: *const Context, a: Allocator, snapshot: Input.Snapshot, instructions: []const u8) ![]const Model.Item {
-        return self.buildRequest(a, .{
+    /// The ordinary turn with only the history eligible for summarization.
+    pub fn retainedRequest(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event) ![]const Model.Item {
+        return buildRequest(a, self.summaryItems(.keep_latest_tool_round), .{ .current = current, .purpose = .{ .work = events } });
+    }
+
+    /// Assemble a request with the pending tool round and observations admitted after it.
+    pub fn latestRequest(self: *const Context, a: Allocator, current: Input.Current) ![]const Model.Item {
+        const pending = self.compactionBoundary(.keep_latest_tool_round);
+        return buildRequest(a, self.messages.items[pending.message_index..], .{ .current = current, .purpose = .{ .work = &.{} } });
+    }
+
+    /// Completed exchanges and observations before the pending continuation
+    /// that can be retained in addition to it.
+    pub fn additionalRecentItems(self: *const Context) []const Model.Item {
+        const pending = self.compactionBoundary(.keep_latest_tool_round);
+        const recent = self.recentRounds(pending);
+        return self.messages.items[recent.message_index..pending.message_index];
+    }
+
+    pub fn hasToolRoundToKeep(self: *const Context) bool {
+        return self.latestToolRound() != null;
+    }
+
+    pub fn hasHistoryForCompaction(self: *const Context, compaction_scope: CompactionScope) bool {
+        return self.summaryEntryCount(compaction_scope) != 0;
+    }
+
+    pub fn canCompact(self: *const Context, compaction_scope: CompactionScope) bool {
+        return switch (self.summaryEntryCount(compaction_scope)) {
+            0 => false,
+            1 => switch (self.entries.items[0]) {
+                .record => |record| record != .handover,
+                .exchange => true,
+            },
+            else => true,
+        };
+    }
+
+    const HistoryBoundary = struct { entry_index: usize, message_index: usize };
+
+    /// An observation can be checkpointed before the next inference receives
+    /// it. Preserve that observation with a tool round still awaiting inference.
+    fn latestToolRound(self: *const Context) ?HistoryBoundary {
+        var entry_index = self.entries.items.len;
+        var message_index = self.messages.items.len;
+        while (entry_index != 0) {
+            entry_index -= 1;
+            switch (self.entries.items[entry_index]) {
+                .record => |record| {
+                    if (record != .events) return null;
+                    message_index -= 1;
+                },
+                .exchange => |exchange| {
+                    for (exchange) |item| {
+                        if (item == .tool_result) return .{ .entry_index = entry_index, .message_index = message_index - exchange.len };
+                    }
+                    return null;
+                },
+            }
+        }
+        return null;
+    }
+
+    fn compactionBoundary(self: *const Context, compaction_scope: CompactionScope) HistoryBoundary {
+        const end: HistoryBoundary = .{ .entry_index = self.entries.items.len, .message_index = self.messages.items.len };
+        return switch (compaction_scope) {
+            .keep_latest_tool_round => self.latestToolRound() orelse end,
+            .keep_recent_rounds => self.recentRounds(self.latestToolRound() orelse end),
+            .all_history => end,
+        };
+    }
+
+    /// Extend the protected suffix over recent exchanges and their preceding
+    /// observations, up to the most recent handover.
+    fn recentRounds(self: *const Context, start: HistoryBoundary) HistoryBoundary {
+        var retained = start;
+        var cursor = start;
+        var completed: usize = 0;
+        while (cursor.entry_index != 0) {
+            cursor.entry_index -= 1;
+            switch (self.entries.items[cursor.entry_index]) {
+                .record => |record| {
+                    if (record != .events) break;
+                    cursor.message_index -= 1;
+                },
+                .exchange => |exchange| {
+                    if (completed == recent_completed_rounds) break;
+                    completed += 1;
+                    cursor.message_index -= exchange.len;
+                },
+            }
+            if (completed != 0) retained = cursor;
+        }
+        return retained;
+    }
+
+    fn summaryEntryCount(self: *const Context, compaction_scope: CompactionScope) usize {
+        return self.compactionBoundary(compaction_scope).entry_index;
+    }
+
+    fn summaryItems(self: *const Context, compaction_scope: CompactionScope) []const Model.Item {
+        const boundary = self.compactionBoundary(compaction_scope);
+        return self.messages.items[0..boundary.message_index];
+    }
+
+    /// Assemble the summary request from selected history and sampled state.
+    pub fn summaryRequest(self: *const Context, a: Allocator, snapshot: Input.Snapshot, instructions: []const u8, compaction_scope: CompactionScope) ![]Model.Item {
+        return buildRequest(a, self.summaryItems(compaction_scope), .{
             .current = snapshot.current,
             .purpose = .{ .summarize = .{ .instructions = instructions, .state = snapshot.state } },
         });
     }
 
-    fn buildRequest(self: *const Context, a: Allocator, turn: Input.Turn) ![]Model.Item {
-        const prefix_len = self.messages.items.len;
+    /// Replace media in the summary request while keeping the source descriptions.
+    /// Return true when a request item changed. The retained history stays intact.
+    pub fn replaceSummaryMedia(a: Allocator, messages: []Model.Item) !bool {
+        const omitted_image = "[Image omitted from this summary input.]";
+        var replaced = false;
+        for (messages) |*item| {
+            if (item.* != .tool_result) continue;
+            var copy: ?[]Content.Part = null;
+            for (item.tool_result.content.parts, 0..) |part, index| {
+                const note = switch (part) {
+                    .text => continue,
+                    .image => |image| switch (image) {
+                        .url => |url| if (std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://"))
+                            try std.fmt.allocPrint(a, "[Image omitted from this summary input. Source URL {s}]", .{url})
+                        else
+                            omitted_image,
+                        .data => omitted_image,
+                    },
+                    .file => "[File omitted from this summary input.]",
+                };
+                if (copy == null) copy = try a.dupe(Content.Part, item.tool_result.content.parts);
+                copy.?[index] = .{ .text = note };
+            }
+            if (copy) |parts| {
+                item.tool_result.content.parts = parts;
+                replaced = true;
+            }
+        }
+        return replaced;
+    }
+
+    fn buildRequest(a: Allocator, history: []const Model.Item, turn: Input.Turn) ![]Model.Item {
+        const prefix_len = history.len;
         const messages = try a.alloc(Model.Item, prefix_len + 2);
         messages[0] = .{ .message = .{ .role = .system, .text = @embedFile("system.md") } };
-        @memcpy(messages[1 .. prefix_len + 1], self.messages.items);
+        @memcpy(messages[1 .. prefix_len + 1], history);
         messages[prefix_len + 1] = .{ .message = .{ .role = .user, .text = try Input.renderTurn(a, turn) } };
         return messages;
     }
 
-    /// One request plus the accounted omissions applied to it.
-    pub const Fitted = struct { items: []const Model.Item, omissions: Omissions };
-    pub const FitResult = union(enum) { fitted: Fitted, over_budget: Omissions };
-
-    /// Assemble a work request, omitting retained content in priority order
-    /// (tool output text, files, images, then oldest history items) until it
-    /// fits `budget`. The current turn is never reduced. Every omission is
-    /// counted and surfaced in one context note; nothing disappears silently.
-    pub fn requestFitted(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event, budget: u64, measure: anytype) !FitResult {
-        return self.fitTurn(a, .{ .current = current, .purpose = .{ .work = events } }, budget, measure);
-    }
-
-    /// Same omission policy for a summary request; compaction reuses it so the
-    /// reduction rules live in one place.
-    pub fn summaryRequestFitted(self: *const Context, a: Allocator, snapshot: Input.Snapshot, instructions: []const u8, budget: u64, measure: anytype) !FitResult {
-        return self.fitTurn(a, .{ .current = snapshot.current, .purpose = .{ .summarize = .{ .instructions = instructions, .state = snapshot.state } } }, budget, measure);
-    }
-
-    const Drop = enum { truncate_text, drop_files, drop_images, drop_entries };
-
-    fn fitTurn(self: *const Context, a: Allocator, turn: Input.Turn, budget: u64, measure: anytype) !FitResult {
-        const turn_text = try Input.renderTurn(a, turn);
-        var prefix: std.ArrayList(Model.Item) = .empty;
-        defer prefix.deinit(a);
-        try prefix.appendSlice(a, self.messages.items);
-        var omissions: Omissions = .{ .budget = budget };
-        var phase: Drop = .truncate_text;
-        var summary = false;
-        var previous: u64 = 0;
-        var pending: ?Omissions.Kind = null;
-        var pending_count: u32 = 0;
-        while (true) {
-            const items = try assemble(a, prefix.items, turn_text, omissions, summary);
-            const measured = try measure.measure(a, items);
-            if (omissions.measured_before == 0) omissions.measured_before = measured;
-            if (pending) |kind| {
-                omissions.record(kind, if (previous > measured) previous - measured else 0, pending_count);
-                pending = null;
-                previous = measured;
-                continue;
-            }
-            if (measured <= budget) {
-                if (!summary and omissions.any()) {
-                    summary = true;
-                    continue;
-                }
-                omissions.measured_after = measured;
-                return .{ .fitted = .{ .items = items, .omissions = omissions } };
-            }
-            previous = measured;
-            if (try dropOne(a, &prefix, &phase, &pending_count)) |kind| {
-                pending = kind;
-                continue;
-            }
-            omissions.measured_after = measured;
-            return .{ .over_budget = omissions };
-        }
-    }
-
-    fn assemble(a: Allocator, prefix: []const Model.Item, turn_text: []const u8, omissions: Omissions, summary: bool) ![]const Model.Item {
-        const text = if (summary) blk: {
-            const note = (try omissions.render(a)) orelse break :blk turn_text;
-            break :blk try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ note, turn_text });
-        } else turn_text;
-        const items = try a.alloc(Model.Item, prefix.len + 2);
-        items[0] = .{ .message = .{ .role = .system, .text = @embedFile("system.md") } };
-        @memcpy(items[1 .. prefix.len + 1], prefix);
-        items[prefix.len + 1] = .{ .message = .{ .role = .user, .text = text } };
-        return items;
-    }
-
-    /// Apply one omission step. Parts are copied into `a` before mutation so
-    /// the retained history is never touched.
-    fn dropOne(a: Allocator, prefix: *std.ArrayList(Model.Item), phase: *Drop, count: *u32) !?Omissions.Kind {
-        while (true) {
-            switch (phase.*) {
-                .truncate_text => {
-                    if (try truncateLargestText(a, prefix.items)) {
-                        count.* = 1;
-                        return .truncated_text;
-                    }
-                    phase.* = .drop_files;
-                },
-                .drop_files => {
-                    if (try replaceFirstPart(a, prefix.items, .file)) {
-                        count.* = 1;
-                        return .files;
-                    }
-                    phase.* = .drop_images;
-                },
-                .drop_images => {
-                    if (try replaceFirstPart(a, prefix.items, .image)) {
-                        count.* = 1;
-                        return .images;
-                    }
-                    phase.* = .drop_entries;
-                },
-                .drop_entries => {
-                    if (prefix.items.len == 0) return null;
-                    _ = prefix.orderedRemove(0);
-                    count.* = 1;
-                    return .entries;
-                },
-            }
-        }
-    }
-
-    fn truncateLargestText(a: Allocator, items: []Model.Item) !bool {
-        var best_item: ?usize = null;
-        var best_part: usize = 0;
-        // A truncated part ends up far below this, so it is never re-selected.
-        var best_len: usize = 2048;
-        for (items, 0..) |item, i| {
-            if (item != .tool_result) continue;
-            for (item.tool_result.content.parts, 0..) |part, p| {
-                if (part != .text) continue;
-                if (part.text.len > best_len) {
-                    best_len = part.text.len;
-                    best_item = i;
-                    best_part = p;
-                }
-            }
-        }
-        const i = best_item orelse return false;
-        const copied = try a.dupe(Content.Part, items[i].tool_result.content.parts);
-        items[i].tool_result.content.parts = copied;
-        const text = copied[best_part].text;
-        // Keep a quarter from each end: the result must be clearly smaller than
-        // the selection threshold or the same part would be chosen forever.
-        const keep = @max(512, text.len / 4);
-        var head_len = keep / 2;
-        while (head_len > 0 and (text[head_len] & 0xC0) == 0x80) head_len -= 1;
-        var tail_start = text.len - (keep - head_len);
-        while (tail_start < text.len and (text[tail_start] & 0xC0) == 0x80) tail_start += 1;
-        const omitted = text.len - head_len - (text.len - tail_start);
-        copied[best_part] = .{ .text = try std.fmt.allocPrint(a, "{s}…[truncated {d} bytes]…{s}", .{ text[0..head_len], omitted, text[tail_start..] }) };
-        return true;
-    }
-
-    const PartKind = enum { file, image };
-
-    fn replaceFirstPart(a: Allocator, items: []Model.Item, kind: PartKind) !bool {
-        for (items, 0..) |item, i| {
-            if (item != .tool_result) continue;
-            const copied = try a.dupe(Content.Part, item.tool_result.content.parts);
-            items[i].tool_result.content.parts = copied;
-            for (copied, 0..) |part, p| {
-                switch (kind) {
-                    .file => {
-                        if (part != .file) continue;
-                        const reference = if (part.file.reference) |r| r else "none";
-                        copied[p] = .{ .text = try std.fmt.allocPrint(a, "[file omitted: {d} bytes, reference {s}]", .{ part.file.bytes.len, reference }) };
-                        return true;
-                    },
-                    .image => {
-                        if (part != .image) continue;
-                        copied[p] = .{ .text = switch (part.image) {
-                            .url => |url| try std.fmt.allocPrint(a, "[image omitted: {s}]", .{url}),
-                            .data => |data| try std.fmt.allocPrint(a, "[image omitted: {d} bytes, format {s}]", .{ data.bytes.len, @tagName(data.format) }),
-                        } };
-                        return true;
-                    },
-                }
-            }
-        }
-        return false;
-    }
-
-    pub fn withHandover(self: *const Context, allocator: Allocator, handover: Input.Handover) !Context {
+    pub fn withHandover(self: *const Context, allocator: Allocator, handover: Input.Handover, compaction_scope: CompactionScope) !Context {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
-        return restore(allocator, scope, self.focus_id, &.{.{ .record = .{ .handover = handover } }});
+        var replacement = try restore(allocator, scope, self.focus_id, &.{.{ .record = .{ .handover = handover } }});
+        errdefer replacement.deinit();
+        const count = self.summaryEntryCount(compaction_scope);
+        for (self.entries.items[count..]) |entry| try replacement.append(entry);
+        return replacement;
     }
 
     fn append(self: *Context, entry: Entry) !void {
@@ -398,7 +371,7 @@ test "candidate handover retains sampled references and leaves earlier history a
             .subscriptions = &.{&subscription_id},
         },
     };
-    var replacement = try original.withHandover(std.testing.allocator, handover);
+    var replacement = try original.withHandover(std.testing.allocator, handover, .keep_latest_tool_round);
     defer replacement.deinit();
     @memset(&activity_id, 0);
     @memset(&command_id, 0);
@@ -418,162 +391,119 @@ test "candidate handover retains sampled references and leaves earlier history a
     try std.testing.expectEqualDeep(expected_state, retained.state);
 }
 
-const TestMeasure = struct {
-    fn measure(_: *const TestMeasure, _: Allocator, items: []const Model.Item) !u64 {
-        var total: u64 = 0;
-        for (items) |item| switch (item) {
-            .message => |message| total += message.text.len,
-            .continuation => |bytes| total += bytes.len,
-            .tool_result => |result| for (result.content.parts) |part| {
-                total += switch (part) {
-                    .text => |text| text.len,
-                    .image => |image| switch (image) {
-                        .url => |url| 1 + url.len,
-                        .data => |data| 1 + data.bytes.len,
-                    },
-                    .file => |file| 1 + file.bytes.len,
-                };
-            },
-        };
-        return total;
-    }
-};
-
-const KindCounts = struct { images: usize = 0, files: usize = 0 };
-
-fn partKindCounts(items: []const Model.Item) KindCounts {
-    var counts: KindCounts = .{};
-    for (items) |item| {
-        if (item != .tool_result) continue;
-        for (item.tool_result.content.parts) |part| switch (part) {
-            .image => counts.images += 1,
-            .file => counts.files += 1,
-            else => {},
-        };
-    }
-    return counts;
-}
-
-test "fitTurn omits retained content by priority and never touches the current turn" {
+test "compaction summarizes older entries and carries forward the complete latest tool round" {
     const testing = std.testing;
-    var context = try Context.init(testing.allocator, .{ .session_id = 3, .epoch = 0 }, "core-1");
-    defer context.deinit();
-    const big_text = try testing.allocator.alloc(u8, 4000);
-    defer testing.allocator.free(big_text);
-    @memset(big_text, 'a');
-    const image_bytes = try testing.allocator.alloc(u8, 2000);
-    defer testing.allocator.free(image_bytes);
-    @memset(image_bytes, 7);
-    const file_bytes = try testing.allocator.alloc(u8, 1000);
-    defer testing.allocator.free(file_bytes);
-    @memset(file_bytes, 9);
-    try context.appendBatch(&.{.{ .message = .{ .role = .user, .text = "ask" } }}, &.{.{ .tool_result = .{
-        .call_id = "call-1",
-        .content = .{ .parts = &.{
-            .{ .text = big_text },
-            .{ .image = .{ .data = .{ .format = .png, .bytes = image_bytes } } },
-            .{ .file = .{ .bytes = file_bytes, .reference = "ref-1" } },
-        } },
-    } }});
-
-    const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 5 };
-    const events: []const Input.Event = &.{.{ .input = .{ .from = &.{"operator"}, .text = "keep this", .observed_at_unix_ms = 4 } }};
-    const records_before = context.records().len;
-    var req_arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer req_arena.deinit();
-
-    // Budget below the current size: policy must drop retained media instead
-    // of handing back an oversized request. The deficit here is small enough
-    // that truncating the text part alone covers it, so the earlier media must
-    // survive: priority order means "do not over-drop", not just "drop".
-    const full = try context.request(req_arena.allocator(), current, events);
-    const full_bytes = try TestMeasure.measure(&.{}, req_arena.allocator(), full);
-    const budget = full_bytes - 2500;
-
-    const result = try context.requestFitted(req_arena.allocator(), current, events, budget, &TestMeasure{});
-    const fitted = switch (result) {
-        .fitted => |value| value,
-        .over_budget => return error.TestUnexpectedResult,
+    var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var original = try Context.init(testing.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+    defer original.deinit();
+    const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
+    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{}, .subscriptions = &.{} };
+    const inline_url = "data:image/png;base64,aGk=";
+    const image_url = "https://example.test/old.png";
+    const earlier: []const Model.Item = &.{
+        .{ .continuation = "older call" },
+        .{ .tool_result = .{ .call_id = "older", .content = .{ .parts = &.{
+            .{ .text = "source description" },
+            .{ .image = .{ .url = image_url } },
+            .{ .file = .{ .bytes = "PDF bytes" } },
+            .{ .image = .{ .url = inline_url } },
+        } } } },
     };
-    try testing.expect(fitted.omissions.any());
-    try testing.expect(fitted.omissions.measured_after <= budget);
-    const counts = partKindCounts(fitted.items);
-    try testing.expect(fitted.omissions.truncated_text_bytes > 0);
-    try testing.expect(counts.images <= 1);
-    try testing.expectEqual(records_before, context.records().len);
-    const kept = partKindCounts(context.messages.items);
-    try testing.expectEqual(@as(usize, 1), kept.images);
-    try testing.expectEqual(@as(usize, 1), kept.files);
-}
-
-test "fitTurn escalates from text to file to image when the deficit is large" {
-    const testing = std.testing;
-    var context = try Context.init(testing.allocator, .{ .session_id = 5, .epoch = 0 }, "core-1");
-    defer context.deinit();
-    const big_text = try testing.allocator.alloc(u8, 4000);
-    defer testing.allocator.free(big_text);
-    @memset(big_text, 'a');
-    const image_bytes = try testing.allocator.alloc(u8, 2000);
-    defer testing.allocator.free(image_bytes);
-    @memset(image_bytes, 7);
-    const file_bytes = try testing.allocator.alloc(u8, 1000);
-    defer testing.allocator.free(file_bytes);
-    @memset(file_bytes, 9);
-    try context.appendBatch(&.{.{ .message = .{ .role = .user, .text = "ask" } }}, &.{.{ .tool_result = .{
-        .call_id = "call-1",
-        .content = .{ .parts = &.{
-            .{ .text = big_text },
-            .{ .image = .{ .data = .{ .format = .png, .bytes = image_bytes } } },
-            .{ .file = .{ .bytes = file_bytes, .reference = "ref-1" } },
-        } },
-    } }});
-
-    const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 5 };
-    const events: []const Input.Event = &.{.{ .input = .{ .from = &.{"operator"}, .text = "keep this", .observed_at_unix_ms = 4 } }};
-    var req_arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer req_arena.deinit();
-
-    // A deficit beyond what text truncation and file removal can save forces
-    // the image out as well, in that order.
-    const full = try context.request(req_arena.allocator(), current, events);
-    const full_bytes = try TestMeasure.measure(&.{}, req_arena.allocator(), full);
-    const budget = full_bytes - 4500;
-
-    const result = try context.requestFitted(req_arena.allocator(), current, events, budget, &TestMeasure{});
-    const fitted = switch (result) {
-        .fitted => |value| value,
-        .over_budget => return error.TestUnexpectedResult,
+    const latest: []const Model.Item = &.{
+        .{ .continuation = "latest call" },
+        .{ .tool_result = .{ .call_id = "latest", .content = .{ .parts = &.{
+            .{ .image = .{ .data = .{ .format = .png, .bytes = "PNG bytes" } } },
+        } } } },
     };
-    try testing.expect(fitted.omissions.truncated_text_bytes > 0);
-    try testing.expectEqual(@as(u32, 1), fitted.omissions.dropped_files);
-    try testing.expectEqual(@as(u32, 1), fitted.omissions.dropped_images);
-    try testing.expect(fitted.omissions.measured_after <= budget);
-    const counts = partKindCounts(fitted.items);
-    try testing.expectEqual(@as(usize, 0), counts.images);
-    try testing.expectEqual(@as(usize, 0), counts.files);
-    // The retained history is untouched: only the request view changes.
-    const kept = partKindCounts(context.messages.items);
-    try testing.expectEqual(@as(usize, 1), kept.images);
-    try testing.expectEqual(@as(usize, 1), kept.files);
+    try original.appendBatch(earlier[0..1], earlier[1..]);
+    try original.appendBatch(latest[0..1], latest[1..]);
+
+    const snapshot: Input.Snapshot = .{ .current = current, .state = state };
+    const summary = try original.summaryRequest(a, snapshot, "Summarize.", .keep_latest_tool_round);
+    try testing.expectEqualDeep(earlier, summary[1 .. summary.len - 1]);
+    try testing.expect(try Context.replaceSummaryMedia(a, summary));
+    try testing.expect(!try Context.replaceSummaryMedia(a, summary));
+    try testing.expectEqualDeep(earlier[0], summary[1]);
+    const projected_reply = summary[2].tool_result;
+    try testing.expectEqualStrings(earlier[1].tool_result.call_id, projected_reply.call_id);
+    const parts = projected_reply.content.parts;
+    try testing.expectEqualDeep(earlier[1].tool_result.content.parts[0], parts[0]);
+    try testing.expect(parts[1] == .text and std.mem.indexOf(u8, parts[1].text, image_url) != null);
+    try testing.expect(parts[2] == .text);
+    try testing.expect(parts[3] == .text and std.mem.indexOf(u8, parts[3].text, inline_url) == null);
+    try testing.expectEqualDeep(earlier, original.records()[0].exchange);
+
+    const handover: Input.Handover = .{
+        .focus_id = current.focus_id,
+        .observed_at_unix_ms = current.observed_at_unix_ms,
+        .summary = "Earlier work.",
+        .state = state,
+    };
+    var replacement = try original.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    defer replacement.deinit();
+    const next = try replacement.request(a, current, &.{});
+    try testing.expectEqualDeep(latest, next[2 .. next.len - 1]);
 }
 
-test "fitTurn reports over_budget with measured bytes when nothing may be dropped" {
+test "compaction retains checkpointed observations following a tool round that still needs inference" {
     const testing = std.testing;
-    var context = try Context.init(testing.allocator, .{ .session_id = 4, .epoch = 0 }, "core-1");
-    defer context.deinit();
-    const huge = try testing.allocator.alloc(u8, 2000);
-    defer testing.allocator.free(huge);
-    @memset(huge, 'x');
-    const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 5 };
-    const events: []const Input.Event = &.{.{ .input = .{ .from = &.{"operator"}, .text = huge, .observed_at_unix_ms = 4 } }};
-    var req_arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer req_arena.deinit();
-    const result = try context.requestFitted(req_arena.allocator(), current, events, 100, &TestMeasure{});
-    switch (result) {
-        .fitted => return error.TestUnexpectedResult,
-        .over_budget => |omissions| {
-            try testing.expectEqual(@as(u64, 100), omissions.budget);
-            try testing.expect(omissions.measured_after > 100);
-        },
-    }
+    const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
+    const scope: Scope = .{ .session_id = 1, .epoch = 0 };
+    const earlier: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "Earlier report.", .observed_at_unix_ms = 10 } };
+    const arrival: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "Recent report.", .observed_at_unix_ms = 20 } };
+    const subsequent: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "Another recent report.", .observed_at_unix_ms = 30 } };
+    const entries: []const Entry = &.{
+        .{ .record = .{ .events = .{ .focus_id = current.focus_id, .items = &.{earlier} } } },
+        .{ .exchange = &.{
+            .{ .continuation = "Tool call" },
+            .{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .text = "Tool result" }} } } },
+        } },
+        .{ .record = .{ .events = .{ .focus_id = current.focus_id, .items = &.{arrival} } } },
+        .{ .record = .{ .events = .{ .focus_id = current.focus_id, .items = &.{subsequent} } } },
+    };
+    var restored = try Context.restore(testing.allocator, scope, current.focus_id, entries);
+    defer restored.deinit();
+    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{}, .subscriptions = &.{} };
+    const handover: Input.Handover = .{ .focus_id = current.focus_id, .observed_at_unix_ms = current.observed_at_unix_ms, .summary = "Previous work.", .state = state };
+
+    var replacement = try restored.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    defer replacement.deinit();
+    try testing.expectEqualDeep(entries[1..], replacement.records()[1..]);
+    try restored.appendBatch(&.{.{ .continuation = "Assistant response" }}, &.{});
+    var after_response = try restored.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    defer after_response.deinit();
+    try testing.expect(after_response.records()[1..].len == 0);
+}
+
+test "recent retention carries complete exchanges and their observations across a handover" {
+    const testing = std.testing;
+    const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
+    const scope: Scope = .{ .session_id = 1, .epoch = 0 };
+    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{}, .subscriptions = &.{} };
+    const handover: Input.Handover = .{ .focus_id = current.focus_id, .observed_at_unix_ms = 900, .summary = "Earlier work.", .state = state };
+    const evidence: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "Keep this evidence.", .observed_at_unix_ms = 910 } };
+    const arrival: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "New observation.", .observed_at_unix_ms = 950 } };
+    const entries: []const Entry = &.{
+        .{ .record = .{ .handover = handover } },
+        .{ .exchange = &.{.{ .continuation = "Older exchange" }} },
+        .{ .record = .{ .events = .{ .focus_id = current.focus_id, .items = &.{evidence} } } },
+        .{ .exchange = &.{
+            .{ .continuation = "Completed tool call" },
+            .{ .tool_result = .{ .call_id = "earlier", .content = .{ .parts = &.{.{ .text = "Completed result" }} } } },
+        } },
+        .{ .exchange = &.{.{ .continuation = "Later completed exchange" }} },
+        .{ .exchange = &.{
+            .{ .continuation = "Pending tool call" },
+            .{ .tool_result = .{ .call_id = "latest", .content = .{ .parts = &.{.{ .text = "Pending result" }} } } },
+        } },
+        .{ .record = .{ .events = .{ .focus_id = current.focus_id, .items = &.{arrival} } } },
+    };
+    var original = try Context.restore(testing.allocator, scope, current.focus_id, entries);
+    defer original.deinit();
+
+    var replacement = try original.withHandover(testing.allocator, handover, .keep_recent_rounds);
+    defer replacement.deinit();
+    try testing.expectEqualDeep(entries[2..], replacement.records()[1..]);
 }
