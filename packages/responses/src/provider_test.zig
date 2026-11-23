@@ -139,23 +139,41 @@ test "one inference sends the complete request and validates the response" {
     try std.testing.expectEqualStrings(text, sent.input[0].content);
 }
 
+test "completed responses expose total input usage when it is available" {
+    const body = completed[0 .. completed.len - 1];
+    var fixture = try Fixture.init(&.{
+        .{ .response = reply("200 OK", "", body ++ ",\"usage\":{\"input_tokens\":12345,\"input_tokens_details\":{\"cached_tokens\":10000}}}") },
+        .{ .response = success },
+    });
+    defer fixture.deinit();
+    var provider = try fixture.start();
+    for ([_]?u64{ 12345, null }) |tokens| {
+        const response = (try provider.port().next(fixture.arena.allocator(), input)).response;
+        try std.testing.expectEqual(tokens, response.input_tokens);
+        try std.testing.expectEqualStrings("accepted", response.calls[0].call_id);
+    }
+    try fixture.finish();
+}
+
 test "request rejections and unusable generations yield no tools" {
-    for ([_]struct { response: []const u8, rejection: Model.Rejection }{
-        .{ .response = reply("400 Bad Request", "", "{}"), .rejection = .request_rejected },
-        .{ .response = reply("403 Forbidden", "", "{}"), .rejection = .request_rejected },
-        .{ .response = reply("404 Not Found", "", "{}"), .rejection = .request_rejected },
-        .{ .response = reply("503 Service Unavailable", "X-Should-Retry: false\r\n", "{}"), .rejection = .request_rejected },
+    for ([_]struct { response: []const u8, rejection: Model.Rejection, wait_for_close: bool = false }{
+        .{ .response = reply("400 Bad Request", "", "{}"), .rejection = .{ .request_rejected = .{ .status = 400 } } },
+        .{ .response = reply("400 Bad Request", "X-Request-ID: req-context\r\n", "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum is 1048576 tokens; private echoed input\"}}"), .rejection = .{ .request_rejected = .{ .status = 400, .context_length = true } } },
+        .{ .response = reply("400 Bad Request", "", "{\"error\":{\"message\":\"context_length_exceeded\"}}"), .rejection = .{ .request_rejected = .{ .status = 400 } } },
+        .{ .response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 500\r\n\r\n", .rejection = .{ .request_rejected = .{ .status = 403 } }, .wait_for_close = true },
+        .{ .response = reply("404 Not Found", "", "{}"), .rejection = .{ .request_rejected = .{ .status = 404 } } },
+        .{ .response = reply("503 Service Unavailable", "X-Should-Retry: false\r\n", "{}"), .rejection = .{ .request_rejected = .{ .status = 503 } } },
         .{ .response = reply("206 Partial Content", "", completed), .rejection = .invalid_response },
         .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: malformed\r\n\r\n", .rejection = .invalid_response },
         .{ .response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx!!", .rejection = .invalid_response },
         .{ .response = reply("200 OK", "", "{\"status\":\"incomplete\",\"output\":[]}"), .rejection = .incomplete_response },
         .{ .response = reply("200 OK", "", "{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"partial\",\"name\":\"inspect\",\"arguments\":\"{}\"},{\"type\":\"unknown\"}]}"), .rejection = .invalid_response },
     }) |case| {
-        var fixture = try Fixture.init(&.{.{ .response = case.response }});
+        var fixture = try Fixture.init(&.{.{ .response = case.response, .wait_for_close = case.wait_for_close }});
         defer fixture.deinit();
         var provider = try fixture.start();
         const outcome = try provider.port().next(fixture.arena.allocator(), input);
-        try std.testing.expectEqual(case.rejection, outcome.rejected);
+        try std.testing.expectEqualDeep(case.rejection, outcome.rejected);
         try fixture.finish();
     }
 }
@@ -240,7 +258,7 @@ test "rate-limit diagnostic timeout preserves the status and retry directive" {
         provider.request_timeout_ms = 100;
         const outcome = try provider.port().next(fixture.arena.allocator(), input);
         if (no_retry) {
-            try std.testing.expectEqual(Model.Rejection.request_rejected, outcome.rejected);
+            try std.testing.expectEqualDeep(Model.Rejection{ .request_rejected = .{ .status = 429 } }, outcome.rejected);
         } else {
             try std.testing.expectEqual(@as(?i64, 3_600_000), outcome.unavailable.retry_after_ms);
         }
@@ -248,8 +266,23 @@ test "rate-limit diagnostic timeout preserves the status and retry directive" {
     }
 }
 
+const blocked_rejection = Exchange{
+    .response = "HTTP/1.1 400 Bad Request\r\nX-DeepSeek-Request-ID: req-stalled\r\nContent-Length: 500\r\n\r\n{",
+    .wait_for_close = true,
+};
+
+test "a stalled client-error diagnostic preserves the known rejection" {
+    var fixture = try Fixture.init(&.{blocked_rejection});
+    defer fixture.deinit();
+    var provider = try fixture.start();
+    provider.request_timeout_ms = 100;
+    const outcome = try provider.port().next(fixture.arena.allocator(), input);
+    try std.testing.expectEqualDeep(Model.Rejection{ .request_rejected = .{ .status = 400 } }, outcome.rejected);
+    try fixture.finish();
+}
+
 test "model cancellation ends response reads without issuing another attempt" {
-    for (blocked_reads ++ .{Exchange{ .response = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 500\r\n\r\n{", .wait_for_close = true }}) |exchange| {
+    for (blocked_reads ++ .{ blocked_rejection, Exchange{ .response = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 500\r\n\r\n{", .wait_for_close = true } }) |exchange| {
         var fixture = try Fixture.init(&.{exchange});
         defer fixture.deinit();
         var provider = try fixture.start();
@@ -284,12 +317,12 @@ test "classified PDF uploads intact bytes and preserves paired tool outputs befo
         .{ .tool_result = .{ .call_id = "other-tool", .content = .{ .parts = &.{.{ .text = "Other result" }} } } },
     };
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
+    try provider.port().prepareToolReplies(a, &history);
     try std.testing.expectEqual(null, parts[1].file.reference);
     const file = history[0].tool_result.content.parts[1].file;
     try std.testing.expectEqualStrings(bytes, file.bytes);
     try std.testing.expectEqualStrings("file-api-test", file.reference.?);
-    const size = try provider.port().requestBytes(a, request);
+    const size = (try provider.port().measure(a, request)).bytes;
     _ = try provider.port().next(a, request);
     try fixture.finish();
 
@@ -336,8 +369,8 @@ test "file upload negotiates from the rejection status and reuses the accepted r
     const a = fixture.arena.allocator();
     var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = .{ .bytes = "plain text document" } }} } } }};
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
-    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
+    try provider.port().prepareToolReplies(a, &history);
+    try provider.port().prepareToolReplies(a, &history);
     _ = try provider.port().next(a, request);
     try fixture.finish();
     try std.testing.expectEqual(@as(usize, 2), fixture.server.file_payloads.items.len);
@@ -361,59 +394,125 @@ test "file upload stops negotiating after the second rejection" {
     try fixture.finish();
 }
 
-test "inline images share the focus's request budget and keep their source when omitted" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = .failing };
-    defer client.deinit();
-    var provider: Provider = .{ .client = &client };
-    const bytes: [1024]u8 = @splat(0);
-    const picture: Content.Part = .{ .image = .{ .data = .{ .bytes = &bytes, .format = .png } } };
-    const uri = "file:///report.png";
-    const url: Content.Part = .{ .image = .{ .url = "https://example.org/i" } };
-    var history = [_]Model.Item{
-        .{ .tool_result = .{ .call_id = "retained", .content = .{ .parts = &.{picture} } } },
-        .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{ .{ .text = uri }, picture, url } } } },
-    };
-    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    const size = try provider.port().requestBytes(a, request);
-    try provider.port().limitToolReplies(a, request, history[1..], size);
-    try std.testing.expect(history[1].tool_result.content.parts[1] == .image);
-    try provider.port().limitToolReplies(a, request, history[1..], size - 1);
-    try std.testing.expect(history[0].tool_result.content.parts[0] == .image);
-    const parts = history[1].tool_result.content.parts;
-    try std.testing.expectEqualStrings(uri, parts[0].text);
-    try std.testing.expectEqualStrings(url.image.url, parts[2].image.url);
-    const omitted = try std.json.parseFromSliceLeaky(std.json.Value, a, parts[1].text, .{});
-    try std.testing.expectEqualStrings("content_limit", omitted.object.get("error").?.object.get("code").?.string);
-    try std.testing.expect(try provider.port().requestBytes(a, request) <= size - 1);
-}
-
-test "file count limit omits only new files before uploading" {
-    var fixture = try Fixture.init(&.{});
+test "the full encoded request is measured and rejected without omitting new images or text" {
+    var fixture = try Fixture.init(&.{.{ .response = success }});
     defer fixture.deinit();
     var provider = try fixture.start();
     const a = fixture.arena.allocator();
-    const reference = "file-api-retained";
-    var history: [21]Model.Item = undefined;
-    for (history[0..20]) |*item| item.* = .{ .tool_result = .{ .call_id = "retained", .content = .{ .parts = &.{.{ .file = .{
-        .bytes = "retained bytes",
-        .reference = reference,
-    } }} } } };
-    history[20] = .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{ .{ .text = "Other observation" }, .{ .file = .{ .bytes = "new bytes" } } } } } };
+    const bytes: [1024]u8 = @splat(0);
+    const picture: Content.Part = .{ .image = .{ .data = .{ .bytes = &bytes, .format = .png } } };
+    const uri = "file:///report.png";
+    var history = [_]Model.Item{
+        .{ .tool_result = .{ .call_id = "retained", .content = .{ .parts = &.{picture} } } },
+        .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{ .{ .text = uri }, picture } } } },
+    };
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    try provider.port().limitToolReplies(a, request, history[20..], std.math.maxInt(u64));
-    try std.testing.expect(history[0].tool_result.content.parts[0] == .file);
-    try std.testing.expect(std.mem.indexOf(u8, history[20].tool_result.content.parts[1].text, "20 files") != null);
-    try std.testing.expectEqualStrings("Other observation", history[20].tool_result.content.parts[0].text);
+    const size = (try provider.port().measure(a, request)).bytes;
+    provider.request_ceiling_bytes = size - 1;
+    try provider.port().prepareToolReplies(a, history[1..]);
+    const limit: Model.Limit = .{ .kind = .request_bytes, .actual = size, .maximum = size - 1 };
+    try std.testing.expectEqualDeep(Model.Measurement{ .bytes = size, .violation = limit }, try provider.port().measure(a, request));
+    try std.testing.expectEqualDeep(limit, (try provider.port().next(a, request)).rejected.limit);
+    try std.testing.expectEqualStrings(uri, history[1].tool_result.content.parts[0].text);
+    try std.testing.expectEqualSlices(u8, &bytes, history[1].tool_result.content.parts[1].image.data.bytes);
+
+    provider.request_ceiling_bytes = size;
+    try std.testing.expectEqualDeep(Model.Measurement{ .bytes = size }, try provider.port().measure(a, request));
+    try std.testing.expect((try provider.port().next(a, request)) == .response);
     try fixture.finish();
+    try std.testing.expectEqual(size, fixture.server.payload.?.len);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, fixture.server.payload.?, "data:image/png;base64,"));
+}
+
+test "the transport rejects oversized requests even without tools or media" {
+    var fixture = try Fixture.init(&.{});
+    defer fixture.deinit();
+    var provider = try fixture.start();
+    provider.request_ceiling_bytes = 1;
+    const a = fixture.arena.allocator();
+    const measured = try provider.port().measure(a, input);
+    try std.testing.expectEqualDeep(Model.Limit{ .kind = .request_bytes, .actual = measured.bytes, .maximum = 1 }, measured.violation.?);
+    try std.testing.expectEqualDeep(measured.violation.?, (try provider.port().next(a, input)).rejected.limit);
+    try fixture.finish();
+}
+
+test "complete request file counts include retained and newly prepared replies" {
+    var fixture = try Fixture.init(&.{.{ .target = "/files", .response = uploaded }});
+    defer fixture.deinit();
+    var provider = try fixture.start();
+    const a = fixture.arena.allocator();
+    const existing = Content.Part{ .file = .{ .bytes = "retained bytes", .reference = "file-api-retained" } };
+    const retained_files: [20]Content.Part = @splat(existing);
+    var history = [_]Model.Item{
+        .{ .tool_result = .{ .call_id = "retained", .content = .{ .parts = &retained_files } } },
+        .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{ .{ .text = "Source" }, .{ .file = .{ .bytes = "new bytes" } } } } } },
+    };
+    var request: Model.Request = .{ .history = history[0..1], .tools = &.{}, .reasoning_effort = .high };
+    try std.testing.expectEqual(null, (try provider.port().measure(a, request)).violation);
+    try provider.port().prepareToolReplies(a, history[1..]);
+    request.history = &history;
+    const limit: Model.Limit = .{ .kind = .files, .actual = 21, .maximum = 20 };
+    try std.testing.expectEqualDeep(limit, (try provider.port().measure(a, request)).violation.?);
+    try std.testing.expectEqualDeep(limit, (try provider.port().next(a, request)).rejected.limit);
+    try std.testing.expectEqualStrings("file-api-test", history[1].tool_result.content.parts[1].file.reference.?);
+    try std.testing.expectEqualStrings("Source", history[1].tool_result.content.parts[0].text);
+    try fixture.finish();
+}
+
+test "request encoding counts images it sends and describes overlong URLs without changing history" {
+    var fixture = try Fixture.init(&.{.{ .response = success }});
+    defer fixture.deinit();
+    var provider = try fixture.start();
+    const a = fixture.arena.allocator();
+    const picture: Content.Part = .{ .image = .{ .url = "https://example.org/i" } };
+    const retained_pictures: [599]Content.Part = @splat(picture);
+    const prefix = "https://example.org/";
+    const suffix: [8191 - prefix.len]u8 = @splat('a');
+    const at_limit = prefix ++ suffix ++ "é";
+    const over_limit = at_limit ++ "é";
+    const source = "{\"result\":{\"uri\":\"file:///report-url.txt\",\"kind\":\"image_url\"}}";
+    const urls: []const Content.Part = &.{
+        .{ .text = source },
+        .{ .image = .{ .url = at_limit } },
+        .{ .image = .{ .url = over_limit } },
+    };
+    var history = [_]Model.Item{
+        .{ .tool_result = .{ .call_id = "retained", .content = .{ .parts = &retained_pictures } } },
+        .{ .tool_result = .{ .call_id = "read", .content = .{ .parts = urls } } },
+        .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{picture} } } },
+    };
+    try provider.port().prepareToolReplies(a, history[1..]);
+    var request: Model.Request = .{ .history = history[0..2], .tools = &.{}, .reasoning_effort = .high };
+    const measurement = try provider.port().measure(a, request);
+    try std.testing.expectEqual(null, measurement.violation);
+    try std.testing.expect((try provider.port().next(a, request)) == .response);
+    try std.testing.expectEqualStrings(over_limit, history[1].tool_result.content.parts[2].image.url);
+
+    const limit: Model.Limit = .{ .kind = .images, .actual = 601, .maximum = 600 };
+    request.history = &history;
+    try std.testing.expectEqualDeep(limit, (try provider.port().measure(a, request)).violation.?);
+    try std.testing.expectEqualDeep(limit, (try provider.port().next(a, request)).rejected.limit);
+    try fixture.finish();
+
+    const body = fixture.server.payload.?;
+    try std.testing.expectEqual(measurement.bytes, body.len);
+    const encoded = try std.json.parseFromSliceLeaky(std.json.Value, a, body, .{});
+    const items = encoded.object.get("input").?.array.items;
+    const output = items[1].object.get("output").?.array.items;
+    try std.testing.expectEqualStrings(source, output[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings(at_limit, output[1].object.get("image_url").?.string);
+    const notice = try std.json.parseFromSliceLeaky(std.json.Value, a, output[2].object.get("text").?.string, .{});
+    const detail = notice.object.get("error").?.object;
+    try std.testing.expectEqualStrings("content_limit", detail.get("code").?.string);
+    try std.testing.expectEqualStrings("unicode_code_points", detail.get("unit").?.string);
+    try std.testing.expectEqual(1, detail.get("omitted_images").?.integer);
+    try std.testing.expectEqual(8193, detail.get("actual").?.integer);
+    try std.testing.expectEqual(8192, detail.get("maximum").?.integer);
 }
 
 fn prepareFile(provider: *Provider, a: Allocator) !Content.Part {
     var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = .{ .bytes = "bytes" } }} } } }};
-    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
-    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
+    try provider.port().prepareToolReplies(a, &history);
     return history[0].tool_result.content.parts[0];
 }
 
@@ -427,7 +526,7 @@ test "a denied file upload leaves the other observations available for inference
     var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{ .{ .file = .{ .bytes = "bytes" } }, .{ .text = "Sibling observation" } } } } }};
     const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
     const a = fixture.arena.allocator();
-    try provider.port().limitToolReplies(a, request, &history, std.math.maxInt(u64));
+    try provider.port().prepareToolReplies(a, &history);
     const outcome = try provider.port().next(a, request);
     try std.testing.expectEqualStrings("accepted", outcome.response.calls[0].call_id);
     try fixture.finish();

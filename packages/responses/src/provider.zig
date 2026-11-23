@@ -14,6 +14,10 @@ pub const Provider = struct {
     pub const default_model = "deepseek-flash";
     pub const default_max_output_tokens: u32 = 65536;
     pub const default_request_timeout_ms: u32 = 600000;
+    /// The default ceiling uses DeepSeek's published request body limit for vision.
+    pub const default_ceiling_bytes: u64 = 48 * 1024 * 1024;
+    const max_images: u64 = 600;
+    const max_files: u64 = 20;
 
     client: *std.http.Client,
     base_url: []const u8 = default_base_url,
@@ -22,102 +26,56 @@ pub const Provider = struct {
     max_output_tokens: u32 = default_max_output_tokens,
     /// Deadline in milliseconds for one inference attempt or one file upload.
     request_timeout_ms: u32 = default_request_timeout_ms,
+    request_ceiling_bytes: u64 = default_ceiling_bytes,
 
     pub fn port(self: *Provider) Model.Port {
         return .{ .context = self, .vtable = &.{
             .next = next,
-            .requestBytes = requestBytes,
-            .limitToolReplies = limitToolReplies,
+            .measure = measure,
+            .prepareToolReplies = prepareToolReplies,
         } };
     }
 
     fn next(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!Model.Outcome {
         const self: *Provider = @ptrCast(@alignCast(context));
-        return self.send(arena, try self.requestPayload(arena, request));
+        return self.send(arena, request);
     }
 
-    /// Measure exactly the same payload that next serializes and sends.
-    fn requestBytes(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!u64 {
+    fn measure(context: *anyopaque, a: Allocator, request: Model.Request) anyerror!Model.Measurement {
         const self: *Provider = @ptrCast(@alignCast(context));
-        var scratch = std.heap.ArenaAllocator.init(arena);
+        var scratch = std.heap.ArenaAllocator.init(a);
         defer scratch.deinit();
-        const payload = try self.requestPayload(scratch.allocator(), request);
+        const encoded = try self.encodeRequest(scratch.allocator(), request);
         var buffer: [4096]u8 = undefined;
         var counter = std.Io.Writer.Discarding.init(&buffer);
-        try std.json.Stringify.value(payload, .{}, &counter.writer);
-        return counter.fullCount();
+        try std.json.Stringify.value(encoded.payload, .{}, &counter.writer);
+        const bytes = counter.fullCount();
+        return .{ .bytes = bytes, .violation = self.requestLimit(bytes, encoded) };
     }
 
-    /// Prepare file input and apply request limits only to the new reply parts.
-    /// Retained history and the caller's other observations remain unchanged.
-    fn limitToolReplies(context: *anyopaque, arena: Allocator, request: Model.Request, replies: []Model.Item, max_request_bytes: u64) anyerror!void {
+    fn requestLimit(self: Provider, bytes: u64, request: EncodedRequest) ?Model.Limit {
+        if (bytes > self.request_ceiling_bytes)
+            return .{ .kind = .request_bytes, .actual = bytes, .maximum = self.request_ceiling_bytes };
+        if (request.images > max_images) return .{ .kind = .images, .actual = request.images, .maximum = max_images };
+        if (request.files > max_files) return .{ .kind = .files, .actual = request.files, .maximum = max_files };
+        return null;
+    }
+
+    fn prepareToolReplies(context: *anyopaque, arena: Allocator, replies: []Model.Item) anyerror!void {
         const self: *Provider = @ptrCast(@alignCast(context));
-        const earlier = request.history[0 .. request.history.len - replies.len];
-        var count = imageCount(earlier);
-        var files = fileCount(earlier);
-        var has_image = false;
         for (replies) |*reply| {
             const parts = try arena.dupe(Content.Part, reply.tool_result.content.parts);
             reply.tool_result.content.parts = parts;
-            for (parts) |*part| {
-                if (part.* == .file) {
-                    if (files >= 20) {
-                        part.* = try contentLimitPart(arena, "File omitted: adding it would exceed the limit of 20 files per request.");
-                        continue;
+            for (parts) |*part| switch (part.*) {
+                .text, .image => {},
+                .file => |*file| {
+                    if (file.reference != null) continue;
+                    switch (try self.uploadFile(arena, file.*)) {
+                        .reference => |reference| file.reference = reference,
+                        .failure => |failure| part.* = try failure.part(arena, file.*),
                     }
-                    if (part.file.reference == null) {
-                        switch (try self.uploadFile(arena, part.file)) {
-                            .reference => |reference| part.file.reference = reference,
-                            .failure => |failure| {
-                                part.* = try failure.part(arena, part.file);
-                                continue;
-                            },
-                        }
-                    }
-                    files += 1;
-                    continue;
-                }
-                if (part.* != .image) continue;
-                if (part.image == .url) {
-                    const url = part.image.url;
-                    if ((std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://")) and
-                        try std.unicode.utf8CountCodepoints(url) > 8192)
-                    {
-                        part.* = try contentLimitPart(arena, "Image omitted: the HTTP(S) image URL exceeds 8192 Unicode code points.");
-                        continue;
-                    }
-                }
-                if (count >= 600) {
-                    part.* = try contentLimitPart(arena, "Image omitted: the model request would contain more than 600 images.");
-                } else {
-                    count += 1;
-                    has_image = true;
-                }
-            }
-        }
-        if (!has_image) return;
-        const byte_limit = @min(max_request_bytes, 48 * 1024 * 1024);
-        var size = try requestBytes(context, arena, request);
-        if (size <= byte_limit) return;
-        const omission = try contentLimitPart(arena, try arena.print("Image omitted because the model request would exceed {d} bytes.", .{byte_limit}));
-        const omission_size = try encodedPartBytes(arena, omission);
-        var index = replies.len;
-        while (index > 0) {
-            index -= 1;
-            // All tool result parts were copied above and belong to arena.
-            const parts = @constCast(replies[index].tool_result.content.parts);
-            var part_index = parts.len;
-            while (part_index > 0) {
-                part_index -= 1;
-                if (parts[part_index] != .image) continue;
-                // Both encodings occupy one array element. A short URL can
-                // cost less space than explaining its omission.
-                const image_size = try encodedPartBytes(arena, parts[part_index]);
-                if (image_size <= omission_size) continue;
-                parts[part_index] = omission;
-                size -= image_size - omission_size;
-                if (size <= byte_limit) return;
-            }
+                },
+            };
         }
     }
 
@@ -138,7 +96,15 @@ pub const Provider = struct {
         stream: bool = false,
     };
 
-    fn requestPayload(self: Provider, arena: Allocator, request: Model.Request) !Payload {
+    const EncodedRequest = struct {
+        payload: Payload,
+        images: u64,
+        files: u64,
+    };
+
+    fn encodeRequest(self: Provider, arena: Allocator, request: Model.Request) !EncodedRequest {
+        var image_count: u64 = 0;
+        var file_count: u64 = 0;
         var input: std.ArrayList(Value) = .empty;
         defer input.deinit(arena);
         var attachments: std.ArrayList(Value) = .empty;
@@ -148,7 +114,7 @@ pub const Provider = struct {
                 try input.appendSlice(arena, attachments.items);
                 attachments.clearRetainingCapacity();
             }
-            try input.append(arena, try encodeItem(arena, item));
+            try input.append(arena, try encodeItem(arena, item, &image_count));
             if (item != .tool_result) continue;
             var files: std.ArrayList(Value) = .empty;
             defer files.deinit(arena);
@@ -163,6 +129,7 @@ pub const Provider = struct {
                 try fields.put(arena, "type", .{ .string = "input_file" });
                 try fields.put(arena, "file_id", .{ .string = part.file.reference orelse return error.UnpreparedModelFile });
                 try files.append(arena, .{ .object = fields });
+                file_count += 1;
             }
             if (files.items.len != 0) {
                 var fields: std.json.ObjectMap = .empty;
@@ -179,12 +146,16 @@ pub const Provider = struct {
             .parameters = tool.parameters,
         };
         return .{
-            .model = self.model,
-            .input = try input.toOwnedSlice(arena),
-            .tools = tools,
-            .tool_choice = if (tools.len == 0) "none" else "auto",
-            .max_output_tokens = self.max_output_tokens,
-            .reasoning = .{ .effort = request.reasoning_effort },
+            .payload = .{
+                .model = self.model,
+                .input = try input.toOwnedSlice(arena),
+                .tools = tools,
+                .tool_choice = if (tools.len == 0) "none" else "auto",
+                .max_output_tokens = self.max_output_tokens,
+                .reasoning = .{ .effort = request.reasoning_effort },
+            },
+            .images = image_count,
+            .files = file_count,
         };
     }
 
@@ -300,14 +271,19 @@ pub const Provider = struct {
         return .{ .reference = try arena.dupe(u8, uploaded.id.bytes) };
     }
 
-    fn send(self: Provider, arena: Allocator, request_payload: Payload) !Model.Outcome {
+    fn send(self: Provider, arena: Allocator, request: Model.Request) !Model.Outcome {
         const io = self.client.io;
         try io.checkCancel();
         const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
             .raw = .fromMilliseconds(self.request_timeout_ms),
             .clock = .awake,
         });
-        const payload = try std.json.Stringify.valueAlloc(arena, request_payload, .{});
+        var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
+        defer scratch.deinit();
+        const temporary = scratch.allocator();
+        const encoded = try self.encodeRequest(temporary, request);
+        const payload = try std.json.Stringify.valueAlloc(temporary, encoded.payload, .{});
+        if (self.requestLimit(payload.len, encoded)) |limit| return .{ .rejected = .{ .limit = limit } };
         const url = try std.fmt.allocPrint(arena, "{s}/responses", .{std.mem.trimEnd(u8, self.base_url, "/")});
         const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{self.api_key});
 
@@ -349,14 +325,27 @@ pub const Provider = struct {
         if (!completeRepresentation(response.head)) {
             request.connection.?.closing = true;
             const status = response.head.status;
-            std.log.warn("model inference endpoint returned HTTP {d}", .{@backingInt(status)});
+            // Reading the body invalidates the borrowed header values.
+            const request_id = if (responseRequestId(response.head)) |id| try temporary.dupe(u8, id) else null;
+            var code: ?[]const u8 = null;
+            defer std.log.warn("model inference endpoint returned HTTP {d} (request_id={s}, code={s})", .{
+                @backingInt(status),
+                request_id orelse "unavailable",
+                code orelse "unavailable",
+            });
             switch (status) {
                 .payment_required => return error.ModelQuotaExhausted,
                 .unauthorized, .proxy_auth_required, .method_not_allowed, .not_implemented, .http_version_not_supported => return error.ModelHttpFailure,
+                .bad_request => {
+                    on_timeout.* = requestRejected(status, false);
+                    const diagnostic = try serviceDiagnostic(temporary, &response) orelse return on_timeout.*;
+                    code = diagnostic.logCode();
+                    return requestRejected(status, diagnostic.matches("context_length_exceeded"));
+                },
                 .request_timeout, .too_many_requests => {},
                 else => switch (status.class()) {
                     .success, .informational => return .{ .rejected = .invalid_response },
-                    .client_error => return .{ .rejected = .request_rejected },
+                    .client_error => return requestRejected(status, false),
                     .redirect => return error.ModelHttpFailure,
                     .server_error => {},
                 },
@@ -364,7 +353,10 @@ pub const Provider = struct {
             const disposition = retryDisposition(response.head, self.client.io);
             if (status == .too_many_requests) {
                 on_timeout.* = disposition;
-                if (try exhaustedQuota(temporary, &response)) return error.ModelQuotaExhausted;
+                if (try serviceDiagnostic(temporary, &response)) |diagnostic| {
+                    code = diagnostic.logCode();
+                    if (diagnostic.matches("insufficient_quota")) return error.ModelQuotaExhausted;
+                }
             }
             return disposition;
         }
@@ -397,6 +389,7 @@ pub const Provider = struct {
         const decoded = std.json.parseFromSliceLeaky(struct {
             status: []const u8,
             output: []const Value,
+            usage: Value = .null,
         }, arena, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.InvalidModelResponse,
@@ -442,11 +435,12 @@ pub const Provider = struct {
             .output = output,
             .calls = try calls.toOwnedSlice(arena),
             .text = if (has_text) try text.toOwnedSlice() else null,
+            .input_tokens = inputTokens(decoded.usage),
         };
     }
 };
 
-fn encodeItem(arena: Allocator, item: Model.Item) !Value {
+fn encodeItem(arena: Allocator, item: Model.Item, image_count: *u64) !Value {
     switch (item) {
         .continuation => |bytes| return std.json.parseFromSliceLeaky(Value, arena, bytes, .{}),
         .message => |message| {
@@ -457,7 +451,11 @@ fn encodeItem(arena: Allocator, item: Model.Item) !Value {
         },
         .tool_result => |result| {
             const parts = try arena.alloc(Value, result.content.parts.len);
-            for (result.content.parts, parts) |part, *encoded| encoded.* = try encodeContentPart(arena, part);
+            for (result.content.parts, parts) |part, *encoded| {
+                const request_part = try projectToolPart(arena, part);
+                if (request_part == .image) image_count.* += 1;
+                encoded.* = try encodeContentPart(arena, request_part);
+            }
             var fields: std.json.ObjectMap = .empty;
             try fields.put(arena, "type", .{ .string = "function_call_output" });
             try fields.put(arena, "call_id", .{ .string = result.call_id });
@@ -498,39 +496,24 @@ fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
     return .{ .object = encoded };
 }
 
-fn encodedPartBytes(a: Allocator, part: Content.Part) !usize {
-    var scratch = std.heap.ArenaAllocator.init(a);
-    defer scratch.deinit();
-    const encoded = try encodeContentPart(scratch.allocator(), part);
-    return std.fmt.count("{f}", .{std.json.fmt(encoded, .{})});
-}
-
-fn contentLimitPart(arena: Allocator, message: []const u8) !Content.Part {
+fn projectToolPart(arena: Allocator, part: Content.Part) !Content.Part {
+    const maximum = 8192;
+    if (part != .image or part.image != .url) return part;
+    const url = part.image.url;
+    if (!std.ascii.startsWithIgnoreCase(url, "http://") and !std.ascii.startsWithIgnoreCase(url, "https://"))
+        return part;
+    const actual = try std.unicode.utf8CountCodepoints(url);
+    if (actual <= maximum) return part;
     return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
-        .@"error" = .{ .code = "content_limit", .message = message },
+        .@"error" = .{
+            .code = "content_limit",
+            .message = "The image was omitted from this request because its HTTP(S) URL exceeds the model service's length limit.",
+            .omitted_images = 1,
+            .unit = "unicode_code_points",
+            .actual = actual,
+            .maximum = maximum,
+        },
     }, .{}) };
-}
-
-fn imageCount(history: []const Model.Item) usize {
-    var count: usize = 0;
-    for (history) |item| {
-        if (item != .tool_result) continue;
-        for (item.tool_result.content.parts) |part| {
-            if (part == .image) count += 1;
-        }
-    }
-    return count;
-}
-
-fn fileCount(history: []const Model.Item) usize {
-    var count: usize = 0;
-    for (history) |item| {
-        if (item != .tool_result) continue;
-        for (item.tool_result.content.parts) |part| {
-            if (part == .file) count += 1;
-        }
-    }
-    return count;
 }
 
 fn transportError(request: *std.http.Client.Request, err: anyerror) anyerror {
@@ -587,29 +570,67 @@ fn completeRepresentation(head: std.http.Client.Response.Head) bool {
         head.status != .partial_content and head.content_encoding == .identity;
 }
 
+const ServiceDiagnostic = struct {
+    code: ?[]const u8 = null,
+    type: ?[]const u8 = null,
+
+    fn matches(self: ServiceDiagnostic, code: []const u8) bool {
+        return std.mem.eql(u8, self.code orelse "", code) or std.mem.eql(u8, self.type orelse "", code);
+    }
+
+    fn logCode(self: ServiceDiagnostic) ?[]const u8 {
+        return diagnosticToken(self.code) orelse diagnosticToken(self.type);
+    }
+};
+
+fn responseRequestId(head: std.http.Client.Response.Head) ?[]const u8 {
+    var deepseek_id: ?[]const u8 = null;
+    var headers = head.iterateHeaders();
+    while (headers.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "x-request-id")) {
+            if (diagnosticToken(header.value)) |id| return id;
+        } else if (deepseek_id == null and std.ascii.eqlIgnoreCase(header.name, "x-deepseek-request-id")) {
+            deepseek_id = diagnosticToken(header.value);
+        }
+    }
+    return deepseek_id;
+}
+
+fn diagnosticToken(value: ?[]const u8) ?[]const u8 {
+    const token = value orelse return null;
+    if (token.len == 0 or token.len > 96) return null;
+    for (token) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-' and byte != '.') return null;
+    }
+    return token;
+}
+
 /// An incomplete or oversized optional diagnostic leaves the status and retry headers in force.
-fn exhaustedQuota(arena: Allocator, response: *std.http.Client.Response) !bool {
+fn serviceDiagnostic(arena: Allocator, response: *std.http.Client.Response) !?ServiceDiagnostic {
     const limit = 16 * 1024;
-    if (response.head.content_encoding != .identity) return false;
+    if (response.head.content_encoding != .identity) return null;
     const length = if (response.head.transfer_encoding == .none) response.head.content_length else null;
-    if (length) |len| if (len > limit) return false;
+    if (length) |len| if (len > limit) return null;
     const bytes = response.reader(&.{}).allocRemaining(arena, .limited(limit)) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        error.StreamTooLong => return false,
+        error.StreamTooLong => return null,
         error.ReadFailed => {
             const cause = transportError(response.request, err);
             if (cause == error.Canceled) return cause;
-            return false;
+            return null;
         },
     };
-    if (length) |len| if (bytes.len != len) return false;
-    const Diagnostic = struct { @"error": struct { code: ?[]const u8 = null, type: ?[]const u8 = null } };
+    if (length) |len| if (bytes.len != len) return null;
+    const Diagnostic = struct { @"error": ServiceDiagnostic };
     const diagnostic = std.json.parseFromSliceLeaky(Diagnostic, arena, bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => return false,
+        else => return null,
     };
-    return std.mem.eql(u8, diagnostic.@"error".code orelse "", "insufficient_quota") or
-        std.mem.eql(u8, diagnostic.@"error".type orelse "", "insufficient_quota");
+    return diagnostic.@"error";
+}
+
+fn requestRejected(status: std.http.Status, context_length: bool) Model.Outcome {
+    return .{ .rejected = .{ .request_rejected = .{ .status = @backingInt(status), .context_length = context_length } } };
 }
 
 fn invalidEnvelope(err: anyerror) bool {
@@ -647,7 +668,7 @@ fn retryDisposition(head: std.http.Client.Response.Head, io: std.Io) Model.Outco
     var headers = head.iterateHeaders();
     while (headers.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "x-should-retry") and std.ascii.eqlIgnoreCase(header.value, "false"))
-            return .{ .rejected = .request_rejected };
+            return requestRejected(head.status, false);
         if (std.ascii.eqlIgnoreCase(header.name, "retry-after"))
             after_ms = retryAfterMilliseconds(header.value, std.Io.Clock.real.now(io).toMilliseconds());
     }
@@ -705,4 +726,9 @@ fn textField(value: Value, name: []const u8) error{InvalidModelResponse}![]const
     const found = try field(value, name);
     if (found != .string) return error.InvalidModelResponse;
     return found.string;
+}
+
+fn inputTokens(usage: Value) ?u64 {
+    const count = field(usage, "input_tokens") catch return null;
+    return if (count == .integer) std.math.cast(u64, count.integer) else null;
 }

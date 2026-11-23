@@ -5,16 +5,16 @@ const Input = @import("input.zig");
 const Context = @import("context.zig").Context;
 const Allocator = std.mem.Allocator;
 
-pub const Rejection = enum {
+pub const Rejection = union(enum) {
     empty_summary,
     unexpected_tool_call,
-    too_large,
+    too_large: Model.Limit,
 
-    pub fn description(self: Rejection) []const u8 {
+    pub fn description(self: Rejection, a: Allocator) ![]const u8 {
         return switch (self) {
-            .empty_summary => "The compaction response contained no summary text.",
-            .unexpected_tool_call => "The compaction response contained tool calls.",
-            .too_large => "The proposed handover left the next request over its context budget.",
+            .empty_summary => "The handover summary was empty.",
+            .unexpected_tool_call => "The summary response included tool calls.",
+            .too_large => |limit| Engine.describeRequestLimit(a, "The next request with the proposed handover", limit),
         };
     }
 };
@@ -27,16 +27,26 @@ pub const Result = union(enum) {
 
 /// Generate one summary from this history and snapshot. Kernel measures the
 /// continuation and decides whether to request a replacement summary.
-pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, snapshot: Input.Snapshot, max_request_bytes: u64, previous: ?Rejection) !Result {
+pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, snapshot: Input.Snapshot, scope: Context.CompactionScope, previous: ?Rejection, retry: Engine.Retry) !Result {
     const instructions = if (previous) |reason|
-        try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ @embedFile("compaction.md"), reason.description() })
+        try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ @embedFile("compaction.md"), try reason.description(arena) })
     else
         @embedFile("compaction.md");
-    const messages = try context.summaryRequest(arena, snapshot, instructions);
-    const request: Model.Request = .{ .history = messages, .tools = &.{}, .reasoning_effort = .high };
-    if (try engine.model.requestBytes(arena, request) > max_request_bytes)
-        return .{ .interrupted = "The summary request exceeds the compaction budget." };
-    var inference = switch (try engine.infer(context.focus_id, request)) {
+    const history = try context.summaryRequest(arena, snapshot, instructions, scope);
+    const request: Model.Request = .{
+        .history = history,
+        .tools = &.{},
+        .reasoning_effort = .high,
+    };
+    if ((try engine.model.measure(arena, request)).violation) |original_limit| {
+        const remaining_limit: ?Model.Limit = if (try Context.replaceSummaryMedia(arena, history))
+            (try engine.model.measure(arena, request)).violation
+        else
+            original_limit;
+        if (remaining_limit) |limit|
+            return .{ .interrupted = try Engine.describeRequestLimit(arena, "The summary request", limit) };
+    }
+    var inference = switch (try engine.infer(arena, context.focus_id, request, retry)) {
         .ready => |result| result,
         .interrupted => |reason| return .{ .interrupted = reason },
     };

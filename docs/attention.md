@@ -79,7 +79,7 @@ Each call creates a subscription and returns its complete reference, even if thi
 
 Set up the listener separately and give it the returned `subscription_id`. If an activity runs the listener for `releases-1` on the host, its reports still go to the core. A replacement listener can use the same ID to resume from the saved feed position. See the [listener protocol](subscriptions.md).
 
-An accepted report makes a sleeping focus ready. A working focus can read several reports alongside other observations after its current model/tool round. Reports beyond the input budget stay queued for later turns. See [subscription observations](input.md#subscription-observations).
+An accepted report makes a sleeping focus ready. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. See [subscription observations](input.md#subscription-observations).
 
 Subscriptions survive sleep and restart. The focus can find its active subscription IDs in the [state sampled for a handover](input.md#sampled-state).
 
@@ -103,13 +103,15 @@ These actions return a JSON text part containing either `result` or an operation
 
 Each ordinary activity inference that produces assistant text contributes one message for the core. The runtime records that text before executing any accompanying tool calls, so a report can describe an intention whose outcome is still unknown. Tool replies belong to the activity's own exchange. To share a finding, the activity can quote the relevant passage or give the core a [location it can open](resources.md).
 
-Activity messages wait for the core's next ordinary input, including a continuation after tool use. The runtime admits as many as fit the request budget and keeps the rest in order for later inputs. Each admitted report stays attributed to its source activity in the core's history.
+The core can receive activity messages in its next ordinary input, including a continuation after tool use. Messages that wait for a later input keep their order. The core's history attributes each admitted report to its source activity.
 
 One input can carry reports from several activities alongside other observations. An ending can accompany new text or arrive later without repeating admitted messages. The [input contract](input.md#assignments-and-reports) defines grouping and the observation times preserved through waiting and restart.
 
 ## Interrupted reasoning
 
-A rejected request, an unusable model response, or an input that cannot fit the context budget can interrupt an activity. The runtime alerts the core with a [`focus_interrupted` observation](input.md#activity-interruptions) giving the reason. The activity keeps its working history, queued observations and registrations. A message from the core, a command completion or a new subscription report can resume it.
+An activity can pause when its next request cannot fit, when the service rejects it, or when the response is unusable. The core receives a [`focus_interrupted` observation](input.md#activity-interruptions) with the reason. The activity keeps its working history, queued observations, and registrations. A message from the core, a command completion, or a new subscription report can resume it.
+
+If waiting observations make a request too large, the runtime can continue a tool exchange with a fitting request while those observations stay queued. See [how the runtime continues after compaction](architecture.md#continuing-with-a-handover).
 
 ## Activity completion
 

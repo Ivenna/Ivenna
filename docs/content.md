@@ -19,12 +19,12 @@ When the reader identifies an oversized source, `content.unavailable` gives its 
 | Reason | Meaning |
 | --- | --- |
 | `image_too_large` | Image data exceeds 32 MiB |
-| `reference_too_large` | A source containing an image URL exceeds 16 KiB |
+| `reference_too_large` | A source opened as an image URL exceeds 16 KiB |
 | `file_too_large` | A file attachment exceeds 32 MiB |
 
 ## Complete files
 
-The Responses adapter uploads a new file attachment to the configured model service for parsing. It uses the returned file reference in the current request and reuses it on later turns. For supported inputs and service limits, see DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/).
+The Responses adapter uploads a new file attachment to the configured model service for parsing. The returned file reference travels with the tool result and is reused on later turns. The service can expand the reference into text and images during inference. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/).
 
 If the upload ends without a usable reference, a text part replaces the attachment. It gives the original `file.byte_length` and an `error` with a code and message. The rest of the tool result is still available.
 
@@ -37,22 +37,23 @@ See [upload handling](architecture.md#tool-results) for how the adapter handles 
 
 ## Image URL references
 
-An HTTP(S) image reference asks the model service to retrieve the image during inference. An image data URL already contains the image. If a command writes a data URL to a file, the focus can open the path in the image view. See [remote images](resources.md#remote-images), [local file views](resources.md#local-files-and-directories), and [image addresses in memory](memory.md#reading).
+An HTTP(S) image reference asks the model service to retrieve the image during inference. An image data URL contains encoded image data. A data URL opened from a file or memory counts toward the reader's reference limit and the encoded request size. See [remote images](resources.md#remote-images), [local file views](resources.md#local-files-and-directories), and [image addresses in memory](memory.md#reading).
+
+For each HTTP(S) image URL longer than 8192 Unicode code points, the adapter sends a JSON text part in place of the image. Its `error` object contains `code: "content_limit"`, a `message`, `omitted_images: 1`, the measured length in `actual`, the allowed length in `maximum`, and `unit: "unicode_code_points"`. The tool's source description stays alongside the notice, and working history retains the original URL.
 
 ## Model request checks
 
-Media that fit the reader's source limits must also fit in the model request. The Responses adapter includes retained media when checking new tool results against the focus's request budget and the provider's limits for [images](https://api-docs.deepseek.com/guides/vision/#limits) and [documents](https://api-docs.deepseek.com/guides/document_parsing/).
+The Responses adapter checks the complete encoded request, including retained and newly produced tool results.
 
 | Check | Limit |
 | --- | --- |
-| HTTP(S) image URL length | 8192 Unicode code points |
-| Image count, including retained images and URL references | 600 |
-| File references, including retained references | 20 |
-| Serialized request body when adding images, including history, tools, and file references | The smaller of `CONTEXT_REQUEST_BYTES` and 48 MiB |
+| Image parts sent in the request | 600 |
+| File references | 20 |
+| Encoded request body | 48 MiB |
 
-An image data URL opened from a file or memory counts toward both the reference size limit and the serialized request size.
+The model service also checks limits that depend on processed input. A file reference may expand into text and images that count toward those limits. See DeepSeek's [image limits](https://api-docs.deepseek.com/guides/vision/#limits) and [document input limits](https://api-docs.deepseek.com/guides/document_parsing/#step-2-reference-a-document-in-chat).
 
-When new media exceed a count limit, earlier parts take priority. Files beyond the limit are omitted before upload. A new image can also be omitted to fit the request budget. Each omitted part reports `content_limit` alongside the source and the other results. Before inference, the kernel measures the actual request, including retained history and newly arrived observations, against its [context budget](running.md#context-budgets).
+Compaction can make room for the latest complete tool exchange. If the kernel still cannot assemble an ordinary request within the adapter's limits, the focus pauses with its saved tool results intact. See [how compaction works](architecture.md#bounded-model-context).
 
 ## Context and continuity
 

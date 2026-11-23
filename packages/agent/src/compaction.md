@@ -1,3 +1,3 @@
-Return only a concise plain-text summary for the handover that will replace the retained messages preceding this turn. The supplied state will accompany your summary unchanged. Do not continue tasks or answer waiting events.
+Return only a concise plain-text summary of the working history shown here. The runtime carries the supplied state alongside your summary. Leave pending work for the next ordinary turn.
 
-Carry forward the understanding and unfinished thought that still matter in this focus, including relevant relationships, preferences, and commitments. Explain where unfinished work stands, how awaited results relate to it, and what needs to happen next. Preserve sources, evidence, uncertainty, and the distinction between intentions and confirmed effects.
+Carry forward what this focus has come to understand, including the relationships, preferences, and commitments that still matter. For unfinished work, preserve the reasoning that matters, where the work stands, how awaited results relate to it, and what needs to happen next. Preserve relevant evidence and its sources. Record uncertainties and distinguish intentions from confirmed effects.
