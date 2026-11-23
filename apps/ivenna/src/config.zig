@@ -18,7 +18,7 @@ pub const Config = struct {
     max_sessions: usize,
     max_pending_events: usize,
     max_host_commands: usize,
-    resource_roots: ?[]const u8,
+    deepseek_api_key: ?[]const u8,
     context_limits: agent.Kernel.Limits,
     llm_base_url: []const u8,
     llm_api_key: []const u8,
@@ -30,6 +30,7 @@ pub const Config = struct {
     /// Text borrows the process environment, which outlives the application.
     pub fn load(env: *const std.process.Environ.Map) !Config {
         const mail_auth = env.get("MAIL_AUTHORIZATION");
+        const fetch_key = env.get("DEEPSEEK_API_KEY") orelse "";
         const default_reasoning: agent.Engine.Reasoning = .{};
         const default_limits: agent.Kernel.Limits = .{};
         const config: Config = .{
@@ -52,7 +53,7 @@ pub const Config = struct {
             .max_sessions = try number(usize, env, "MAX_SESSIONS", 128),
             .max_pending_events = try number(usize, env, "MAX_PENDING_EVENTS", 64),
             .max_host_commands = try number(usize, env, "MAX_HOST_COMMANDS", 8),
-            .resource_roots = env.get("RESOURCE_ROOTS"),
+            .deepseek_api_key = if (fetch_key.len > 0) fetch_key else null,
             .context_limits = .{
                 .request_bytes = try number(u64, env, "CONTEXT_REQUEST_BYTES", default_limits.request_bytes),
                 .compaction_bytes = try number(u64, env, "CONTEXT_COMPACTION_BYTES", default_limits.compaction_bytes),

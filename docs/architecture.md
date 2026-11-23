@@ -17,7 +17,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [packages/responses](../packages/responses/src/root.zig) | Encode, measure, and decode model exchanges; own model HTTP transport, file uploads, and request content limits |
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, incremental interaction, process cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
-| [packages/resources](../packages/resources/src/root.zig) | Define the host resource tool and own canonical path resolution, root scope, and bounded file and directory observation |
+| [packages/resources](../packages/resources/src/root.zig) | Resolve resource references, read host files and directories, retrieve web pages, and present remote images by URL |
 | [packages/subscriptions](../packages/subscriptions/src/root.zig) | Store registrations, listener progress, report keys and pending observations in SQLite |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result text, image, and file content, classify source bytes, and interpret image references |
 
@@ -49,7 +49,6 @@ flowchart TD
     Memory --> Content
     Resources --> Contracts
     Resources --> Content
-    Resources --> Host
     Responses --> Content
     Agent --> Content
     Contracts --> Content
@@ -197,13 +196,13 @@ The first mailbox checkpoint records the identity of an unbound catalog before t
 
 Context prepends the embedded [system.md](../packages/agent/src/system.md) as one system message before selected history and the current turn. Its text is identical for core and activity sessions; the turn identifies the current focus and role, and Engine selects tools separately. Ordinary requests, admission candidates, and compaction include this prompt independently of retained entries and measure its encoded cost.
 
-[Input](../packages/agent/src/input.zig) renders retained `Record` values and temporary `Turn` values as YAML user messages. `Registry.current` supplies the current focus's identity, role, and time for each ordinary turn. Presentation methods format internal Unix milliseconds as UTC RFC 3339 `observed_at` and `ended_at` strings; retained ZON records preserve numeric times and complete typed values. The [input contract](input.md) defines the fields and omission semantics of these agent-generated messages. The model adapter separately encodes native exchanges and [tool content](#tool-results). The private [time adapter](../packages/agent/src/time.zig) uses [zdt](https://codeberg.org/FObersteiner/zdt) to format observation times and parse attention deadlines.
+[Input](../packages/agent/src/input.zig) renders retained `Record` values and temporary `Turn` values as YAML user messages. The session registry supplies `current` for both ordinary and compaction turns. Presentation methods format internal Unix milliseconds as UTC RFC 3339 `observed_at` and `ended_at` strings. Retained ZON records preserve numeric times and complete typed values. The [input contract](input.md#inference-turns) defines the fields and omission semantics of these agent-generated messages. The model adapter separately encodes native exchanges and [tool content](#tool-results). The private [time adapter](../packages/agent/src/time.zig) uses [zdt](https://codeberg.org/FObersteiner/zdt) to format observation times and parse attention deadlines.
 
 An ordinary request presents the selected events in its current turn after the complete retained prefix. A continuation without newly selected events omits the turn's `events` field. [Compaction](#bounded-model-context) uses the complete retained prefix and adds sampled state for recollection.
 
 ## Model requests and tools
 
-[Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). [tools.zig](../packages/agent/src/tools.zig) selects agent declarations and parses their arguments using one explicit role rule. Memory joins through `shared_tools` and, for activity sessions, Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection. Runtime action effects remain in Kernel's calling round, including focus preparation and atomic publication with the completed round.
+[Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). [tools.zig](../packages/agent/src/tools.zig) selects agent declarations and parses their arguments using one explicit role rule. Memory and Resources join through `shared_tools`. Activity sessions also receive Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection. Runtime action effects remain in Kernel's calling round, including focus preparation and atomic publication with the completed round.
 
 Kernel calls inference and tool execution separately. The activation remains owned by the same worker through the returned batch. Engine retains the prepared request through tool execution so the provider can apply content limits to the complete result batch.
 
@@ -223,7 +222,7 @@ Engine owns the retry schedule for ordinary and summary inference. The worker ke
 
 ### Tool results
 
-Capabilities return [Content](../packages/content/src/root.zig) parts owned by the model-round arena. Content supplies byte classification and image-reference interpretation; Host and Memory own source reading, limits, and provenance. Engine associates results with call IDs and passes the complete tool batch to the Responses adapter before the exchange is committed.
+Capabilities return [Content](../packages/content/src/root.zig) parts owned by the model-round arena. Content supplies byte classification, media limits, and image-reference interpretation. Each capability reads its sources and identifies them in the result. Engine associates results with call IDs and passes the complete tool batch to the Responses adapter before the exchange is committed.
 
 The adapter copies the new reply parts and applies the [model request checks](content.md#model-request-checks) against the complete request, preserving retained history and operation descriptions. It omits files beyond the count limit before uploading them. Each file part holds complete bytes and an optional opaque upload reference.
 
@@ -378,11 +377,13 @@ Transfers buffer each request and reply. Returned text, image, and file content 
 
 The handler translates selected-entry filesystem and pattern failures into tool outcomes. The adapter translates host source-file failures before transfer, while transport and protocol errors propagate to runtime supervision. The [memory interface](memory.md#results-and-errors) defines the outcomes, infrastructure failures, and uncertain effects.
 
-## Host resources
+## Resource reads
 
-[Resources](../packages/resources/src/root.zig) defines the shared `touch` capability and applies the deployment's `RESOURCE_ROOTS` scope. Startup resolves each root against the kernel's startup directory, canonicalizes it, and verifies that it is a directory; an unset or empty `RESOURCE_ROOTS` leaves the capability with no roots, so every address is outside scope. A relative address resolves against the first root; an absolute address must lie inside some root. Resolution normalizes `..`, checks the lexical candidate, resolves symbolic links, and checks the canonical path again. Directory listings stop at the shared entry limit and do not follow links for entry metadata.
+[Resources](../packages/resources/src/root.zig) serves both focuses. The application gives it the same startup directory as Host. Host uses the shared [file URI contract](../packages/agent_contracts/src/file_uri.zig) to identify command logs, and Resources uses it to open local paths and return directory entries. The [local reader](../packages/resources/src/local.zig) uses Content to recognize images and read their bytes.
 
-Files reuse [Reader](../packages/host/src/reader.zig) for complete-source classification and native media and [output.zig](../packages/host/src/output.zig) for bounded text ranges. A text range is aligned to UTF-8 boundaries; an image, PDF header, or binary range selects complete-source reading. Sources over the shared limit return the content `unavailable` diagnostic. The [host resources guide](resources.md) defines arguments, results, and errors.
+An HTTP(S) image read returns the URL as an image content part for the model service. When page retrieval is enabled, the application supplies a [web reader](../packages/resources/src/web.zig). Its service and billing notice appears in the tool declaration. The [DeepSeek adapter](../packages/resources/src/deepseek.zig) sends the authenticated Fetch request and returns the title and Markdown or a retrieval error. It bounds one exchange to 60 seconds and the response body to 32 MiB.
+
+The [snapshot store](../packages/resources/src/pages.zig) assigns each fetched page its own URI. Later reads from either focus use the retained Markdown. The store holds up to 256 snapshots in kernel memory and budgets 32 MiB for their source URLs, title previews, and Markdown combined. It evicts the oldest snapshots first. See [reading a web page](resources.md#web-pages).
 
 ## Host execution
 
@@ -420,7 +421,7 @@ Normal completion and timeout report cleanup failures as unavailable outcomes. E
 
 ### Output and delivery
 
-Commands write to private log files. [Reader](../packages/host/src/reader.zig) owns complete-source classification and native media; stderr uses text-only reading. [output.zig](../packages/host/src/output.zig) selects byte ranges and previews. The tool decoder validates the combined encoded budget, and internal readers use its stream allocations. Host, resource, and memory reads use the text-prefix classifier in Content.
+Commands write to private log files. The [host reader](../packages/host/src/reader.zig) uses Content to classify completed stdout and read complete media. Running output and stderr use the byte ranges and text previews in [output.zig](../packages/host/src/output.zig). The tool decoder validates the combined encoded budget and the readers use the share allocated to each stream.
 
 Continuation calls consume shared per-stream cursors. They periodically check log-file growth and wait on the condition so completion can wake them immediately. After completion, an image or PDF header or an observed binary range triggers complete-source reading independently of the text cursor. The command's shared media flag is set only after returning native media or a complete-source diagnostic. A text-only observation leaves the allowance available so a later continuation can identify binary content and return the complete file once.
 

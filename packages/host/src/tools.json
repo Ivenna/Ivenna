@@ -23,7 +23,7 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. Returns its outcome, or a command handle and a completion callback for this focus when execution outlasts the wait. Text output is previewed; final stdout can include complete images or files.",
+    "description": "Run a command in a fresh shell. If the wait ends before completion, the result includes a command handle and a callback ID for this focus. Pass stdout.uri or stderr.uri to read_resource to read beyond a preview. Final stdout can include a complete image or file.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -39,7 +39,7 @@
         "cwd": {
           "type": "string",
           "minLength": 1,
-          "description": "Relative paths and omission use the runtime's startup directory."
+          "description": "Working directory on the host. Omit to use the kernel's startup directory, or supply an absolute path or a path relative to that directory."
         },
         "shell": {
           "type": "string",

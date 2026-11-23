@@ -6,7 +6,6 @@
     .dependencies = .{
         .agent_contracts = .{ .path = "../agent_contracts" },
         .content = .{ .path = "../content" },
-        .host = .{ .path = "../host" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

@@ -46,7 +46,10 @@ Core and activity focuses use the same system prompt. Each receives observations
 | Schedule a wakeup | Yes | — |
 | Subscribe to observations for the current focus | Yes | Yes |
 | Withdraw a subscription by its complete reference | Yes | Yes |
+| [Read a resource by URI](resources.md) | Yes | Yes |
 | Run and interact with host programs | — | Yes |
+
+An activity can share a page's snapshot URI with the core. The core can then read the surrounding text in the same version the activity cited.
 
 The core can [open an activity focus](attention.md#opening-a-focus) with a free-form assignment. It carries the core's retained understanding, relationships, preferences, and unfinished thought into the new focus. The core continues its own work while their histories grow independently.
 

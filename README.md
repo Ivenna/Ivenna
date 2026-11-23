@@ -4,11 +4,13 @@ Ivenna is an agent runtime for [a self to take shape and live in the world](docs
 
 The core is Ivenna's continuing focus of attention. Each activity it opens starts with an assignment and a copy of the core's working history. Their histories then grow independently while they share files, memory, communication, and host processes. The core reads activity messages alongside its other observations. When an activity ends or its reasoning is interrupted, the runtime calls for the core's attention. See [how focuses coordinate](docs/attention.md).
 
+Either focus can read host files and view images by URL. With web page access enabled, both can also read pages as Markdown. An activity can run a host command and give the core the URI of its output log. See [reading resources](docs/resources.md) and [host commands](docs/host.md).
+
 People and programs correspond with Ivenna through messages. Ivenna observes who said what, chooses how to act, and decides when to write and whom to address. See [communication](docs/communication.md).
 
 The core can schedule a wakeup, and an activity can resume when its host command finishes. Both can subscribe to a source such as a project's release feed. A separate listener watches the feed and reports new versions to the focus that subscribed. A report can wake that focus, and one turn can include several reports. See [registering a subscription](docs/attention.md#subscriptions) and [writing a listener](docs/subscriptions.md).
 
-The current implementation uses email for correspondence and working history, shared [memory rooms](docs/memory.md) over SSH, and [host commands](docs/host.md) for activities. Communication and memory must be available for it to run. The deployment user owns the records, memory, and artifacts; the [running guide](docs/running.md) describes service requirements and retained data.
+The runtime uses email for correspondence and working history and SSH for shared [memory rooms](docs/memory.md). Both services must be available for it to run. The deployment user owns the records, memory, and artifacts. See the [running guide](docs/running.md) for service requirements and retained data.
 
 ## Getting started
 

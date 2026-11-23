@@ -70,6 +70,12 @@ pub const Classified = union(enum) {
     file: File,
 };
 
+pub const Media = union(enum) {
+    image: ImageContent,
+    file: File,
+    unavailable: Unavailable,
+};
+
 /// Recognize encoded image signatures without decoding pixels.
 pub fn detectFormat(bytes: []const u8) ?Image.Format {
     return switch (zignal.image.Format.detectFromBytes(bytes) orelse return null) {
@@ -108,6 +114,58 @@ pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Classified 
     if (interpretation == .image_url and classified == .text and bytes.len != 0)
         return .{ .image = .{ .url = bytes } };
     return classified;
+}
+
+pub const FileMediaRequest = union(enum) {
+    detect: struct { interpretation: ?Interpretation = null, binary_observed: bool = false },
+    image,
+};
+
+/// Return the complete source when it matches the request. A later text
+/// window can reveal binary content that the first bytes did not identify.
+pub fn readFileMedia(io: std.Io, a: std.mem.Allocator, file: std.Io.File, length: u64, request: FileMediaRequest) !?Media {
+    var header: [32]u8 = undefined;
+    const header_read = try file.readPositionalAll(io, &header, 0);
+    if (detectFormat(header[0..header_read]) != null) {
+        if (length > image_size_limit)
+            return .{ .unavailable = .{ .byte_length = length, .reason = .image_too_large } };
+    } else switch (request) {
+        .image => return null,
+        .detect => |options| if (options.binary_observed or requiresCompleteSource(header[0..header_read], header_read == length)) {
+            if (length > file_size_limit)
+                return .{ .unavailable = .{ .byte_length = length, .reason = .file_too_large } };
+        } else {
+            if (options.interpretation == null) return null;
+            if (length > reference_size_limit)
+                return .{ .unavailable = .{ .byte_length = length, .reason = .reference_too_large } };
+        },
+    }
+    const bytes = try a.alloc(u8, @intCast(length));
+    var retained = false;
+    defer if (!retained) a.free(bytes);
+    const count = try file.readPositionalAll(io, bytes, 0);
+    // A size reported before reading can describe a changing or virtual file.
+    // An attachment and an image URL both require the complete source.
+    var extra: [1]u8 = undefined;
+    if (count != bytes.len or try file.readPositionalAll(io, &extra, length) != 0) return error.IncompleteMedia;
+    const interpretation = switch (request) {
+        .detect => |options| options.interpretation,
+        .image => null,
+    };
+    return switch (interpret(bytes, interpretation)) {
+        .text => null,
+        .image => |image| blk: {
+            if (image == .url and image.url.len > reference_size_limit)
+                break :blk .{ .unavailable = .{ .byte_length = image.url.len, .reason = .reference_too_large } };
+            retained = true;
+            break :blk .{ .image = image };
+        },
+        .file => |document| blk: {
+            if (request == .image) return null;
+            retained = true;
+            break :blk .{ .file = document };
+        },
+    };
 }
 
 pub fn isText(bytes: []const u8) bool {
@@ -193,4 +251,24 @@ test "streaming text rejects malformed bytes rather than retaining them as an in
         try std.testing.expectEqual(null, textPrefixLength(bytes, true));
         try std.testing.expectEqual(null, textPrefixLength(bytes, false));
     }
+}
+
+test "a prior binary observation still applies the limit to a replacement image reference" {
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reference = try a.alloc(u8, reference_size_limit + 1);
+    @memset(reference, 'a');
+    try temporary.dir.writeFile(io, .{ .sub_path = "stdout", .data = reference });
+    const file = try temporary.dir.openFile(io, "stdout", .{});
+    defer file.close(io);
+
+    // The earlier binary observation selects whole-source reading, but that
+    // source may now be text interpreted as a URL with its own smaller limit.
+    const result = (try readFileMedia(io, a, file, reference.len, .{ .detect = .{ .interpretation = .image_url, .binary_observed = true } })).?;
+    try std.testing.expectEqual(.reference_too_large, result.unavailable.reason);
+    try std.testing.expectEqual(reference.len, result.unavailable.byte_length);
 }

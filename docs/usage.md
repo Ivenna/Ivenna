@@ -18,11 +18,19 @@ Your mail service can report a delivery failure when Ivenna's [reception is clos
 
 Ivenna reads your correspondent ID (`operator` in this example), subject, and message body. Each From address must map to a supported ID in the configured domain for Ivenna to receive the letter. To ask Ivenna to contact someone else, include their correspondent ID in the text. See [email addressing](communication.md#current-email-addressing).
 
-Put material you want Ivenna to read in the subject or body. Ivenna reads the plain-text body when available, uses HTML source for HTML-only letters, and skips attachments. If a letter and the context needed to read it exceed the model request budget even after compaction, the letter stays in the mailbox and later correspondence waits behind it. See the operator's guide to [resolving an admission failure](running.md#recovering-from-an-admission-failure).
-
 Ivenna decides whether and when to write. You may receive one response, several updates, or none. Read its messages in your mail client under the subject `Ivenna`.
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
+
+### Sharing material to read
+
+Put short passages in the body of your letter. Ivenna reads the plain-text body when available, uses the HTML source for HTML-only letters, and skips attachments.
+
+- For a file on Ivenna's host, give its absolute file URI, such as `file:///srv/notes.md`.
+- For a screenshot, send a direct link to the image that Ivenna's model service can open. Say what you want Ivenna to look for.
+- For an article, send the page URL. Ivenna can read it when web page access is enabled. See [web pages](resources.md#web-pages).
+
+If a letter and the context needed to read it exceed the model request budget even after compaction, the letter stays in the mailbox and later correspondence waits behind it. See the operator's guide to [resolving an admission failure](running.md#recovering-from-an-admission-failure).
 
 ## Continuing correspondence
 

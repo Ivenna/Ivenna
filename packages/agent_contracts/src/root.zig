@@ -5,3 +5,4 @@ pub const Model = @import("model.zig");
 pub const Tools = @import("tool.zig").Tools;
 pub const Callback = @import("callback.zig");
 pub const Reference = @import("reference.zig");
+pub const FileUri = @import("file_uri.zig");

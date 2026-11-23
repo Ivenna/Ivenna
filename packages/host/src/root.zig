@@ -11,10 +11,6 @@ const Reference = contracts.Reference;
 const finished_command_cache = 8;
 const max_input_characters = 4096;
 
-/// Shared source reading and range selection used by host output and resource reads.
-pub const Reader = @import("reader.zig").Reader;
-pub const output = @import("output.zig");
-
 /// One process registry serves completed calls and background commands.
 pub const Host = struct {
     allocator: Allocator,
@@ -136,8 +132,8 @@ pub const Host = struct {
                 .elapsed_ms = self.snapshot.elapsed_ms,
                 .mode = self.mode,
                 .stdin = self.snapshot.stdin,
-                .stdout = self.streams.stdout.describe(),
-                .stderr = self.streams.stderr.describe(),
+                .stdout = try self.streams.stdout.describe(a),
+                .stderr = try self.streams.stderr.describe(a),
                 .media_omission = if (self.asynchronous and (self.streams.stdout.content == .image or self.streams.stdout.content == .file)) @as(?[]const u8, "asynchronous_media_unavailable") else null,
             };
             const text = if (failure) |err|
@@ -561,8 +557,8 @@ pub const Host = struct {
                 .elapsed_ms = current.elapsed_ms,
                 .mode = job.args.mode,
                 .stdin = current.stdin,
-                .stdout = .{ .path = job.invocation.stdout_path },
-                .stderr = .{ .path = job.invocation.stderr_path },
+                .stdout = try Shell.logReference(a, job.invocation.stdout_path),
+                .stderr = try Shell.logReference(a, job.invocation.stderr_path),
                 .output_error = @errorName(err),
             },
         }, .{ .emit_null_optional_fields = false }));
@@ -670,7 +666,7 @@ test "file results preserve source descriptions and asynchronous omissions" {
         .snapshot = .{ .state = .{ .finished = .{ .completed = .{ .exited = 0 } } }, .elapsed_ms = 1, .stdin = .{ .open = false, .pending = false, .@"error" = null } },
         .mode = .batch,
         .streams = .{
-            .stdout = .{ .path = "/logs/stdout", .byte_length = file.bytes.len, .content = .{ .file = file } },
+            .stdout = .{ .path = "/logs/a b%20#?/stdout", .byte_length = file.bytes.len, .content = .{ .file = file } },
             .stderr = .{ .path = "/logs/stderr", .byte_length = 0, .content = .{ .text = .{ .text = "", .truncated = false } } },
         },
     };
@@ -679,11 +675,14 @@ test "file results preserve source descriptions and asynchronous omissions" {
     try std.testing.expectEqualSlices(u8, file.bytes, result.parts[1].file.bytes);
     const source = try std.json.parseFromSliceLeaky(std.json.Value, a, result.parts[0].text, .{});
     const stdout = source.object.get("result").?.object.get("stdout").?.object;
-    try std.testing.expectEqualStrings("/logs/stdout", stdout.get("path").?.string);
+    try std.testing.expectEqualStrings("/logs/a b%20#?/stdout", stdout.get("path").?.string);
+    const log_uri = stdout.get("uri").?.string;
+    try std.testing.expectEqualStrings("file:///logs/a%20b%2520%23%3F/stdout", log_uri);
     try std.testing.expectEqual(@as(i64, @intCast(file.bytes.len)), stdout.get("content").?.object.get("file").?.object.get("byte_length").?.integer);
     observation.asynchronous = true;
     const callback = try observation.render(a);
     try std.testing.expectEqual(@as(usize, 1), callback.parts.len);
     const diagnostic = try std.json.parseFromSliceLeaky(std.json.Value, a, callback.parts[0].text, .{});
     try std.testing.expectEqualStrings("asynchronous_media_unavailable", diagnostic.object.get("result").?.object.get("media_omission").?.string);
+    try std.testing.expectEqualStrings(log_uri, diagnostic.object.get("result").?.object.get("stdout").?.object.get("uri").?.string);
 }

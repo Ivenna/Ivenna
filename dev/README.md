@@ -173,7 +173,7 @@ Keep the same instance directory and [load its configuration](#configuration) fo
 
 The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Check the [storage format requirements](../docs/running.md#updating-the-executable) before updating an existing instance. After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild both executables and restart it.
 
-To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Point any independent listeners at the new checkout's `zig-out/bin/ivenna-report`. Rebuild memory if its sources changed. The new checkout becomes the default directory for host commands.
+To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Point any independent listeners at the new checkout's `zig-out/bin/ivenna-report`. Rebuild memory if its sources changed. Launching from the new checkout makes it the starting directory for file browsing and host commands.
 
 ### Memory
 

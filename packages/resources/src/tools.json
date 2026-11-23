@@ -1,32 +1,46 @@
 [
   {
-    "name": "touch",
-    "description": "Look at a file or directory on the host without changing it. Text returns a byte range and a next offset; images and complete files return native content; a directory lists one level.",
+    "name": "read_resource",
+    "description": "Read a file or list a directory on this host, or view an image from an HTTP(S) URL.",
     "parameters": {
       "type": "object",
       "properties": {
-        "address": {
+        "uri": {
           "type": "string",
           "minLength": 1,
-          "description": "Path relative to the first configured root, or an absolute path inside any root."
+          "description": "Absolute URI of the resource, such as file:///srv/notes.md. Omit to use the kernel's startup directory."
         },
-        "offset": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0,
-          "description": "Byte offset for a text range. Must be 0 for images, complete files, and directories."
-        },
-        "max_bytes": {
-          "type": "integer",
-          "minimum": 4,
-          "maximum": 8388608,
-          "default": 262144,
-          "description": "Maximum text bytes to return. Images, complete files, and directories ignore it."
+        "view": {
+          "default": {},
+          "description": "Omit to read from the beginning. Text and directories are read in windows. Recognized local media is read whole.",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "UTF-8 byte offset in text or entry index in a directory. If result.next_offset is non-null, use it with result.uri to continue."
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Requested number of text bytes or directory entries. Each text window preserves whole characters."
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            {
+              "type": "string",
+              "enum": ["image"],
+              "description": "View the whole image. A local image supplies its bytes. For a remote image, the tool passes the URL to the configured model service for retrieval."
+            }
+          ]
         }
       },
-      "required": [
-        "address"
-      ],
+      "required": [],
       "additionalProperties": false
     }
   }

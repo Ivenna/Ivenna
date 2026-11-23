@@ -75,7 +75,14 @@ pub fn main(init: std.process.Init) !u8 {
         .max_output_tokens = config.llm_max_output_tokens,
         .request_timeout_ms = config.llm_request_timeout_ms,
     };
-    var resource_tools = try resources.Resources.init(io, a, host_directory, config.resource_roots);
+    const fetcher: ?resources.DeepSeek = if (config.deepseek_api_key) |key| .{ .http = &client, .api_key = key } else null;
+    var resource_tools: resources.Resources = .{
+        .allocator = init.gpa,
+        .io = io,
+        .directory = host_directory,
+        .web = if (fetcher) |*service_client| service_client.reader() else null,
+    };
+    defer resource_tools.deinit();
     const shared_tools = [_]contracts.Tools{ try memory_client.tools(a), try resource_tools.tools(a) };
     const activity_tools = [_]contracts.Tools{try host_tools.tools(a)};
     var engine: agent.Engine = .{

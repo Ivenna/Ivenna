@@ -4,7 +4,9 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 ## Runtime requirements
 
-Install `ivenna` and `ivenna-report` from the same build in the same directory so the kernel can locate the reporter for host commands. Host commands run as the kernel's OS account. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+Install `ivenna` and `ivenna-report` from the same build in the same directory so the kernel can locate the reporter for host commands. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+
+Choose the kernel's OS account and filesystem mounts for the host data you want Ivenna to access. The core and activities can read regular files and directories with that account's permissions. Host commands also run as that account.
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
@@ -19,6 +21,7 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | Variable | Purpose | Default when unset |
 | --- | --- | --- |
 | `LLM_API_KEY` | Model API key | Required |
+| `DEEPSEEK_API_KEY` | DeepSeek Fetch credential for [web page access](#web-page-access) | Web page access disabled |
 | `LLM_BASE_URL` | Model API base URL | `https://api.deepseek.com` |
 | `LLM_MODEL` | Model name | `deepseek-flash` |
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `65536` |
@@ -38,13 +41,20 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
 | `DATA_DIR` | Persistent directory for the subscription database and host command output | Required |
-| `RESOURCE_ROOTS` | Colon-separated roots the `touch` tool may observe | None (`touch` reports `outside_scope`) |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
 `MAIL_AUTHORIZATION` takes precedence over username/password authentication. `SERVICE_ADDRESS` must contain a literal IP address and a nonzero port; keep the [mail readiness policy](#service-status-and-reception) aligned when changing it.
 
-Numeric kernel settings must be positive. Relative `DATA_DIR`, `MEMORY_SSH_CONFIG`, and `RESOURCE_ROOTS` paths resolve from the kernel's startup directory.
+Numeric kernel settings must be positive. Relative `DATA_DIR` and `MEMORY_SSH_CONFIG` paths resolve from the kernel's startup directory.
+
+### Web page access
+
+Set `DEEPSEEK_API_KEY` to let Ivenna read web pages. Opening a page sends the full URL, including its query string, to DeepSeek Fetch even when another service handles inference. To use one DeepSeek key for page reads and inference, assign it to both `DEEPSEEK_API_KEY` and `LLM_API_KEY`.
+
+DeepSeek bills each successful Fetch request that returns page content. Continuing through a retained copy of the page uses that copy without another Fetch request. See [web page snapshots](resources.md#web-pages) and [DeepSeek's billing terms](https://api-docs.deepseek.com/guides/search/#billing).
+
+Viewing an image by URL sends that URL to the configured model service. A service that supports remote images can retrieve the image even with web page access disabled. See [remote images](resources.md#remote-images).
 
 ### Model requests
 
@@ -134,7 +144,7 @@ The [local development setup](../dev/README.md#configuring-memory) packages this
 
 ## Starting the kernel
 
-`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` with no arguments from the directory you want host commands and the default resource root to use.
+`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` from the directory where you want file browsing and host commands to start by default.
 
 ```sh
 cd /path/to/workspace
@@ -234,6 +244,8 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
 | `<DATA_DIR>/subscriptions.sqlite3` | Subscription registrations, listener cursors, accepted report keys, and reports awaiting history admission |
 | Configured model-service account | Uploaded files and their service-side parsing results |
+
+Restarting the kernel clears its web page snapshots. Saved tool results retain the excerpts already read. Reaching an unread passage requires fetching the source URL again, and the page may have changed. See [web page snapshots](resources.md#web-pages).
 
 Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
 

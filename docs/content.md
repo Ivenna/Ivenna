@@ -1,20 +1,39 @@
 # Tool content
 
-Memory reads, resource reads, and host tool results combine an operation description with text, image, or file content. This guide defines shared classification, image references, omission diagnostics, and model-request limits. The [memory](memory.md) and [host](host.md) guides define each tool's arguments, source fields, and continuation rules; the [input contract](input.md#retained-records) covers observations delivered as events.
+Tool results can carry text, images, or complete files into a focus's working history. For the source and reading options, see [resource reads](resources.md), [memory reads](memory.md#reading), and [host command output](host.md#output-and-results). For observations delivered as events, see the [input contract](input.md#retained-records).
 
 ## Automatic classification
 
-Text is valid UTF-8 without NUL bytes. Readers recognize JPEG, PNG, GIF, and WebP from byte signatures; recognition does not decode pixels or validate the complete image. Other binary content is supplied as a file. A PDF header also selects file handling when the remaining bytes would qualify as text. Filenames and URL suffixes do not select a content type.
+Readers recognize JPEG, PNG, GIF, and WebP images by their byte signatures. This identifies the format before any pixels are decoded. A PDF header selects a file attachment even when the rest of the file is valid text. For other bytes, readers return UTF-8 text when it contains no NUL bytes and a file attachment when they encounter binary content.
 
-Text can be returned in bounded ranges or previews. Its classification covers only the bytes read; omitted bytes may contain binary content. Images and files are supplied from complete sources: memory entries or final host stdout. An image or PDF header, or binary content in a selected text range or preview, selects complete-source reading.
+Classification covers the bytes inspected. A text window can therefore return text even though a later window reveals binary data. Once a reader recognizes media in a host file, memory entry, or completed command's stdout, it returns the whole image or file, subject to the source size limit.
 
-Readers limit each image or file source to 32 MiB. Host stderr and running output supply only text or an unavailable-content diagnostic. Host [input modes](host.md#input-modes) determine whether streams are separate and whether terminal processing can alter their bytes.
+Host stderr and running output supply a text preview or an unavailable-content diagnostic. The command's input mode determines whether streams are separate and whether terminal processing can alter their bytes. See [host input modes](host.md#input-modes).
+
+## Content and results
+
+The text part describes the operation and its source. A resource read identifies the resource by URI, a memory read by entry address, and a command result by its state and log references. When the tool supplies media, the description identifies a separate content part.
+
+| Description | Fields | Native part |
+| --- | --- | --- |
+| `image.data` | `format` and `byte_length` | Encoded image bytes |
+| `image.url` | Empty object | The supplied URL |
+| `file` | `byte_length` | Complete source bytes |
+
+When a source exceeds its size limit or a text-only stream contains binary data, the reader returns an `unavailable` description with the `byte_length` and reason.
+
+| Reason | Meaning |
+| --- | --- |
+| `unsupported_binary` | Binary bytes were encountered in a result that can only supply text, such as stderr or running output |
+| `image_too_large` | Recognized image data exceeds 32 MiB |
+| `reference_too_large` | The source selected for image-reference interpretation exceeds 16 KiB |
+| `file_too_large` | A source to be supplied as a complete file exceeds 32 MiB |
+
+The surrounding result identifies whether the diagnostic concerns a complete source or a selected range. It preserves the operation outcome and the reference to the source.
 
 ## Complete files
 
-Files contain the complete source bytes, independently of text page or preview budgets. A binary range is never supplied as though it were the whole file. Omit `interpretation` when reading a file; the [memory](memory.md#reading) and [host](host.md#output-and-results) guides show the ordinary read operations.
-
-The configured model service owns file format recognition and parsing. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for supported inputs, parsing behavior, and service limits.
+The adapter uploads a new file attachment to the configured model service for parsing and uses the returned file reference in the model request. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for supported inputs, parsing behavior, and service limits.
 
 If the upload ends without a usable reference, a JSON text part replaces the attachment. It gives the original `file.byte_length` and an `error` with a code and message. Other parts still describe the operation, including the exit status and log paths of a completed host command.
 
@@ -27,32 +46,9 @@ See [upload handling](architecture.md#tool-results) for how the adapter handles 
 
 ## Image URL references
 
-A URL remains text unless `interpretation: "image_url"` is set on the read or command. This presents the complete nonempty text as one image URL reference, with a 16 KiB source limit. Ivenna preserves the text without validating URL syntax or fetching the media. A partial text range is never used as an image reference.
+For an HTTP(S) image reference that passes the [model request checks](#model-request-checks), the adapter sends the URL to the configured model service for retrieval. A focus can supply the URL directly through the image view in [resource reads](resources.md#remote-images).
 
-Recognized images and files retain their native representation, and empty output remains text. The [model request checks](#model-request-checks) can omit a reference before inference; references that pass are handled by the model service. The tool-specific requirements and examples are in [memory reads](memory.md#reading) and [host results](host.md#output-and-results).
-
-## Content and results
-
-A tool result contains text describing the operation and its source. Images and complete files add a native content part alongside that description. Memory results identify the entry address, resource results identify the canonical host path, and host results preserve command state and log paths, including on nonzero exits and timeouts.
-
-Media descriptions accompany their native content:
-
-| Description | Fields | Native part |
-| --- | --- | --- |
-| `image.data` | `format` and `byte_length` | Encoded image bytes |
-| `image.url` | Empty object | The supplied URL |
-| `file` | `byte_length` | Complete source bytes |
-
-Content that cannot be supplied has an `unavailable` description with `byte_length` and one reason:
-
-| Reason | Meaning |
-| --- | --- |
-| `unsupported_binary` | Binary bytes were encountered in a result that can only supply text, such as stderr or running output |
-| `image_too_large` | Recognized image data exceeds 32 MiB |
-| `reference_too_large` | The source selected for image-reference interpretation exceeds 16 KiB |
-| `file_too_large` | A source to be supplied as a complete file exceeds 32 MiB |
-
-The surrounding result identifies whether the diagnostic concerns a complete source or a selected range. An unavailable-content diagnostic leaves the operation outcome and stored source intact. The [memory](memory.md#results-and-errors) and [host](host.md#output-and-results) guides define those source descriptions.
+A memory entry or a command's final stdout can itself contain an image URL. With `interpretation: "image_url"`, the reader passes the entire nonempty text as one reference if it fits the source limit. Empty output stays text, and recognized images and files keep their native representation. See [source limits](#content-and-results), [memory reads](memory.md#reading), and [host results](host.md#output-and-results).
 
 ## Model request checks
 
@@ -65,7 +61,7 @@ The Responses adapter checks new media against these local limits while accounti
 | File references, including retained references | 20 |
 | Serialized request body, including history, tools, base64 images, and file references | 48 MiB |
 
-Image references supplied as text first pass the [16 KiB source limit](#image-url-references). Data URL references remain subject to this source limit and the serialized request byte limit; the HTTP(S) code point limit does not apply to them.
+A data URL read from memory or stdout counts toward both the source size limit and the serialized request size.
 
 The adapter omits new HTTP(S) image URL parts that exceed the code point limit, then keeps new images and files in order up to their count limits. Files beyond the count limit are omitted before upload. If the serialized request exceeds the byte limit, it omits new images from the end until the request fits or no new images remain. Each omitted part becomes a text part containing an `error` with code `content_limit`. The operation description, source, and other parts remain available.
 

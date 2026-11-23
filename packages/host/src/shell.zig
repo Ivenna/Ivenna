@@ -3,6 +3,7 @@ const process = @import("process.zig");
 const Reader = @import("reader.zig").Reader;
 const output = @import("output.zig");
 const content = @import("content");
+const FileUri = @import("agent_contracts").FileUri;
 const Allocator = std.mem.Allocator;
 
 /// Shell setup and retained output. Host owns command lifetimes and delivery.
@@ -33,19 +34,30 @@ pub const Shell = struct {
         content: Reader.FileContent,
         pub const Description = struct {
             path: []const u8,
+            uri: []const u8,
             byte_length: u64,
             range: ?Range,
             content: union(enum) { text: output.Preview, image: content.ImageContent.Description, file: content.File.Description, unavailable: content.Unavailable },
         };
-        pub fn describe(self: Stream) Description {
-            return .{ .path = self.path, .byte_length = self.byte_length, .range = self.range, .content = switch (self.content) {
-                .text => |text| .{ .text = text },
-                .image => |image| .{ .image = image.describe() },
-                .file => |file| .{ .file = file.describe() },
-                .unavailable => |diagnostic| .{ .unavailable = diagnostic },
-            } };
+        pub fn describe(self: Stream, a: Allocator) !Description {
+            const log = try logReference(a, self.path);
+            return .{
+                .path = log.path,
+                .uri = log.uri,
+                .byte_length = self.byte_length,
+                .range = self.range,
+                .content = switch (self.content) {
+                    .text => |text| .{ .text = text },
+                    .image => |image| .{ .image = image.describe() },
+                    .file => |file| .{ .file = file.describe() },
+                    .unavailable => |diagnostic| .{ .unavailable = diagnostic },
+                },
+            };
         }
     };
+    pub fn logReference(a: Allocator, path: []const u8) !struct { path: []const u8, uri: []const u8 } {
+        return .{ .path = path, .uri = try FileUri.fromPath(a, path, .file) };
+    }
     pub const Streams = struct { stdout: Stream, stderr: Stream };
     pub const Collection = enum { complete, initial, incremental };
     pub const Start = union(enum) { ready: Invocation, unavailable: anyerror };
