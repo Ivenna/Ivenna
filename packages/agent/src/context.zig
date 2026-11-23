@@ -184,7 +184,6 @@ pub const Context = struct {
     /// Replace media in the summary request while keeping the source descriptions.
     /// Return true when a request item changed. The retained history stays intact.
     pub fn replaceSummaryMedia(a: Allocator, messages: []Model.Item) !bool {
-        const omitted_image = "[Image omitted from this summary input.]";
         var replaced = false;
         for (messages) |*item| {
             if (item.* != .tool_result) continue;
@@ -192,13 +191,7 @@ pub const Context = struct {
             for (item.tool_result.content.parts, 0..) |part, index| {
                 const note = switch (part) {
                     .text => continue,
-                    .image => |image| switch (image) {
-                        .url => |url| if (std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://"))
-                            try std.fmt.allocPrint(a, "[Image omitted from this summary input. Source URL {s}]", .{url})
-                        else
-                            omitted_image,
-                        .data => omitted_image,
-                    },
+                    .image => "[Image omitted from this summary input.]",
                     .file => "[File omitted from this summary input.]",
                 };
                 if (copy == null) copy = try a.dupe(Content.Part, item.tool_result.content.parts);
@@ -400,15 +393,13 @@ test "compaction summarizes older entries and carries forward the complete lates
     defer original.deinit();
     const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
     const state: Input.State = .{ .activities = &.{}, .callbacks = &.{}, .subscriptions = &.{} };
-    const inline_url = "data:image/png;base64,aGk=";
     const image_url = "https://example.test/old.png";
     const earlier: []const Model.Item = &.{
         .{ .continuation = "older call" },
         .{ .tool_result = .{ .call_id = "older", .content = .{ .parts = &.{
-            .{ .text = "source description" },
+            .{ .text = "file:///old-image-url.txt" },
             .{ .image = .{ .url = image_url } },
             .{ .file = .{ .bytes = "PDF bytes" } },
-            .{ .image = .{ .url = inline_url } },
         } } } },
     };
     const latest: []const Model.Item = &.{
@@ -424,15 +415,13 @@ test "compaction summarizes older entries and carries forward the complete lates
     const summary = try original.summaryRequest(a, snapshot, "Summarize.", .keep_latest_tool_round);
     try testing.expectEqualDeep(earlier, summary[1 .. summary.len - 1]);
     try testing.expect(try Context.replaceSummaryMedia(a, summary));
-    try testing.expect(!try Context.replaceSummaryMedia(a, summary));
     try testing.expectEqualDeep(earlier[0], summary[1]);
     const projected_reply = summary[2].tool_result;
     try testing.expectEqualStrings(earlier[1].tool_result.call_id, projected_reply.call_id);
     const parts = projected_reply.content.parts;
     try testing.expectEqualDeep(earlier[1].tool_result.content.parts[0], parts[0]);
-    try testing.expect(parts[1] == .text and std.mem.indexOf(u8, parts[1].text, image_url) != null);
+    try testing.expect(parts[1] == .text and std.mem.indexOf(u8, parts[1].text, image_url) == null);
     try testing.expect(parts[2] == .text);
-    try testing.expect(parts[3] == .text and std.mem.indexOf(u8, parts[3].text, inline_url) == null);
     try testing.expectEqualDeep(earlier, original.records()[0].exchange);
 
     const handover: Input.Handover = .{

@@ -69,7 +69,7 @@ To view a screenshot from a letter or an illustration linked in Markdown, pass t
 {"location":"https://example.org/figures/weekly-rainfall","view":"image"}
 ```
 
-The result identifies the URL in `uri` and supplies it as an image reference. The model service retrieves the image during inference. Viewing it requires a reachable URL and a model with image support. See [image URL references](content.md#image-url-references).
+The tool identifies the original URL in `result.uri` and supplies an image reference. The model service can retrieve the image during inference when the URL is reachable, the model supports images, and the reference fits the [image URL limit](content.md#image-url-references).
 
 ## Failure results
 

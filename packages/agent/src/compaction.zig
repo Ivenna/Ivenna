@@ -12,9 +12,9 @@ pub const Rejection = union(enum) {
 
     pub fn description(self: Rejection, a: Allocator) ![]const u8 {
         return switch (self) {
-            .empty_summary => "The model returned an empty handover summary.",
-            .unexpected_tool_call => "The model returned tool calls for the handover summary.",
-            .too_large => |limit| a.print("The next request still exceeds its limit with this handover. {s}", .{try limit.description(a)}),
+            .empty_summary => "The handover summary was empty.",
+            .unexpected_tool_call => "The summary response included tool calls.",
+            .too_large => |limit| Engine.describeRequestLimit(a, "The next request with the proposed handover", limit),
         };
     }
 };
@@ -44,7 +44,7 @@ pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, sna
         else
             original_limit;
         if (remaining_limit) |limit|
-            return .{ .interrupted = try std.fmt.allocPrint(arena, "The summary request could not be sent. {s}", .{try limit.description(arena)}) };
+            return .{ .interrupted = try Engine.describeRequestLimit(arena, "The summary request", limit) };
     }
     var inference = switch (try engine.infer(arena, context.focus_id, request, retry)) {
         .ready => |result| result,

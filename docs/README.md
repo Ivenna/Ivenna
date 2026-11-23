@@ -16,7 +16,7 @@
 | Understand the project's goals and interface principles | [Design intent](design.md) |
 | Understand component ownership and how execution fits together | [Architecture guide](architecture.md) |
 | Change implementation and documentation, build from source, and validate work | [Development guide](development.md) |
-| Choose, run, and maintain automated tests | [Testing guide](testing.md) |
+| Run automated checks and validate behavior with running services | [Testing guide](testing.md) |
 
 ## Interface reference
 

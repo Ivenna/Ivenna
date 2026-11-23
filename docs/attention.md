@@ -109,7 +109,9 @@ One input can carry reports from several activities alongside other observations
 
 ## Interrupted reasoning
 
-An activity can pause when the runtime cannot fit its next request or the model service rejects a request or returns an unusable response. The core receives a [`focus_interrupted` observation](input.md#activity-interruptions) with the reason. The activity keeps its working history, queued observations, and registrations. A message from the core, a command completion, or a new subscription report can resume it.
+An activity can pause when its next request cannot fit, when the service rejects it, or when the response is unusable. The core receives a [`focus_interrupted` observation](input.md#activity-interruptions) with the reason. The activity keeps its working history, queued observations, and registrations. A message from the core, a command completion, or a new subscription report can resume it.
+
+If waiting observations make a request too large, the runtime can continue a tool exchange with a fitting request while those observations stay queued. See [how the runtime continues after compaction](architecture.md#continuing-with-a-handover).
 
 ## Activity completion
 

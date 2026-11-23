@@ -50,7 +50,7 @@ Keep mail identifiers, headers, folders, and thread grouping out of scheduling a
 
 Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
-The agent chooses tools and reasoning for each request and decides which history and observations to include. The model adapter prepares tool content, reports request measurements and limits, and checks the payload before sending it. Use the same encoder for measurement and inference without mutating a shared provider. See [bounded model context](architecture.md#bounded-model-context).
+The agent chooses tools and reasoning for each request and decides which history and observations to include. The model adapter prepares tool replies for retention, including file uploads. It also reports request measurements and limits, and checks the encoded payload before sending it. Share an encoder between measurement and inference and keep request-specific encoding separate from retained history and shared provider settings. See [bounded model context](architecture.md#bounded-model-context).
 
 ### Model-facing resources
 

@@ -19,7 +19,7 @@ When the reader identifies an oversized source, `content.unavailable` gives its 
 | Reason | Meaning |
 | --- | --- |
 | `image_too_large` | Image data exceeds 32 MiB |
-| `reference_too_large` | A source containing an image URL exceeds 16 KiB |
+| `reference_too_large` | A source opened as an image URL exceeds 16 KiB |
 | `file_too_large` | A file attachment exceeds 32 MiB |
 
 ## Complete files
@@ -37,21 +37,23 @@ See [upload handling](architecture.md#tool-results) for how the adapter handles 
 
 ## Image URL references
 
-An HTTP(S) image reference asks the model service to retrieve the image during inference. An image data URL already contains the image. If a command writes a data URL to a file, the focus can open the path in the image view. See [remote images](resources.md#remote-images), [local file views](resources.md#local-files-and-directories), and [image addresses in memory](memory.md#reading).
+An HTTP(S) image reference asks the model service to retrieve the image during inference. An image data URL contains encoded image data. A data URL opened from a file or memory counts toward the reader's reference limit and the encoded request size. See [remote images](resources.md#remote-images), [local file views](resources.md#local-files-and-directories), and [image addresses in memory](memory.md#reading).
 
-When preparing a new tool reply, the adapter replaces an HTTP(S) image URL longer than 8192 Unicode code points with a `content_limit` result part. The result still identifies the source. An image data URL opened from a file or memory counts toward both the reader's reference limit and the encoded request size.
+For each HTTP(S) image URL longer than 8192 Unicode code points, the adapter sends a JSON text part in place of the image. Its `error` object contains `code: "content_limit"`, a `message`, `omitted_images: 1`, the measured length in `actual`, the allowed length in `maximum`, and `unit: "unicode_code_points"`. The tool's source description stays alongside the notice, and working history retains the original URL.
 
 ## Model request checks
 
-The Responses adapter checks the complete request, including retained and newly produced tool results. See DeepSeek's [image limits](https://api-docs.deepseek.com/guides/vision/#limits) and [document parsing limits](https://api-docs.deepseek.com/guides/document_parsing/).
+The Responses adapter checks the complete encoded request, including retained and newly produced tool results.
 
 | Check | Limit |
 | --- | --- |
-| Inline images and image URL references | 600 |
+| Image parts sent in the request | 600 |
 | File references | 20 |
 | Encoded request body | 48 MiB |
 
-Compaction can make room for the latest complete tool exchange. A summary can use descriptions in place of media when its request exceeds a limit. If the ordinary request still cannot fit, the focus pauses with its saved tool results intact. See [how compaction works](architecture.md#bounded-model-context).
+The model service also checks limits that depend on processed input. A file reference may expand into text and images that count toward those limits. See DeepSeek's [image limits](https://api-docs.deepseek.com/guides/vision/#limits) and [document input limits](https://api-docs.deepseek.com/guides/document_parsing/#step-2-reference-a-document-in-chat).
+
+Compaction can make room for the latest complete tool exchange. If the kernel still cannot assemble an ordinary request within the adapter's limits, the focus pauses with its saved tool results intact. See [how compaction works](architecture.md#bounded-model-context).
 
 ## Context and continuity
 

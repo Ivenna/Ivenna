@@ -47,17 +47,6 @@ pub const Limit = struct {
     kind: enum { request_bytes, images, files },
     actual: u64,
     maximum: u64,
-
-    pub fn description(self: Limit, a: Allocator) ![]const u8 {
-        const units = switch (self.kind) {
-            .request_bytes => "encoded bytes",
-            .images => "images",
-            .files => "file references",
-        };
-        return std.fmt.allocPrint(a, "The model request exceeds the adapter limit by {d} {s} ({d} measured, {d} allowed).", .{
-            self.actual -| self.maximum, units, self.actual, self.maximum,
-        });
-    }
 };
 
 /// Size of the encoded request and the first known adapter limit it violates.

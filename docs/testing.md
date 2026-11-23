@@ -38,22 +38,24 @@ The email adapter tests use a local HTTP server to drop connections and count th
 
 The email, Responses, and web page reader tests check that canceling a stalled HTTP exchange closes the connection. The [local server](../tests/http.zig) detects further request bytes or a connection left open. Measuring how many bytes reach a TLS peer requires exercising the [request writer](architecture.md#model-transport) against a local HTTPS server.
 
-The [web reader tests](../packages/resources/src/web_test.zig) check that two focuses can read the same page snapshot with one fetch. The [Responses tests](../packages/responses/src/provider_test.zig) check what the next inference receives after a file upload fails and whether the adapter repeats an upload whose outcome is uncertain.
+The [web reader tests](../packages/resources/src/web_test.zig) check that two focuses can read the same page snapshot with one fetch. The [Responses tests](../packages/responses/src/provider_test.zig) compare measured request sizes with bodies sent over loopback HTTP. They also check what the next inference receives after a file upload fails and whether the adapter repeats an upload whose outcome is uncertain.
 
-The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The session registry tests use a history store that can report a failed save after receiving the checkpoint. They check that activity completion publishes once and that a later maintenance pass republishes the same selection when confirmation was lost.
+The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The [kernel tests](../packages/agent/src/kernel.zig) also check that a complete tool exchange can reach the next request across a handover and that an observation stays pending when it cannot fit. The session registry tests inject a save failure after receiving a checkpoint to check that activity completion publishes once and a later maintenance pass republishes the same selection when confirmation was lost.
 
 The CLI tests invoke both executables in an empty environment to verify that help works before configuration. For a mistyped reporter command, they check the JSON receipt on stdout and the diagnostic on stderr.
-
-For process restart and communication through the configured services, exercise the running application in the [local development environment](../dev/README.md). See [validation across runtime boundaries](development.md#validation).
-
-### Evaluating compaction
-
-When evaluating a change to [context settings](running.md#context-budgets), replay representative work from the same starting history with the deployed model in a test instance. Check whether the focus carries a commitment and a correction through a handover, can find the original evidence, and resumes an activity when its callback or subscription report arrives.
-
-The kernel advances the [focus's saved epoch](architecture.md#persistent-working-history) when it commits a handover. Compare epoch changes across runs and check stderr for requests that interrupt a focus.
 
 ### Subscription delivery
 
 - **Listener process.** Each request runs the reporter in a separate process against a temporary on-disk catalog. The tests check receipts and exit status for publication, same-key retries, cursor changes, invalid fields, and publication after withdrawal. See the [reporter process tests](../apps/ivenna-report/src/report_test.zig).
 - **Subscription store.** Two SQLite connections exercise publication and withdrawal. The tests check that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. See the [store tests](../packages/subscriptions/src/root.zig).
 - **Focus history.** The kernel tests cover ordered admission across pages, later arrivals, tight request limits, interrupted admission, and withdrawal of a sleeping activity's last subscription. To exercise recovery, they inject a failure before checkpoint commit or a lost confirmation after commit. In each case they rebuild the kernel against the same test history store and in-memory SQLite catalog and check that the receiving history contains the report exactly once. See the [kernel tests](../packages/agent/src/kernel.zig).
+
+## Validating with running services
+
+For process restart and communication through the configured services, exercise the running application in the [local development environment](../dev/README.md). See [validation across runtime boundaries](development.md#validation).
+
+### Evaluating compaction
+
+To compare [context settings](running.md#context-budgets), replay representative work from the same starting history with the deployed model in a test instance. After a handover, check whether the focus carries a commitment and a correction forward and can find the original evidence. Check that an activity resumes when its callback or subscription report arrives.
+
+The kernel advances the [focus's saved epoch](architecture.md#persistent-working-history) when it commits a handover. Compare epoch changes across runs and check stderr for interruptions.

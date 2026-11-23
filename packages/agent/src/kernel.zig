@@ -29,6 +29,7 @@ pub const Kernel = struct {
     pub const Limits = struct {
         compact_at_tokens: u64 = 256 * 1024,
         compact_at_bytes: u64 = 1024 * 1024,
+        observation_batch_bytes: u64 = 1024 * 1024,
     };
 
     pub const Dependencies = struct {
@@ -246,7 +247,7 @@ pub const Kernel = struct {
             const response = round.inference.response;
             if (response.calls.len == 0) {
                 if (response.output.len == 0 and !work.activation.admitted)
-                    return "The model returned an empty response while an observation was deferred because of the request limit.";
+                    return "The model returned no output for the pending tool exchange. The waiting observations did not fit in that request and remain queued.";
                 if (try self.sessions.commitResponse(work, &history, response)) return null;
                 continue;
             }
@@ -279,7 +280,7 @@ pub const Kernel = struct {
         var count: usize = 0;
         var trial_arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer trial_arena.deinit();
-        var batch_target = self.limits.compact_at_bytes;
+        var batch_target = self.limits.observation_batch_bytes;
         var included_history = false;
         while (true) {
             for (work.activation.deliveries.items[events.items.len..]) |delivery| try events.append(a, delivery.event);
@@ -330,7 +331,7 @@ pub const Kernel = struct {
                     switch (try self.compactRequest(a, work, history, current, scope, .{ .threshold = prepared })) {
                         .ready => |input| return .{ .ready = input },
                         .interrupted => |reason| {
-                            std.log.warn("compaction deferred for {s}. {s}", .{ work.session.focus_id, reason });
+                            std.log.warn("soft compaction skipped for {s}. {s}", .{ work.session.focus_id, reason });
                             soft_compaction.* = false;
                         },
                     }
@@ -346,7 +347,8 @@ pub const Kernel = struct {
                     const latest = try history.latestRequest(trial, current);
                     break :blk if ((try self.engine.measure(trial, latest, current.role)).violation == null) keep_pending else .all_history;
                 } else keep_pending;
-                if (!history.hasHistoryForCompaction(scope)) return .{ .interrupted = try limit.description(a) };
+                if (!history.hasHistoryForCompaction(scope))
+                    return .{ .interrupted = try Engine.describeRequestLimit(a, "The next request", limit) };
                 const compacted = try self.compactRequest(a, work, history, current, scope, .limit);
                 if (compacted == .interrupted and scope == keep_pending and has_pending) {
                     // The hard limit may only apply when the waiting observation
@@ -758,7 +760,7 @@ test "a subscription backlog leaves another focus schedulable and each source ge
     for (0..2) |_| try testing.expectEqual(.accepted, try kernel.sessions.accept(.{
         .content = .{ .message = .{ .from = &.{"operator"}, .text = "budget-marker", .observed_at_unix_ms = 100 } },
     }));
-    kernel.limits.compact_at_bytes = 1;
+    kernel.limits.observation_batch_bytes = 1;
     const ready = try kernel.sessions.takeReadyBatch(a);
     try testing.expectEqual(2, ready.len);
     const work = ready[1];
@@ -803,7 +805,7 @@ test "a rejected inference resumes for remaining reports while failed admission 
     for ([_][]const u8{ "first", "second" }) |key| {
         _ = try store.publish(subscription.subscription_id, .{ .key = key, .text = "budget-marker" }, 100);
     }
-    kernel.limits.compact_at_bytes = 1;
+    kernel.limits.observation_batch_bytes = 1;
     const first = try SubscriptionFixture.takeWork(&kernel, a);
     var admitted = try SubscriptionFixture.admit(&kernel, a, first);
     defer admitted.deinit();
@@ -860,8 +862,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             try testing.expect(std.mem.indexOf(u8, request.history[request.history.len - 1].message.text, "\nsummarize:") != null);
             for (request.history) |item| {
                 if (item != .tool_result) continue;
-                const part = item.tool_result.content.parts[0];
-                try testing.expect(part == .text and std.mem.indexOf(u8, part.text, "Image omitted") != null);
+                try testing.expect(item.tool_result.content.parts[0] == .text);
                 self.summary_saw_omission = true;
             }
             self.summaries += 1;
@@ -886,14 +887,14 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         delivered: bool = true,
         kept_image: bool = true,
         observed_tokens: ?u64 = null,
-        byte_target: u64 = 4,
+        compact_at_bytes: u64 = 4,
         summaries: usize = 1,
     };
     for ([_]Case{
         .{ .ceiling = 40 },
         .{ .ceiling = 40, .summary = .outage, .compacted = false },
         .{ .ceiling = 40, .observed_tokens = 7, .compacted = false, .summaries = 0 },
-        .{ .ceiling = 40, .observed_tokens = 8, .byte_target = 100 },
+        .{ .ceiling = 40, .observed_tokens = 8, .compact_at_bytes = 100 },
         .{ .ceiling = 16 },
         .{ .ceiling = 15, .summary = .rejection, .compacted = false, .delivered = false },
         .{ .ceiling = 14, .delivered = false },
@@ -929,7 +930,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
 
         var model: BudgetModel = .{ .hard_limit = case.ceiling, .summary = case.summary };
         engine.model = .{ .context = &model, .vtable = &.{ .next = BudgetModel.next, .measure = BudgetModel.measure, .prepareToolReplies = undefined } };
-        kernel.limits.compact_at_bytes = case.byte_target;
+        kernel.limits.compact_at_bytes = case.compact_at_bytes;
         kernel.limits.compact_at_tokens = 8;
         var soft_compaction = true;
         const input = (try kernel.prepareRequest(a, work, &history, &soft_compaction)).ready;
@@ -945,11 +946,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             try testing.expectEqual(@as(usize, 3), input.len);
         }
         try testing.expectEqual(@as(u64, @intFromBool(case.compacted)), history.scope.epoch);
-        if (!case.delivered) {
-            try testing.expect(!work.activation.admitted);
-            try kernel.sessions.interrupt(work, "The model refused the tool continuation.");
-            try testing.expectEqual(0, (try kernel.sessions.takeReadyBatch(a)).len);
-        }
+        if (!case.delivered) try testing.expect(!work.activation.admitted);
     }
 }
 

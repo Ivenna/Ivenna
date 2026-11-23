@@ -221,7 +221,7 @@ Each event carries the reference returned by the tool that arranged it. The rele
 
 ## Handover generation and replacement
 
-A compaction request contains the common system prompt, the history to summarize, and a turn with `current` and `summarize`. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary. Tools are disabled, and observations awaiting admission stay queued. Tool results in this request can describe omitted attachments in place of the file or image parts. If the runtime requests a revised summary, `summarize.instructions` includes the reason for revision.
+A compaction request contains the common system prompt, the history to summarize, and a turn with `current` and `summarize`. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary. Tools are disabled, and observations awaiting admission stay queued. A tool result in this request can contain a short omission notice in place of an attachment. The result keeps its existing text, including any source description. If the runtime requests a revised summary, `summarize.instructions` includes the reason for revision.
 
 An accepted summary becomes a `handover` with the sampled state and observation time of that attempt. The next ordinary request presents the handover, any observations and complete exchanges carried forward from the earlier history, and a turn with the focus's current identity, time, and newly admitted events.
 

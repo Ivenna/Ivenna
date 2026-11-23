@@ -76,9 +76,9 @@ pub const Engine = struct {
                 },
                 .rejected => |rejection| {
                     const reason = switch (rejection) {
-                        .limit => |limit| try limit.description(a),
+                        .limit => |limit| try describeRequestLimit(a, "The model request", limit),
                         .request_rejected => |detail| if (detail.context_length)
-                            try a.print("The model service reported that the request exceeded the model's context window (HTTP {d}).", .{detail.status})
+                            try a.print("The model service rejected the request for exceeding the context window (HTTP {d}).", .{detail.status})
                         else
                             try a.print("The model service rejected the inference request (HTTP {d}).", .{detail.status}),
                         .invalid_response => "The runtime could not read a usable model response.",
@@ -101,6 +101,17 @@ pub const Engine = struct {
                 },
             }
         }
+    }
+
+    pub fn describeRequestLimit(a: Allocator, request_description: []const u8, limit: Model.Limit) ![]const u8 {
+        const units = switch (limit.kind) {
+            .request_bytes => "encoded bytes",
+            .images => "images",
+            .files => "file references",
+        };
+        return a.print("{s} has {d} {s}, which exceeds the adapter's limit of {d} by {d}.", .{
+            request_description, limit.actual, units, limit.maximum, limit.actual -| limit.maximum,
+        });
     }
 
     /// Execute and prepare the decoded batch in order. Replies belong to a.

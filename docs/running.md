@@ -29,7 +29,8 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
 | `DEEPSEEK_API_KEY` | DeepSeek Fetch credential for [web page access](#web-page-access) | Web page retrieval disabled |
 | `CONTEXT_COMPACT_AT_TOKENS` | Input-token threshold for compaction | `262144` |
-| `CONTEXT_COMPACT_AT_BYTES` | Observation batch size and fallback threshold for compaction, in encoded bytes | `1048576` (1 MiB) |
+| `CONTEXT_COMPACT_AT_BYTES` | Fallback threshold for compaction, in encoded request bytes | `1048576` (1 MiB) |
+| `CONTEXT_OBSERVATION_BATCH_BYTES` | Target for the encoded bytes a batch of observations adds to a request | `1048576` (1 MiB) |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | URL for [JMAP session discovery](#mail-service) | `http://127.0.0.1:8088/jmap/session` |
 | `MAIL_ADDRESS` | Kernel address and sending identity; its domain resolves correspondent IDs | Required |
@@ -54,7 +55,7 @@ Set `DEEPSEEK_API_KEY` to let `read_resource` fetch web pages as Markdown. DeepS
 
 Opening the original URL again starts a new Fetch request. DeepSeek charges for each successful request that returns page content. To read another passage from the same copy, use the returned snapshot URI. See [web page snapshots](resources.md#web-pages) and [DeepSeek's billing terms](https://api-docs.deepseek.com/guides/search/#billing).
 
-Viewing an image by URL sends that URL to the configured model service. A service that supports remote images can retrieve the image even with web page access disabled. See [remote images](resources.md#remote-images).
+Ivenna sends supported image references to the configured model service for retrieval. The image view works with web page retrieval disabled. See [remote images](resources.md#remote-images).
 
 ### Model requests
 
@@ -66,13 +67,15 @@ Choose an ordinary reasoning effort for each role from the values supported by y
 
 ### Context budgets
 
-For each focus, `CONTEXT_COMPACT_AT_TOKENS` uses the reported input tokens from the last successful ordinary request, including cached input. When that count is unavailable, `CONTEXT_COMPACT_AT_BYTES` sets the threshold for an encoded request with older working history. It also caps the space added by a batch of new observations. The first observation can exceed that batch target if the full request fits the adapter's limits. See [what compaction measures](architecture.md#when-compaction-runs).
+Each focus compares the input-token count from its last successful ordinary request, including cached input, with `CONTEXT_COMPACT_AT_TOKENS`. When no count is available, `CONTEXT_COMPACT_AT_BYTES` applies to the encoded request containing the older history eligible for compaction. See [what compaction measures](architecture.md#when-compaction-runs).
 
-For a smaller model with a shared input and output window, choose an output cap that leaves room for input. As a starting point, set the compaction threshold to about three quarters of the window left after reserving `LLM_MAX_OUTPUT_TOKENS`, up to the default token threshold. Evaluate continuity and compaction frequency on your workload. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/) and [evaluating compaction](testing.md#evaluating-compaction).
+`CONTEXT_OBSERVATION_BATCH_BYTES` sets the target for encoded bytes added by a batch of new observations. The first observation can exceed that target if the full request fits the adapter's limits. See [how observations are admitted](architecture.md#activation-admission).
 
-The Responses adapter caps the encoded request size and attachment counts. The model service can still reject a request that exceeds its token window after processing the input. See [model request checks](content.md#model-request-checks).
+For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKENS` for output. Set the compaction threshold below the remaining input space, leaving room for a complete tool exchange and incoming observations. Evaluate continuity and compaction frequency on representative work. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/) and [evaluating compaction](testing.md#evaluating-compaction).
 
-If a threshold triggers compaction and the handover cannot be used, the focus continues with its original request. If the kernel still cannot assemble a request within adapter limits, the focus waits with its history and unadmitted observations intact. See [handover outcomes](architecture.md#continuing-with-a-handover).
+The [model request limits](content.md#model-request-checks) apply to the complete encoded request. The model service checks its own limits after processing the input.
+
+When compaction is optional and a usable handover cannot be prepared, the original request can proceed while it fits. If the kernel cannot assemble a request within the adapter's limits, the focus waits with its history and any unadmitted observations intact. See [handover outcomes](architecture.md#continuing-with-a-handover).
 
 ### Session and command capacity
 
@@ -196,6 +199,8 @@ If the kernel cannot read or confirm required mailbox state, it closes reception
 ### When model work stalls
 
 To follow a focus, look for its ID in the kernel's standard error. `retrying inference` gives the wait before its next attempt. `inference resumed` means a retry returned a model response. An `interrupted` message gives the reason the focus paused. A retry alone leaves the [checkpoint revision](#working-history) unchanged. Other focuses can advance it while this one waits.
+
+For inference HTTP errors, the adapter logs the status and the service's request ID when available. It also logs a usable error code from an HTTP 400 or 429 response. Include the request ID when contacting the model provider about a rejection.
 
 - **Temporary outage.** The kernel retries ordinary inference and summaries needed to resolve a hard limit. During soft compaction, a temporary failure returns control to the ordinary request. The first retry wait is 250–500 milliseconds. The range doubles after each failure up to 2.5–5 minutes. A longer delay requested by the service in `Retry-After` takes precedence. Retries reuse completed tool results. A lost model response can still incur charges.
 - **Interrupted focus.** A rejected request or an unusable response pauses the focus with its history intact. This includes letters saved and acknowledged before inference, even if the model service rejects the request for exceeding its token window. Another observation can resume the focus, and the core receives a notice if an activity was interrupted. If HTTP 403 or 404 recurs across focuses, check model access and `LLM_BASE_URL`.
