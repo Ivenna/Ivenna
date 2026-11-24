@@ -4,12 +4,28 @@ const Input = @import("input.zig");
 const Time = @import("time.zig");
 const Allocator = std.mem.Allocator;
 
+pub const Destination = union(enum) {
+    correspondent_id: []const u8,
+    focus_id: []const u8,
+    feed_id: []const u8,
+
+    fn parse(value: std.json.Value) !Destination {
+        if (value != .object or value.object.count() != 1) return error.InvalidToolArguments;
+        const tag = std.meta.stringToEnum(std.meta.Tag(Destination), value.object.keys()[0]) orelse return error.InvalidToolArguments;
+        const id = try string(value.object.values()[0]);
+        return switch (tag) {
+            inline else => |active| @unionInit(Destination, @tagName(active), id),
+        };
+    }
+};
+
 /// Agent-owned actions share one definition for recognition, arguments, and role
 /// selection. Kernel owns their effects within the calling model/tool round.
 pub const Request = union(enum) {
-    send_message: contracts.Communication.Message,
+    send: struct { to: Destination, text: []const u8 },
+    create_feed: struct { name: []const u8, description: []const u8 },
+    close_feed: struct { feed_id: []const u8 },
     open_focus: struct { name: []const u8, task: []const u8 },
-    send_focus_message: struct { focus_id: []const u8, text: []const u8 },
     schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
     subscribe: struct { name: []const u8, listener: []const u8 },
     withdraw_subscription: struct { subscription_id: []const u8 },
@@ -24,14 +40,13 @@ pub const Request = union(enum) {
             else => return error.InvalidToolArguments,
         };
         const request: Request = switch (tag) {
-            inline else => |active| @unionInit(Request, @tagName(active), try parseArguments(@FieldType(Request, @tagName(active)), a, value)),
+            inline else => |active| @unionInit(Request, @tagName(active), try parseArguments(@FieldType(Request, @tagName(active)), value)),
         };
         switch (request) {
-            .send_message => |args| if (args.recipients.len == 0 or args.text.len == 0) return error.InvalidToolArguments,
+            .send => |args| if (args.text.len == 0) return error.InvalidToolArguments,
+            .create_feed, .close_feed, .subscribe => {},
             .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
-            .send_focus_message => |args| if (args.focus_id.len == 0 or args.text.len == 0) return error.InvalidToolArguments,
             .schedule_attention => |args| if (!contracts.Reference.validName(args.name) or args.text.len == 0) return error.InvalidToolArguments,
-            .subscribe => {},
             .withdraw_subscription => |args| if (args.subscription_id.len == 0) return error.InvalidToolArguments,
         }
         return request;
@@ -44,21 +59,16 @@ fn string(value: std.json.Value) ![]const u8 {
 
 // Tool references and text are JSON strings. Decoding directly into a Zig
 // byte slice would also accept an array of integers as the same reference.
-fn parseArguments(comptime T: type, a: Allocator, value: std.json.Value) !T {
+fn parseArguments(comptime T: type, value: std.json.Value) !T {
     const fields = @typeInfo(T).@"struct";
     if (value != .object or value.object.count() != fields.field_names.len) return error.InvalidToolArguments;
     var result: T = undefined;
     inline for (fields.field_names, fields.field_types) |name, Field| {
-        const argument = value.object.get(name) orelse return error.InvalidToolArguments;
+        const present = value.object.get(name) orelse return error.InvalidToolArguments;
         @field(result, name) = switch (Field) {
-            []const u8 => try string(argument),
-            Time.Instant => Time.parse(try string(argument)) catch return error.InvalidToolArguments,
-            []const []const u8 => items: {
-                if (argument != .array) return error.InvalidToolArguments;
-                const items = try a.alloc([]const u8, argument.array.items.len);
-                for (items, argument.array.items) |*item, element| item.* = try string(element);
-                break :items items;
-            },
+            []const u8 => try string(present),
+            Destination => try Destination.parse(present),
+            Time.Instant => Time.parse(try string(present)) catch return error.InvalidToolArguments,
             else => @compileError("unsupported tool argument type: " ++ @typeName(Field)),
         };
     }
@@ -67,8 +77,8 @@ fn parseArguments(comptime T: type, a: Allocator, value: std.json.Value) !T {
 
 fn available(tag: std.meta.Tag(Request), role: Input.Role) bool {
     return switch (tag) {
-        .send_message, .subscribe, .withdraw_subscription => true,
-        .open_focus, .send_focus_message, .schedule_attention => role == .core,
+        .send, .create_feed, .close_feed, .subscribe, .withdraw_subscription => true,
+        .open_focus, .schedule_attention => role == .core,
     };
 }
 
@@ -88,5 +98,13 @@ test "a subscription reference must be supplied as a JSON string" {
     defer arena.deinit();
     try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "withdraw_subscription",
         \\{"subscription_id":[102,101,101,100,45,49]}
+    ));
+}
+
+test "send rejects a call that selects two destinations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "send",
+        \\{"to":{"focus_id":"core-1","feed_id":"core-1"},"text":"Hello"}
     ));
 }

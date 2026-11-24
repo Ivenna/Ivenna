@@ -348,12 +348,17 @@ test "encoded native exchanges restore independently of their source buffers" {
 }
 
 test "candidate handover retains sampled references and leaves earlier history available" {
+    var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
     var original = try Context.init(std.testing.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
     defer original.deinit();
     try original.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Keep working on our plan.", .observed_at_unix_ms = 100 } }} } });
     var activity_id = "practice-2".*;
     var command_id = "inspect-7".*;
     var subscription_id = "releases-4".*;
+    var feed_id = "public-3".*;
+    var correspondent_id = "reviewer+notes".*;
     const handover: Input.Handover = .{
         .focus_id = "core-1",
         .observed_at_unix_ms = 900,
@@ -362,13 +367,19 @@ test "candidate handover retains sampled references and leaves earlier history a
             .activities = &.{&activity_id},
             .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = &command_id } } }},
             .subscriptions = &.{&subscription_id},
+            .feeds = &.{&feed_id},
+            .correspondents = &.{&correspondent_id},
         },
     };
+    const current: Input.Current = .{ .focus_id = handover.focus_id, .role = .core, .observed_at_unix_ms = 900 };
+    const summary = try original.summaryRequest(a, .{ .current = current, .state = handover.state }, "Summarize.", .keep_latest_tool_round);
     var replacement = try original.withHandover(std.testing.allocator, handover, .keep_latest_tool_round);
     defer replacement.deinit();
     @memset(&activity_id, 0);
     @memset(&command_id, 0);
     @memset(&subscription_id, 0);
+    @memset(&feed_id, 0);
+    @memset(&correspondent_id, 0);
 
     try std.testing.expectEqual(@as(usize, 1), original.records().len);
     try std.testing.expectEqualStrings("Keep working on our plan.", original.records()[0].record.events.items[0].input.text);
@@ -380,8 +391,15 @@ test "candidate handover retains sampled references and leaves earlier history a
         .activities = &.{"practice-2"},
         .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = "inspect-7" } } }},
         .subscriptions = &.{"releases-4"},
+        .feeds = &.{"public-3"},
+        .correspondents = &.{"reviewer+notes"},
     };
     try std.testing.expectEqualDeep(expected_state, retained.state);
+    const next = try replacement.request(a, current, &.{});
+    for ([_][]const u8{ summary[summary.len - 1].message.text, next[1].message.text }) |rendered| {
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "public-3") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "reviewer+notes") != null);
+    }
 }
 
 test "compaction summarizes older entries and carries forward the complete latest tool round" {

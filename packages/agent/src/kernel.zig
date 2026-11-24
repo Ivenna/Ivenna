@@ -8,6 +8,9 @@ const Input = @import("input.zig");
 const AgentTools = @import("tools.zig");
 const Sessions = @import("sessions.zig");
 const contracts = @import("agent_contracts");
+const InstanceState = @import("instance_state");
+const Feeds = InstanceState.feeds;
+const Subscriptions = InstanceState.subscriptions;
 const Communication = contracts.Communication;
 const Model = contracts.Model;
 const Allocator = std.mem.Allocator;
@@ -21,6 +24,7 @@ pub const Kernel = struct {
     engine: *Engine,
     inbox: contracts.Inbox,
     sender: Communication.Sender,
+    feeds: *Feeds.Store,
     callbacks: contracts.Callback.Publisher,
     limits: Limits,
     poll_interval_ms: u32,
@@ -36,9 +40,10 @@ pub const Kernel = struct {
         engine: *Engine,
         inbox: contracts.Inbox,
         sender: Communication.Sender,
+        feeds: *Feeds.Store,
         callbacks: contracts.Callback.Publisher,
         history: contracts.HistoryStore,
-        subscriptions: *@import("subscriptions").Store,
+        subscriptions: *Subscriptions.Store,
     };
 
     pub const Config = struct {
@@ -55,10 +60,19 @@ pub const Kernel = struct {
             .engine = dependencies.engine,
             .inbox = dependencies.inbox,
             .sender = dependencies.sender,
+            .feeds = dependencies.feeds,
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
             .poll_interval_ms = config.poll_interval_ms,
-            .sessions = try Sessions.Registry.init(allocator, io, config.max_sessions, config.max_pending_events, dependencies.history, dependencies.subscriptions),
+            .sessions = try Sessions.Registry.init(
+                allocator,
+                io,
+                config.max_sessions,
+                config.max_pending_events,
+                dependencies.history,
+                dependencies.subscriptions,
+                dependencies.sender.registered_correspondents,
+            ),
         };
     }
 
@@ -189,22 +203,24 @@ pub const Kernel = struct {
         fn invoke(context: *anyopaque, a: Allocator, request: AgentTools.Request) anyerror!Content {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
             return switch (request) {
-                .send_message => |message| switch (try self.kernel.sender.send(a, message)) {
-                    .submitted => |submission| try runtimeResult(a, submission),
-                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "At least one recipient ID is unsupported. No message was submitted."),
-                    .not_submitted => try runtimeError(a, "not_submitted", "Preparation stopped before any attempt to submit this message."),
-                    .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
+                .send => |message| self.send(a, message.to, message.text),
+                .create_feed => |args| blk: {
+                    const id = self.kernel.feeds.create(a, self.work.session.focus_id, args.name, args.description) catch |err| return feedFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .feed_id = id });
                 },
-                .send_focus_message => |message| blk: {
-                    self.kernel.sessions.sendFocusMessage(self.work, message.focus_id, message.text) catch |err| return try toolFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .focus_id = message.focus_id });
+                .close_feed => |args| blk: {
+                    const changed = self.kernel.feeds.closeFeed(args.feed_id) catch |err| return feedFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .feed_id = args.feed_id, .changed = changed });
                 },
                 .schedule_attention => |args| blk: {
-                    const id = self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text) catch |err| return try toolFailure(a, err);
+                    const id = try self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text);
                     break :blk try runtimeResult(a, .{ .callback_id = id });
                 },
                 .subscribe => |args| blk: {
-                    const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.listener) catch |err| return toolFailure(a, err);
+                    const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.listener) catch |err| switch (err) {
+                        error.InvalidArguments => return error.InvalidToolArguments,
+                        else => return err,
+                    };
                     break :blk try runtimeResult(a, subscription);
                 },
                 .withdraw_subscription => |args| blk: {
@@ -214,11 +230,35 @@ pub const Kernel = struct {
                 .open_focus => |args| blk: {
                     try self.forks.ensureUnusedCapacity(self.kernel.allocator, 1);
                     const plan = self.kernel.sessions.prepareFork(self.work, args.name, args.task) catch |err| switch (err) {
-                        error.SessionCapacityUnavailable => return try runtimeError(a, "focus_unavailable", "The focus limit has been reached. Existing focuses remain addressable."),
+                        error.SessionCapacityUnavailable => return try runtimeError(a, "focus_unavailable", "The focus limit has been reached."),
                         else => return err,
                     };
                     self.forks.appendAssumeCapacity(plan);
                     break :blk try runtimeResult(a, .{ .focus_id = plan.session.focus_id });
+                },
+            };
+        }
+
+        fn send(self: *RuntimeRound, a: Allocator, to: AgentTools.Destination, text: []const u8) !Content {
+            return switch (to) {
+                .correspondent_id => |id| switch (try self.kernel.sender.send(a, .{ .recipient = id, .text = text })) {
+                    .submitted => |submission| try runtimeResult(a, .{ .correspondent_id = id, .reference = submission.reference }),
+                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "No outgoing correspondent is registered with that ID."),
+                    .not_submitted => try runtimeError(a, "not_submitted", "Sending stopped before the submission attempt."),
+                    .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
+                },
+                .feed_id => |id| blk: {
+                    const now = std.Io.Clock.real.now(self.kernel.io).toMilliseconds();
+                    const sequence = self.kernel.feeds.publish(id, self.work.session.focus_id, text, now) catch |err| return feedFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .feed_id = id, .sequence = sequence });
+                },
+                .focus_id => |id| blk: {
+                    self.kernel.sessions.sendFocusMessage(self.work, id, text) catch |err| return switch (err) {
+                        error.UnknownSession => runtimeError(a, "unknown_focus", "No existing focus matches that ID."),
+                        error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The receiving focus's queue is full."),
+                        else => err,
+                    };
+                    break :blk try runtimeResult(a, .{ .focus_id = id });
                 },
             };
         }
@@ -385,13 +425,35 @@ pub const Kernel = struct {
         return if (measured.bytes <= core_extra_history_bytes) .keep_recent_rounds else .keep_latest_tool_round;
     }
 
+    fn compactionSnapshot(self: *Kernel, a: Allocator, session: *Sessions.Session) !Input.Snapshot {
+        const is_core = session.role == .core;
+        // Read feeds before the live IDs so a newly opened creator cannot be
+        // missing from the registry sample for a feed already present here.
+        const open_feeds = try self.feeds.openFeeds(a, if (is_core) null else session.focus_id);
+        var snapshot = try self.sessions.compactionSnapshot(a, session);
+        if (is_core) snapshot.state.correspondents = self.sender.registered_correspondents;
+
+        var live_activities: std.StringHashMapUnmanaged(void) = .empty;
+        defer live_activities.deinit(a);
+        for (snapshot.state.activities) |id| try live_activities.put(a, id, {});
+
+        var references: std.ArrayList([]const u8) = .empty;
+        errdefer references.deinit(a);
+        for (open_feeds) |feed| {
+            if (live_activities.contains(feed.creator_focus_id)) continue;
+            try references.append(a, feed.feed_id);
+        }
+        snapshot.state.feeds = try references.toOwnedSlice(a);
+        return snapshot;
+    }
+
     fn compactRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, current: Input.Current, scope: Context.CompactionScope, trigger: CompactionTrigger) !FocusResult([]const Model.Item) {
         var rejection: ?Compaction.Rejection = null;
         const retry: Engine.Retry = if (trigger == .limit) .wait_for_service else .single_attempt;
         const summary_attempts: usize = if (trigger == .limit) 2 else 1;
         for (0..summary_attempts) |_| {
-            const state = try self.sessions.compactionSnapshot(a, work.session);
-            switch (try Compaction.summarize(self.engine, a, history, state, scope, rejection, retry)) {
+            const snapshot = try self.compactionSnapshot(a, work.session);
+            switch (try Compaction.summarize(self.engine, a, history, snapshot, scope, rejection, retry)) {
                 .interrupted => |reason| return .{ .interrupted = reason },
                 .rejected => |reason| rejection = reason,
                 .handover => |handover| {
@@ -466,11 +528,13 @@ fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
     return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .code = code, .message = message } }, .{}));
 }
 
-fn toolFailure(a: Allocator, err: anyerror) !Content {
+fn feedFailure(a: Allocator, err: anyerror) !Content {
     return switch (err) {
         error.InvalidArguments => error.InvalidToolArguments,
-        error.UnknownSession => runtimeError(a, "unknown_focus", "The focus is not addressable."),
-        error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The focus cannot currently accept another observation."),
+        error.UnknownFeed => runtimeError(a, "unknown_feed", "No feed matches the supplied ID."),
+        error.FeedClosed => runtimeError(a, "feed_closed", "This feed is closed to new messages."),
+        error.StateStoreBusy => runtimeError(a, "feed_storage_busy", "Feed storage is busy."),
+        error.StateStoreFull => runtimeError(a, "feed_storage_full", "Feed storage is full."),
         else => err,
     };
 }
@@ -481,8 +545,16 @@ const SubscriptionFixture = struct {
     const testing = std.testing;
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
     storage: TestStore = .{},
+    feed_store: ?Feeds.Store = null,
+    correspondents: []const []const u8 = &.{},
 
-    fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *@import("subscriptions").Store) !Kernel {
+    fn deinit(self: *SubscriptionFixture) void {
+        if (self.feed_store) |*store| store.close();
+        self.storage.arena.deinit();
+    }
+
+    fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *Subscriptions.Store) !Kernel {
+        if (self.feed_store == null) self.feed_store = try Feeds.Store.openInMemory(testing.allocator, testing.io);
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
@@ -494,7 +566,8 @@ const SubscriptionFixture = struct {
             .engine = engine,
             .subscriptions = subscriptions,
             .inbox = undefined,
-            .sender = undefined,
+            .sender = .{ .context = undefined, .submit = undefined, .registered_correspondents = self.correspondents },
+            .feeds = &self.feed_store.?,
             .callbacks = undefined,
             .history = self.storage.port(),
         }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
@@ -537,22 +610,173 @@ const SubscriptionFixture = struct {
         defer instance.sessions.endWorker(work.session);
         try testing.expect(try instance.sessions.commitResponse(work, history, empty_response));
     }
+
+    fn callTool(a: Allocator, round: *Kernel.RuntimeRound, name: []const u8, args: anytype) !std.json.Value {
+        const arguments = try std.json.Stringify.valueAlloc(a, args, .{});
+        const request = (try AgentTools.Request.parse(a, round.work.session.role, name, arguments)).?;
+        const reply = try Kernel.RuntimeRound.invoke(round, a, request);
+        return std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
+    }
 };
+
+test "core startup reports the outgoing registration of each runtime" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    const registrations: []const []const []const u8 = &.{ &.{"operator"}, &.{"Reviewer+Ops"}, &.{} };
+    for (registrations) |ids| {
+        fixture.correspondents = ids;
+        var engine: Engine = undefined;
+        var kernel = try fixture.kernel(&engine, &store);
+        defer kernel.deinit();
+        const work = try SubscriptionFixture.takeWork(&kernel, a);
+        var history = try kernel.sessions.snapshot(work.session);
+        defer history.deinit();
+        var soft_compaction = true;
+        const input = (try kernel.prepareRequest(a, work, &history, &soft_compaction)).ready;
+        const turn = input[input.len - 1].message.text;
+        const marker = if (ids.len == 0) "correspondents: []" else ids[0];
+        try testing.expect(std.mem.indexOf(u8, turn, marker) != null);
+        const records = history.records();
+        const startup = records[records.len - 1].record.events.items[0].startup;
+        try testing.expectEqualDeep(ids, startup.correspondents.?);
+        if (ids.len == 0) {
+            const snapshot = try kernel.compactionSnapshot(a, work.session);
+            const summary = try history.summaryRequest(a, snapshot, "Summarize.", .keep_latest_tool_round);
+            try testing.expect(std.mem.indexOf(u8, summary[summary.len - 1].message.text, marker) != null);
+        }
+        try SubscriptionFixture.finish(&kernel, work, &history);
+    }
+}
+
+test "continuations omit destination directories and send uses the selected destination kind" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{ .correspondents = &.{"reviewer+notes"} };
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    defer kernel.sessions.endWorker(core.work.session);
+    var history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer history.deinit();
+
+    const opened = try call(a, &core, "open_focus", .{ .name = "research", .task = "Collect findings." });
+    const sender_id = opened.object.get("result").?.object.get("focus_id").?.string;
+    try kernel.sessions.commitToolRound(core.work, &history, &core.forks, null);
+    var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer kernel.sessions.endWorker(activity.work.session);
+
+    const created = try call(a, &activity, "create_feed", .{
+        .name = "core",
+        .description = "Keep release findings for readers.",
+    });
+    const feed_id = created.object.get("result").?.object.get("feed_id").?.string;
+    try testing.expectEqualStrings(core.work.session.focus_id, feed_id);
+
+    var soft_compaction = true;
+    const input = (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready;
+    const turn = input[input.len - 1].message.text;
+    for ([_][]const u8{ "activities:", "correspondents:", "feeds:" }) |field| {
+        try testing.expect(std.mem.indexOf(u8, turn, field) == null);
+    }
+
+    const result = try call(a, &activity, "send", .{
+        .to = .{ .focus_id = core.work.session.focus_id },
+        .text = "Findings are ready.",
+    });
+    try testing.expectEqualStrings(feed_id, result.object.get("result").?.object.get("focus_id").?.string);
+    const publication = try call(a, &core, "send", .{
+        .to = .{ .feed_id = feed_id },
+        .text = "A separate publication.",
+    });
+    const published = publication.object.get("result").?.object;
+    try testing.expectEqualStrings(feed_id, published.get("feed_id").?.string);
+    try testing.expectEqual(1, published.get("sequence").?.integer);
+    try kernel.sessions.collectPending(core.work);
+    const deliveries = core.work.activation.deliveries.items;
+    try testing.expectEqual(1, deliveries.len);
+    const message = deliveries[0].event.focus_message;
+    try testing.expectEqualStrings(sender_id, message.from_focus);
+    try testing.expectEqualStrings("Findings are ready.", message.text);
+
+    _ = try call(a, &core, "close_feed", .{ .feed_id = feed_id });
+    const closed = try call(a, &activity, "send", .{ .to = .{ .feed_id = feed_id }, .text = "Another publication." });
+    try testing.expectEqualStrings("feed_closed", closed.object.get("error").?.object.get("code").?.string);
+}
+
+test "core compaction picks up open feeds when their creating activities end" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{ .correspondents = &.{"operator"} };
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    defer kernel.sessions.endWorker(core.work.session);
+    var history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer history.deinit();
+    const core_feed = try kernel.feeds.create(a, core.work.session.focus_id, "core-news", "Core notes");
+    _ = try call(a, &core, "open_focus", .{ .name = "first", .task = "Follow the first release." });
+    const opened = try call(a, &core, "open_focus", .{ .name = "second", .task = "Follow the second release." });
+    const second_id = opened.object.get("result").?.object.get("focus_id").?.string;
+    try testing.expectEqual(0, (try kernel.compactionSnapshot(a, core.work.session)).state.activities.len);
+    try kernel.sessions.commitToolRound(core.work, &history, &core.forks, null);
+
+    const ready = try kernel.sessions.takeReadyBatch(a);
+    try testing.expectEqual(2, ready.len);
+    var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = ready[0] };
+    var activity_history = try SubscriptionFixture.admit(&kernel, a, activity.work);
+    defer activity_history.deinit();
+    const created = try call(a, &activity, "create_feed", .{ .name = "first-news", .description = "First release notes" });
+    const own_feed = created.object.get("result").?.object.get("feed_id").?.string;
+    _ = try kernel.feeds.publish(core_feed, activity.work.session.focus_id, "A shared update", 100);
+    const closed_feed = try kernel.feeds.create(a, activity.work.session.focus_id, "old-news", "Previous release notes");
+    try testing.expect(try kernel.feeds.closeFeed(closed_feed));
+    _ = try kernel.sessions.subscribe(a, activity.work, "releases", "Watch upcoming releases");
+    try SubscriptionFixture.finish(&kernel, activity.work, &activity_history);
+
+    const second = ready[1];
+    var second_history = try SubscriptionFixture.admit(&kernel, a, second);
+    defer second_history.deinit();
+    const surviving_feed = try kernel.feeds.create(a, second.session.focus_id, "second-news", "Second release notes");
+    const before_ending = (try kernel.compactionSnapshot(a, core.work.session)).state;
+    try testing.expectEqualDeep(@as([]const []const u8, &.{core_feed}), before_ending.feeds);
+    try SubscriptionFixture.finish(&kernel, second, &second_history);
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ activity.work.session.focus_id, second_id }), before_ending.activities);
+
+    const core_state = (try kernel.compactionSnapshot(a, core.work.session)).state;
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ core_feed, surviving_feed }), core_state.feeds);
+    try testing.expectEqualDeep(fixture.correspondents, core_state.correspondents.?);
+    try testing.expectEqualDeep(@as([]const []const u8, &.{activity.work.session.focus_id}), core_state.activities);
+
+    const activity_state = (try kernel.compactionSnapshot(a, activity.work.session)).state;
+    try testing.expectEqualDeep(@as([]const []const u8, &.{own_feed}), activity_state.feeds);
+    try testing.expect(activity_state.correspondents == null);
+    try testing.expectEqual(0, activity_state.activities.len);
+}
 
 test "an activity can use the reference returned by subscribe to withdraw another focus's registration" {
     const testing = std.testing;
-    const Tool = struct {
-        fn call(a: Allocator, round: *Kernel.RuntimeRound, name: []const u8, args: anytype) !std.json.Value {
-            const arguments = try std.json.Stringify.valueAlloc(a, args, .{});
-            const request = (try AgentTools.Request.parse(a, round.work.session.role, name, arguments)).?;
-            const reply = try Kernel.RuntimeRound.invoke(round, a, request);
-            return std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
-        }
-    };
+    const call = SubscriptionFixture.callTool;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -561,33 +785,33 @@ test "an activity can use the reference returned by subscribe to withdraw anothe
     defer core.deinit();
     var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
     defer core_history.deinit();
-    const created = (try Tool.call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed" })).object.get("result").?;
+    const created = (try call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed" })).object.get("result").?;
     const core_id = created.object.get("subscription_id").?.string;
-    _ = try Tool.call(a, &core, "open_focus", .{ .name = "research", .task = "Watch for releases." });
+    _ = try call(a, &core, "open_focus", .{ .name = "research", .task = "Watch for releases." });
     try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks, null);
 
     var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer activity.deinit();
-    const closed = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
+    const closed = (try call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
     try testing.expectEqualStrings(core_id, closed.get("subscription_id").?.string);
     try testing.expect(closed.get("changed").?.bool);
 
-    const repeated = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
+    const repeated = (try call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
     try testing.expect(!repeated.get("changed").?.bool);
 }
 
 test "startup requires the subscription catalog and working history to belong together" {
     const testing = std.testing;
-    const Store = @import("subscriptions").Store;
+    const Store = Subscriptions.Store;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
-    var catalog = try Store.open(testing.allocator, ":memory:");
+    defer fixture.deinit();
+    var catalog = try Store.openInMemory(testing.allocator);
     defer catalog.close();
     var engine: Engine = undefined;
     var initial = try fixture.kernel(&engine, &catalog);
     initial.deinit();
 
-    var other = try Store.open(testing.allocator, ":memory:");
+    var other = try Store.openInMemory(testing.allocator);
     defer other.close();
     try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &other));
     fixture.storage.checkpoint = null;
@@ -596,12 +820,11 @@ test "startup requires the subscription catalog and working history to belong to
 
 test "subscription admission and database acknowledgement survive either outcome of an unconfirmed checkpoint" {
     const testing = std.testing;
-    const Subs = @import("subscriptions");
     for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
         var fixture: SubscriptionFixture = .{};
-        defer fixture.storage.arena.deinit();
+        defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
-        var store = try Subs.Store.open(a, ":memory:");
+        var store = try Subscriptions.Store.openInMemory(a);
         defer store.close();
         var engine: Engine = undefined;
         {
@@ -642,9 +865,9 @@ test "dispatch retires a withdrawn activity once its accepted reports have been 
     const Case = enum { live, restart_empty, restart_with_report };
     for ([_]Case{ .live, .restart_empty, .restart_with_report }) |scenario| {
         var fixture: SubscriptionFixture = .{};
-        defer fixture.storage.arena.deinit();
+        defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
-        var store = try @import("subscriptions").Store.open(a, ":memory:");
+        var store = try Subscriptions.Store.openInMemory(a);
         defer store.close();
         var engine: Engine = undefined;
         var kernel = try fixture.kernel(&engine, &store);
@@ -687,9 +910,9 @@ test "dispatch retires a withdrawn activity once its accepted reports have been 
 test "an activity admits its sampled backlog in one input and receives a later report after withdrawal" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -729,9 +952,9 @@ test "an activity admits its sampled backlog in one input and receives a later r
 test "a subscription backlog leaves another focus schedulable and each source gets a turn under a one-event budget" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -790,9 +1013,9 @@ test "a subscription backlog leaves another focus schedulable and each source ge
 test "a rejected inference resumes for remaining reports while failed admission waits for fresh input" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -813,7 +1036,7 @@ test "a rejected inference resumes for remaining reports while failed admission 
     kernel.sessions.endWorker(first.session);
     const second = try SubscriptionFixture.takeWork(&kernel, a);
     try testing.expectEqual(1, second.activation.deliveries.items.len);
-    const third = @import("subscriptions").NewReport{ .key = "third", .text = "budget-marker" };
+    const third = Subscriptions.NewReport{ .key = "third", .text = "budget-marker" };
     _ = try store.publish(subscription.subscription_id, third, 110);
     try kernel.sessions.interrupt(second, "The remaining observation could not be admitted.");
     kernel.sessions.endWorker(second.session);
@@ -859,7 +1082,8 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         fn next(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Outcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             try testing.expectEqual(@as(usize, 0), request.tools.len);
-            try testing.expect(std.mem.indexOf(u8, request.history[request.history.len - 1].message.text, "\nsummarize:") != null);
+            const turn = request.history[request.history.len - 1].message.text;
+            try testing.expect(std.mem.indexOf(u8, turn, "\nsummarize:") != null);
             for (request.history) |item| {
                 if (item != .tool_result) continue;
                 try testing.expect(item.tool_result.content.parts[0] == .text);
@@ -901,9 +1125,9 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         .{ .ceiling = 8, .kept_image = false },
     }) |case| {
         var fixture: SubscriptionFixture = .{};
-        defer fixture.storage.arena.deinit();
+        defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
-        var store = try @import("subscriptions").Store.open(a, ":memory:");
+        var store = try Subscriptions.Store.openInMemory(a);
         defer store.close();
         var engine: Engine = undefined;
         var kernel = try fixture.kernel(&engine, &store);
@@ -958,9 +1182,9 @@ test "a pending document can accompany completed exchanges across a handover" {
         }
     };
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);

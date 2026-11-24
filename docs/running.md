@@ -4,7 +4,7 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 ## Runtime requirements
 
-Install `ivenna` and `ivenna-report` from the same build in the same directory so the kernel can locate the reporter for host commands. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+Install the `ivenna` executable. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
 
 The core and activities can read regular files and list directories wherever the kernel's OS account has access. Choose the account and filesystem mounts accordingly. Host commands run as the same account.
 
@@ -33,15 +33,16 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `CONTEXT_OBSERVATION_BATCH_BYTES` | Target for the encoded bytes a batch of observations adds to a request | `1048576` (1 MiB) |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | URL for [JMAP session discovery](#mail-service) | `http://127.0.0.1:8088/jmap/session` |
-| `MAIL_ADDRESS` | Kernel address and sending identity; its domain resolves correspondent IDs | Required |
+| `MAIL_ADDRESS` | Kernel mailbox address and sending identity | Required |
+| `MAIL_CORRESPONDENTS` | Comma-separated [mailbox addresses for outgoing correspondence](#outgoing-correspondents) | No registered recipients |
 | `MAIL_USERNAME` | Mail login | Required for username/password authentication |
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
-| `MAIL_POLL_INTERVAL_MS` | Delay between intake passes for mail and subscription reports | `2000` |
+| `MAIL_POLL_INTERVAL_MS` | Milliseconds between checks for mail and subscription reports | `2000` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
-| `DATA_DIR` | Persistent directory for the subscription database and host command output | Required |
+| `DATA_DIR` | Persistent directory for instance state and host command output | Required |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
 
@@ -87,17 +88,15 @@ When compaction is optional and a usable handover cannot be prepared, the origin
 
 Retained history can include native model output and reasoning data supplied by the model adapter, plus file identifiers supplied by the model service. A replacement service and model must accept those items as well as the configured tools and reasoning settings. File identifiers also require access to the account that owns the uploads. The runtime does not translate retained model output, transfer uploaded files between services, or verify in advance that a replacement model can consume them. Establish compatibility before resuming retained work with the replacement model.
 
-To apply the change, [stop the kernel](#stopping-and-restarting), update `LLM_MODEL` and any changed service settings, then restart. Keep the existing mail account, `MAIL_ADDRESS`, subscription database and memory workspace to retain the material needed for continuation.
+Stop the kernel, update `LLM_MODEL` and any changed service settings, then restart with the same instance data. See [stopping and restarting](#stopping-and-restarting).
 
 ## Mail service
 
 Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks` and `Ivenna History` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
 
-Set `MAIL_SESSION_URL` to the URL of the JMAP session document. Discovery follows up to three redirects within the same scheme, host, and effective port. For a longer chain or a change of origin, configure the final session URL directly.
+Set `MAIL_ADDRESS` and authentication settings for the kernel account. Set `MAIL_SESSION_URL` to the URL of the JMAP session document. Discovery follows up to three redirects within the same scheme, host, and effective port. For a longer chain or a change of origin, configure the final session URL directly.
 
-Set `MAIL_ADDRESS` and authentication settings for the kernel account. Give correspondents separate accounts in the same domain as `MAIL_ADDRESS`. For example, with `MAIL_ADDRESS=ivenna@ivenna.test`, the ID `operator` resolves to `operator@ivenna.test`. Changing the domain changes where messages to retained IDs are sent. See [supported email addresses](communication.md#current-email-addressing).
-
-For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks when presenting correspondent IDs. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
+For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks to attribute each message to its correspondent. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
 Wakeup and host completion callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped. See [callback observations](attention.md#callback-observations) for the delivery contract.
 
@@ -105,11 +104,17 @@ Configure automatic Trash expiry and cleanup of unreferenced storage in the mail
 
 The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working history shares the account's storage capacity; [data and retention](#data-and-retention) explains its folder lifecycle and backup requirements.
 
+### Outgoing correspondents
+
+Set `MAIL_CORRESPONDENTS` to a comma-separated list of full mailbox addresses in the domain of `MAIL_ADDRESS`, such as `operator@ivenna.test,reviewer@ivenna.test`. Include `MAIL_ADDRESS` to allow Ivenna to write to itself. An unset or empty list registers no recipients. Inbound correspondence follows the [mail intake rules](#mail-intake).
+
+Spaces and tabs around entries are ignored. Repeated addresses for the same mailbox register one correspondent. `InvalidCorrespondentAddress` indicates an empty entry, an unsupported mailbox address, or a different domain. Restart the kernel to apply changes. See [correspondent IDs](communication.md#current-email-addressing).
+
 ### Mail intake
 
 The kernel reads correspondence awaiting durable admission across the account's mail folders, including the mail client's ordinary Archive folder. `Ivenna Callbacks`, `Ivenna History`, Drafts, Junk, and Trash are excluded from ordinary correspondence, along with drafts and records carrying private callback, outgoing, or history-state markers. The callback inbox has its own admission path; these records do not become correspondence.
 
-Incoming mail must have at least one From address, and every such address must map to a supported ID in the configured domain. The adapter presents the corresponding IDs and complete supported text as an observation. Messages with missing, cross-domain, or unsupported From addresses are excluded from intake. Messages without a complete supported body produce a diagnostic and are skipped. These copies remain unchanged.
+The adapter selects messages with supported sender addresses and a complete supported body. If it cannot read the body, it logs a diagnostic and leaves the mail copy intact. See [email addressing](communication.md#current-email-addressing) and [incoming email text](communication.md#incoming-email-text).
 
 Eligible correspondence without the private acknowledgement marker is pending, including existing messages that have been read or archived. Once its complete observation and checkpoint have been saved, Ivenna acknowledges the message and moves its incoming copy to Trash before reasoning about that input. Reading, starring, or moving correspondence does not acknowledge it. The [communication-copy lifecycle](#communication-copies) also applies to existing mail in this dedicated account.
 
@@ -145,29 +150,37 @@ The [local development setup](../dev/README.md#configuring-memory) packages this
 
 ## Starting the kernel
 
-`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna` from the directory where you want file browsing and host commands to start by default.
+`ivenna --help` displays usage before you configure the services. To start the kernel, prepare the services and export the required [environment settings](#configuration). Run `ivenna serve` from the directory where you want file browsing and host commands to start by default.
 
 ```sh
 cd /path/to/workspace
 export DATA_DIR=/path/to/instance/data
-/path/to/ivenna
+/path/to/ivenna serve
 ```
 
 The executable embeds its model-facing resources and can run independently of the source checkout.
 
 Give each kernel its own mailbox and `DATA_DIR`. The kernel binds `SERVICE_ADDRESS` before accessing the account. If the address is in use, startup exits. On Linux, an `AddressInUse` error just after an upgrade can persist until the older executable's connections leave `TIME_WAIT`.
 
-The kernel initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a message](usage.md#sending-a-request). The kernel writes diagnostics to standard error.
+The kernel opens the instance database, initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a message](usage.md#sending-a-request). The kernel writes diagnostics to standard error.
 
 Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
 
-## Subscription listeners
+## Local programs
 
-Start the program that watches the source and give it the `subscription_id` returned when a focus [registers the subscription](attention.md#subscriptions). When the subscription is withdrawn, stop the listener if it has no other work.
+Feed readers and subscription listeners call `ivenna` on the kernel host and use the existing instance database, including while the kernel is stopped. When launching either program independently, set `DATA_DIR` to the instance's data directory. Use an absolute path if programs run from different working directories. Ivenna's [host commands](host.md#command-environment) inherit absolute paths to the executable and data directory in `IVENNA` and `DATA_DIR`.
 
-A listener running as a host command inherits the reporter's absolute path in `IVENNA_REPORT` and the kernel's data directory in `DATA_DIR`. It stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs.
+Database file permissions cover all feeds and subscriptions. A relay on the kernel host can forward selected messages to other consumers.
 
-To keep collecting while the kernel is stopped, run the listener independently, for example under a service manager on the same host. Give it the path to the installed `ivenna-report` and point its `DATA_DIR` at the directory the kernel initialized. An absolute path works even when the two programs start in different directories. The reporter needs read and write access to the existing subscription database and its directory. Limit that access to trusted processes. Reports accepted during downtime are available to their subscribing focus after restart. See the [listener protocol](subscriptions.md) for publication and cursor recovery.
+### Feed readers
+
+Give the reader the `feed_id` supplied by Ivenna. `ivenna feed read` opens the database read-only. The reader needs read access to the database. It also needs read access to the existing `-wal` and `-shm` files or permission to create them in `DATA_DIR`. See the [feed reader command](communication.md#reading-feeds) and [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
+
+### Subscription listeners
+
+Give the listener the `subscription_id` returned when a focus registers the subscription. The listener needs write access to the instance database and its directory. See [subscription registration](attention.md#subscriptions).
+
+Run the listener independently to keep collecting during kernel downtime. Reports accepted while the kernel is stopped wait for delivery after restart. A listener launched as a host command stops with the kernel. If the command outlasts the tool call, its completion callback lets the activity sleep until the command ends. See [host command lifetimes](host.md#command-lifetimes) and the [listener protocol](subscriptions.md).
 
 ## Service status and reception
 
@@ -192,7 +205,7 @@ An accepted letter can wait in the mailbox if a focus is busy or the kernel stop
 
 Look for `JMAP` on the kernel's standard error. A failed request logs its method, stage, and error. A warning ending in `Retrying on a fresh connection` means another attempt is underway. Check `/readyz` for the current reception state. See [JMAP requests](architecture.md#jmap-requests) for which operations can retry.
 
-Reception can stay open even if Ivenna loses confirmation while sending a reply. To see what Ivenna learned about submission, look for the reply's `send_message` result in [working history](#working-history). Trash can contain both submitted messages and abandoned drafts. See [sending outcomes](communication.md#sending-a-message).
+Reception can stay open even if Ivenna loses confirmation while sending a reply. Check the reply's `send` result in [working history](#working-history) to see whether Ivenna confirmed submission. Trash can contain both submitted messages and abandoned drafts. See [correspondence outcomes](communication.md#writing-to-a-correspondent).
 
 If the kernel cannot read or confirm required mailbox state, it closes reception and exits. For a `connect` failure, check whether the kernel can reach the mail endpoint. For HTTP 401, check the credentials configured for the [mail account](#mail-service).
 
@@ -212,15 +225,15 @@ If the core cannot admit an incoming letter within the adapter's request limits,
 
 If admission keeps failing, check the focus's interruption reason against the [model request limits](content.md#model-request-checks). To withdraw an oversized letter, stop the kernel, move it out of [eligible intake](#mail-intake), then restart. The kernel rebuilds pending deliveries from the mailbox. You can send a shorter letter with a reference to the original material. See [sharing material to read](usage.md#sharing-material-to-read).
 
-A subscription report that cannot fit stays in the subscription database. Withdrawing the subscription closes it to new reports. The focus still needs enough request space to receive the one already accepted.
+A subscription report that cannot fit stays in the instance database. Withdrawing the subscription closes it to new reports. The focus still needs enough request space to receive the one already accepted.
 
 ## Stopping and restarting
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work (including model recovery waits) and host commands, and wait for the runtime's tasks to end. Failure of a required service such as history storage, or an unrecoverable execution error, also stops the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
-Start the executable with the same mail account, `MAIL_ADDRESS`, and subscription store to resume its saved focuses and pending deliveries. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mail account and `DATA_DIR` identify the same instance. When restoring backup data, use a [matched mailbox and subscription store](#backups-and-transfers).
+Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries and preserve feed IDs and messages. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mailbox and instance database belong to the same instance. When restoring data, use [matched backups](#backups-and-transfers).
 
-The core receives a fresh startup observation on every restart. A restored activity receives one immediately if it had an unfinished activation or unread internal observations. Other restored activities receive startup with their next event. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
+At restart the core sees the current outgoing correspondent IDs, including changes to [`MAIL_CORRESPONDENTS`](#outgoing-correspondents). An activity with unfinished work can also resume on startup. See the [startup observation contract](input.md#startup-and-restart) for delivery timing. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
 Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose deadlines passed while the runtime was unavailable become due. Host completions without stored results receive interruption observations with unknown effects; already stored results are preserved.
 
@@ -228,15 +241,9 @@ Host processes and command handles are not restored, and commands are not replay
 
 ### Updating the executable
 
-Before updating across a storage-format change, preserve a [complete backup](#backups-and-transfers) and keep the executables that can read it. To resume [saved history](architecture.md#persistent-working-history), the current kernel requires a mailbox checkpoint that identifies its subscription database. To start fresh with the current build, give it a separate mailbox and `DATA_DIR`.
+Before updating across a change in storage format, make a [matched backup](#backups-and-transfers) and keep the executable that can read it. Use that executable to resume the instance from the backup if needed. To start a fresh instance, use a separate mailbox and `DATA_DIR`.
 
-If either binary reports `IncompatibleSubscriptionSchema`, check that `DATA_DIR` points to the intended instance and that both the kernel and reporter support its database format. For `SubscriptionCatalogMismatch`, check the [mailbox and database pairing](#stopping-and-restarting).
-
-If you previously tuned `CONTEXT_REQUEST_BYTES` or `CONTEXT_COMPACTION_BYTES`, remove those overrides and choose the current [compaction settings](#context-budgets) for your model and workload.
-
-Older configurations may contain `LLM_MAX_ATTEMPTS`. The kernel now ignores this setting and continues retrying temporary inference failures. `LLM_REQUEST_TIMEOUT_MS` limits each attempt. See [model request settings](#model-requests).
-
-Earlier executables cannot restore a checkpoint whose selected history or pending observations include a `focus_interrupted` event. The current executable requires handovers to include the summary's observation time and sampled state. See [persistent working history](architecture.md#persistent-working-history).
+If `ivenna` reports `IncompatibleStateSchema`, check that `DATA_DIR` points to the intended instance and that the executable supports its database format.
 
 ## Data and retention
 
@@ -247,12 +254,10 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
-| `<DATA_DIR>/subscriptions.sqlite3` | Subscription registrations, listener cursors, accepted report keys, and reports awaiting history admission |
+| `<DATA_DIR>/state.sqlite3` | Feed IDs, descriptions, creators, closure state and messages, plus subscriptions, listener cursors, accepted report keys and pending reports |
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
 Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).
-
-Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
 
@@ -274,9 +279,9 @@ Keep original correspondence separately if you need it beyond the Trash retentio
 
 ### Working history
 
-A message with the subject `Ivenna history checkpoint` lists the state the kernel uses to resume its sessions. For each session, `head` points to the latest retained history record and `count` gives the number of records in that chain. Admitted observations and model/tool exchanges live in those separate records, so a whole new exchange can change just a few fields in the checkpoint. The checkpoint also tracks scheduled wakeups, callback registrations, unread activity reports, and how far each focus has read in the subscription database.
+A message with the subject `Ivenna history checkpoint` lists the state the kernel uses to resume its sessions. For each session, `head` points to the latest retained history record and `count` gives the number of records in that chain. Admitted observations and model/tool exchanges live in those separate records, so a whole new exchange can change just a few fields in the checkpoint. The checkpoint also tracks scheduled wakeups, callback registrations, unread activity reports, and which subscription reports each focus has admitted from the instance database.
 
-Suppose the core receives a letter and the model returns text without calling tools. In an otherwise idle kernel, this normally produces two revisions. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response in the core's history. Sending a reply to the correspondent requires a `send_message` call.
+Suppose the core receives a letter and the model returns text without calling tools. In an otherwise idle kernel, this normally produces two revisions. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response in the core's history. Sending a reply to the correspondent requires a `send` call.
 
 Ivenna cleans up the history folder at startup and periodically while it runs. Between maintenance passes, several checkpoints can still appear in `Ivenna History`. The kernel selects the candidate marked `ivenna-current` with the highest numeric `X-Ivenna-History-Revision`. If two candidates share that highest revision, restoration fails.
 
@@ -293,6 +298,12 @@ A sleeping activity retains its history even when its context is unloaded. When 
 
 Unread activity expressions retain each text in order with its original observation time. Ending times are also retained. The core admits reports that fit its ordinary request. Unread reference metadata grows with the backlog, and all unread bodies occupy mailbox storage. Activity messages and endings are outside `MAX_PENDING_EVENTS`, so size runtime memory and mailbox capacity for work that can accumulate before the core next reads it. See [activity reports](architecture.md#activity-reports) for reading and admission behavior.
 
+### Feed and subscription retention
+
+The instance database retains open and closed feeds and their messages without automatic expiry. See [backups and transfers](#backups-and-transfers).
+
+Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
+
 ### Uploaded model files
 
 When an upload returns a usable reference, saved working history includes the original bytes and the service identifier. Later inferences reuse that identifier, including after restart. The [working-history limits](#working-history) apply to the bytes. If an upload may have reached the service but returned no usable reference, the service account can also contain a file whose identifier Ivenna never received. See [file outcomes](content.md#complete-files).
@@ -303,11 +314,11 @@ Preserve the host artifact or memory entry when it needs to outlive selected wor
 
 ### Backups and transfers
 
-Back up the mailbox and subscription database together. Startup checks the database identity, which stays the same across snapshots of an instance. Pairing an older mailbox with a newer database can lose a report if the database already removed it and the mailbox snapshot predates its admission.
+Back up the mailbox and instance database as a pair. Startup checks the database identity, which stays the same across snapshots of an instance. Pairing an older mailbox with a newer database can lose a report if the database already removed it and the mailbox snapshot predates its admission.
 
-If taking the backups separately, stop the kernel before saving either store and leave it stopped until both backups finish. Use a SQLite backup of `<DATA_DIR>/subscriptions.sqlite3`. To copy the database files directly, pause independent listeners too and include any SQLite journal files with the database.
+If taking the backups separately, stop the kernel before saving either store and leave it stopped until both backups finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners and readers too and include any SQLite journal files with the database.
 
-For restoration, stop the kernel and listeners before replacing the mailbox and database with their matched copies. Keep the listener programs and their configuration so they can resume collection on the restored subscriptions.
+To restore an instance, stop the kernel, listeners, and feed readers. Move the current database, journal, and shared-memory files aside. Restore the database and mailbox from the matched backup and keep the reader and listener programs and their configuration. Restoring an older snapshot allows the instance to reuse feed IDs and message sequences from discarded data. Before resuming a reader, check that its feed ID and saved position match the restored data.
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 

@@ -1,0 +1,21 @@
+ivenna subscription publish SUBSCRIPTION_ID
+
+Queue an observation for the focus that subscribed. You can save a new cursor
+in the same write. This example uses a subscription with no saved cursor.
+
+  printf '%s\n' '{
+    "key": "release-v2.4.0",
+    "text": "Stable release v2.4.0 is available",
+    "cursor": {"to": "17"}
+  }' | ivenna subscription publish 'release-watch-1'
+
+Send one JSON object on stdin with these fields.
+
+  key                  Nonempty string identifying the observation within
+                       this subscription. Give each observation its own key
+                       and reuse it for retries.
+  text                 Observation as a string of 1–2048 UTF-8 bytes.
+  source_time_unix_ms  Optional source event time in integer Unix milliseconds
+                       from -62167219200000 through 253402300799000.
+  cursor               Optional cursor change to save with the observation.
+                       Omit it to keep the saved position.

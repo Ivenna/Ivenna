@@ -24,7 +24,7 @@ The tool wait retains the current activation and context while the core and othe
 
 | Argument | Meaning |
 | --- | --- |
-| `name` | Required short name; the runtime appends a number to form the command reference; names may repeat |
+| `name` | Required short name used to form the [command ID](input.md#names-and-references) |
 | `command` | Required command text, interpreted by the selected shell |
 | `cwd` | Initial working directory. Defaults to the kernel's startup directory. Relative values resolve from that directory. |
 | `shell` | Shell executable accepting `-c`; defaults to `/bin/sh` |
@@ -34,13 +34,13 @@ The tool wait retains the current activation and context while the core and othe
 | `timeout_ms` | Optional positive execution deadline in milliseconds, up to `4294967295`; omitted means no execution deadline |
 | `max_output_bytes` | Combined encoded stdout/stderr preview budget in bytes. Defaults to `4096` and accepts `512` through `16384`. Result metadata and log references are additional. |
 
-Names must contain 1–32 Unicode code points and no ASCII control characters; spaces alone are not accepted.
-
 Each command starts a fresh shell. The `cwd` and `shell` arguments accept literal paths or local `file://` URIs. Inside `command`, the shell expands expressions and resolves relative paths from its current directory. A shell running in an interactive [input mode](#input-modes) can retain directory and environment changes across calls.
+
+### Command environment
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 
-Host commands inherit the absolute path to `ivenna-report` in `IVENNA_REPORT` and the instance's data directory in `DATA_DIR`. Run `"$IVENNA_REPORT" --help` in the host shell for reporting commands and examples. See the [listener protocol](subscriptions.md).
+Host commands receive the absolute path to the `ivenna` executable as `IVENNA` and the absolute path to the instance's data directory as `DATA_DIR`. Run `"$IVENNA" feed read --help` to look up feed reader options or `"$IVENNA" subscription --help` to find listener commands. See [reading feeds](communication.md#reading-feeds) and the [subscription listener protocol](subscriptions.md).
 
 ## Input modes
 
@@ -128,7 +128,7 @@ The portion of the log you see depends on how you observe the command.
 | --- | --- |
 | Initial call with a `callback_id` | Reads from byte zero independently of other activities. A later continuation can show the same bytes. |
 | `continue_host_shell` | Reads forward from one shared cursor per stream. A read by one activity advances the cursor for all activities. |
-| Direct final result or completion callback | Shows the beginning and end of long text with an omitted-byte count, independently of the cursors. The callback identifies the command in `source.host.command_id`. See [callback observations](input.md#focus-messages-and-callbacks). |
+| Direct final result or completion callback | Shows the beginning and end of long text with an omitted-byte count, independently of the cursors. The callback identifies the command in `source.host.command_id`. See [callback observations](input.md#callback-observations). |
 
 On the initial handoff and on continuations, a log object gives the byte `range` read, from `offset` up to but excluding `next_offset`. A text `preview` contains the characters in that range. Binary output omits the preview. Each stream's preview fits its share of `max_output_bytes` after JSON escaping.
 

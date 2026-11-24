@@ -19,6 +19,7 @@ pub const Config = struct {
     session_url: []const u8,
     authorization: []const u8,
     address: []const u8,
+    correspondent_addresses: []const []const u8,
 };
 
 /// Own correspondence and persistent history behind the runtime's contracts.
@@ -45,11 +46,12 @@ pub const Integration = struct {
             .address = config.address,
             .addressing = try Addressing.init(config.address),
         };
-        try self.mailbox.discover(self.discovery.allocator());
+        const discovery = self.discovery.allocator();
+        self.transport = try EmailTransport.init(discovery, &self.mailbox, config.correspondent_addresses);
+        try self.mailbox.discover(discovery);
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         try self.mailbox.maintainCorrespondence(arena.allocator());
-        self.transport = EmailTransport.init(&self.mailbox);
         self.history_adapter = History.init(allocator, &self.mailbox);
     }
 
@@ -65,7 +67,7 @@ pub const Integration = struct {
     }
 
     pub fn sender(self: *Integration) contracts.Communication.Sender {
-        return .{ .context = self, .submit = submit };
+        return .{ .context = self, .submit = submit, .registered_correspondents = self.transport.recipients.keys() };
     }
 
     pub fn callbackPublisher(self: *Integration) contracts.Callback.Publisher {

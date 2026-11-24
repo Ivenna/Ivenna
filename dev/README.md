@@ -19,9 +19,9 @@ dev/prepare.sh
 
 The preparation script copies [.env.example](../.env.example) to `$DEV_INSTANCE_DIR/.env` and the [mail plan example](mail/provision.example.ndjson) to `$DEV_INSTANCE_DIR/mail/provision.ndjson`. Running it again preserves existing private files.
 
-In the instance's `.env`, set `LLM_API_KEY` for inference and configure the mail and memory connections. Match the kernel and operator credentials to the accounts in the [private mail plan](#configuring-mail). The [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`.
+In the instance's `.env`, set `LLM_API_KEY`. If you customize the kernel or operator account, use the same address and credentials in `.env` and the private mail plan. The sample registers the operator mailbox in `MAIL_CORRESPONDENTS` so Ivenna can reply to it. See [configuring mail](#configuring-mail).
 
-The kernel requires `DATA_DIR`; the example sets it to `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. The sample connections match the local services below. To use another [mail service](../docs/running.md#mail-service) or [memory workspace](../docs/running.md#memory-service), configure those connections and prepare only the services you run locally.
+The example stores kernel files in `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. To use other services, configure their connections and prepare the services you run locally. See [mail service setup](../docs/running.md#mail-service) and [memory service setup](../docs/running.md#memory-service).
 
 To enable optional web page retrieval, set `DEEPSEEK_API_KEY` in the same file. See [web page access](../docs/running.md#web-page-access).
 
@@ -107,10 +107,10 @@ After preparing the services, use a terminal with the [instance configuration lo
 
 ```sh
 podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml up -d --wait
-zig build run
+zig build run -- serve
 ```
 
-Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers. `zig build run` installs `ivenna` and `ivenna-report` in `zig-out/bin`, then starts the kernel. Keep it running in this terminal. Each kernel needs its own mailbox and `DATA_DIR`.
+Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed settings when recreating containers. The second command builds `zig-out/bin/ivenna` and runs the kernel in this terminal.
 
 From a second terminal, check reception at the default listener address:
 
@@ -122,7 +122,7 @@ Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the U
 
 ## Sending a message
 
-The operator account provides the `operator` correspondent ID for the local mailbox. Its sender address must use the domain of `MAIL_ADDRESS`; see [supported addressing](../docs/communication.md#current-email-addressing). With reception open, [load the instance configuration](#configuration) in a second terminal and submit through the local SMTP endpoint:
+With reception open, [load the instance configuration](#configuration) in a second terminal and submit a message from the operator account through the local SMTP endpoint.
 
 ```sh
 curl --url "smtp://127.0.0.1:${MAIL_SMTP_PORT:-2525}" --crlf \
@@ -143,21 +143,41 @@ With the supplied readiness policy installed, this command receives a `550` reje
 
 Read messages from Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna chooses whether and when to reply. See the [usage guide](../docs/usage.md) for continuing correspondence and interpreting responses.
 
-## Trying a subscription listener
+## Trying local programs
 
-Once a focus has [registered a subscription](../docs/attention.md#subscriptions), use the returned ID to try the [listener protocol](../docs/subscriptions.md). In another terminal at the repository root, [load the instance configuration](#configuration) to export the kernel's `DATA_DIR`. Set the reporter path and replace the example ID with the one the focus returned.
+In a second terminal at the repository root, [load the same instance environment](#configuration) to set `DATA_DIR`, then point `IVENNA` at the executable built at startup.
 
 ```sh
-export IVENNA_REPORT="$PWD/zig-out/bin/ivenna-report"
-subscription_id='releases-1'
-"$IVENNA_REPORT" inspect "$subscription_id"
+export IVENNA="$PWD/zig-out/bin/ivenna"
 ```
 
-The result shows the receiving focus and saved cursor. A `null` result means the ID is unknown or withdrawn. To keep collecting across kernel stops, see [listener deployment](../docs/running.md#subscription-listeners).
+To set up an independent reader or listener, follow the [deployment guide](../docs/running.md#local-programs).
+
+### Trying a feed reader
+
+Ask Ivenna by email to create a feed, publish a message, and reply with the feed ID. Substitute the returned ID when reading the message.
+
+```sh
+feed_id='releases-1'
+"$IVENNA" feed read "$feed_id"
+```
+
+Run the same command after stopping the kernel to check offline access. See [reading feeds](../docs/communication.md#reading-feeds).
+
+### Trying a subscription listener
+
+Ask Ivenna to [register a subscription](../docs/attention.md#subscriptions) and give you its complete ID. Use that ID in place of the example.
+
+```sh
+subscription_id='release-watch-1'
+"$IVENNA" subscription inspect "$subscription_id"
+```
+
+The result shows the receiving focus and saved cursor. Use the same ID to [publish a test observation](../docs/subscriptions.md#publish-an-observation).
 
 ## Stopping and restarting
 
-Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how running host commands stop, and how Ivenna continues interrupted work.
+Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run -- serve`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how running host commands stop, and how Ivenna continues interrupted work.
 
 To remove the local middleware containers:
 
@@ -169,13 +189,13 @@ The external volumes and private instance files remain in place. Use the [startu
 
 ## Updating the kernel and middleware
 
-Keep the same instance directory and [load its configuration](#configuration) for the commands below. Preparation preserves private copies of the examples; incorporate relevant changes from [.env.example](../.env.example) into the instance's `.env` and reload it.
+For compatible updates, keep the same instance directory and [load its configuration](#configuration). Preparation preserves private copies of the examples. Incorporate relevant changes from [.env.example](../.env.example) into the instance's `.env` and reload it.
 
 ### Kernel
 
-The executable embeds the [model-facing resources](../docs/development.md#model-facing-resources) from their owning packages. Check the [storage format requirements](../docs/running.md#updating-the-executable) before updating an existing instance. After editing code or embedded resources, stop the kernel and run `zig build run` to rebuild both executables and restart it.
+For a change in storage format, see [updating an existing instance](../docs/running.md#updating-the-executable). For a fresh development instance, choose a new `DEV_INSTANCE_DIR`. With the supplied Stalwart account plan, configure a new `MAIL_VOLUME_NAME` in that instance and provision it as described in [mail setup](#configuring-mail).
 
-To use another source checkout, stop the previous kernel and follow the update steps from the new checkout's root, using the same instance directory and service volumes. Point any independent listeners at the new checkout's `zig-out/bin/ivenna-report`. Rebuild memory if its sources changed. Launching from the new checkout makes it the starting directory for file browsing and host commands.
+After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent readers and listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
 
 ### Memory
 
@@ -184,7 +204,7 @@ The memory [Containerfile](../apps/memory/Containerfile) installs [memory.nu](..
 ```sh
 podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml build --pull --no-cache memory
 podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml up -d --wait memory
-zig build run
+zig build run -- serve
 ```
 
 For another memory deployment, update its handler and entry point as described in [memory service setup](../docs/running.md#memory-service).
@@ -223,12 +243,11 @@ For another memory deployment, configure capacity at its [service entry point](.
 
 | Location | Contents |
 | --- | --- |
-| Stalwart volume, `ivenna-mail` by default | Correspondence, callback inbox, working-history records, checkpoints, Trash, accounts, and Stalwart configuration |
+| Stalwart volume, `ivenna-mail` by default | Mail accounts, the kernel's mailbox data, and Stalwart configuration |
 | Memory volume, `ivenna-memory` by default | Shared memory rooms and entries |
 | `$DEV_INSTANCE_DIR/.env` | Kernel and local service settings and credentials |
 | `$DEV_INSTANCE_DIR/mail/provision.ndjson` | Private mail configuration plan |
 | `$DEV_INSTANCE_DIR/memory/` | Local memory SSH configuration and keys |
-| `<DATA_DIR>/host/` | Full host command output |
-| `<DATA_DIR>/subscriptions.sqlite3` | Subscription catalog, listener progress, and pending observations |
+| `$DEV_INSTANCE_DIR/data/` | Host output and the instance database. See [kernel data locations](../docs/running.md#data-and-retention). |
 
-The example sets `DATA_DIR` to `$DEV_INSTANCE_DIR/data/`. When moving the instance, [back up the subscription database and mailbox together](../docs/running.md#backups-and-transfers). Container removal and recreation preserve the external volumes and private instance files. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.
+Container replacement preserves the external volumes and private instance files. To move the instance, follow the [backup and transfer procedures](../docs/running.md#backups-and-transfers).

@@ -10,6 +10,7 @@ pub const Config = struct {
     memory_ssh_config: ?[]const u8,
     mail_session_url: []const u8,
     mail_address: []const u8,
+    mail_correspondents: []const []const u8,
     mail_authentication: union(enum) {
         authorization: []const u8,
         credentials: struct { username: []const u8, password: []const u8 },
@@ -27,12 +28,14 @@ pub const Config = struct {
     llm_request_timeout_ms: u32,
     llm_reasoning: agent.Engine.Reasoning,
 
-    /// Text borrows the process environment, which outlives the application.
-    pub fn load(env: *const std.process.Environ.Map) !Config {
+    /// The address list belongs to a. All strings borrow the process environment.
+    pub fn load(a: std.mem.Allocator, env: *const std.process.Environ.Map) !Config {
         const mail_auth = env.get("MAIL_AUTHORIZATION");
         const fetch_key = env.get("DEEPSEEK_API_KEY") orelse "";
         const default_reasoning: agent.Engine.Reasoning = .{};
         const default_limits: agent.Kernel.Limits = .{};
+        const correspondents = try mailCorrespondents(a, env);
+        errdefer a.free(correspondents);
         const config: Config = .{
             .service_address = try serviceAddress(env),
             .data_dir = try nonempty(env, "DATA_DIR", ""),
@@ -40,6 +43,7 @@ pub const Config = struct {
             .memory_ssh_config = env.get("MEMORY_SSH_CONFIG"),
             .mail_session_url = try nonempty(env, "MAIL_SESSION_URL", "http://127.0.0.1:8088/jmap/session"),
             .mail_address = try nonempty(env, "MAIL_ADDRESS", ""),
+            .mail_correspondents = correspondents,
             .mail_authentication = if (mail_auth) |value| blk: {
                 if (value.len == 0) return error.MissingMailCredentials;
                 break :blk .{ .authorization = value };
@@ -104,6 +108,15 @@ fn nonempty(env: *const std.process.Environ.Map, key: []const u8, default: []con
     const value = env.get(key) orelse default;
     if (value.len == 0) return error.MissingConfiguration;
     return value;
+}
+
+fn mailCorrespondents(a: std.mem.Allocator, env: *const std.process.Environ.Map) ![]const []const u8 {
+    const text = std.mem.trim(u8, env.get("MAIL_CORRESPONDENTS") orelse "", " \t");
+    if (text.len == 0) return &.{};
+    const addresses = try a.alloc([]const u8, std.mem.count(u8, text, ",") + 1);
+    var items = std.mem.splitScalar(u8, text, ',');
+    for (addresses) |*address| address.* = std.mem.trim(u8, items.next().?, " \t");
+    return addresses;
 }
 
 fn number(comptime T: type, env: *const std.process.Environ.Map, key: []const u8, default: T) !T {

@@ -2,7 +2,7 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const History = @import("history.zig").History;
 const Persistence = @import("history.zig").Persistence;
-const Subscriptions = @import("subscriptions");
+const Subscriptions = @import("instance_state").subscriptions;
 const Reports = @import("reports.zig");
 const Input = @import("input.zig");
 const WorkInput = @import("work.zig");
@@ -44,6 +44,7 @@ pub const Session = struct {
     context: ?Context = null,
     /// Input usage from the latest committed ordinary inference in this epoch.
     last_input_tokens: ?u64 = null,
+    /// A restored activity still needs its first observation of this runtime.
     needs_startup: bool = false,
     state: union(enum) {
         idle,
@@ -94,7 +95,15 @@ pub const Registry = struct {
     next_command_id: u64 = 1,
     started_at_unix_ms: i64,
 
-    pub fn init(allocator: Allocator, io: std.Io, max_sessions: usize, max_pending: usize, history: contracts.HistoryStore, subscriptions: *Subscriptions.Store) !Registry {
+    pub fn init(
+        allocator: Allocator,
+        io: std.Io,
+        max_sessions: usize,
+        max_pending: usize,
+        history: contracts.HistoryStore,
+        subscriptions: *Subscriptions.Store,
+        correspondents: []const []const u8,
+    ) !Registry {
         var self: Registry = .{
             .allocator = allocator,
             .io = io,
@@ -127,7 +136,7 @@ pub const Registry = struct {
                     .role = record.role,
                     .epoch = record.epoch,
                     .subscription_through = record.subscription_through,
-                    .needs_startup = true,
+                    .needs_startup = record.role == .activity,
                 };
                 errdefer self.destroySession(session);
                 session.focus_id = try allocator.dupe(u8, record.focus_id);
@@ -149,7 +158,7 @@ pub const Registry = struct {
             }
             for (retained.sessions) |record| {
                 const session = self.sessions.get(record.session_id).?;
-                if (session == self.core or record.was_running or record.observations.len != 0) try self.ensureStartupLocked(session);
+                if (record.was_running or record.observations.len != 0) try self.ensureActivityStartupLocked(session);
                 for (record.observations) |event| {
                     const delivery = try Delivery.create(allocator, event, null);
                     errdefer delivery.destroy(allocator);
@@ -159,14 +168,14 @@ pub const Registry = struct {
         } else {
             if (try subscriptions.isBound()) return error.SubscriptionCatalogMismatch;
             const core = try allocator.create(Session);
-            core.* = .{ .session_id = 1, .role = .core, .needs_startup = true };
+            core.* = .{ .session_id = 1, .role = .core };
             errdefer self.destroySession(core);
             core.focus_id = try allocator.dupe(u8, "core-1");
             core.context = try Context.init(allocator, .{ .session_id = 1, .epoch = 0 }, core.focus_id);
-            try self.ensureStartupLocked(core);
             try self.sessions.put(allocator, 1, core);
             self.core = core;
         }
+        try self.queueStartupLocked(self.core, correspondents);
         try self.saveLocked();
         try subscriptions.markBound();
         // A prior checkpoint may have committed just before the process stopped.
@@ -231,7 +240,6 @@ pub const Registry = struct {
         if (!self.hasCapacity(session)) return .deferred;
         const delivery = try Delivery.create(self.allocator, event, incoming.receipt);
         errdefer delivery.destroy(self.allocator);
-        try self.ensureStartupLocked(session);
         try session.pending.ensureUnusedCapacity(self.allocator, 1);
         const notice_key = if (incoming.receipt) |key| try self.allocator.dupe(u8, key) else null;
         errdefer if (notice_key) |key| self.allocator.free(key);
@@ -255,11 +263,8 @@ pub const Registry = struct {
             work.session.borrowed_workers -= 1;
         };
         try ready.ensureTotalCapacity(a, self.sessions.count());
-        const sessions = try a.alloc(*Session, self.sessions.count());
+        const sessions = try self.liveSessionsLocked(a);
         defer a.free(sessions);
-        var iterator = self.sessions.valueIterator();
-        for (sessions) |*session| session.* = iterator.next().?.*;
-        std.mem.sort(*Session, sessions, {}, lessSessionId);
         for (sessions) |session| {
             if (try self.takeReady(session)) |work| ready.appendAssumeCapacity(work);
         }
@@ -505,16 +510,14 @@ pub const Registry = struct {
     pub fn compactionSnapshot(self: *Registry, a: Allocator, session: *Session) !Input.Snapshot {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        var activities: std.ArrayList([]const u8) = .empty;
-        if (session == self.core) {
-            var sessions = self.sessions.valueIterator();
-            while (sessions.next()) |entry| {
-                const activity = entry.*;
-                if (activity == self.core) continue;
-                try activities.append(a, try a.dupe(u8, activity.focus_id));
-            }
-            std.mem.sort([]const u8, activities.items, {}, lessActivity);
-        }
+        const activities: []const []const u8 = if (session == self.core) blk: {
+            const live = try self.liveSessionsLocked(a);
+            defer a.free(live);
+            std.debug.assert(live[0] == self.core);
+            const ids = try a.alloc([]const u8, live.len - 1);
+            for (ids, live[1..]) |*id, activity| id.* = try a.dupe(u8, activity.focus_id);
+            break :blk ids;
+        } else &.{};
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
         for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
             .callback_id = try a.dupe(u8, callback.reference),
@@ -523,11 +526,19 @@ pub const Registry = struct {
         return .{
             .current = try self.currentLocked(a, session),
             .state = .{
-                .activities = try activities.toOwnedSlice(a),
+                .activities = activities,
                 .callbacks = try own_callbacks.toOwnedSlice(a),
                 .subscriptions = try self.subscriptions.activeReferences(a, session.focus_id),
             },
         };
+    }
+
+    fn liveSessionsLocked(self: *Registry, a: Allocator) ![]*Session {
+        const live = try a.alloc(*Session, self.sessions.count());
+        var sessions = self.sessions.valueIterator();
+        for (live) |*session| session.* = sessions.next().?.*;
+        std.mem.sort(*Session, live, {}, lessSessionId);
+        return live;
     }
 
     fn currentLocked(self: *Registry, a: Allocator, session: *Session) !Input.Current {
@@ -846,7 +857,7 @@ pub const Registry = struct {
             }
             return null;
         }
-        try self.ensureStartupLocked(session);
+        try self.ensureActivityStartupLocked(session);
         try self.restoreContextLocked(session);
         const activation = try self.allocator.create(Activation);
         activation.* = .{};
@@ -903,20 +914,25 @@ pub const Registry = struct {
         session.context = try Context.restore(self.allocator, .{ .session_id = session.session_id, .epoch = session.epoch }, session.focus_id, entries);
     }
 
-    fn ensureStartupLocked(self: *Registry, session: *Session) !void {
+    fn ensureActivityStartupLocked(self: *Registry, session: *Session) !void {
         if (!session.needs_startup) return;
-        const delivery = try Delivery.create(self.allocator, .{ .startup = .{ .observed_at_unix_ms = self.started_at_unix_ms } }, null);
+        try self.queueStartupLocked(session, null);
+        session.needs_startup = false;
+    }
+
+    fn queueStartupLocked(self: *Registry, session: *Session, correspondents: ?[]const []const u8) !void {
+        const delivery = try Delivery.create(self.allocator, .{ .startup = .{
+            .observed_at_unix_ms = self.started_at_unix_ms,
+            .correspondents = correspondents,
+        } }, null);
         errdefer delivery.destroy(self.allocator);
         try session.pending.insert(self.allocator, 0, delivery);
-        session.needs_startup = false;
     }
 
     fn enqueueLocked(self: *Registry, session: *Session, event: Input.Event) !void {
         const delivery = try Delivery.create(self.allocator, event, null);
         errdefer delivery.destroy(self.allocator);
-        try self.ensureStartupLocked(session);
-        try session.pending.ensureUnusedCapacity(self.allocator, 1);
-        session.pending.appendAssumeCapacity(delivery);
+        try session.pending.append(self.allocator, delivery);
         session.notify();
     }
 
@@ -964,10 +980,6 @@ fn isInternal(event: Input.Event) bool {
     };
 }
 
-fn lessActivity(_: void, left: []const u8, right: []const u8) bool {
-    return (contracts.Reference.sequence(left) orelse unreachable) < (contracts.Reference.sequence(right) orelse unreachable);
-}
-
 fn lessSessionId(_: void, left: *Session, right: *Session) bool {
     return left.session_id < right.session_id;
 }
@@ -992,9 +1004,9 @@ const TestStore = @import("test_history.zig").TestStore;
 test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
     var storage: TestStore = .{};
     defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+    var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, &.{});
     defer registry.deinit();
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
@@ -1052,9 +1064,9 @@ test "compaction samples the active subscriptions addressed to this focus" {
     const a = scratch.allocator();
     var storage: TestStore = .{};
     defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+    var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, &.{});
     defer registry.deinit();
     var core = try admitTestInput(&registry, a);
     defer core.history.deinit();
@@ -1085,9 +1097,9 @@ test "activity completion publishes once and maintenance republishes the same ch
     for ([_]bool{ false, true }) |sleeping| {
         var storage: TestStore = .{};
         defer storage.arena.deinit();
-        var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+        var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
         defer subscriptions.close();
-        var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
+        var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, &.{});
         defer registry.deinit();
         var core = try admitTestInput(&registry, a);
         defer core.history.deinit();

@@ -9,7 +9,7 @@ pub const IncomingMessage = struct {
 };
 
 pub const Message = struct {
-    recipients: []const []const u8,
+    recipient: []const u8,
     text: []const u8,
 };
 
@@ -28,12 +28,14 @@ pub const SendResult = union(enum) {
     submission_unknown: void,
 };
 
-/// The adapter resolves correspondent IDs to native addresses and submits the
+/// The adapter resolves the recipient to a native address and submits the
 /// message. Failures of required service access propagate to the caller.
 /// The caller owns the returned reference, allocated with the supplied allocator.
 pub const Sender = struct {
     context: *anyopaque,
     submit: *const fn (*anyopaque, std.mem.Allocator, Message) anyerror!SendResult,
+    /// The IDs accepted for outgoing correspondence, borrowed for the sender's lifetime.
+    registered_correspondents: []const []const u8,
 
     pub fn send(self: Sender, a: std.mem.Allocator, message: Message) !SendResult {
         return self.submit(self.context, a, message);

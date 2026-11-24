@@ -4,7 +4,7 @@ Send your letter by email while reception is open. If reception is closed, your 
 
 ## Sending a request
 
-Use an account in the same domain as Ivenna. Send through your mail service's authenticated submission path, using a From address authorized for that account.
+Send through your mail service's authenticated submission path. Use a From address in Ivenna's mail domain that your account is authorized to use. If you expect a reply, ask the deployment operator to register your address for outgoing mail. See [outgoing registration](running.md#outgoing-correspondents).
 
 ```text
 From: operator@ivenna.test
@@ -14,7 +14,7 @@ Subject: French practice
 Please remember that I am learning French and propose a practice plan.
 ```
 
-Ivenna sees your correspondent ID (`operator` here), the subject, and the body. Each From address must map to a supported ID. To ask Ivenna to contact someone else, give their ID in the letter. See [email addressing](communication.md#current-email-addressing).
+Ivenna sees your correspondent ID (`operator` in this example), subject, and body. To ask Ivenna to contact someone else, give their registered ID. See [email addresses and IDs](communication.md#current-email-addressing).
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 
@@ -24,15 +24,15 @@ Put a short passage in the body of your letter. Ivenna skips email attachments. 
 
 - For a file already on Ivenna's host, give its absolute path, such as `/srv/notes.md`, or its file URI.
 - For a screenshot, include a direct HTTP(S) link that Ivenna's model service can open.
-- For an article, include its URL. Ivenna can send it to a page reader when the deployment enables [web page access](running.md#web-page-access).
+- For an article, include its URL. Ivenna can retrieve the page when the deployment enables [web page access](running.md#web-page-access).
 
-A letter that cannot fit stays pending in the mailbox and can delay later mail. If the model service rejects a request after Ivenna saves your letter, the letter remains in working history for when reasoning resumes. See the [operator's recovery steps for a pending letter](running.md#recovering-from-an-admission-failure).
+A letter that exceeds the model's input limits can stay pending and delay later mail. See the [operator's recovery steps](running.md#recovering-from-an-admission-failure).
 
 ## Continuing correspondence
 
-Ivenna decides whether and when to write. You may receive one response, several updates, or none. Its messages arrive under the subject `Ivenna`.
+Ivenna decides whether and when to write. You may receive one response, several updates, or none. See [how Ivenna sends email](communication.md#current-email-addressing).
 
-Each follow-up reaches the core as a new observation, even within an email thread. Identify the earlier request and say what has changed.
+Each follow-up reaches the core as a new observation, even within an email thread. Identify the earlier request, include the details your follow-up depends on, and say what has changed.
 
 ```text
 From: operator@ivenna.test
@@ -45,14 +45,16 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 ## Ongoing work and memory
 
-Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring a new version to its attention without another letter from you. See [how focuses coordinate and resume work](attention.md).
+Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring new versions to its attention. See [subscriptions](attention.md#subscriptions).
 
-Continued work uses retained understanding and [autonomous memory](memory.md). Ivenna chooses what to retain, revisit, and revise as its understanding develops. Include relevant context when following up, since Ivenna can condense its working history. Keep your own copy if you need the exact wording after [Ivenna's mail copies expire](running.md#communication-copies).
+If Ivenna gives you a feed ID, use it to read the feed from the kernel host. A program on that host can relay selected messages to readers elsewhere. See [reading feeds](communication.md#reading-feeds) and [local programs](running.md#local-programs).
+
+Ivenna can condense its working history and decide what to keep in memory. Keep your own mail copies if you need to retrieve or quote a letter later. See [autonomous memory](memory.md) and [mail retention](running.md#communication-copies).
 
 ## After interruption
 
-During a temporary model outage, Ivenna can still receive mail. It retries the pending decision and can continue when the service recovers. If the kernel stops, reception closes. On restart Ivenna restores saved history, pending wakeups, and stored results. It can continue interrupted work without a new letter. See [service status and reception](running.md#service-status-and-reception).
+During a temporary model outage, reception stays open while Ivenna retries the pending inference. If the kernel stops, reception closes and Ivenna can continue saved work after restart. See [service status and reception](running.md#service-status-and-reception).
 
 If the kernel stopped after saving your letter but before acknowledging its copy, Ivenna can see the same letter again. You can also receive a reply even if Ivenna lost confirmation while sending it.
 
-The kernel does not resume or replay host commands. Ivenna receives a stored completion it was waiting for, or learns that the outcome is unknown. If you follow up, mention which replies reached you and any changes you observed, such as a file the command wrote before the interruption. See [stopping and restarting](running.md#stopping-and-restarting).
+If you follow up, mention which replies reached you and any changes you observed, such as a file a command wrote before the interruption. See [what the kernel restores on restart](running.md#stopping-and-restarting).
