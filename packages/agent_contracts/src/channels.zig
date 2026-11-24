@@ -7,10 +7,10 @@ pub const Channels = struct {
 
     pub const Outcome = enum {
         accepted,
-        no_receiver,
+        /// This attempt made no handoff and stored no message.
+        not_ready,
         unknown_channel,
         too_long,
-        busy,
     };
 
     context: *anyopaque,

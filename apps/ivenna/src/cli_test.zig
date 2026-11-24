@@ -153,7 +153,7 @@ test "a channel matches one pending read and holds no message between receivers"
     const receiver = try Receiver.init(a, directory, id);
     try channels.open(channels.context, receiver.id, "core-1");
 
-    try expectSendOutcome(channels, receiver.id, "before any receiver", .no_receiver);
+    try expectSendOutcome(channels, receiver.id, "before any receiver", .not_ready);
 
     const oversize: [contracts.Channels.max_bytes + 1]u8 = @splat('x');
     const maximum = oversize[0..contracts.Channels.max_bytes];
@@ -162,18 +162,17 @@ test "a channel matches one pending read and holds no message between receivers"
         var pending = try io.concurrent(Receiver.once, .{ &receiver, a, &.{} });
         defer _ = pending.cancel(io) catch {};
         try expectSendOutcome(channels, receiver.id, maximum, .accepted);
-        try expectSendOutcome(channels, receiver.id, "the same read cannot match twice", .no_receiver);
         try expectMessage(try pending.await(io), maximum);
     }
 
     try expectReceiveStatus(try receiver.once(a, &.{ "--wait", "10" }), "timeout");
-    try expectSendOutcome(channels, receiver.id, "after the wait expired", .no_receiver);
+    try expectSendOutcome(channels, receiver.id, "after the wait expired", .not_ready);
     {
         const canceled = try channel_ipc.connect(io, directory, receiver.id, null);
         defer canceled.close(io);
         try expectReceiveReply(canceled, .waiting);
     }
-    try expectSendOutcome(channels, receiver.id, "after the waiting receiver disconnected", .no_receiver);
+    try expectSendOutcome(channels, receiver.id, "after the waiting receiver disconnected", .not_ready);
 
     const second = "前半段\x00\n\"\\second half";
     var replacement = try io.concurrent(Receiver.once, .{ &receiver, a, &.{ "--wait", "5000" } });
@@ -198,6 +197,16 @@ test "receive follow flushes successive matches and exits when its channel close
     const channels = registry.port();
     const receiver = try Receiver.init(a, directory, "events-1");
     try channels.open(channels.context, receiver.id, "activity-1");
+    const waiting = try channel_ipc.connect(io, directory, receiver.id, null);
+    defer waiting.close(io);
+    try expectReceiveReply(waiting, .waiting);
+    try expectSendOutcome(channels, receiver.id, "first request", .accepted);
+    try expectReceiveReply(waiting, .{ .message = "first request" });
+    try expectSendOutcome(channels, receiver.id, "before the next request", .not_ready);
+    try channel_ipc.requestNext(waiting);
+    try expectSendOutcome(channels, receiver.id, "next request on the same socket", .accepted);
+    try expectReceiveReply(waiting, .{ .message = "next request on the same socket" });
+
     var child = try receiver.spawn(&.{ executable, "receive", receiver.id, "--follow" });
     defer child.kill(io);
     var buffer: [256]u8 = undefined;
@@ -206,10 +215,8 @@ test "receive follow flushes successive matches and exits when its channel close
     try expectSendOutcome(channels, receiver.id, "first message\ncontinued", .accepted);
     try expectFollowMessage(a, &output.interface, "first message\ncontinued");
     try expectSendOutcome(channels, receiver.id, "matched before closing", .accepted);
-    const waiting = try channel_ipc.connect(io, directory, receiver.id, null);
-    defer waiting.close(io);
-    try expectReceiveReply(waiting, .waiting);
     try testing.expect(try channels.close(channels.context, receiver.id));
+    try channel_ipc.requestNext(waiting);
     try expectReceiveReply(waiting, .closed);
     try expectFollowMessage(a, &output.interface, "matched before closing");
     try testing.expectEqual(null, try readFollowLine(&output.interface));
@@ -258,7 +265,7 @@ test "receive follow exits when a shell pipeline takes one message" {
     try testing.expectEqual(null, try readFollowLine(&diagnostics.interface));
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
 
-    try expectSendOutcome(channels, receiver.id, "after the follower exits", .no_receiver);
+    try expectSendOutcome(channels, receiver.id, "after the follower exits", .not_ready);
 }
 
 fn expectSendOutcome(channels: contracts.Channels, id: []const u8, message: []const u8, expected: contracts.Channels.Outcome) !void {
@@ -266,23 +273,20 @@ fn expectSendOutcome(channels: contracts.Channels, id: []const u8, message: []co
     const deadline = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
     while (true) {
         const outcome = try channels.submit(id, message);
-        const retrying = outcome == .busy or (outcome == .no_receiver and expected == .accepted);
+        const retrying = outcome == .not_ready and expected != .not_ready;
         if (!retrying or std.Io.Clock.awake.now(io).compare(.gte, deadline))
             return testing.expectEqual(expected, outcome);
         try io.sleep(.fromMilliseconds(2), .awake);
     }
 }
 
-fn expectReceiveReply(connection: std.Io.net.Stream, expected: std.meta.Tag(channel_ipc.Response)) !void {
-    const io = testing.io;
-    var status: [1]u8 = undefined;
-    var buffers = [_][]u8{&status};
-    const response = try (try io.operateTimeout(.{ .net_read = .{
-        .socket_handle = connection.socket.handle,
-        .data = &buffers,
-    } }, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } })).net_read;
-    try testing.expectEqual(@as(usize, 1), response.data_len);
-    try testing.expectEqual(@backingInt(expected), status[0]);
+fn expectReceiveReply(connection: std.Io.net.Stream, expected: channel_ipc.Response) !void {
+    var descriptors = [_]std.posix.pollfd{
+        .{ .fd = connection.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    try testing.expect(try std.posix.poll(&descriptors, 5000) != 0);
+    var buffer: [channel_ipc.response_buffer_size]u8 = undefined;
+    try testing.expectEqualDeep(expected, try channel_ipc.readResponse(connection, &buffer));
 }
 
 fn expectFollowMessage(a: std.mem.Allocator, reader: *std.Io.Reader, expected: []const u8) !void {

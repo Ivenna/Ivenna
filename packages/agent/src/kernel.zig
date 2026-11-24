@@ -252,13 +252,12 @@ pub const Kernel = struct {
                 },
                 .channel_id => |id| switch (try self.kernel.channels.submit(id, text)) {
                     .accepted => try runtimeResult(a, .{ .channel_id = id, .status = "accepted" }),
-                    .no_receiver => try runtimeError(a, "channel_no_receiver", "No waiting read matched this message. Start a receiver or retry when one is waiting."),
+                    .not_ready => try runtimeError(a, "channel_not_ready", "This send did not hand off or queue the message. You can retry."),
                     .unknown_channel => try runtimeError(a, "unknown_channel", "No open channel in this runtime matches the ID."),
                     .too_long => try runtimeError(a, "channel_message_too_long", std.fmt.comptimePrint(
                         "Channel messages can contain up to {d} UTF-8 bytes.",
                         .{Channels.max_bytes},
                     )),
-                    .busy => try runtimeError(a, "channel_busy", "Sending is temporarily unavailable. Try again."),
                 },
                 .focus_id => |id| blk: {
                     self.kernel.sessions.sendFocusMessage(self.work, id, text) catch |err| return switch (err) {
@@ -733,9 +732,9 @@ test "continuations omit destination directories and focus and channel sends res
     try testing.expectEqualStrings(sender_id, message.from_focus);
     try testing.expectEqualStrings("Findings are ready.", message.text);
 
-    fixture.send_outcome = .no_receiver;
+    fixture.send_outcome = .not_ready;
     const rejected = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Process more findings." });
-    try testing.expectEqualStrings("channel_no_receiver", rejected.object.get("error").?.object.get("code").?.string);
+    try testing.expectEqualStrings("channel_not_ready", rejected.object.get("error").?.object.get("code").?.string);
     const closed = try call(a, &core, "close_channel", .{ .channel_id = channel_id });
     try testing.expect(closed.object.get("result").?.object.get("changed").?.bool);
     const late = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Late findings." });

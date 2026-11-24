@@ -17,25 +17,27 @@ pub fn run(init: std.process.Init, request: cli.Receive) !void {
     var buffer: [ipc.response_buffer_size]u8 = undefined;
     switch (request.mode) {
         .once => |wait_ms| {
-            const response = (try receive(io, data_directory, request.id, wait_ms, &buffer)) orelse return;
+            const response = response: {
+                const connection = (try start(io, data_directory, request.id, wait_ms, &buffer)) orelse return;
+                defer connection.close(io);
+                break :response (try readReply(io, connection, &buffer, null)) orelse return;
+            };
             switch (response) {
                 .message => |text| try cli.writeJson(io, .{ .status = "message", .text = text }),
                 .timeout, .closed => try cli.writeJson(io, .{ .status = @tagName(response) }),
                 else => return error.InvalidChannelReply,
             }
         },
-        .follow => try follow(io, data_directory, request.id, &buffer),
+        .follow => {
+            const connection = (try start(io, data_directory, request.id, null, &buffer)) orelse return;
+            defer connection.close(io);
+            try follow(io, connection, &buffer);
+        },
     }
 }
 
-fn follow(io: std.Io, data_directory: []const u8, id: []const u8, buffer: *[ipc.response_buffer_size]u8) !void {
-    var received = false;
-    while (true) {
-        const response = (receive(io, data_directory, id, null, buffer) catch |err| switch (err) {
-            // The channel can close between two reads of this stream.
-            error.UnknownChannel => if (received) return else return err,
-            else => return err,
-        }) orelse return;
+fn follow(io: std.Io, connection: std.Io.net.Stream, buffer: *[ipc.response_buffer_size]u8) !void {
+    while (try readReply(io, connection, buffer, null)) |response| {
         switch (response) {
             .message => |text| cli.writeJson(io, .{ .status = "message", .text = text }) catch |err| switch (err) {
                 error.BrokenPipe => return,
@@ -44,36 +46,38 @@ fn follow(io: std.Io, data_directory: []const u8, id: []const u8, buffer: *[ipc.
             .closed => return,
             else => return error.InvalidChannelReply,
         }
-        received = true;
+        if (try outputClosed()) return;
+        try ipc.requestNext(connection);
     }
 }
 
-fn receive(io: std.Io, data_directory: []const u8, id: []const u8, wait_ms: ?u32, buffer: *[ipc.response_buffer_size]u8) !?ipc.Response {
+fn start(io: std.Io, data_directory: []const u8, id: []const u8, wait_ms: ?u32, buffer: *[ipc.response_buffer_size]u8) !?std.Io.net.Stream {
     if (try outputClosed()) return null;
     const connection = try ipc.connect(io, data_directory, id, wait_ms);
-    defer connection.close(io);
-    var descriptors = [_]posix.pollfd{
-        .{ .fd = connection.socket.handle, .events = posix.POLL.IN, .revents = 0 },
-        .{ .fd = std.Io.File.stdout().handle, .events = 0, .revents = 0 },
-    };
+    errdefer connection.close(io);
     const deadline = std.Io.Clock.Timestamp.fromNow(io, ipc.handshake_time).raw;
-    var response = (try readReply(io, connection, &descriptors, buffer, deadline)) orelse return null;
-    if (response == .waiting) response = (try readReply(io, connection, &descriptors, buffer, null)) orelse return null;
+    const response = (try readReply(io, connection, buffer, deadline)) orelse {
+        connection.close(io);
+        return null;
+    };
     return switch (response) {
+        .waiting => connection,
         .unknown_channel => error.UnknownChannel,
-        .waiting => error.InvalidChannelReply,
-        else => response,
+        else => error.InvalidChannelReply,
     };
 }
 
 fn readReply(
     io: std.Io,
     connection: std.Io.net.Stream,
-    descriptors: *[2]posix.pollfd,
     buffer: *[ipc.response_buffer_size]u8,
     deadline: ?std.Io.Timestamp,
 ) !?ipc.Response {
-    if (!try poll(io, descriptors, deadline)) return error.ChannelServiceUnavailable;
+    var descriptors = [_]posix.pollfd{
+        .{ .fd = connection.socket.handle, .events = posix.POLL.IN, .revents = 0 },
+        .{ .fd = std.Io.File.stdout().handle, .events = 0, .revents = 0 },
+    };
+    if (!try poll(io, &descriptors, deadline)) return error.ChannelServiceUnavailable;
     if (descriptors[1].revents != 0) return null;
     return try ipc.readResponse(connection, buffer);
 }

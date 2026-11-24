@@ -149,9 +149,11 @@ Use the [mail example](#sending-a-message) to give Ivenna this assignment.
 
 > Open an activity to try a channel. In that activity, open `task-input` with the description `Send test messages to local receivers`. Try sending `first` before starting a receiver.
 >
-> In the same activity, start `"$IVENNA" receive CHANNEL_ID` with `yield_ms` set to `0`, substituting the complete channel ID. Send `first` while the command waits. If the send reports `channel_no_receiver`, check that the command is still running before retrying. Once it exits, start a second receiver and send `second` to the same channel. Close the channel and report the send results, command output, and exit statuses.
+> In the same activity, start `"$IVENNA" receive CHANNEL_ID --follow` with `yield_ms` set to `0`, substituting the complete channel ID. Send `first` and use `continue_host_shell` to read its output before sending `second`. If either send reports `channel_not_ready`, check that the command is still running before retrying that send.
+>
+> After reading both messages, close the channel and report the send results, command output, and exit status.
 
-The first attempt should return `channel_no_receiver`. The sends made while a reader is waiting should return `accepted`. Each receiver should print one JSON `message` record with the expected text and exit with status 0. See the [channel interface](../docs/communication.md#channels).
+The send before the receiver starts should return `channel_not_ready`. The two successful sends should return `accepted` and produce two JSON `message` records in the same command's output. After the channel closes, the command should exit with status 0. See the [channel interface](../docs/communication.md#channels).
 
 ## Trying a subscription listener
 

@@ -103,7 +103,7 @@ Delivery, wakeups, and resumption use the runtime's own records. The runtime kee
 
 #### Continuing work
 
-A channel sampled in a handover can close before Ivenna uses it again. The next send checks the reference and reports the outcome. See [sending to a channel](communication.md#sending-to-a-channel).
+A channel sampled in a handover can close before Ivenna uses it again. A send's outcome can tell Ivenna whether to retry or arrange a new channel. See [sending to a channel](communication.md#sending-to-a-channel).
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 

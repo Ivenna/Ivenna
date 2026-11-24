@@ -40,7 +40,7 @@ The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. Th
 - **Instance state.** Two subscription connections exercise cursor conflicts, retries after acknowledgement, and whether queued reports retain their destination after withdrawal. [Subscription store](../packages/instance_state/src/subscriptions.zig)
 - **Focus execution.** Fixtures exercise startup with changed registrations, routing by destination kind, and tool exchanges and references carried through handovers. They also check that each report is admitted once after a checkpoint failure or lost confirmation. [Kernel tests](../packages/agent/src/kernel.zig) · [Context tests](../packages/agent/src/context.zig) · [Session registry tests](../packages/agent/src/sessions.zig)
 - **Working history.** The persistence test loads a handover with retired fields, appends a new entry, and reloads the saved history. [History tests](../packages/agent/src/history.zig)
-- **Channels.** Process tests exercise single and timed reads, streaming, and exit when a downstream pipe closes. They check that a send without a waiting reader leaves no message, a replacement reader can use the same ID, and closing the channel wakes waiting readers. [CLI process tests](../apps/ivenna/src/cli_test.zig)
+- **Channels.** Process tests cover single and timed reads, replacement readers, streamed output, and exit when the channel or downstream pipe closes. Direct protocol checks verify that a connection must request each successive read before a send can match it, and that it can observe channel closure between reads. [Channel tests](../apps/ivenna/src/cli_test.zig)
 - **Mail.** A local JMAP server verifies recipient lookup before draft creation and the address stored on the draft. Connection failures exercise mailbox read recovery, uncertain submission, and confirmation of callback and history writes. [Email transport](../packages/email/src/email_transport.zig) · [Email tests](../packages/email/src/root.zig)
 - **Model transport and resources.** HTTP fixtures compare measured request sizes with encoded bodies, exercise file upload outcomes, and verify that two focuses can read one page snapshot from a single fetch. [Responses tests](../packages/responses/src/provider_test.zig) · [Web reader tests](../packages/resources/src/web_test.zig)
 
@@ -50,7 +50,7 @@ The email, Responses, and web reader tests check that canceling a stalled HTTP e
 
 Use the running application to validate process restart and communication through the configured services. To compare context behavior across runs, replay representative work with the same model and starting history. See the [local environment](../dev/README.md) and [validation across runtime boundaries](development.md#validation).
 
-The [channel walkthrough](../dev/README.md#trying-a-channel) exercises send feedback and receiver replacement through the running application.
+Use the [channel walkthrough](../dev/README.md#trying-a-channel) to check send feedback, delivery of successive messages to one receiver, and stream exit on channel close through the running application.
 
 ### Evaluating compaction
 

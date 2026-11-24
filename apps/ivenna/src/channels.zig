@@ -12,8 +12,8 @@ pub const Registry = struct {
     mutex: std.Io.Mutex = .init,
     channels: std.StringArrayHashMapUnmanaged(Channel) = .{},
 
-    // Bound the connections and tasks serving local receive requests.
-    const max_receive_requests = 128;
+    // Bound the sockets and tasks serving local receivers.
+    const max_receivers = 128;
     const Channel = struct {
         focus_id: []const u8,
         waiting: std.DoublyLinkedList = .{},
@@ -29,10 +29,19 @@ pub const Registry = struct {
             return end.durationFromNow(io).raw.toNanoseconds() <= 0;
         }
 
-        fn finish(self: *Receive, waiting: *std.DoublyLinkedList) void {
+        fn park(self: *Receive, waiting: *std.DoublyLinkedList) void {
+            waiting.append(&self.node);
+            self.linked = true;
+        }
+
+        fn remove(self: *Receive, waiting: *std.DoublyLinkedList) void {
             waiting.remove(&self.node);
             self.linked = false;
-            ipc.wakeAfterReply(self.connection);
+        }
+
+        fn finish(self: *Receive, waiting: *std.DoublyLinkedList) void {
+            self.remove(waiting);
+            ipc.endRequests(self.connection);
         }
     };
 
@@ -59,7 +68,7 @@ pub const Registry = struct {
                 connection.close(self.io);
                 continue;
             };
-            if (active.load(.monotonic) >= max_receive_requests) {
+            if (active.load(.monotonic) >= max_receivers) {
                 connection.close(self.io);
                 continue;
             }
@@ -80,31 +89,42 @@ pub const Registry = struct {
             .connection = connection,
             .deadline = if (request.wait_ms) |ms| .fromNow(self.io, .{ .raw = .fromMilliseconds(ms), .clock = .awake }) else null,
         };
-        if (!self.register(request, &receive)) return;
+        if (!self.startReceive(request.id, &receive)) return;
+        while (self.waitForNext(request.id, &receive)) {}
+    }
 
-        const timed_out = blk: {
-            ipc.waitForDisconnect(connection, self.io, receive.deadline) catch |err| break :blk err == error.Timeout;
+    fn waitForNext(self: *Registry, id: []const u8, receive: *Receive) bool {
+        var timed_out = false;
+        const next = ipc.waitForNext(receive.connection, self.io, receive.deadline) catch |err| blk: {
+            timed_out = err == error.Timeout;
             break :blk false;
         };
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (receive.linked) {
-            const channel = self.channels.getPtr(request.id).?;
-            channel.waiting.remove(&receive.node);
-            if (timed_out) ipc.reply(connection, .timeout) catch {};
+            const channel = self.channels.getPtr(id).?;
+            receive.remove(&channel.waiting);
+            if (timed_out) ipc.reply(receive.connection, .timeout) catch {};
+            return false;
         }
+        if (!next or receive.deadline != null) return false;
+        const channel = self.channels.getPtr(id) orelse {
+            ipc.reply(receive.connection, .closed) catch {};
+            return false;
+        };
+        receive.park(&channel.waiting);
+        return true;
     }
 
-    fn register(self: *Registry, request: ipc.Request, receive: *Receive) bool {
+    fn startReceive(self: *Registry, id: []const u8, receive: *Receive) bool {
         self.mutex.lock(self.io) catch return false;
         defer self.mutex.unlock(self.io);
-        const channel = self.channels.getPtr(request.id) orelse {
+        const channel = self.channels.getPtr(id) orelse {
             ipc.reply(receive.connection, .unknown_channel) catch {};
             return false;
         };
         ipc.reply(receive.connection, .waiting) catch return false;
-        channel.waiting.append(&receive.node);
-        receive.linked = true;
+        receive.park(&channel.waiting);
         return true;
     }
 
@@ -150,11 +170,13 @@ pub const Registry = struct {
         std.debug.assert(message.len != 0);
         if (message.len > Channels.max_bytes) return .too_long;
         try self.io.checkCancel();
-        if (!self.mutex.tryLock()) return .busy;
+        if (!self.mutex.tryLock()) return .not_ready;
         defer self.mutex.unlock(self.io);
 
         const channel = self.channels.getPtr(id) orelse return .unknown_channel;
-        while (channel.waiting.first) |node| {
+        var candidate = channel.waiting.first;
+        while (candidate) |node| {
+            candidate = node.next;
             const receive: *Receive = @alignCast(@fieldParentPtr("node", node));
             if (receive.expired(self.io)) {
                 ipc.reply(receive.connection, .timeout) catch {};
@@ -166,13 +188,17 @@ pub const Registry = struct {
                     receive.finish(&channel.waiting);
                     continue;
                 },
-                error.WouldBlock => return .busy,
+                error.WouldBlock => continue,
                 else => return err,
             };
-            receive.finish(&channel.waiting);
+            if (receive.deadline == null) {
+                receive.remove(&channel.waiting);
+            } else {
+                receive.finish(&channel.waiting);
+            }
             return .accepted;
         }
-        return .no_receiver;
+        return .not_ready;
     }
 
     fn sample(context: *anyopaque, a: Allocator, focus_id: ?[]const u8) ![]const []const u8 {

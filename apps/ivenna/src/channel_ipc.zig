@@ -7,6 +7,7 @@ const max_id_bytes = 4 * contracts.Reference.max_name_characters + 21;
 const prefix = "\x00ivenna.channels.";
 const wait_header_size = @sizeOf(u64);
 const unlimited_wait = std.math.maxInt(u64);
+const next_request = "\x01";
 
 pub const handshake_time = std.Io.Clock.Duration{ .raw = .fromSeconds(2), .clock = .awake };
 pub const request_buffer_size = wait_header_size + max_id_bytes + 1;
@@ -54,11 +55,19 @@ pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8, wait_ms: 
     var header: [wait_header_size]u8 = undefined;
     const encoded_wait: u64 = if (wait_ms) |ms| ms else unlimited_wait;
     std.mem.writeInt(u64, &header, encoded_wait, .little);
-    writePacket(connection, &header, id) catch |err| switch (err) {
+    try writeRequest(connection, &header, id);
+    return connection;
+}
+
+pub fn requestNext(connection: net.Stream) !void {
+    try writeRequest(connection, next_request, "");
+}
+
+fn writeRequest(connection: net.Stream, header: []const u8, text: []const u8) !void {
+    writePacket(connection, header, text) catch |err| switch (err) {
         error.PeerDisconnected, error.WouldBlock => return error.ChannelServiceUnavailable,
         else => return err,
     };
-    return connection;
 }
 
 const address_length = @offsetOf(linux.sockaddr.un, "path") + prefix.len + 64;
@@ -135,11 +144,10 @@ pub fn readResponse(connection: net.Stream, buffer: *[response_buffer_size]u8) !
     };
 }
 
-pub fn waitForDisconnect(connection: net.Stream, io: std.Io, deadline: ?std.Io.Clock.Timestamp) !void {
-    // An open receive sends no further requests on this connection. A peer
-    // disconnect or a local shutdown after completing the read wakes this task.
-    var byte: [1]u8 = undefined;
-    _ = read(connection, io, &byte, if (deadline) |end| .{ .deadline = end } else .none) catch |err| switch (err) {
+pub fn waitForNext(connection: net.Stream, io: std.Io, deadline: ?std.Io.Clock.Timestamp) !bool {
+    // The extra byte lets us reject oversized requests on the packet socket.
+    var packet: [next_request.len + 1]u8 = undefined;
+    const size = read(connection, io, &packet, if (deadline) |end| .{ .deadline = end } else .none) catch |err| switch (err) {
         error.Timeout => {
             // Threaded I/O polls with millisecond resolution. Honor the absolute
             // deadline if the transport wait rounded down its final fraction.
@@ -148,9 +156,10 @@ pub fn waitForDisconnect(connection: net.Stream, io: std.Io, deadline: ?std.Io.C
         },
         else => return err,
     };
+    return std.mem.eql(u8, packet[0..size], next_request);
 }
 
-pub fn wakeAfterReply(connection: net.Stream) void {
+pub fn endRequests(connection: net.Stream) void {
     _ = linux.shutdown(connection.socket.handle, linux.SHUT.RD);
 }
 

@@ -5,8 +5,8 @@ Use the ID returned by open_channel. Run under the kernel's OS account with
 DATA_DIR set to the running instance's data directory. Ivenna host commands
 inherit DATA_DIR and can call the executable as "$IVENNA".
 
-Without options, wait for one message. Start the receive before sending.
-Use --wait MS to set a timeout of 1 through {d} milliseconds.
+Start receiving before sending. Without options, wait for one message.
+Use --wait MS to limit that wait to 1 through {d} milliseconds.
 
 For any of the results below, a single read exits with code 0 and writes
 one JSON object to stdout. Its status field gives the outcome.
@@ -16,9 +16,10 @@ one JSON object to stdout. Its status field gives the outcome.
   closed     The channel closed during the wait.
 
 Use --follow to receive successive messages as JSON lines. Each line is
-flushed before the next read begins. Closing the channel ends the stream
-with exit code 0. If the output pipe closes during a wait, either mode
-exits with code 0 without printing another record.
+flushed before the next read begins. When the channel closes, the
+follower writes any message already handed off and exits with code 0.
+If the output pipe closes during a wait, either mode exits with code 0
+without printing another record.
 
 An unknown ID or unavailable channel service produces a diagnostic on
 stderr and exit code 1.
