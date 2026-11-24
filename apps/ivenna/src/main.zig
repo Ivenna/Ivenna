@@ -61,18 +61,25 @@ fn readFeed(io: std.Io, a: std.mem.Allocator, reader: *state.feeds.Reader, query
         .raw = .fromMilliseconds(query.wait_ms),
         .clock = .awake,
     });
+    // Every look reuses one scratch arena that is reset between looks, so a
+    // long wait does not accumulate the metadata of each empty page. Only the
+    // page that ends the wait is allocated from the caller's allocator.
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
     while (true) {
         const left = remainingMilliseconds(io, deadline);
         try reader.setBusyTimeout(@min(left, feed_busy_cap_ms));
-        const page = reader.read(a, query.feed_id, query.after, query.limit) catch |err| {
+        const look = reader.read(scratch.allocator(), query.feed_id, query.after, query.limit) catch |err| {
             // A writer holding the lock must not stretch the wait past its
             // deadline, and a wait should survive one that comes and goes.
             if (err != error.StateStoreBusy or left == 0) return err;
+            _ = scratch.reset(.retain_capacity);
             try io.sleep(.fromMilliseconds(@min(feed_poll_ms, left)), .awake);
             continue;
         };
-        if (page.messages.len != 0 or page.closed or left == 0) return page;
-        freePage(a, page);
+        const settled = look.messages.len != 0 or look.closed or left == 0;
+        _ = scratch.reset(.retain_capacity);
+        if (settled) return reader.read(a, query.feed_id, query.after, query.limit);
         try io.sleep(.fromMilliseconds(@max(1, @min(feed_poll_ms, left))), .awake);
     }
 }
@@ -83,16 +90,6 @@ fn remainingMilliseconds(io: std.Io, deadline: std.Io.Clock.Timestamp) u32 {
     if (left <= 0) return 0;
     const milliseconds = @divTrunc(left, std.time.ns_per_ms);
     return if (milliseconds > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(milliseconds);
-}
-
-fn freePage(a: std.mem.Allocator, page: state.feeds.Reader.Page) void {
-    a.free(page.feed_id);
-    a.free(page.description);
-    for (page.messages) |message| {
-        a.free(message.focus_id);
-        a.free(message.text);
-    }
-    a.free(page.messages);
 }
 
 fn failure(io: std.Io, err: anyerror) !u8 {
