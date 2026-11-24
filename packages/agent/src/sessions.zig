@@ -85,6 +85,9 @@ pub const Registry = struct {
     noticed: std.StringHashMapUnmanaged(enum { scheduled, acknowledged }) = .empty,
     wakeups: std.ArrayList(History.Wakeup) = .empty,
     callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
+    /// Channels the checkpoint should rebuild. The channel registry owns the
+    /// live set; this list only records the IDs a restart restores.
+    channels: std.ArrayList(History.Channel) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
     // Only withdrawal can remove the last reason for an already sleeping
@@ -165,6 +168,20 @@ pub const Registry = struct {
                     try session.pending.append(allocator, delivery);
                 }
             }
+            for (retained.channels) |record| {
+                // A channel opened by a focus that did not come back has no ID
+                // to restore; its record would only accumulate.
+                if (!self.hasFocusLocked(record.opened_by)) continue;
+                const id = try allocator.dupe(u8, record.id);
+                errdefer allocator.free(id);
+                const opened_by = try allocator.dupe(u8, record.opened_by);
+                errdefer allocator.free(opened_by);
+                try self.channels.append(allocator, .{
+                    .id = id,
+                    .opened_by = opened_by,
+                    .opened_at_unix_ms = record.opened_at_unix_ms,
+                });
+            }
         } else {
             if (try subscriptions.isBound()) return error.SubscriptionCatalogMismatch;
             const core = try allocator.create(Session);
@@ -198,6 +215,8 @@ pub const Registry = struct {
         self.wakeups.deinit(self.allocator);
         for (self.callbacks.items) |callback| self.freeCallback(callback);
         self.callbacks.deinit(self.allocator);
+        for (self.channels.items) |channel| self.freeChannel(channel);
+        self.channels.deinit(self.allocator);
         self.queued_callbacks.deinit(self.allocator);
         self.reports.deinit();
         self.history.deinit();
@@ -497,6 +516,7 @@ pub const Registry = struct {
             .wakeups = self.wakeups.items,
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
+            .channels = try self.liveChannelsLocked(a),
             .activity_reports = self.reports.checkpoint(),
         });
     }
@@ -952,6 +972,83 @@ pub const Registry = struct {
         if (session.context) |*context| context.deinit();
         self.allocator.free(session.focus_id);
         self.allocator.destroy(session);
+    }
+
+    /// Record a channel the runtime opened so a restart can restore its ID.
+    pub fn recordChannelOpened(self: *Registry, work: Work, id: []const u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        assertWork(work);
+        const opened_at = self.now();
+        for (self.channels.items) |*channel| {
+            if (!std.mem.eql(u8, channel.id, id)) continue;
+            channel.opened_at_unix_ms = opened_at;
+            try self.saveLocked();
+            return;
+        }
+        const owned_id = try self.allocator.dupe(u8, id);
+        errdefer self.allocator.free(owned_id);
+        const owned_focus = try self.allocator.dupe(u8, work.session.focus_id);
+        errdefer self.allocator.free(owned_focus);
+        try self.channels.append(self.allocator, .{
+            .id = owned_id,
+            .opened_by = owned_focus,
+            .opened_at_unix_ms = opened_at,
+        });
+        try self.saveLocked();
+    }
+
+    /// Drop the record of a channel the runtime closed, so a restart does not
+    /// restore an ID whose close already reached its readers.
+    pub fn forgetChannel(self: *Registry, id: []const u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var index: usize = 0;
+        while (index < self.channels.items.len) : (index += 1) {
+            if (!std.mem.eql(u8, self.channels.items[index].id, id)) continue;
+            self.freeChannel(self.channels.orderedRemove(index));
+            try self.saveLocked();
+            return;
+        }
+    }
+
+    /// Channel records whose opening focus survived into this runtime. The
+    /// kernel reopens them before reception starts.
+    pub fn restoredChannels(self: *Registry, a: Allocator) ![]const History.Channel {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var restored: std.ArrayList(History.Channel) = .empty;
+        for (self.channels.items) |channel| {
+            if (!self.hasFocusLocked(channel.opened_by)) continue;
+            try restored.append(a, .{
+                .id = try a.dupe(u8, channel.id),
+                .opened_by = try a.dupe(u8, channel.opened_by),
+                .opened_at_unix_ms = channel.opened_at_unix_ms,
+            });
+        }
+        return restored.toOwnedSlice(a);
+    }
+
+    fn liveChannelsLocked(self: *Registry, a: Allocator) ![]const History.Channel {
+        var live: std.ArrayList(History.Channel) = .empty;
+        for (self.channels.items) |channel| {
+            if (!self.hasFocusLocked(channel.opened_by)) continue;
+            try live.append(a, channel);
+        }
+        return live.toOwnedSlice(a);
+    }
+
+    fn hasFocusLocked(self: *Registry, focus_id: []const u8) bool {
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |session| {
+            if (std.mem.eql(u8, session.*.focus_id, focus_id)) return true;
+        }
+        return false;
+    }
+
+    fn freeChannel(self: *Registry, channel: History.Channel) void {
+        self.allocator.free(channel.id);
+        self.allocator.free(channel.opened_by);
     }
 
     fn now(self: *Registry) i64 {

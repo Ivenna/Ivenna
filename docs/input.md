@@ -172,7 +172,7 @@ The core's `correspondents` list is present even when empty. The renderer omits 
 
 Active subscriptions include listeners that have yet to report. A report accepted before withdrawal can arrive after the ID has dropped out of a new sample.
 
-The `channels` list reflects the sample time. A retained handover can still show an ID after its channel closes or the runtime restarts. See [channel send outcomes](communication.md#sending-to-a-channel).
+The `channels` list reflects the sample time. A retained handover can still show an ID after its channel closes. A restart restores the channels its checkpoint recorded, so a retained ID can address an open channel again. See [channel send outcomes](communication.md#sending-to-a-channel).
 
 Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after the result is published or queued. A pending host source can identify a command that has already finished. Observation text arrives separately as an event. See [command lifetimes](host.md#command-lifetimes) for handle availability.
 

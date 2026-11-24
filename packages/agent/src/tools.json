@@ -53,7 +53,7 @@
   },
   {
     "name": "open_channel",
-    "description": "Open a named channel for local programs. Give the receiver the returned `channel_id`. A replacement can use the same ID. In an activity, `\"$IVENNA\" receive --help` shows how to receive.",
+    "description": "Open a named channel for local programs. Give the receiver the returned `channel_id`. A replacement reader, and Ivenna after a restart, can use the same ID. In an activity, `\"$IVENNA\" receive --help` shows how to receive.",
     "parameters": {
       "type": "object",
       "properties": {

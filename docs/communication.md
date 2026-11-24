@@ -131,4 +131,6 @@ Either role can call `close_channel` with a complete channel ID.
 
 Closing the channel retires its ID and ends waiting reads with `closed`. A matched read can finish. A follower between reads notices the close on its next request. Closing an unknown ID returns `changed: false`.
 
-A channel stays open when its readers exit or the opening focus ends. It lasts until a focus closes it or the runtime stops. After restart, open a new channel and give the new ID to the receiving program.
+A channel stays open when its readers exit or the opening focus ends. It lasts until a focus closes it or the runtime stops.
+
+A restart restores the channels its checkpoint recorded under the same IDs, so a receiving program can reconnect with the ID it already has. A restored channel starts empty: without a waiting reader, a send returns `channel_not_ready` rather than `unknown_channel`. A channel opened by an activity that ended before the restart is not restored.

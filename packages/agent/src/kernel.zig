@@ -54,7 +54,7 @@ pub const Kernel = struct {
     };
 
     pub fn init(allocator: Allocator, io: std.Io, dependencies: Dependencies, config: Config) !Kernel {
-        return .{
+        var kernel: Kernel = .{
             .allocator = allocator,
             .io = io,
             .engine = dependencies.engine,
@@ -73,6 +73,23 @@ pub const Kernel = struct {
                 dependencies.subscriptions,
                 dependencies.sender.registered_correspondents,
             ),
+        };
+        try kernel.restoreChannels();
+        return kernel;
+    }
+
+    /// Rebuild the channels the last checkpoint recorded before reception
+    /// starts. Each comes back empty: a send to it reports `not_ready` until a
+    /// reader reconnects with the same ID.
+    fn restoreChannels(self: *Kernel) !void {
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const restored = self.sessions.restoredChannels(arena.allocator()) catch |err| {
+            std.log.warn("no channels were restored after restart: {s}", .{@errorName(err)});
+            return;
+        };
+        for (restored) |channel| self.channels.open(self.channels.context, channel.id, channel.opened_by) catch |err| {
+            std.log.warn("channel {s} was not restored: {s}", .{ channel.id, @errorName(err) });
         };
     }
 
@@ -208,11 +225,16 @@ pub const Kernel = struct {
                     const channels = self.kernel.channels;
                     const channel_id = try self.kernel.sessions.issueRuntimeReference(a, self.work, args.name);
                     try channels.open(channels.context, channel_id, self.work.session.focus_id);
+                    self.kernel.sessions.recordChannelOpened(self.work, channel_id) catch |err| {
+                        _ = channels.close(channels.context, channel_id) catch {};
+                        return err;
+                    };
                     break :blk try runtimeResult(a, .{ .channel_id = channel_id });
                 },
                 .close_channel => |args| blk: {
                     const channels = self.kernel.channels;
                     const changed = try channels.close(channels.context, args.channel_id);
+                    if (changed) try self.kernel.sessions.forgetChannel(args.channel_id);
                     break :blk try runtimeResult(a, .{ .channel_id = args.channel_id, .changed = changed });
                 },
                 .schedule_attention => |args| blk: {
@@ -572,7 +594,10 @@ const SubscriptionFixture = struct {
 
     fn openChannel(context: *anyopaque, channel_id: []const u8, focus_id: []const u8) !void {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        self.channel = .{ .id = channel_id, .focus_id = focus_id };
+        const a = self.storage.arena.allocator();
+        // A registry owns the references it keeps; the fixture's outlive the
+        // kernel that opened them.
+        self.channel = .{ .id = try a.dupe(u8, channel_id), .focus_id = try a.dupe(u8, focus_id) };
     }
 
     fn closeChannel(context: *anyopaque, channel_id: []const u8) !bool {
@@ -1191,4 +1216,79 @@ test "a pending document can accompany completed exchanges across a handover" {
         const first_response = carried[0].exchange[0].continuation;
         try testing.expectEqualStrings(if (completed_has_pdf) "Pending call" else "Recent response", first_response);
     }
+}
+
+test "a channel reopened after a restart keeps its ID and reports not_ready" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer core_history.deinit();
+    const opened = try call(a, &core, "open_channel", .{ .name = "core", .description = "Send the path of each file to process." });
+    const channel_id = opened.object.get("result").?.object.get("channel_id").?.string;
+    try SubscriptionFixture.finish(&kernel, core.work, &core_history);
+
+    // The live registry dies with the runtime; only the checkpoint carries the
+    // ID forward.
+    fixture.channel = null;
+    const restarted = try fixture.kernel(&engine, &store);
+    kernel.deinit();
+    kernel = restarted;
+    try testing.expect(fixture.channel != null);
+    try testing.expectEqualStrings(channel_id, fixture.channel.?.id);
+    try testing.expectEqualStrings("core-1", fixture.channel.?.focus_id);
+
+    // A restored channel is open but has no waiting reader.
+    fixture.send_outcome = .not_ready;
+    var restarted_core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer restarted_core.deinit();
+    var restarted_history = try SubscriptionFixture.admit(&kernel, a, restarted_core.work);
+    defer restarted_history.deinit();
+    const rejected = try call(a, &restarted_core, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Process this." });
+    try testing.expectEqualStrings("channel_not_ready", rejected.object.get("error").?.object.get("code").?.string);
+    try SubscriptionFixture.finish(&kernel, restarted_core.work, &restarted_history);
+}
+
+test "a channel opened by an activity that ended is not restored" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer core_history.deinit();
+    _ = try call(a, &core, "open_focus", .{ .name = "research", .task = "Collect findings." });
+    try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks, null);
+    var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer activity.deinit();
+    var activity_history = try SubscriptionFixture.admit(&kernel, a, activity.work);
+    defer activity_history.deinit();
+    const opened = try call(a, &activity, "open_channel", .{ .name = "findings", .description = "Send findings for the local program to process." });
+    try testing.expect(opened.object.get("result").?.object.get("channel_id") != null);
+    const activity_id = activity.work.session.session_id;
+    // No subscriptions or callbacks remain, so the response ends the activity.
+    try SubscriptionFixture.finish(&kernel, activity.work, &activity_history);
+    try testing.expect(!kernel.sessions.sessions.contains(activity_id));
+
+    fixture.channel = null;
+    const restarted = try fixture.kernel(&engine, &store);
+    kernel.deinit();
+    kernel = restarted;
+    try testing.expect(fixture.channel == null);
 }
