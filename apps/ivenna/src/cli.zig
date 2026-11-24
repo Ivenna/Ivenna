@@ -1,5 +1,4 @@
 const std = @import("std");
-const ChannelAddress = @import("agent_contracts").ChannelAddress;
 
 const default_feed_limit = 100;
 const max_feed_limit = 1000;
@@ -12,7 +11,7 @@ pub const Command = union(enum) {
 };
 
 const Feed = struct {
-    channel_id: []const u8,
+    feed_id: []const u8,
     after: u63,
     limit: u32,
 };
@@ -22,7 +21,7 @@ const Subscription = struct {
     id: []const u8,
 };
 
-pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Command {
+pub fn parse(args: []const []const u8) !Command {
     if (args.len == 0) return .{ .help = overview };
     if (isHelp(args[0])) return help(args[1..], overview);
     if (equal(args[0], "serve")) {
@@ -30,27 +29,20 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Command {
         if (isHelp(args[1])) return help(args[2..], serve_help);
         return unexpected(args[1]);
     }
-    if (equal(args[0], "feed")) return parseFeed(a, args[1..]);
+    if (equal(args[0], "feed")) return parseFeed(args[1..]);
     if (equal(args[0], "subscription")) return parseSubscription(args[1..]);
     return invalid("unknown command \"{f}\". See 'ivenna --help'.", .{std.zig.fmtString(args[0])});
 }
 
-fn parseFeed(a: std.mem.Allocator, args: []const []const u8) !Command {
+fn parseFeed(args: []const []const u8) !Command {
     if (args.len == 0) return .{ .help = feed_help };
     if (isHelp(args[0])) return help(args[1..], feed_help);
     const rest = args[1..];
     if (!equal(args[0], "read"))
         return invalid("unknown feed command \"{f}\". See 'ivenna feed --help'.", .{std.zig.fmtString(args[0])});
-    if (rest.len == 0) return invalid("missing CHANNEL_ID. See 'ivenna feed read --help'.", .{});
+    if (rest.len == 0) return invalid("missing FEED_ID. See 'ivenna feed read --help'.", .{});
     const id = rest[0];
     if (isHelp(id)) return help(rest[1..], feed_help);
-    const address = ChannelAddress.parse(a, id) catch |err| switch (err) {
-        error.InvalidAddress => return invalid("expected a complete feed channel ID, got \"{f}\"", .{std.zig.fmtString(id)}),
-        error.OutOfMemory => return err,
-    };
-    if (address != .feed)
-        return invalid("expected a feed channel ID, got \"{f}\"", .{std.zig.fmtString(id)});
-
     var after: ?u63 = null;
     var limit: ?u32 = null;
     const options = rest[1..];
@@ -67,7 +59,7 @@ fn parseFeed(a: std.mem.Allocator, args: []const []const u8) !Command {
         } else return unexpected(option);
     }
     return .{ .feed = .{
-        .channel_id = id,
+        .feed_id = id,
         .after = after orelse 0,
         .limit = limit orelse default_feed_limit,
     } };
@@ -125,26 +117,27 @@ const overview =
     \\ivenna COMMAND [ARGUMENTS]
     \\
     \\  serve          Run the kernel.
-    \\  feed           Read messages from a feed.
-    \\  subscription   Report observations and track source positions.
+    \\  feed           Read messages by feed ID.
+    \\  subscription   Report observations and save source positions.
     \\
-    \\Pass --help to any command for its usage.
+    \\Run ivenna COMMAND --help for command usage.
     \\
 ;
 
 const serve_help =
     \\ivenna serve
     \\
-    \\Run the kernel with the service settings from the environment. The current
-    \\directory is the default location for file browsing and host commands.
+    \\Run the kernel with service settings from the environment. The current
+    \\directory is the starting point for file browsing and host commands.
     \\See docs/running.md for configuration.
     \\
 ;
 
 const environment =
-    \\Set DATA_DIR to the instance's data directory. A relative path resolves
-    \\from the current directory. Host commands inherit absolute DATA_DIR and
-    \\IVENNA paths. These commands also work while the kernel is stopped.
+    \\Set DATA_DIR to the instance's data directory. Relative paths resolve
+    \\from the current directory. Local commands also work while the kernel is
+    \\stopped. Ivenna host commands receive absolute paths in DATA_DIR and
+    \\IVENNA and can invoke the executable as "$IVENNA".
     \\
 ;
 
@@ -154,4 +147,15 @@ const inspect = @embedFile("help/inspect.txt");
 const publish = @embedFile("help/publish.txt");
 const checkpoint = @embedFile("help/checkpoint.txt");
 const writes = @embedFile("help/writes.txt");
-const subscription_help = inspect ++ "\n" ++ publish ++ "\n" ++ checkpoint ++ "\n" ++ writes ++ "\n" ++ environment;
+const subscription_help =
+    \\ivenna subscription COMMAND SUBSCRIPTION_ID
+    \\
+    \\Use the subscription ID returned by Ivenna's subscribe tool.
+    \\
+    \\  inspect      Read the registration and saved cursor.
+    \\  publish      Queue an observation and optionally save a cursor.
+    \\  checkpoint   Save a cursor after skipping an item.
+    \\
+    \\Run ivenna subscription COMMAND --help for examples and command results.
+    \\
+++ "\n" ++ environment;

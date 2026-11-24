@@ -11,5 +11,4 @@ test {
     _ = database;
     _ = feeds;
     _ = subscriptions;
-    _ = @import("feed_reader.zig");
 }

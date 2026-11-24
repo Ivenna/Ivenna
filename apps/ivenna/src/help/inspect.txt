@@ -1,10 +1,10 @@
 ivenna subscription inspect SUBSCRIPTION_ID
 
-Read the registration and saved cursor as JSON on stdout.
+Read the subscription registration and recover the listener's saved position.
 
-  "$IVENNA" subscription inspect releases-1
+  ivenna subscription inspect 'release-watch-1'
 
-An active subscription returns an object with subscription_id, focus_id,
-listener, and cursor. A null cursor means the listener has yet to save a
-position. For an unknown or withdrawn ID, the entire result is null.
-Both results have exit status 0.
+For an active subscription, stdout contains a JSON object with
+subscription_id, focus_id, listener, and cursor. A null cursor means the
+listener has yet to save a position. For an unknown or withdrawn ID, stdout
+contains JSON null. Both results have exit status 0.

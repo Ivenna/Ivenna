@@ -1,20 +1,20 @@
 CREATE TABLE feeds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    stem TEXT NOT NULL,
-    reference TEXT AS (stem || '-' || id) UNIQUE,
+    name TEXT NOT NULL,
+    reference TEXT AS (name || '-' || id) UNIQUE,
     description TEXT NOT NULL,
     closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1))
 ) STRICT;
 CREATE INDEX open_feeds_by_id ON feeds(id) WHERE closed=0;
 CREATE TABLE feed_messages (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel INTEGER NOT NULL REFERENCES feeds(id),
+    feed_id INTEGER NOT NULL REFERENCES feeds(id),
     focus_id TEXT NOT NULL,
     text TEXT NOT NULL,
     published_at_unix_ms INTEGER NOT NULL
 ) STRICT;
--- The sequence is the rowid and already sorts entries within each channel.
-CREATE INDEX feed_messages_by_channel ON feed_messages(channel);
+-- The sequence is the rowid and already sorts entries within each feed.
+CREATE INDEX feed_messages_by_feed ON feed_messages(feed_id);
 
 CREATE TABLE mailbox_binding (
     singleton INTEGER PRIMARY KEY CHECK (singleton=1),

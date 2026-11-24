@@ -26,6 +26,8 @@ Keep each document focused on its role:
 | Architecture guide | The current implementation's package ownership, dependencies, algorithms, synchronization, storage representation, and service protocols |
 | Running and local development guides | Deployment configuration and service procedures |
 
+Pull requests describe the difference from their target branch. Release notes describe what changes for users in a release and link to version-specific upgrade instructions when the update calls for a procedure.
+
 Keep project guidance focused on Ivenna's interfaces, integration choices, and their operational effects. Refer readers to component documentation for general use and administration, keeping Ivenna-specific settings and procedures here.
 
 Design can name an operation or concept when it expresses a behavioral choice, such as explicit sending or work ownership. When behavior changes, update the affected design, interface contracts, model-facing resources, and implementation together. When replacing a mechanism while preserving behavior, update its implementation and architecture description. Describe any remaining implementation limitation and its effect in the relevant interface or operational guide.
@@ -46,7 +48,7 @@ Decode external protocols in their owning components and supply typed contracts 
 
 Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
 
-Keep [channel address syntax](../packages/agent_contracts/src/channel_address.zig) in the shared contract. The kernel presents available destinations to the model and routes sends by namespace. Each destination owner checks whether it can accept the message and reports the outcome it can confirm. See [channel delivery](architecture.md#channel-delivery).
+Keep [channel address syntax](../packages/agent_contracts/src/channel_address.zig) in the shared contract. The kernel resolves the address namespace and gives the decoded ID to the destination owner. That owner decides whether it can accept the message and reports the outcome it can confirm. See [channel delivery](architecture.md#channel-delivery).
 
 [Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Execution projects internal session and delivery state into this interface, exposing facts that help Ivenna choose its next action. Keep runtime state and exact references under program ownership through persistence and compaction. Supply complete references in operation results and observations, and return invalid selections as operation outcomes.
 

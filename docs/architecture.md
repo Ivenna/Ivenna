@@ -8,7 +8,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 
 | Unit | Responsibility |
 | --- | --- |
-| [apps/ivenna](../apps/ivenna) | Provide the CLI, assemble the runtime, serve HTTP status, and own process startup and shutdown |
+| [apps/ivenna](../apps/ivenna) | Provide the CLI, load configuration, assemble the runtime, serve HTTP status, and manage process startup and shutdown |
 | [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
 | [packages/agent](../packages/agent/src/root.zig) | Coordinate focuses, sessions, activations, and retained history; own model-input rendering, execution policy, session prompts, and expression and attention actions |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
@@ -21,7 +21,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [packages/sqlite](../packages/sqlite) | Provide the embedded SQLite build and shared bindings |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result parts, classify source bytes, interpret image references, and read local file contents within a byte limit |
 
-`ivenna serve` runs the kernel and its [HTTP listener](../apps/ivenna/src/service.zig) in the same process. The application gives host commands the absolute path to the executable so they can call the same CLI. The kernel reaches the memory app over SSH. Local service orchestration lives in [dev](../dev).
+`ivenna serve` runs the kernel and its [HTTP listener](../apps/ivenna/src/service.zig) in the same process. Host commands receive the executable path and data directory so they can use the instance's [local commands](running.md#local-programs). The kernel reaches the memory app over SSH. See [local service setup](../dev/README.md).
 
 The agent and concrete capabilities share `agent_contracts`, which depends only on Content. Content supplies tool-result text, image, and file representation and source classification. YAML rendering belongs to the agent. The build declarations enforce the following module dependencies; each arrow points from a module to one it imports:
 
@@ -81,21 +81,23 @@ The sending adapter resolves one correspondent ID and reports what it knows abou
 
 The callback registrar accepts a name and source and returns `Callback.Registration`: an internal numeric delivery ID and a complete reference allocated for the caller. A capability retains the numeric ID for publication through `Callback.Publisher` and presents the reference as `callback_id`; it does not retain the registrar or choose another receiving session.
 
-[Reference](../packages/agent_contracts/src/reference.zig) validates names of at most 32 Unicode code points and formats `<name>-<number>` references for Agent and Host. Execution retains focus, callback, and command sequences in the checkpoint. The subscription and feed stores each allocate their own numeric suffixes in SQLite. Capabilities control the lifetime of their referenced resources. Lookup checks the complete reference.
+[Reference](../packages/agent_contracts/src/reference.zig) validates names and formats the references allocated by execution. The checkpoint retains the focus, callback, and command sequences. The subscription and feed stores each allocate their suffixes in SQLite. Resource lookup uses the complete reference. See [names and references](input.md#names-and-references).
 
 The email integration uses the configured mail account for correspondence, callbacks, and working history. It owns native addressing, folders, markers, and record lifecycles behind the shared contracts. The [email boundary](#email-boundary) describes its storage protocols and operation ownership.
 
 ### Channel delivery
 
-The kernel routes `send` by the address namespace. It passes a decoded correspondent ID to the sender or a decoded focus ID to the session registry. For a feed it passes the complete canonical address, calling focus ID, text, and publication time to the feed store. See the [channel address codec](../packages/agent_contracts/src/channel_address.zig).
+The kernel routes `send` by address namespace. It passes the decoded ID to the configured sender, the session registry, or the feed store. The feed store receives the publishing focus ID and publication time with the text. See the [channel address codec](../packages/agent_contracts/src/channel_address.zig).
 
-The [feed store](../packages/instance_state/src/feeds.zig) serializes publication and closure with a mutex and SQLite write transactions. A publication inserts a message only while the feed is open and returns its sequence after commit. SQLite assigns message sequences across all feeds. Feed changes commit independently of working-history checkpoints. For a complete feed address, the [feed reader](../packages/instance_state/src/feed_reader.zig) reads the description, closure state, and page of messages from one SQLite snapshot. See the [reader interface](communication.md#reading-feeds).
-
-The kernel assembles `current.channels` for ordinary inference and compaction. The registry samples live focus addresses under its lock. For core compaction, the same sample supplies activity references for the handover state. The kernel formats channel addresses from the sender's registered correspondent IDs. The feed store copies open feed addresses and descriptions under its own lock. The request renderer uses the catalog after both locks are released. When the feed store is temporarily busy, the catalog still presents focus and correspondent addresses. Other feed catalog read errors reach kernel supervision. See the [input contract](input.md#inference-turns).
+For ordinary inference, the session registry samples live focus addresses under its lock. The feed store samples open feed IDs and descriptions under its own lock. The kernel formats those IDs and the registered correspondent IDs as addresses and assembles `current.channels`. The input renderer formats sender addresses when presenting correspondence. Retained observations store correspondent IDs. Catalog read errors reach kernel supervision. See the [input contract](input.md#inference-turns).
 
 ### Instance database
 
-`ivenna serve` installs the [schema and format marker](../packages/instance_state/src/database.zig) when initializing `<DATA_DIR>/state.sqlite3`. The kernel opens one connection for feeds and one for subscriptions. Each feed read opens a read-only connection, and each subscription operation opens its own connection to the same initialized file. Both kinds of command can run while the kernel is stopped. In WAL mode, readers can run while SQLite serializes writes across the two stores. See the [schema](../packages/instance_state/src/schema.sql) and [backup and access procedures](running.md#data-and-retention).
+`ivenna serve` initializes `<DATA_DIR>/state.sqlite3` with the [instance schema](../packages/instance_state/src/schema.sql) and a [format marker](../packages/instance_state/src/database.zig). The kernel opens separate connections for feeds and subscriptions. Each CLI operation opens its own connection to the same file. Feed reads use read-only connections. In WAL mode, reads can proceed while SQLite serializes writes.
+
+The first mailbox checkpoint records the database identity before the kernel marks the database bound. On restart the saved identity must match. See [backups and transfers](running.md#backups-and-transfers).
+
+The [feed store](../packages/instance_state/src/feeds.zig) serializes publication and closure with a mutex and SQLite write transactions. Publication checks the open state in the transaction and returns the message sequence after commit. SQLite assigns those sequences across all feeds. Feed writes commit independently of working-history checkpoints. The [feed reader](../packages/instance_state/src/feed_reader.zig) joins feed metadata and messages in one query so the page comes from one SQLite snapshot. See the [reader interface](communication.md#reading-feeds).
 
 ## Service and reception
 
@@ -196,7 +198,7 @@ The [subscription store](../packages/instance_state/src/subscriptions.zig) seria
 
 The listener's cursor records its position in the source. SQLite assigns report sequence numbers across all subscriptions. The kernel records the last sequence admitted to each focus's history as `subscription_through`. At startup, on each intake pass, and when a worker finishes, the dispatcher checks for work. An idle focus with a report beyond its saved sequence is ready to run. Each batch reads that focus's reports in order up to the latest sequence sampled for the batch. Later arrivals wait for the next input. See [activation admission](#activation-admission).
 
-The first mailbox checkpoint records the identity of an unbound instance database before the kernel marks the database bound. On restart the saved identity must match. The registry then deletes each focus's reports through the sequence confirmed in its history, completing any acknowledgement interrupted by shutdown. See [backups and transfers](running.md#backups-and-transfers).
+After matching the [instance database](#instance-database) to the mailbox checkpoint on restart, the registry deletes each focus's reports through the sequence confirmed in its history. This completes any acknowledgement interrupted by shutdown.
 
 ## Working history and user messages
 

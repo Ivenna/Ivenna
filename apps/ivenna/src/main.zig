@@ -7,7 +7,7 @@ const subscription = @import("subscription.zig");
 pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    const command = cli.parse(a, args[1..]) catch |err| return failure(init.io, err);
+    const command = cli.parse(args[1..]) catch |err| return failure(init.io, err);
     switch (command) {
         .serve => try serve.run(init),
         .help => |help| try std.Io.File.stdout().writeStreamingAll(init.io, help),
@@ -20,7 +20,7 @@ fn localCommand(init: std.process.Init, command: cli.Command) !void {
     const a = init.arena.allocator();
     const directory = init.environ_map.get("DATA_DIR") orelse "";
     if (directory.len == 0) {
-        std.log.err("set DATA_DIR to the kernel's data directory", .{});
+        std.log.err("set DATA_DIR to the instance's data directory", .{});
         return error.MissingDataDirectory;
     }
     const path = try std.fs.path.join(a, &.{ directory, state.filename });
@@ -28,7 +28,7 @@ fn localCommand(init: std.process.Init, command: cli.Command) !void {
         .feed => |query| {
             var reader = try state.feeds.Reader.open(a, path);
             defer reader.close();
-            try writeJson(init.io, try reader.read(a, query.channel_id, query.after, query.limit));
+            try writeJson(init.io, try reader.read(a, query.feed_id, query.after, query.limit));
         },
         .subscription => |request| {
             var store = try state.subscriptions.Store.open(a, path);
@@ -49,7 +49,7 @@ fn localCommand(init: std.process.Init, command: cli.Command) !void {
 fn failure(io: std.Io, err: anyerror) !u8 {
     const reason: []const u8 = switch (err) {
         error.InvalidArguments => "invalid_request",
-        error.UnknownChannel => "unknown_channel",
+        error.UnknownFeed => "unknown_feed",
         error.SubscriptionWithdrawn => "withdrawn",
         error.CursorConflict => "cursor_conflict",
         error.StateStoreBusy => "busy",

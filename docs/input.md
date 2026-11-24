@@ -4,24 +4,26 @@ The agent renders retained events, handovers, and inference turns as YAML messag
 
 Tools return their own text, images, and files. When the Responses adapter uses a user-role message to present an uploaded file, it identifies the tool call that supplied it. See [tool content](content.md) and [how tool results are encoded](architecture.md#tool-results).
 
-The [Input definitions and renderers](../packages/agent/src/input.zig) own the data and its model-facing presentation. All focuses use the same [system prompt](../packages/agent/src/system.md), which explains model interpretation; current identity, observations, and available tools identify each focus's circumstances and possible actions.
+All focuses use the same system prompt. The focus's current identity, observations, and available tools describe its own circumstances and possible actions. See the [input definitions and renderers](../packages/agent/src/input.zig) and the [system prompt](../packages/agent/src/system.md).
 
 ## Records and turns
-
-The interfaces have two lifetimes:
 
 | Interface | Shape | Lifetime and meaning |
 | --- | --- | --- |
 | `Input.Record` | `events` or `handover` | Observations and handovers retained in working history |
-| `Input.Turn` | `current`, with observations or `summarize` | Current identity, observation time, and input for one inference |
+| `Input.Turn` | `current` with optional `events`, or `current` with `summarize` | Current identity, observation time, and input for one inference |
 
 An ordinary turn contains `current` and any newly delivered `events`. A compaction turn contains `current` and `summarize`, which asks for a summary and supplies sampled state for recollection. The runtime records admitted events and complete model/tool exchanges in working history.
 
 `Text` denotes a string. `Time` denotes a UTC RFC 3339 string with millisecond precision, such as `2026-11-06T12:00:01.000Z`. Records, events, and callback sources serialize as mappings containing one branch name and its payload. Focus roles serialize as enum values, `core` or `activity`.
 
-Focus references remain stable across waiting, context unloading, and restart; ended activity references are not reused. Retained records identify the focus that admitted their events or produced their handover. A turn's `current.focus_id` identifies the focus performing this inference. Inherited records keep their original focus references, which can differ from the focus now reading them.
+Retained records identify the focus that admitted their events or produced their handover. Inherited records keep that focus ID. The turn's `current.focus_id` identifies the focus performing the current inference.
 
-Tools that create focuses, commands, attention arrangements, subscriptions, or feeds take a short `name`. It contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime adds a numeric suffix to distinguish repeated names. Use the complete reference returned by the tool. Focus and feed channels use [complete channel addresses](communication.md#sending-a-message), such as `ivenna:/focus/practice-2`. Callback references connect an arrangement with its pending state and arriving observation. Command references identify executions and remain control handles only within their originating runtime.
+## Names and references
+
+The `name` supplied when opening a focus, running a command, scheduling attention, subscribing, or creating a feed contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
+
+Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs remain usable as control handles within their originating runtime. To send to a focus or feed, use its complete channel address. See [sending a message](communication.md#sending-a-message).
 
 ## Retained records
 
@@ -50,7 +52,7 @@ Correspondence enters the core as an `input` observation of who said what.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `from` | `Text[]` | Channel addresses of the correspondents this message came from |
+| `from` | `Text[]` | Channel addresses of the senders |
 | `text` | `Text` | Complete message text |
 | `observed_at` | `Time` | Time the runtime observed the message during intake |
 
@@ -100,7 +102,7 @@ A `send` to a focus channel produces a `FocusMessage`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `from_focus` | `Text` | ID of the sending focus, supplied by the runtime |
+| `from_focus` | `Text` | Sending focus's `focus_id`, supplied by the runtime |
 | `observed_at` | `Time` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
 
@@ -127,7 +129,7 @@ Each `subscription` event carries one listener report to the focus that subscrib
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `subscription_id` | `Text` | Complete reference returned by `subscribe`, shared by all reports for that subscription |
+| `subscription_id` | `Text` | ID returned by `subscribe`, shared by all reports for that subscription |
 | `observed_at` | `Time` | Time the local `subscription publish` command received the report |
 | `source_time` | `Time`, when supplied | Time the listener attributes to the upstream event |
 | `text` | `Text` | Listener's account of what it observed |
@@ -151,9 +153,9 @@ A `State` can contain the following collections:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `activities` | `Text[]` | Complete references of the core's existing activities, including sleeping activities |
+| `activities` | `Text[]` | Focus IDs of the core's existing activities, including sleeping activities |
 | `callbacks` | `PendingCallback[]` | Observations arranged for the sampled focus and awaiting admission |
-| `subscriptions` | `Text[]` | Complete references of the subscriptions active for this focus at the time of the sample, including those whose listeners have never reported |
+| `subscriptions` | `Text[]` | IDs of the subscriptions active for this focus at the time of the sample, including those whose listeners have never reported |
 
 The activity list omits the core itself and is empty for an activity focus. Empty collections are omitted. When all collections are empty, the entire `state` field is omitted.
 
@@ -172,7 +174,7 @@ handover:
   summary: A 20-minute practice outline is being prepared. Revisit the plan when it arrives.
   state:
     activities: [practice-2]
-    subscriptions: [releases-1]
+    subscriptions: [release-watch-1]
     callbacks:
       - callback_id: revisit-practice-5
         source:
@@ -183,25 +185,27 @@ The runtime carries sampled state independently of the generated summary. Inheri
 
 ## Inference turns
 
-Each inference ends its input with a turn:
+Each inference ends its input with a turn.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `current` | `Current` | The focus performing this inference, observation time, and channel catalog |
+| `current` | `Current` | Focus identity, role, and observation time, with a channel catalog in ordinary turns |
 | `events` | `Event[]`, when nonempty | New events for an ordinary inference |
 | `summarize` | Summary instructions and optional state | Compaction request, replacing ordinary observations |
 
-`Current` contains `focus_id: Text`, `role: Role`, `observed_at: Time`, and `channels: ChannelCatalog`. Its time dates the current inference input. Events and handovers keep their own observation times and sources. A historical record's focus can differ from the focus identified by `current`.
+`Current` contains `focus_id: Text`, `role: Role`, and `observed_at: Time`. Events and handovers retain their own times and sources.
+
+In ordinary turns, `current.channels: ChannelCatalog` presents the available destinations.
 
 | `ChannelCatalog` field | Type | Meaning |
 | --- | --- | --- |
-| `focuses` | `Text[]` | Complete addresses for all existing focuses, including the current one and sleeping focuses |
-| `correspondents` | `Text[]` | Complete addresses for the registered destinations available to `send` |
-| `feeds` | `Feed[]` or `null` | Open feeds in creation order, `[]` when none are open, or `null` when the store is temporarily busy |
+| `focuses` | `Text[]` | Channel addresses of existing focuses, including the current focus and sleeping focuses |
+| `correspondents` | `Text[]` | Channel addresses of correspondents registered to receive messages |
+| `feeds` | `Feed[]` | Open feeds in creation order |
 
-Each `Feed` has a complete `channel_id: Text` and the `description: Text` supplied when the feed was created.
+Each `Feed` has a `feed_id: Text` for closing and reading the feed, a `channel_id: Text` for `send`, and the `description: Text` supplied at creation.
 
-Both ordinary and compaction turns present sampled catalogs. A destination can change between the sample and a tool call. `send` checks the destination when it runs. See [channel addresses](communication.md#sending-a-message).
+A destination can change between the sample and a tool call. `send` checks the destination when it runs. See [channel addresses](communication.md#sending-a-message).
 
 An ordinary turn with no new events contains only `current` and continues from the preceding history.
 
@@ -220,7 +224,8 @@ current:
     correspondents:
       - ivenna:/correspondent/operator
     feeds:
-      - channel_id: ivenna:/feed/releases-1
+      - feed_id: releases-1
+        channel_id: ivenna:/feed/releases-1
         description: Release announcements and links to upgrade notes.
 events:
   - callback:
@@ -230,7 +235,7 @@ events:
       observed_at: "2026-11-10T18:00:00.500Z"
       text: Revisit the French practice plan.
   - subscription:
-      subscription_id: releases-1
+      subscription_id: release-watch-1
       observed_at: "2026-11-10T17:59:59.200Z"
       text: Stable release v2.4.0 is available
 ```

@@ -8,8 +8,8 @@ const Allocator = std.mem.Allocator;
 /// selection. Kernel owns their effects within the calling model/tool round.
 pub const Request = union(enum) {
     send: struct { channel_id: []const u8, text: []const u8 },
-    create_channel: struct { name: []const u8, description: []const u8 },
-    close_channel: struct { channel_id: []const u8 },
+    create_feed: struct { name: []const u8, description: []const u8 },
+    close_feed: struct { feed_id: []const u8 },
     open_focus: struct { name: []const u8, task: []const u8 },
     schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
     subscribe: struct { name: []const u8, listener: []const u8 },
@@ -29,7 +29,7 @@ pub const Request = union(enum) {
         };
         switch (request) {
             .send => |args| if (args.text.len == 0) return error.InvalidToolArguments,
-            .create_channel, .close_channel, .subscribe => {},
+            .create_feed, .close_feed, .subscribe => {},
             .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
             .schedule_attention => |args| if (!contracts.Reference.validName(args.name) or args.text.len == 0) return error.InvalidToolArguments,
             .withdraw_subscription => |args| if (args.subscription_id.len == 0) return error.InvalidToolArguments,
@@ -61,7 +61,7 @@ fn parseArguments(comptime T: type, value: std.json.Value) !T {
 
 fn available(tag: std.meta.Tag(Request), role: Input.Role) bool {
     return switch (tag) {
-        .send, .create_channel, .close_channel, .subscribe, .withdraw_subscription => true,
+        .send, .create_feed, .close_feed, .subscribe, .withdraw_subscription => true,
         .open_focus, .schedule_attention => role == .core,
     };
 }

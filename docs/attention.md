@@ -1,6 +1,6 @@
 # Attention
 
-The core and activities are focuses of one Ivenna. Each focus has its own identity, working history, and event queue. Its `focus_id` identifies it in observations and retained history across sleep and restart. Its channel address lets another focus send it a message. See [communication](communication.md).
+The core and activities are focuses of one Ivenna. Each has its own working history and event queue. Its `focus_id` identifies it in observations and retained history. Its `channel_id` is the address used to send it a message. The core's focus ID is `core-1`. See [communication](communication.md).
 
 These [attention tools](../packages/agent/src/tools.json) let each focus decide what to attend to. The [role overview](design.md#core-and-concurrent-attention) covers the other actions available to each focus.
 
@@ -12,11 +12,11 @@ These [attention tools](../packages/agent/src/tools.json) let each focus decide 
 | Receive [recurring observations](#subscriptions) in this focus | `subscribe` | Core and activities |
 | Stop accepting reports for a subscription | `withdraw_subscription` | Core and activities |
 
-Use the complete channel address to reach a focus and the complete subscription ID to withdraw a subscription. The core's focus ID is `core-1`. See [names and references](input.md#records-and-turns) for the name format.
+See [names and references](input.md#names-and-references) for the `name` argument to `open_focus`, `schedule_attention`, and `subscribe`.
 
 ## Opening a focus
 
-The core calls `open_focus` with a short `name` and nonempty `task` describing what the activity should pursue. The runtime appends a number to the name and returns the focus ID and its channel address.
+The core calls `open_focus` with a short `name` and nonempty `task` describing what the activity should pursue. The result includes the new `focus_id` and its `channel_id`.
 
 ```json
 {"result":{"focus_id":"practice-2","channel_id":"ivenna:/focus/practice-2"}}
@@ -30,7 +30,7 @@ Malformed arguments or an empty task return `invalid_arguments`. Exhausted focus
 
 ## Reaching an existing focus
 
-Any focus can call `send` with an existing focus's `channel_id` and nonempty `text`. `current.channels.focuses` includes the calling focus, so it can also send to itself. See [the channel catalog](input.md#inference-turns).
+Call `send` with the recipient's `channel_id` and the message text. Copy the address from an `open_focus` result or from `current.channels.focuses`. This list includes the calling focus, which can send to itself. See [the channel catalog](input.md#inference-turns).
 
 ```json
 {"channel_id":"ivenna:/focus/practice-2","text":"Include a short warm-up in your plan."}
@@ -42,7 +42,7 @@ A successful call saves the message in the recipient's queue and returns its cha
 {"result":{"channel_id":"ivenna:/focus/practice-2"}}
 ```
 
-The observation identifies the sending focus as its source. When relaying someone else's words, include their attribution in the text. The message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds, so a long tool call can delay delivery. Focus messages count toward the recipient's [event queue limit](running.md#session-and-command-capacity). See [focus message fields](input.md#focus-messages-and-callbacks).
+The observation identifies the sending focus. When relaying someone else's words, include their attribution in the text. A message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds. Focus messages count toward the recipient's event queue limit. See [focus message fields](input.md#focus-messages-and-callbacks) and [session capacity](running.md#session-and-command-capacity).
 
 ## Returning later
 
@@ -72,18 +72,18 @@ Call `subscribe` in the focus that should receive the reports. Describe in `list
 
 ```json
 {
-  "name": "releases",
-  "listener": "Report each new stable version from the project's release feed."
+  "name": "release-watch",
+  "listener": "Report each stable release announced on the feed."
 }
 ```
 
-Each call creates a subscription and returns its complete reference, even if this focus already follows the same source.
+Each call creates a subscription with a new `subscription_id`, even if this focus already follows the same source.
 
 ```json
-{"result":{"subscription_id":"releases-1"}}
+{"result":{"subscription_id":"release-watch-1"}}
 ```
 
-Give the returned `subscription_id` to the listener you set up. If an activity runs the listener for `releases-1` on the host, the subscription still directs its reports to the core. See the [listener protocol](subscriptions.md) for reporting and resuming from a saved position.
+Give the returned `subscription_id` to the listener you set up. In this example, reports go to the core even if an activity runs the listener on the host. See the [listener protocol](subscriptions.md) for reporting and resuming from a saved position.
 
 An accepted report makes a sleeping focus ready. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. See [subscription observations](input.md#subscription-observations).
 

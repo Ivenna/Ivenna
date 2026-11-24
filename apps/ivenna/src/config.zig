@@ -18,7 +18,7 @@ pub const Config = struct {
     mail_poll_interval_ms: u32,
     max_sessions: usize,
     max_pending_events: usize,
-    max_open_channels: usize,
+    max_open_feeds: usize,
     max_host_commands: usize,
     deepseek_api_key: ?[]const u8,
     context_limits: agent.Kernel.Limits,
@@ -57,7 +57,7 @@ pub const Config = struct {
             .mail_poll_interval_ms = try number(u32, env, "MAIL_POLL_INTERVAL_MS", 2000),
             .max_sessions = try number(usize, env, "MAX_SESSIONS", 128),
             .max_pending_events = try number(usize, env, "MAX_PENDING_EVENTS", 64),
-            .max_open_channels = try number(usize, env, "MAX_OPEN_CHANNELS", 128),
+            .max_open_feeds = try number(usize, env, "MAX_OPEN_FEEDS", 128),
             .max_host_commands = try number(usize, env, "MAX_HOST_COMMANDS", 8),
             .deepseek_api_key = if (fetch_key.len > 0) fetch_key else null,
             .context_limits = .{

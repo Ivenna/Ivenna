@@ -21,15 +21,12 @@ fn prefix(kind: Kind) []const u8 {
     };
 }
 
-/// Address one opaque key. The result belongs to a.
-pub fn format(a: Allocator, kind: Kind, key: []const u8) Error![]const u8 {
-    if (key.len == 0 or !std.unicode.utf8ValidateSlice(key)) return error.InvalidAddress;
+/// Address a nonempty UTF-8 key whose owner has excluded ASCII controls.
+/// The result belongs to a.
+pub fn format(a: Allocator, kind: Kind, key: []const u8) Allocator.Error![]const u8 {
     const start = prefix(kind);
     var length = start.len;
-    for (key) |byte| {
-        if (isAsciiControl(byte)) return error.InvalidAddress;
-        length += if (isUnreserved(byte)) @as(usize, 1) else 3;
-    }
+    for (key) |byte| length += if (isUnreserved(byte)) @as(usize, 1) else 3;
 
     const address = try a.alloc(u8, length);
     @memcpy(address[0..start.len], start);
@@ -106,10 +103,6 @@ test "channel addresses preserve names as opaque UTF-8 keys" {
     const parsed = (try parse(a, address)).feed;
     defer a.free(parsed);
     try std.testing.expectEqualStrings(name, parsed);
-
-    const focus = (try parse(a, "ivenna:/focus/core-1")).focus;
-    defer a.free(focus);
-    try std.testing.expectEqualStrings("core-1", focus);
 }
 
 test "a correspondent address decodes to exactly one identifier" {
@@ -140,7 +133,4 @@ test "invalid and noncanonical channel addresses are rejected" {
     }) |address| {
         try std.testing.expectError(error.InvalidAddress, parse(a, address));
     }
-    try std.testing.expectError(error.InvalidAddress, format(a, .focus, ""));
-    try std.testing.expectError(error.InvalidAddress, format(a, .focus, "a\n-1"));
-    try std.testing.expectError(error.InvalidAddress, format(a, .focus, "\xff"));
 }

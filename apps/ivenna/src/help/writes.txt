@@ -1,10 +1,9 @@
 Cursor changes and write receipts
 
-Set "to" to the new source position as a string. Copy the cursor from
-inspect into "from". If the cursor is null, you can omit "from". An empty
-string is a position and should be passed as "from": "". The write changes
-the cursor only if "from" matches the saved position. The JSON reader accepts
-up to 4 MiB per string.
+Set "to" to the new source position as a string. Copy the saved cursor from
+inspect to "from". For an unset cursor, omit "from" or send null. Copy a saved
+empty string as "from": "". The cursor changes only when "from" matches the
+saved position. JSON strings can be up to 4 MiB.
 
 Read the JSON string on stdout and check the exit status.
 

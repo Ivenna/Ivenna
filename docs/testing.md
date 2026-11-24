@@ -46,11 +46,11 @@ The [CLI process tests](../apps/ivenna/src/cli_test.zig) invoke `ivenna` in an e
 
 ### Channel delivery
 
-The [kernel test](../packages/agent/src/kernel.zig) checks the model's catalog and routes sends from both roles when a focus and a feed share a local ID. The [session registry test](../packages/agent/src/sessions.zig) follows a focus address through registration, compaction, and completion. The [input tests](../packages/agent/src/input.zig) check that incoming observations expose channel addresses while retained records preserve correspondent IDs.
+The agent tests exercise the catalog and delivery when a focus and a feed share an ID. They check that focus addresses follow session lifetime and that correspondence is presented with channel addresses while history preserves correspondent IDs. See the [kernel](../packages/agent/src/kernel.zig), [session registry](../packages/agent/src/sessions.zig), and [context](../packages/agent/src/context.zig) tests.
 
-The [email tests](../packages/email/src/email_transport.zig) check the exact recipient on a draft for a registered ID and the absence of a draft request for an unregistered ID. The [feed store tests](../packages/instance_state/src/feeds.zig) check persistence across reopen and the outcome of publication racing with closure. The [feed reader test](../packages/instance_state/src/feed_reader.zig) follows a feed across gaps in message sequences and drains it after closure.
+The [email tests](../packages/email/src/email_transport.zig) check that a registered ID selects its configured recipient and an unregistered ID stops the send before draft creation.
 
-The [feed CLI test](../apps/ivenna/src/cli_test.zig) reads one of two same-named feeds by complete address with the kernel stopped. It checks pagination arguments, preservation of the complete message text in JSON, and distinct results for a closed feed, an unknown feed, and a malformed address.
+The [feed store tests](../packages/instance_state/src/feeds.zig) check persistence across reopen and publication racing with closure. The [feed CLI test](../apps/ivenna/src/cli_test.zig) reads a closed feed by ID with the kernel stopped. It checks pagination across sequence gaps, `next_after` at the end of the feed, and preservation of complete message text.
 
 ### Subscription delivery
 

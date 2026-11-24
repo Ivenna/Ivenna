@@ -25,7 +25,7 @@ pub const Kernel = struct {
     engine: *Engine,
     inbox: contracts.Inbox,
     sender: Communication.Sender,
-    channels: *Feeds.Store,
+    feeds: *Feeds.Store,
     callbacks: contracts.Callback.Publisher,
     limits: Limits,
     poll_interval_ms: u32,
@@ -41,7 +41,7 @@ pub const Kernel = struct {
         engine: *Engine,
         inbox: contracts.Inbox,
         sender: Communication.Sender,
-        channels: *Feeds.Store,
+        feeds: *Feeds.Store,
         callbacks: contracts.Callback.Publisher,
         history: contracts.HistoryStore,
         subscriptions: *Subscriptions.Store,
@@ -61,7 +61,7 @@ pub const Kernel = struct {
             .engine = dependencies.engine,
             .inbox = dependencies.inbox,
             .sender = dependencies.sender,
-            .channels = dependencies.channels,
+            .feeds = dependencies.feeds,
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
             .poll_interval_ms = config.poll_interval_ms,
@@ -197,15 +197,16 @@ pub const Kernel = struct {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
             return switch (request) {
                 .send => |message| self.send(a, message.channel_id, message.text),
-                .create_channel => |args| blk: {
-                    const id = self.kernel.channels.create(a, args.name, args.description) catch |err| return channelFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .channel_id = id });
+                .create_feed => |args| blk: {
+                    const id = self.kernel.feeds.create(a, args.name, args.description) catch |err| return feedFailure(a, err);
+                    break :blk try runtimeResult(a, .{
+                        .feed_id = id,
+                        .channel_id = try ChannelAddress.format(a, .feed, id),
+                    });
                 },
-                .close_channel => |args| blk: {
-                    if (try parseChannel(a, args.channel_id) != .feed)
-                        break :blk try runtimeError(a, "channel_managed", "Choose the complete address of a feed.");
-                    const changed = self.kernel.channels.closeChannel(args.channel_id) catch |err| return channelFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .channel_id = args.channel_id, .changed = changed });
+                .close_feed => |args| blk: {
+                    const changed = self.kernel.feeds.closeFeed(args.feed_id) catch |err| return feedFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .feed_id = args.feed_id, .changed = changed });
                 },
                 .schedule_attention => |args| blk: {
                     const id = try self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text);
@@ -238,20 +239,28 @@ pub const Kernel = struct {
         }
 
         fn send(self: *RuntimeRound, a: Allocator, channel_id: []const u8, text: []const u8) !Content {
-            return switch (try parseChannel(a, channel_id)) {
+            const address = ChannelAddress.parse(a, channel_id) catch |err| switch (err) {
+                error.InvalidAddress => return error.InvalidToolArguments,
+                error.OutOfMemory => return err,
+            };
+            return switch (address) {
                 .correspondent => |recipient| switch (try self.kernel.sender.send(a, .{ .recipient = recipient, .text = text })) {
                     .submitted => |submission| try runtimeResult(a, .{ .channel_id = channel_id, .reference = submission.reference }),
-                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "Check current.channels.correspondents for registered destinations."),
-                    .not_submitted => try runtimeError(a, "not_submitted", "Preparation stopped before submission."),
+                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "Choose a registered address from current.channels.correspondents."),
+                    .not_submitted => try runtimeError(a, "not_submitted", "Sending stopped before the submission attempt."),
                     .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
                 },
-                .feed => blk: {
+                .feed => |id| blk: {
                     const now = std.Io.Clock.real.now(self.kernel.io).toMilliseconds();
-                    const sequence = self.kernel.channels.publish(channel_id, self.work.session.focus_id, text, now) catch |err| return channelFailure(a, err);
+                    const sequence = self.kernel.feeds.publish(id, self.work.session.focus_id, text, now) catch |err| return feedFailure(a, err);
                     break :blk try runtimeResult(a, .{ .channel_id = channel_id, .sequence = sequence });
                 },
                 .focus => |id| blk: {
-                    self.kernel.sessions.sendFocusMessage(self.work, id, text) catch |err| return channelFailure(a, err);
+                    self.kernel.sessions.sendFocusMessage(self.work, id, text) catch |err| return switch (err) {
+                        error.UnknownSession => runtimeError(a, "unknown_channel", "That focus is unavailable. Choose an address from current.channels.focuses."),
+                        error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The receiving focus's queue is full."),
+                        else => err,
+                    };
                     break :blk try runtimeResult(a, .{ .channel_id = channel_id });
                 },
             };
@@ -357,10 +366,15 @@ pub const Kernel = struct {
         for (self.sender.correspondents, correspondents) |id, *address|
             address.* = try ChannelAddress.format(a, .correspondent, id);
         catalog.correspondents = correspondents;
-        catalog.feeds = self.channels.openFeeds(a) catch |err| switch (err) {
-            error.StateStoreBusy => null,
-            else => return err,
+        const open_feeds = try self.feeds.openFeeds(a);
+        defer a.free(open_feeds);
+        const feeds = try a.alloc(Input.ChannelCatalog.Feed, open_feeds.len);
+        for (open_feeds, feeds) |stored, *feed| feed.* = .{
+            .feed_id = stored.feed_id,
+            .channel_id = try ChannelAddress.format(a, .feed, stored.feed_id),
+            .description = stored.description,
         };
+        catalog.feeds = feeds;
     }
 
     /// Fit continuation and admission against the same snapshot. A rejected
@@ -436,8 +450,7 @@ pub const Kernel = struct {
         const retry: Engine.Retry = if (trigger == .limit) .wait_for_service else .single_attempt;
         const summary_attempts: usize = if (trigger == .limit) 2 else 1;
         for (0..summary_attempts) |_| {
-            var state = try self.sessions.compactionSnapshot(a, work.session);
-            try self.completeChannelCatalog(a, &state.current.channels);
+            const state = try self.sessions.compactionSnapshot(a, work.session);
             switch (try Compaction.summarize(self.engine, a, history, state, scope, rejection, retry)) {
                 .interrupted => |reason| return .{ .interrupted = reason },
                 .rejected => |reason| rejection = reason,
@@ -513,23 +526,15 @@ fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
     return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .code = code, .message = message } }, .{}));
 }
 
-fn parseChannel(a: Allocator, value: []const u8) !ChannelAddress.Address {
-    return ChannelAddress.parse(a, value) catch |err| switch (err) {
-        error.InvalidAddress => error.InvalidToolArguments,
-        else => err,
-    };
-}
-
-fn channelFailure(a: Allocator, err: anyerror) !Content {
+fn feedFailure(a: Allocator, err: anyerror) !Content {
     return switch (err) {
         error.InvalidArguments => error.InvalidToolArguments,
-        error.UnknownChannel, error.UnknownSession => runtimeError(a, "unknown_channel", "No channel matches this address. Check the complete address."),
-        error.ChannelClosed => runtimeError(a, "channel_closed", "This feed is closed to new messages."),
-        error.OpenChannelCapacity => runtimeError(a, "channel_capacity", "The limit for open feeds has been reached."),
-        error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The receiving focus's queue is full."),
-        error.StateStoreBusy => runtimeError(a, "channel_storage_busy", "Feed storage is busy."),
-        error.StateStoreFull => runtimeError(a, "channel_storage_full", "Feed storage is full."),
-        error.StateStorageFailed, error.InvalidStateDatabase => runtimeError(a, "channel_storage_failed", "Feed storage could not confirm the operation. Check for the intended change before retrying."),
+        error.UnknownFeed => runtimeError(a, "unknown_feed", "No feed matches the supplied reference."),
+        error.FeedClosed => runtimeError(a, "feed_closed", "This feed is closed to new messages."),
+        error.OpenFeedCapacity => runtimeError(a, "feed_capacity", "The limit for open feeds has been reached."),
+        error.StateStoreBusy => runtimeError(a, "feed_storage_busy", "Feed storage is busy."),
+        error.StateStoreFull => runtimeError(a, "feed_storage_full", "Feed storage is full."),
+        error.StateStorageFailed, error.InvalidStateDatabase => runtimeError(a, "feed_storage_failed", "The feed store could not confirm the change. Check the feed before retrying."),
         else => err,
     };
 }
@@ -540,15 +545,15 @@ const SubscriptionFixture = struct {
     const testing = std.testing;
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
     storage: TestStore = .{},
-    channel_store: ?Feeds.Store = null,
+    feed_store: ?Feeds.Store = null,
 
     fn deinit(self: *SubscriptionFixture) void {
-        if (self.channel_store) |*store| store.close();
+        if (self.feed_store) |*store| store.close();
         self.storage.arena.deinit();
     }
 
     fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *Subscriptions.Store) !Kernel {
-        if (self.channel_store == null) self.channel_store = try Feeds.Store.openInMemory(testing.allocator, testing.io, 128);
+        if (self.feed_store == null) self.feed_store = try Feeds.Store.openInMemory(testing.allocator, testing.io, 128);
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
@@ -561,7 +566,7 @@ const SubscriptionFixture = struct {
             .subscriptions = subscriptions,
             .inbox = undefined,
             .sender = .{ .context = undefined, .submit = undefined, .correspondents = &.{ "operator", "reviewer+notes" } },
-            .channels = &self.channel_store.?,
+            .feeds = &self.feed_store.?,
             .callbacks = undefined,
             .history = self.storage.port(),
         }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
@@ -604,10 +609,18 @@ const SubscriptionFixture = struct {
         defer instance.sessions.endWorker(work.session);
         try testing.expect(try instance.sessions.commitResponse(work, history, empty_response));
     }
+
+    fn callTool(a: Allocator, round: *Kernel.RuntimeRound, name: []const u8, args: anytype) !std.json.Value {
+        const arguments = try std.json.Stringify.valueAlloc(a, args, .{});
+        const request = (try AgentTools.Request.parse(a, round.work.session.role, name, arguments)).?;
+        const reply = try Kernel.RuntimeRound.invoke(round, a, request);
+        return std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
+    }
 };
 
-test "a focus and a feed with the same local ID are separate channels" {
+test "feed lifecycle uses an ID and send routes by the channel address" {
     const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
@@ -629,33 +642,33 @@ test "a focus and a feed with the same local ID are separate channels" {
     const sender_id = activity.work.session.focus_id;
 
     const purpose = "Keep release findings for readers.";
-    const created = try Kernel.RuntimeRound.invoke(&activity, a, .{ .create_channel = .{
+    const created = try call(a, &activity, "create_feed", .{
         .name = "core",
         .description = purpose,
-    } });
-    const creation = try std.json.parseFromSliceLeaky(std.json.Value, a, created.parts[0].text, .{});
-    const feed_id = creation.object.get("result").?.object.get("channel_id").?.string;
-    try testing.expectEqualStrings("ivenna:/feed/core-1", feed_id);
+    });
+    const creation = created.object.get("result").?.object;
+    const feed_id = creation.get("feed_id").?.string;
+    const feed_address = creation.get("channel_id").?.string;
+    try testing.expectEqualStrings("core-1", feed_id);
+    try testing.expectEqualStrings("ivenna:/feed/core-1", feed_address);
     var soft_compaction = true;
     const input = (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready;
     const turn = input[input.len - 1].message.text;
     try testing.expect(std.mem.indexOf(u8, turn, "ivenna:/focus/core-1") != null);
-    try testing.expect(std.mem.indexOf(u8, turn, "ivenna:/correspondent/operator") != null);
     try testing.expect(std.mem.indexOf(u8, turn, "ivenna:/correspondent/reviewer%2Bnotes") != null);
-    try testing.expect(std.mem.indexOf(u8, turn, feed_id) != null);
+    try testing.expect(std.mem.indexOf(u8, turn, feed_address) != null);
+    try testing.expect(std.mem.indexOf(u8, turn, "feed_id: core-1") != null);
     try testing.expect(std.mem.indexOf(u8, turn, purpose) != null);
 
-    const request = (try AgentTools.Request.parse(a, .activity, "send",
-        \\{"channel_id":"ivenna:/focus/core-1","text":"Findings are ready."}
-    )).?;
-    const reply = try Kernel.RuntimeRound.invoke(&activity, a, request);
-    const result = try std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
+    const result = try call(a, &activity, "send", .{
+        .channel_id = "ivenna:/focus/core-1",
+        .text = "Findings are ready.",
+    });
     try testing.expectEqualStrings("ivenna:/focus/core-1", result.object.get("result").?.object.get("channel_id").?.string);
-    const publication_request = (try AgentTools.Request.parse(a, .core, "send",
-        \\{"channel_id":"ivenna:/feed/core-1","text":"A separate publication."}
-    )).?;
-    const published = try Kernel.RuntimeRound.invoke(&core, a, publication_request);
-    const publication = try std.json.parseFromSliceLeaky(std.json.Value, a, published.parts[0].text, .{});
+    const publication = try call(a, &core, "send", .{
+        .channel_id = feed_address,
+        .text = "A separate publication.",
+    });
     try testing.expectEqual(1, publication.object.get("result").?.object.get("sequence").?.integer);
     try kernel.sessions.collectPending(core.work);
     const deliveries = core.work.activation.deliveries.items;
@@ -663,18 +676,18 @@ test "a focus and a feed with the same local ID are separate channels" {
     const message = deliveries[0].event.focus_message;
     try testing.expectEqualStrings(sender_id, message.from_focus);
     try testing.expectEqualStrings("Findings are ready.", message.text);
+
+    const close = try call(a, &core, "close_feed", .{ .feed_id = feed_id });
+    const closed = close.object.get("result").?.object;
+    try testing.expectEqualStrings(feed_id, closed.get("feed_id").?.string);
+    try testing.expect(closed.get("changed").?.bool);
+    const rejected = try call(a, &activity, "send", .{ .channel_id = feed_address, .text = "Too late." });
+    try testing.expectEqualStrings("feed_closed", rejected.object.get("error").?.object.get("code").?.string);
 }
 
 test "an activity can use the reference returned by subscribe to withdraw another focus's registration" {
     const testing = std.testing;
-    const Tool = struct {
-        fn call(a: Allocator, round: *Kernel.RuntimeRound, name: []const u8, args: anytype) !std.json.Value {
-            const arguments = try std.json.Stringify.valueAlloc(a, args, .{});
-            const request = (try AgentTools.Request.parse(a, round.work.session.role, name, arguments)).?;
-            const reply = try Kernel.RuntimeRound.invoke(round, a, request);
-            return std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
-        }
-    };
+    const call = SubscriptionFixture.callTool;
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
@@ -687,18 +700,18 @@ test "an activity can use the reference returned by subscribe to withdraw anothe
     defer core.deinit();
     var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
     defer core_history.deinit();
-    const created = (try Tool.call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed" })).object.get("result").?;
+    const created = (try call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed" })).object.get("result").?;
     const core_id = created.object.get("subscription_id").?.string;
-    _ = try Tool.call(a, &core, "open_focus", .{ .name = "research", .task = "Watch for releases." });
+    _ = try call(a, &core, "open_focus", .{ .name = "research", .task = "Watch for releases." });
     try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks, null);
 
     var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer activity.deinit();
-    const closed = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
+    const closed = (try call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
     try testing.expectEqualStrings(core_id, closed.get("subscription_id").?.string);
     try testing.expect(closed.get("changed").?.bool);
 
-    const repeated = (try Tool.call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
+    const repeated = (try call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
     try testing.expect(!repeated.get("changed").?.bool);
 }
 
@@ -986,7 +999,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             try testing.expectEqual(@as(usize, 0), request.tools.len);
             const turn = request.history[request.history.len - 1].message.text;
             try testing.expect(std.mem.indexOf(u8, turn, "\nsummarize:") != null);
-            try testing.expect(std.mem.indexOf(u8, turn, "ivenna:/correspondent/reviewer%2Bnotes") != null);
+            try testing.expect(std.mem.indexOf(u8, turn, "channels:") == null);
             for (request.history) |item| {
                 if (item != .tool_result) continue;
                 try testing.expect(item.tool_result.content.parts[0] == .text);

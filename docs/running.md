@@ -38,11 +38,11 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAIL_USERNAME` | Mail login | Required for username/password authentication |
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
-| `MAIL_POLL_INTERVAL_MS` | Delay between intake passes for mail and subscription reports | `2000` |
+| `MAIL_POLL_INTERVAL_MS` | Milliseconds between checks for mail and subscription reports | `2000` |
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
-| `MAX_OPEN_CHANNELS` | Instance-wide capacity for opening feeds | `128` |
+| `MAX_OPEN_FEEDS` | Instance-wide limit on open feeds when creating a feed | `128` |
 | `DATA_DIR` | Persistent directory for instance state and host command output | Required |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
@@ -77,7 +77,7 @@ For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKEN
 
 The [model request limits](content.md#model-request-checks) apply to the complete encoded request. The model service checks its own limits after processing the input.
 
-Each open feed adds its address and description to the request. Size `MAX_OPEN_CHANNELS` for the model's context window. Existing feeds remain visible and writable after you lower the limit, and the open count must fall below it before you can create another. If the catalog alone exceeds the model's window, use a compatible model with enough context to close feeds before switching back. See [changing the model](#changing-the-model).
+Ordinary inference requests include the ID, channel address, and description of each open feed. Set `MAX_OPEN_FEEDS` with the model's context window in mind. Lowering the limit leaves existing feeds open. To create another feed, the number of open feeds must fall below the limit. If the catalog alone exceeds the model's window, use a compatible model with enough context to close feeds before switching back. See [changing the model](#changing-the-model).
 
 When compaction is optional and a usable handover cannot be prepared, the original request can proceed while it fits. If the kernel cannot assemble a request within the adapter's limits, the focus waits with its history and any unadmitted observations intact. See [handover outcomes](architecture.md#continuing-with-a-handover).
 
@@ -103,7 +103,7 @@ Set `MAIL_ADDRESS` and authentication settings for the kernel account. Use `MAIL
 
 The application trims spaces and tabs around each entry in a nonempty list. Startup reports `InvalidCorrespondentAddress` for an empty entry or an unsupported or cross-domain address. It reports `DuplicateCorrespondentId` if entries share the same case-sensitive local part. Restart the kernel to apply changes to the list. See [correspondent addressing](communication.md#current-email-addressing).
 
-For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks when presenting correspondent IDs. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
+For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks to attribute each message to its correspondent. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
 Wakeup and host completion callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped. See [callback observations](attention.md#callback-observations) for the delivery contract.
 
@@ -169,19 +169,19 @@ Startup reads and validates all selected session history, including sleeping ses
 
 ## Local programs
 
-Run feed readers and subscription listeners on the kernel host. [Host commands](host.md#command-lifetimes) inherit the executable's absolute path in `IVENNA` and the instance's absolute `DATA_DIR`. For an independent program, use the installed `ivenna` and set `DATA_DIR` to the absolute path of the kernel's initialized data directory. Independent programs can use these commands while the kernel is stopped.
+Run feed readers and subscription listeners on the kernel host. For a program you launch independently, use the installed `ivenna` and set `DATA_DIR` to the instance's initialized data directory. The program can use these commands while the kernel is stopped. Programs Ivenna starts receive both paths from the [host shell](host.md#command-environment).
 
-Grant filesystem access to programs you trust with the instance database, which contains both feed and subscription data. A relay running on the kernel host can forward selected feeds to other consumers.
+Grant filesystem access to programs you trust with both feed and subscription data. A relay on the kernel host can forward selected messages to other consumers.
 
 ### Feed readers
 
-Give the reader the full feed address supplied by Ivenna. `ivenna feed read` opens the database read-only. In WAL mode, the reader needs access to the existing `-wal` and `-shm` files or directory permission to create them. See the [feed read contract](communication.md#reading-feeds) and [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
+Give the reader the `feed_id` supplied by Ivenna. `ivenna feed read` opens the database read-only. The reader also needs access to the existing `-wal` and `-shm` files or directory permission to create them. See the [feed reader command](communication.md#reading-feeds) and [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
 
 ### Subscription listeners
 
-Give the listener the `subscription_id` returned when a focus [registers the subscription](attention.md#subscriptions). The listener uses `ivenna subscription` and needs write access to the database and its directory.
+Give the listener the `subscription_id` returned when a focus [registers the subscription](attention.md#subscriptions). The listener reports through `ivenna subscription` and needs write access to the database and its directory.
 
-A listener launched as a host command stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs. Run the listener independently to keep collecting across kernel stops. Reports accepted during downtime are available for delivery after restart. Stop using a subscription ID after it is withdrawn. See the [listener protocol](subscriptions.md) for publication and cursor recovery.
+Run the listener independently to collect across kernel stops. Reports accepted during downtime are available for delivery after restart. A listener Ivenna launches as a host command stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs. See the [listener protocol](subscriptions.md) for publication, cursor recovery, and withdrawal.
 
 ## Service status and reception
 
@@ -232,7 +232,7 @@ A subscription report that cannot fit stays in the instance database. Withdrawin
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work (including model recovery waits) and host commands, and wait for the runtime's tasks to end. Failure of a required service such as history storage, or an unrecoverable execution error, also stops the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
-Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries and preserve feed addresses and messages. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mailbox and instance database belong to the same instance. When restoring data, use [matched backups](#backups-and-transfers).
+Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries and preserve feed IDs and messages. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mailbox and instance database belong to the same instance. When restoring data, use [matched backups](#backups-and-transfers).
 
 The core receives a fresh startup observation on every restart. A restored activity receives one immediately if it had an unfinished activation or unread internal observations. Other restored activities receive startup with their next event. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
@@ -242,17 +242,9 @@ Host processes and command handles are not restored, and commands are not replay
 
 ### Updating the executable
 
-Before changing storage format, follow the old build's backup instructions and keep its executables with its mailbox and instance data. Use that build and its matched data to resume the archived instance.
-
-If the previous build used `subscriptions.sqlite3`, start this build with a fresh mailbox and `DATA_DIR`. Update the launcher to `ivenna serve` and listener scripts to `ivenna subscription`. Give each listener a new subscription ID. Give feed readers the addresses of the new feeds and start them with new positions. To send correspondence, register the intended recipients in `MAIL_CORRESPONDENTS` before startup. See [mail service setup](#mail-service).
+Before updating across a change in storage format, make a [matched backup](#backups-and-transfers) and keep the executable that can read it. Use that executable to resume the instance from the backup if needed. To start a fresh instance, use a separate mailbox and `DATA_DIR`.
 
 If `ivenna` reports `IncompatibleStateSchema`, check that `DATA_DIR` points to the intended instance and that the executable supports its database format.
-
-If you previously tuned `CONTEXT_REQUEST_BYTES` or `CONTEXT_COMPACTION_BYTES`, remove those overrides and choose the current [compaction settings](#context-budgets) for your model and workload.
-
-Older configurations may contain `LLM_MAX_ATTEMPTS`. The kernel now ignores this setting and continues retrying temporary inference failures. `LLM_REQUEST_TIMEOUT_MS` limits each attempt. See [model request settings](#model-requests).
-
-Earlier executables cannot restore a checkpoint whose selected history or pending observations include a `focus_interrupted` event. The current executable requires handovers to include the summary's observation time and sampled state. See [persistent working history](architecture.md#persistent-working-history).
 
 ## Data and retention
 
@@ -263,7 +255,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
-| `<DATA_DIR>/state.sqlite3` | Feed addresses, descriptions, closure state and messages, plus subscriptions, listener cursors, accepted report keys and pending reports |
+| `<DATA_DIR>/state.sqlite3` | Feed IDs, descriptions, closure state and messages, plus subscriptions, listener cursors, accepted report keys and pending reports |
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
 Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).
@@ -323,7 +315,7 @@ Back up the mailbox and instance database as a pair. Startup checks the database
 
 If taking the backups separately, stop the kernel before saving either store and leave it stopped until both backups finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners and readers too and include any SQLite journal files with the database.
 
-For restoration, stop the kernel, listeners, and feed readers. Move the current database and its SQLite journal and shared-memory files aside before putting the restored database files in place. Restore the mailbox from the matched backup. Keep the reader and listener programs and their configuration. Restoring an older snapshot can reuse feed addresses and message sequences from discarded data. Reconcile feed addresses and reader positions before resuming.
+To restore an instance, stop the kernel, listeners, and feed readers. Move the current database, journal, and shared-memory files aside. Restore the database and mailbox from the matched backup and keep the reader and listener programs and their configuration. Restoring an older snapshot allows the instance to reuse feed IDs and message sequences from discarded data. Before resuming a reader, check that its feed ID and saved position match the restored data.
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 
@@ -345,7 +337,7 @@ A mailbox backup preserves stored callbacks and wakeup arrangements, not running
 
 ### Feed retention
 
-Closing a feed preserves its description and messages. Feed records accumulate in the instance database without automatic expiry. See [backups and transfers](#backups-and-transfers).
+The instance database retains open and closed feeds and their messages without automatic expiry. See [backups and transfers](#backups-and-transfers).
 
 ### Host output and deployment files
 

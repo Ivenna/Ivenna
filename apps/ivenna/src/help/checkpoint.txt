@@ -1,7 +1,8 @@
 ivenna subscription checkpoint SUBSCRIPTION_ID
 
 Save the listener's position after skipping a source item. Send the cursor
-change as one JSON object on stdin. If inspect returns cursor "17" and the
-listener skips item 18, run
+change as one JSON object on stdin. This example advances from saved
+position "17" past item 18.
 
-  printf '%s\n' '{"from":"17","to":"18"}' | "$IVENNA" subscription checkpoint releases-1
+  printf '%s\n' '{"from":"17","to":"18"}' |
+    ivenna subscription checkpoint 'release-watch-1'

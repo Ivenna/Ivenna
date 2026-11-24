@@ -129,11 +129,17 @@ pub const SubscriptionReport = struct {
     }
 };
 
-/// Addresses available at the time of an inference.
+/// Destinations available at the time of an inference.
 pub const ChannelCatalog = struct {
+    pub const Feed = struct {
+        feed_id: []const u8,
+        channel_id: []const u8,
+        description: []const u8,
+    };
+
     focuses: []const []const u8 = &.{},
     correspondents: []const []const u8 = &.{},
-    feeds: ?[]const @import("instance_state").feeds.Feed = null,
+    feeds: []const Feed = &.{},
 };
 
 /// Identity, observation time, and live channel addresses accompanying one inference.
@@ -143,13 +149,19 @@ pub const Current = struct {
     observed_at_unix_ms: i64,
     channels: ChannelCatalog = .{},
 
-    pub fn jsonStringify(self: Current, writer: anytype) !void {
-        try writer.write(.{
-            .focus_id = self.focus_id,
-            .role = self.role,
-            .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms },
-            .channels = self.channels,
-        });
+    fn write(self: Current, writer: anytype, include_channels: bool) !void {
+        try writer.beginObject();
+        try writer.objectField("focus_id");
+        try writer.write(self.focus_id);
+        try writer.objectField("role");
+        try writer.write(self.role);
+        try writer.objectField("observed_at");
+        try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
+        if (include_channels) {
+            try writer.objectField("channels");
+            try writer.write(self.channels);
+        }
+        try writer.endObject();
     }
 };
 
@@ -339,7 +351,7 @@ pub const Turn = struct {
     pub fn jsonStringify(self: Turn, writer: anytype) !void {
         try writer.beginObject();
         try writer.objectField("current");
-        try writer.write(self.current);
+        try self.current.write(writer, self.purpose == .work);
         switch (self.purpose) {
             .work => |events| {
                 if (events.len != 0) {
@@ -399,21 +411,6 @@ fn render(arena: Allocator, value: anytype) ![]const u8 {
     defer output.deinit();
     try yaml.emit(&output.writer, document, .{});
     return output.toOwnedSlice();
-}
-
-test "live and retained observations present correspondent addresses without changing stored IDs" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const items: []const Event = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Continue.", .observed_at_unix_ms = 10 } }};
-    const record = try renderRecord(a, .{ .events = .{ .focus_id = "core-1", .items = items } });
-    const turn = try renderTurn(a, .{
-        .current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 10 },
-        .purpose = .{ .work = items },
-    });
-    try std.testing.expect(std.mem.indexOf(u8, record, "ivenna:/correspondent/operator") != null);
-    try std.testing.expect(std.mem.indexOf(u8, turn, "ivenna:/correspondent/operator") != null);
-    try std.testing.expectEqualStrings("operator", items[0].input.from[0]);
 }
 
 test "activity grouping retains each source's message order, times, and silent endings" {

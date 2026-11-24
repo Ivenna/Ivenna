@@ -24,7 +24,7 @@ The tool wait retains the current activation and context while the core and othe
 
 | Argument | Meaning |
 | --- | --- |
-| `name` | Required short name; the runtime appends a number to form the command reference; names may repeat |
+| `name` | Required short name used to form the [command ID](input.md#names-and-references) |
 | `command` | Required command text, interpreted by the selected shell |
 | `cwd` | Initial working directory. Defaults to the kernel's startup directory. Relative values resolve from that directory. |
 | `shell` | Shell executable accepting `-c`; defaults to `/bin/sh` |
@@ -34,9 +34,9 @@ The tool wait retains the current activation and context while the core and othe
 | `timeout_ms` | Optional positive execution deadline in milliseconds, up to `4294967295`; omitted means no execution deadline |
 | `max_output_bytes` | Combined encoded stdout/stderr preview budget in bytes. Defaults to `4096` and accepts `512` through `16384`. Result metadata and log references are additional. |
 
-Names must contain 1–32 Unicode code points and no ASCII control characters; spaces alone are not accepted.
-
 Each command starts a fresh shell. The `cwd` and `shell` arguments accept literal paths or local `file://` URIs. Inside `command`, the shell expands expressions and resolves relative paths from its current directory. A shell running in an interactive [input mode](#input-modes) can retain directory and environment changes across calls.
+
+### Command environment
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 

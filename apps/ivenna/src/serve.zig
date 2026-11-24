@@ -27,8 +27,8 @@ pub fn run(init: std.process.Init) !void {
     try state.initialize(a, database_path);
     var subscription_store = try state.subscriptions.Store.open(init.gpa, database_path);
     defer subscription_store.close();
-    var channel_store = try state.feeds.Store.open(init.gpa, io, database_path, config.max_open_channels);
-    defer channel_store.close();
+    var feed_store = try state.feeds.Store.open(init.gpa, io, database_path, config.max_open_feeds);
+    defer feed_store.close();
     var mail: email.Integration = undefined;
     try mail.init(init.gpa, io, .{
         .session_url = config.mail_session_url,
@@ -77,7 +77,7 @@ pub fn run(init: std.process.Init) !void {
         .engine = &engine,
         .inbox = mail.inbox(),
         .sender = mail.sender(),
-        .channels = &channel_store,
+        .feeds = &feed_store,
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),
         .subscriptions = &subscription_store,

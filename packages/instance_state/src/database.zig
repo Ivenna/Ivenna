@@ -5,7 +5,7 @@ const c = zqlite.c;
 const Allocator = std.mem.Allocator;
 
 pub const filename = "state.sqlite3";
-const application_id = std.mem.readInt(u32, "IVD1", .big);
+const application_id = std.mem.readInt(u32, "IVDB", .big);
 const OpenMode = enum { initialize, read_write, read_only };
 
 pub fn initialize(a: Allocator, path: []const u8) !void {
@@ -150,5 +150,12 @@ test "initialization and existing open preserve an incompatible database" {
     try t.expectError(error.IncompatibleStateSchema, initialize(a, path));
     try t.expectEqual(1, try integer(prior, "SELECT count(*) FROM notes WHERE text='keep me'", .{}));
     try t.expectEqual(0, try integer(prior, "PRAGMA application_id", .{}));
-    try t.expectEqual(0, try integer(prior, "SELECT journal_mode='wal' FROM pragma_journal_mode", .{}));
+
+    // An empty database with another application's marker is already claimed.
+    try exec(prior, "DROP TABLE notes");
+    const other_id = std.mem.readInt(u32, "TEST", .big);
+    try exec(prior, std.fmt.comptimePrint("PRAGMA application_id={d}", .{other_id}));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .read_only));
+    try t.expectError(error.IncompatibleStateSchema, initialize(a, path));
+    try t.expectEqual(other_id, try integer(prior, "PRAGMA application_id", .{}));
 }

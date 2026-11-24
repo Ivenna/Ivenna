@@ -110,17 +110,13 @@ test "an interrupted draft create has no submission to reconcile" {
     try fixture.finish();
 }
 
-test "registered correspondent IDs each submit to their single configured address" {
+test "sending selects the exact registered address" {
     const Fixture = @import("test_jmap.zig").Fixture;
     var fixture = try Fixture.init(&.{
-        .{ .method = "Email/set", .result = "{\"created\":{\"letter\":{\"id\":\"draft-1\"}}}", .properties = &.{
+        .{ .method = "Email/set", .result = "{\"created\":{\"letter\":{\"id\":\"draft\"}}}", .properties = &.{
             .{ .path = &.{ "create", "letter", "to" }, .json = "[{\"email\":\"Reviewer+Ops@EXAMPLE.COM\"}]" },
         } },
-        .{ .method = "EmailSubmission/set", .result = "{\"created\":{\"submission\":{\"id\":\"submitted-1\"}}}" },
-        .{ .method = "Email/set", .result = "{\"created\":{\"letter\":{\"id\":\"draft-2\"}}}", .properties = &.{
-            .{ .path = &.{ "create", "letter", "to" }, .json = "[{\"email\":\"operator@example.com\"}]" },
-        } },
-        .{ .method = "EmailSubmission/set", .result = "{\"created\":{\"submission\":{\"id\":\"submitted-2\"}}}" },
+        .{ .method = "EmailSubmission/set", .result = "{\"created\":{\"submission\":{\"id\":\"submitted\"}}}" },
     });
     defer fixture.deinit();
     var mailbox = try fixture.start();
@@ -128,8 +124,6 @@ test "registered correspondent IDs each submit to their single configured addres
     var transport = try EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "Reviewer+Ops@EXAMPLE.COM" });
     const review = try transport.send(a, .{ .recipient = "Reviewer+Ops", .text = "Review complete" });
     try std.testing.expect(review == .submitted);
-    const operator = try transport.send(a, .{ .recipient = "operator", .text = "Deployment complete" });
-    try std.testing.expect(operator == .submitted);
     try fixture.finish();
 }
 

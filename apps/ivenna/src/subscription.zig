@@ -54,7 +54,7 @@ fn readInput(comptime T: type, a: Allocator, io: std.Io) !T {
     return std.json.parseFromTokenSourceLeaky(T, a, &json, .{}) catch |err| switch (err) {
         error.OutOfMemory, error.ReadFailed => return err,
         else => {
-            std.log.err("cannot decode request at line {d}, column {d} of stdin ({s})", .{ diagnostics.getLine(), diagnostics.getColumn(), @errorName(err) });
+            std.log.err("invalid JSON request on stdin at line {d}, column {d} ({s})", .{ diagnostics.getLine(), diagnostics.getColumn(), @errorName(err) });
             return error.InvalidArguments;
         },
     };

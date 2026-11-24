@@ -498,15 +498,19 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         const live = try self.liveSessionsLocked(a);
         defer a.free(live);
-        return self.currentLocked(a, session, live);
+        var turn = try self.currentLocked(a, session);
+        const focuses = try a.alloc([]const u8, live.len);
+        for (focuses, live) |*address, focus| address.* = try contracts.ChannelAddress.format(a, .focus, focus.focus_id);
+        turn.channels.focuses = focuses;
+        return turn;
     }
 
     pub fn compactionSnapshot(self: *Registry, a: Allocator, session: *Session) !Input.Snapshot {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const live = try self.liveSessionsLocked(a);
-        defer a.free(live);
         const activities: []const []const u8 = if (session == self.core) blk: {
+            const live = try self.liveSessionsLocked(a);
+            defer a.free(live);
             std.debug.assert(live[0] == self.core);
             const ids = try a.alloc([]const u8, live.len - 1);
             for (ids, live[1..]) |*id, activity| id.* = try a.dupe(u8, activity.focus_id);
@@ -518,7 +522,7 @@ pub const Registry = struct {
             .source = try cloneSource(a, callback.source),
         });
         return .{
-            .current = try self.currentLocked(a, session, live),
+            .current = try self.currentLocked(a, session),
             .state = .{
                 .activities = activities,
                 .callbacks = try own_callbacks.toOwnedSlice(a),
@@ -535,14 +539,11 @@ pub const Registry = struct {
         return live;
     }
 
-    fn currentLocked(self: *Registry, a: Allocator, session: *Session, live: []const *Session) !Input.Current {
-        const focuses = try a.alloc([]const u8, live.len);
-        for (focuses, live) |*address, focus| address.* = try contracts.ChannelAddress.format(a, .focus, focus.focus_id);
+    fn currentLocked(self: *Registry, a: Allocator, session: *Session) !Input.Current {
         return .{
             .focus_id = try a.dupe(u8, session.focus_id),
             .role = session.role,
             .observed_at_unix_ms = self.now(),
-            .channels = .{ .focuses = focuses },
         };
     }
 
@@ -1075,7 +1076,6 @@ test "both roles see focus addresses only while their sessions are live" {
     defer registry.endWorker(activity.work.session);
     try std.testing.expectEqualDeep(both, (try registry.current(a, activity.work.session)).channels.focuses);
     const core_sample = try registry.compactionSnapshot(a, core.work.session);
-    try std.testing.expectEqualDeep(both, core_sample.current.channels.focuses);
     try std.testing.expectEqualDeep(@as([]const []const u8, &.{"research/notes-2"}), core_sample.state.activities);
 
     try std.testing.expect(try registry.commitResponse(activity.work, &activity.history, .{ .output = &.{}, .calls = &.{}, .text = null }));

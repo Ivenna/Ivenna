@@ -56,6 +56,7 @@ test "command help and argument errors work without instance or service settings
 
     const feed = try runWithoutConfig(a, &.{ executable, "feed", "read", "--help" });
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, feed.term);
+    try testing.expect(std.mem.indexOf(u8, feed.stdout, "FEED_ID") != null);
     try testing.expect(std.mem.indexOf(u8, feed.stdout, "--after") != null);
 
     const publish = try runWithoutConfig(a, &.{ executable, "subscription", "publish", "-h" });
@@ -111,7 +112,7 @@ test "the subscription command accepts observations while the kernel is stopped 
     try testing.expect((try listener.request("inspect", null, true)) == .null);
 }
 
-test "the feed command resumes offline and distinguishes a closed feed from an unknown one" {
+test "the feed command reads by ID and resumes offline" {
     const io = testing.io;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -123,7 +124,7 @@ test "the feed command resumes offline and distinguishes a closed feed from an u
     var env = std.process.Environ.Map.init(a);
     try env.put("DATA_DIR", dir);
 
-    const missing = try std.process.run(a, io, .{ .argv = &.{ executable, "feed", "read", "ivenna:/feed/releases-1" }, .environ_map = &env });
+    const missing = try std.process.run(a, io, .{ .argv = &.{ executable, "feed", "read", "releases-1" }, .environ_map = &env });
     try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, missing.term);
     try testing.expectError(error.FileNotFound, temporary.dir.access(io, state.filename, .{}));
 
@@ -131,29 +132,44 @@ test "the feed command resumes offline and distinguishes a closed feed from an u
     const source = closed: {
         var writer = try state.feeds.Store.open(a, io, path, 2);
         defer writer.close();
-        const first_feed = try writer.create(a, "发布", "Release updates");
-        const other_feed = try writer.create(a, "发布", "Other work");
+        const first_feed = try writer.create(a, "刊 /rc", "Release updates");
+        const other_feed = try writer.create(a, "刊 /rc", "Other work");
         const after = try writer.publish(first_feed, "core-1", "Already processed", 100);
         _ = try writer.publish(other_feed, "core-1", "Other update", 101);
         const next = try writer.publish(first_feed, "activity-2", "First line\x00\n第二行", 102);
         _ = try writer.publish(first_feed, "activity-2", "Later update", 103);
-        _ = try writer.closeChannel(first_feed);
+        _ = try writer.closeFeed(first_feed);
         break :closed .{ .id = first_feed, .after = after, .next = next };
     };
 
     const after = try std.fmt.allocPrint(a, "{d}", .{source.after});
     const page = (try runJson(a, &env, &.{ executable, "feed", "read", source.id, "--after", after, "--limit", "1" }, null, true)).object;
-    try testing.expectEqualStrings(source.id, page.get("channel_id").?.string);
+    try testing.expectEqualStrings(source.id, page.get("feed_id").?.string);
     try testing.expectEqualStrings("Release updates", page.get("description").?.string);
     try testing.expect(page.get("closed").?.bool);
     try testing.expect(page.get("has_more").?.bool);
     try testing.expectEqual(@as(i64, @intCast(source.next)), page.get("next_after").?.integer);
     const messages = page.get("messages").?.array.items;
     try testing.expectEqual(1, messages.len);
-    try testing.expectEqualStrings("First line\x00\n第二行", messages[0].object.get("text").?.string);
+    const message = messages[0].object;
+    try testing.expectEqualStrings("First line\x00\n第二行", message.get("text").?.string);
+    try testing.expectEqualStrings("activity-2", message.get("focus_id").?.string);
+    try testing.expectEqual(102, message.get("published_at_unix_ms").?.integer);
 
-    const unknown = try runJson(a, &env, &.{ executable, "feed", "read", "ivenna:/feed/missing-1" }, null, false);
-    try testing.expectEqualStrings("unknown_channel", unknown.string);
-    const invalid = try runJson(a, &env, &.{ executable, "feed", "read", "ivenna:/focus/core-1" }, null, false);
-    try testing.expectEqualStrings("invalid_request", invalid.string);
+    const next_after = try std.fmt.allocPrint(a, "{d}", .{page.get("next_after").?.integer});
+    const final_page = (try runJson(a, &env, &.{ executable, "feed", "read", source.id, "--after", next_after }, null, true)).object;
+    try testing.expect(final_page.get("closed").?.bool and !final_page.get("has_more").?.bool);
+    const last_messages = final_page.get("messages").?.array.items;
+    try testing.expectEqual(1, last_messages.len);
+    try testing.expectEqualStrings("Later update", last_messages[0].object.get("text").?.string);
+
+    const end = final_page.get("next_after").?.integer;
+    const end_after = try std.fmt.allocPrint(a, "{d}", .{end});
+    const caught_up = (try runJson(a, &env, &.{ executable, "feed", "read", source.id, "--after", end_after }, null, true)).object;
+    try testing.expect(caught_up.get("closed").?.bool and !caught_up.get("has_more").?.bool);
+    try testing.expectEqual(0, caught_up.get("messages").?.array.items.len);
+    try testing.expectEqual(end, caught_up.get("next_after").?.integer);
+
+    const unknown = try runJson(a, &env, &.{ executable, "feed", "read", "missing" }, null, false);
+    try testing.expectEqualStrings("unknown_feed", unknown.string);
 }

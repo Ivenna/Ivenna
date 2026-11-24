@@ -1,21 +1,21 @@
 ivenna subscription publish SUBSCRIPTION_ID
 
-Queue an observation for the subscribing focus. With an unset cursor, this
-request also saves source position "17".
+Queue an observation for the focus that subscribed. This example also saves
+source position "17" on a subscription with no saved cursor.
 
   printf '%s\n' '{
     "key": "release-v2.4.0",
     "text": "Stable release v2.4.0 is available",
     "cursor": {"to": "17"}
-  }' | "$IVENNA" subscription publish releases-1
+  }' | ivenna subscription publish 'release-watch-1'
 
 Send one JSON object on stdin with these fields.
 
-  key                  Nonempty string identifying the update within this
-                       subscription. Reuse this key when retrying the same
-                       report. Give a later revision its own key.
+  key                  Nonempty string identifying the observation within
+                       this subscription. Reuse the key for retries and
+                       give each distinct observation its own key.
   text                 Observation as a string of 1–2048 UTF-8 bytes.
   source_time_unix_ms  Optional source event time in integer Unix milliseconds
                        from -62167219200000 through 253402300799000.
-  cursor               Optional object with the cursor change to commit.
-                       Omitting it leaves the saved position in place.
+  cursor               Optional cursor change to save with the observation.
+                       Omit it to keep the saved position.

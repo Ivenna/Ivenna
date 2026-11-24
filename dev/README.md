@@ -19,7 +19,7 @@ dev/prepare.sh
 
 The preparation script copies [.env.example](../.env.example) to `$DEV_INSTANCE_DIR/.env` and the [mail plan example](mail/provision.example.ndjson) to `$DEV_INSTANCE_DIR/mail/provision.ndjson`. Running it again preserves existing private files.
 
-In the instance's `.env`, set `LLM_API_KEY` and match the kernel and operator credentials to the private mail plan. The SMTP example uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD`. To receive Ivenna's replies in that account, set `MAIL_CORRESPONDENTS="$OPERATOR_MAIL_ADDRESS"` after the address definition, as in the sample. See [configuring mail](#configuring-mail).
+In the instance's `.env`, set `LLM_API_KEY`. If you customize the kernel or operator account, use the same address and credentials in `.env` and the private mail plan. The sample registers the operator mailbox in `MAIL_CORRESPONDENTS` so Ivenna can reply to it. See [configuring mail](#configuring-mail).
 
 The example stores kernel files in `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. To use other services, configure their connections and prepare the services you run locally. See [mail service setup](../docs/running.md#mail-service) and [memory service setup](../docs/running.md#memory-service).
 
@@ -122,7 +122,7 @@ Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the U
 
 ## Sending a message
 
-With reception open, load the instance configuration in a second terminal and submit a message from the operator account through the local SMTP endpoint. See [loading the configuration](#configuration).
+With reception open, [load the instance configuration](#configuration) in a second terminal and submit a message from the operator account through the local SMTP endpoint.
 
 ```sh
 curl --url "smtp://127.0.0.1:${MAIL_SMTP_PORT:-2525}" --crlf \
@@ -145,7 +145,7 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 ## Trying local programs
 
-In a second terminal at the repository root, [load the instance configuration](#configuration) so the commands use the kernel's `DATA_DIR`. Set `IVENNA` for the examples.
+In a second terminal at the repository root, [load the instance configuration](#configuration) to select the same `DATA_DIR` as the kernel. Point `IVENNA` to the executable built at startup.
 
 ```sh
 export IVENNA="$PWD/zig-out/bin/ivenna"
@@ -155,20 +155,21 @@ To set up an independent reader or listener, follow the [deployment guide](../do
 
 ### Trying a feed reader
 
-Ask Ivenna to [create a feed, publish a test message](../docs/communication.md#feeds), and give you its complete address. Use that address in place of the example.
+Ask Ivenna to create a feed, publish a test message, and send you its feed ID. Replace the example ID with the one it gives you.
 
 ```sh
-"$IVENNA" feed read 'ivenna:/feed/releases-1'
+feed_id='releases-1'
+"$IVENNA" feed read "$feed_id"
 ```
 
-The result includes the test message. Try the same command after stopping the kernel to verify it can still read the feed. See [reading feeds](../docs/communication.md#reading-feeds) for page fields and how to resume from a saved position.
+The page includes the test message. You can run the same command after stopping the kernel. See [reading feeds](../docs/communication.md#reading-feeds) for the page fields and how to resume from a saved position.
 
 ### Trying a subscription listener
 
 Ask Ivenna to [register a subscription](../docs/attention.md#subscriptions) and give you its complete ID. Use that ID in place of the example.
 
 ```sh
-subscription_id='releases-1'
+subscription_id='release-watch-1'
 "$IVENNA" subscription inspect "$subscription_id"
 ```
 
@@ -192,7 +193,7 @@ For compatible updates, keep the same instance directory and [load its configura
 
 ### Kernel
 
-Check the [storage format requirements](../docs/running.md#updating-the-executable) before rebuilding. If the update needs a fresh instance, choose a new `DEV_INSTANCE_DIR`. With the supplied Stalwart account plan, configure a new `MAIL_VOLUME_NAME` in that instance and provision it as described in [mail setup](#configuring-mail).
+For a change in storage format, see [updating an existing instance](../docs/running.md#updating-the-executable). For a fresh development instance, choose a new `DEV_INSTANCE_DIR`. With the supplied Stalwart account plan, configure a new `MAIL_VOLUME_NAME` in that instance and provision it as described in [mail setup](#configuring-mail).
 
 After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent readers and listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
 

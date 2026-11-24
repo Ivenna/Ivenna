@@ -40,7 +40,8 @@ Core and activity focuses use the same system prompt. Each receives observations
 
 | Action | Core | Activity |
 | --- | --- | --- |
-| Communicate with people and programs and manage feeds | Yes | Yes |
+| Correspond with people and programs | Yes | Yes |
+| Create, publish to, and close feeds | Yes | Yes |
 | Remember, revisit, revise, arrange, and forget | Yes | Yes |
 | Reach an existing focus | Yes | Yes |
 | Open an activity focus | Yes | — |
@@ -58,11 +59,11 @@ An activity that ends calls for the core's attention even if it said nothing. Wh
 
 ## Communication with people and programs
 
-Messages enter the core as observations of who said what, with the senders' channel addresses and observation time. Receiving one does not imply that Ivenna was addressed or must respond. Retained exchanges connect those observations with Ivenna's own choices and subsequent effects.
+Correspondence reaches the core as observations of who said what and when the runtime observed it. Ivenna can consider a message addressed to it or a conversation someone relays. Retained exchanges connect these observations with what Ivenna chose to say and the effects that followed.
 
-Ivenna chooses when to send, whom or what to reach, and what to say. A channel address can reach a correspondent, a focus, or a feed. Each focus sees open feeds, existing focuses, and the correspondents the deployment has registered for sending. One arrival can lead to zero, one, or several sends. Internal reasoning and activity completion remain within Ivenna unless it chooses to send a message. See [communication](communication.md) and [coordination among focuses](attention.md#reaching-an-existing-focus).
+Ivenna chooses when to send, whom or what to reach, and what to say. Each focus sees the available destinations, including live focuses, open feeds, and registered correspondents. Internal reasoning and activity completion stay within Ivenna. See [communication](communication.md) and [coordination among focuses](attention.md#reaching-an-existing-focus).
 
-The core and activities can create named feeds and publish to them directly. A feed belongs to the instance. Its description lets any focus recognize its purpose before publishing or giving its complete address to a program Ivenna chooses or writes. Each reader can catch up from the last message it processed. Closing a feed ends publication while preserving whole messages for readers, even while Ivenna is stopped. See [reading feeds](communication.md#reading-feeds).
+A feed gives Ivenna a place to publish messages that people and programs can follow. It belongs to the instance and can outlive the focus that created it. Its description helps each focus recognize its purpose before publishing or giving its ID to a program Ivenna chooses or writes. Each reader can resume from its last processed message, including after the feed closes or the kernel stops. See [reading feeds](communication.md#reading-feeds).
 
 ## Sessions and continued work
 
