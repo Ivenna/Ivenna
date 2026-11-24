@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const options = .{ .target = target, .optimize = optimize };
     const agent = b.dependency("agent", options).module("agent");
     const subscriptions = b.dependency("subscriptions", options).module("subscriptions");
+    const channels = b.dependency("channels", options).module("channels");
     const contracts = b.dependency("agent_contracts", options).module("agent_contracts");
     const email = b.dependency("email", options).module("email");
     const responses = b.dependency("responses", options).module("responses");
@@ -22,6 +23,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "agent", .module = agent },
                 .{ .name = "subscriptions", .module = subscriptions },
+                .{ .name = "channels", .module = channels },
                 .{ .name = "agent_contracts", .module = contracts },
                 .{ .name = "email", .module = email },
                 .{ .name = "responses", .module = responses },

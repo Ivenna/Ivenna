@@ -1,6 +1,6 @@
 const std = @import("std");
-const zqlite = @import("zqlite");
-const c = zqlite.c;
+const sqlite = @import("sqlite");
+const zqlite = sqlite.zqlite;
 
 pub fn checked(result: anytype) !@typeInfo(@TypeOf(result)).error_union.payload {
     return result catch |err| switch (err) {
@@ -15,32 +15,15 @@ pub fn checked(result: anytype) !@typeInfo(@TypeOf(result)).error_union.payload 
     };
 }
 
-/// sqlite3_open_v2 can return an allocated connection even on failure.
 pub fn open(path: [:0]const u8, flags: c_int) !zqlite.Conn {
-    var handle: ?*c.sqlite3 = null;
-    const rc = c.sqlite3_open_v2(path.ptr, &handle, flags, null);
-    if (rc == c.SQLITE_OK) return .{ .conn = handle.? };
-    defer if (handle) |db| {
-        _ = c.sqlite3_close(db);
-    };
-    const message = if (handle) |db| c.sqlite3_errmsg(db) else c.sqlite3_errstr(rc);
-    std.log.err("opening subscription database '{s}': {s}", .{ path, std.mem.span(message) });
-    return switch (rc) {
-        c.SQLITE_BUSY, c.SQLITE_LOCKED => error.SubscriptionStoreBusy,
-        c.SQLITE_FULL => error.SubscriptionStoreFull,
-        c.SQLITE_NOMEM => error.OutOfMemory,
-        else => error.SubscriptionStorageFailed,
-    };
+    return checked(sqlite.open(path, flags));
 }
 
-/// A null result for a required value can also mean conversion ran out of memory.
 pub fn text(s: zqlite.Stmt, i: usize) ![]const u8 {
-    const ptr = c.sqlite3_column_text(s.stmt, @intCast(i));
-    if (ptr == null) {
-        if (c.sqlite3_errcode(s.conn) == c.SQLITE_NOMEM) return error.OutOfMemory;
-        return error.InvalidSubscriptionDatabase;
-    }
-    return ptr[0..s.columnBytes(i)];
+    return sqlite.text(s, i) catch |err| switch (err) {
+        error.NullColumn => error.InvalidSubscriptionDatabase,
+        error.OutOfMemory => error.OutOfMemory,
+    };
 }
 
 pub fn copyText(a: std.mem.Allocator, s: zqlite.Stmt, i: usize) ![]const u8 {

@@ -46,6 +46,8 @@ Decode external protocols in their owning components and supply typed contracts 
 
 Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
 
+Keep channel address syntax in the shared contract. The runtime routes by namespace and presents available addresses to the model. Each destination owner checks whether it can accept a message and reports the outcome it can confirm. See [channel delivery](architecture.md#channel-delivery).
+
 [Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Execution projects internal session and delivery state into this interface, exposing facts that help Ivenna choose its next action. Keep runtime state and exact references under program ownership through persistence and compaction. Supply complete references in operation results and observations, and return invalid selections as operation outcomes.
 
 Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
@@ -59,7 +61,7 @@ Treat prompts and tool descriptions as editable interfaces:
 | Resource | Purpose |
 | --- | --- |
 | [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
-| [Agent tools](../packages/agent/src/tools.json) | Send messages, open and reach focuses, schedule wakeups, and manage subscriptions |
+| [Agent tools](../packages/agent/src/tools.json) | Send messages, manage feeds, open focuses, schedule wakeups, and manage subscriptions |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. The configured [web reader](../packages/resources/src/web.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |

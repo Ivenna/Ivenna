@@ -7,6 +7,7 @@ const host = @import("host");
 const memory = @import("memory");
 const resources = @import("resources");
 const subscriptions = @import("subscriptions");
+const channels = @import("channels");
 const Config = @import("config.zig").Config;
 const Service = @import("service.zig").Service;
 
@@ -38,7 +39,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
 
-    const config = try Config.load(init.environ_map);
+    const config = try Config.load(init.arena.allocator(), init.environ_map);
     const io = init.io;
     var service = try Service.listen(io, config.service_address);
     defer service.deinit();
@@ -50,11 +51,14 @@ pub fn main(init: std.process.Init) !u8 {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, data_directory, .fromMode(0o700));
     var subscription_store = try subscriptions.Store.open(init.gpa, try std.fs.path.join(a, &.{ data_directory, subscriptions.filename }));
     defer subscription_store.close();
+    var channel_store = try channels.Store.open(init.gpa, io, try std.fs.path.join(a, &.{ data_directory, channels.filename }), config.max_open_channels);
+    defer channel_store.close();
     var mail: email.Integration = undefined;
     try mail.init(init.gpa, io, .{
         .session_url = config.mail_session_url,
         .authorization = try config.authorization(a),
         .address = config.mail_address,
+        .correspondent_addresses = config.mail_correspondents,
     });
     defer mail.deinit();
     var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
@@ -95,13 +99,11 @@ pub fn main(init: std.process.Init) !u8 {
         .activity_tools = &activity_tools,
         .reasoning = config.llm_reasoning,
     };
-    const outbound_channels = [_]contracts.Communication.Channel{
-        .{ .name = "email", .sender = mail.sender() },
-    };
     var kernel = try agent.Kernel.init(init.gpa, io, .{
         .engine = &engine,
         .inbox = mail.inbox(),
-        .channels = .{ .channels = &outbound_channels, .default_name = "email" },
+        .sender = mail.sender(),
+        .channels = &channel_store,
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),
         .subscriptions = &subscription_store,

@@ -18,7 +18,9 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, incremental interaction, process cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/resources](../packages/resources/src/root.zig) | Resolve resource references, read host files and directories, retrieve web pages, and present remote images by URL |
+| [packages/channels](../packages/channels/src/root.zig) | Own the feed catalog, append messages, and expose read-only views |
 | [packages/subscriptions](../packages/subscriptions/src/root.zig) | Store registrations, listener progress, report keys and pending observations in SQLite |
+| [packages/sqlite](../packages/sqlite) | Provide the embedded SQLite build and shared bindings |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result parts, classify source bytes, interpret image references, and read local file contents within a byte limit |
 
 The kernel and its [HTTP listener](../apps/ivenna/src/service.zig) run in the same process and shut down together. On Linux the kernel uses `/proc/self/exe` to locate `ivenna-report` beside it and supplies that path to host commands. The separate reporter process opens the subscription store on behalf of local listeners. The kernel reaches the memory app over SSH. Its handler and image sources live in `apps/memory`, and local service orchestration lives in `dev`.
@@ -34,12 +36,15 @@ flowchart TD
     App --> Host[packages/host]
     App --> Memory[packages/memory]
     App --> Resources[packages/resources]
+    App --> Channels[packages/channels]
     App --> Subscriptions[packages/subscriptions]
     Report[apps/ivenna-report] --> Subscriptions
+    Agent --> Channels
     Agent --> Subscriptions
+    Channels --> Contracts
     Subscriptions --> Contracts
-    Subscriptions --> Zqlite[zqlite]
-    Zqlite --> SQLite[SQLite]
+    Channels --> SQLite[packages/sqlite]
+    Subscriptions --> SQLite
     Agent --> Contracts
     Email --> Contracts
     Responses --> Contracts
@@ -71,21 +76,29 @@ Shared [communication types](../packages/agent_contracts/src/communication.zig) 
 | [Inbox](../packages/agent_contracts/src/inbox.zig) | Poll typed correspondence and callback envelopes with opaque receipts and acknowledge durable admission | Email integration |
 | [Callback.Registrar](../packages/agent_contracts/src/callback.zig) | Persist a future observation's source and bind its destination to the invoking session | Agent execution |
 | [Callback.Publisher](../packages/agent_contracts/src/callback.zig) | Store one observation under a registered callback ID, preserving the first stored result | Email integration |
-| [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Submit explicit outgoing messages using correspondent IDs | Email integration |
+| [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Expose the registered correspondent IDs and submit a message to one of them | Email integration |
 | [HistoryStore](../packages/agent_contracts/src/history.zig) | Load and save the current checkpoint; allocate groups, discover record metadata, read and create records in batches, and maintain the selected history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure encoded requests, and prepare tool results for model input | Responses adapter |
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
 | [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host, Memory, and Resources |
 
-The sending adapter resolves recipients and reports what it knows about submission through `Communication.SendResult`. Kernel renders those [sending outcomes](communication.md#sending-a-message) as tool replies. Errors that prevent the adapter from providing a defined outcome propagate to runtime supervision.
+The sending adapter resolves one correspondent ID and reports what it knows about submission through `Communication.SendResult`. Kernel renders those [sending outcomes](communication.md#sending-a-message) as tool replies. Errors that prevent the adapter from providing a defined outcome propagate to runtime supervision.
 
 `Tools.Invocation` carries the internal calling session ID and its model-facing `focus_id`, together with a callback registrar and a command-reference issuer borrowed for that invocation. Host requests its durably allocated command reference through `command_reference` before launch.
 
 The callback registrar accepts a name and source and returns `Callback.Registration`: an internal numeric delivery ID and a complete reference allocated for the caller. A capability retains the numeric ID for publication through `Callback.Publisher` and presents the reference as `callback_id`; it does not retain the registrar or choose another receiving session.
 
-[Reference](../packages/agent_contracts/src/reference.zig) validates names of at most 32 Unicode code points and formats `<name>-<number>` references for Agent and Host. Execution retains focus, callback, and command sequences in the checkpoint. SQLite allocates the numeric suffix for each subscription reference. Capabilities control the lifetime of their referenced resources. Lookup checks the complete reference; its numeric suffix alone does not establish identity.
+[Reference](../packages/agent_contracts/src/reference.zig) validates names of at most 32 Unicode code points and formats `<name>-<number>` references for Agent and Host. Execution retains focus, callback, and command sequences in the checkpoint. The subscription and feed stores each allocate their own numeric suffixes in SQLite. Capabilities control the lifetime of their referenced resources. Lookup checks the complete reference.
 
 The email integration uses the configured mail account for correspondence, callbacks, and working history. It owns native addressing, folders, markers, and record lifecycles behind the shared contracts. The [email boundary](#email-boundary) describes its storage protocols and operation ownership.
+
+### Channel delivery
+
+The kernel routes `send` by the address namespace. It passes a decoded correspondent ID to the sender or a decoded focus ID to the session registry. For a feed it passes the complete canonical address, calling focus ID, text, and publication time to the feed store. See the [channel address codec](../packages/agent_contracts/src/channel_address.zig).
+
+The feed store serializes publication and closure with a mutex and SQLite write transactions. A publication inserts a message only while the feed is open and returns its sequence after commit. Feed rows and messages have their own commit points, independent of working-history checkpoints. Readers use the read-only views and track their own positions. See the [feed schema](../packages/channels/src/schema.sql) and [reader interface](communication.md#reading-feeds).
+
+Ordinary and compaction requests assemble `current.channels` from three sources. The registry samples live focus addresses under its lock and includes them with the activity references when sampling handover state. The kernel formats correspondent addresses from the sender's registered IDs. The feed store copies open feed addresses and descriptions under its own lock. The request renderer uses the resulting catalog after the locks are released. See the [input contract](input.md#inference-turns).
 
 ## Service and reception
 
@@ -123,7 +136,7 @@ Sleeping activities retain their session slots. Completing an activity releases 
 
 Correspondence enters the core's FIFO queue independently of mail threads. Each focus can use the tools selected for its current role, including when its inherited history contains calls made by the core. See [model requests and tools](#model-requests-and-tools) for selection and [attention](attention.md) for the actions available to each focus.
 
-`send_focus_message` uses the registry's durable session-message queue with a target chosen by the core. The registry records the calling core's complete reference as `from_focus`. Messages consume ordinary event capacity and can make a sleeping or interrupted recipient ready. They do not register an awaited reply. Activity expressions remain in their separate outbox and accompany the core's ordinary inputs without activating it.
+Explicit sends to a focus use the registry's durable session-message queue. The registry records the sender's complete focus reference as `from_focus`. Messages consume ordinary event capacity and can make a sleeping or interrupted recipient ready. Activity expressions remain in their own outbox and accompany the core's ordinary inputs without activating it.
 
 Unknown focus selections remain ordinary tool errors. Activity endings and interruptions request the core's attention. An ordinary tool reply can continue an already active core session.
 
@@ -299,7 +312,7 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 ## Startup and interruption
 
-Startup opens the subscription catalog, discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, activity outbox references, callbacks, and wakeups. The registry uses the checkpoint to resume [subscription delivery](#subscription-delivery). Requests receive the common system prompt independently of restored history. Communication-copy and history maintenance complete before reception opens.
+Startup opens the subscription and feed catalogs, discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, activity outbox references, callbacks, and wakeups. The registry uses the checkpoint to resume [subscription delivery](#subscription-delivery). Requests receive the common system prompt independently of restored history. Communication-copy and history maintenance complete before reception opens.
 
 On every restart the core receives a fresh `startup` observation. For an activity, `was_running` records whether it had a running or interrupted activation or a startup observation waiting in its queue. The registry queues startup immediately for activities with that flag or unread internal observations. Other restored activities receive startup with their next event. A newly opened activity begins with its assignment.
 
@@ -307,11 +320,11 @@ Before dispatch, Kernel publishes an interruption observation for each restored 
 
 Unacknowledged correspondence remains eligible and can appear again after a crash between persistence and acknowledgement; callback IDs instead retain durable admission deduplication. Fresh startup observations identify this runtime; earlier records remain evidence of their original observations and outcomes.
 
-Use one kernel per account. Host effects, memory writes, mail submission, subscription changes, acknowledgement, and history publication have separate commit points. Effects may precede their saved results, and repeating uncertain actions can duplicate them. An incomplete model/tool round is outside confirmed working history. The [availability contract](design.md#runtime-availability) determines when execution can continue.
+Use one kernel per account. Host effects, memory writes, mail submission, feed publication, subscription changes, acknowledgement, and history publication have separate commit points. Effects may precede their saved results, and repeating uncertain actions can duplicate them. An incomplete model/tool round is outside confirmed working history. The [availability contract](design.md#runtime-availability) determines when execution can continue.
 
 ## Email boundary
 
-The [mail service](running.md#mail-service) checks which From addresses a sender may use. The adapter's [addressing module](../packages/email/src/addressing.zig) maps those addresses to correspondent IDs and resolves outgoing IDs in the configured domain. The [communication guide](communication.md#current-email-addressing) defines supported addresses and IDs.
+The mail service checks which From addresses a sender may use. The adapter maps supported same-domain senders to correspondent IDs for intake. At startup it indexes the configured sending destinations by their case-sensitive local part. The sender exposes those index keys for discovery and uses the same index for authorization and native address resolution before creating a draft. See the [email transport](../packages/email/src/email_transport.zig) and the [mail service setup](running.md#mail-service).
 
 ### JMAP requests
 
@@ -323,7 +336,7 @@ At startup the adapter locates `Ivenna Callbacks` and `Ivenna History` by their 
 
 ### Outgoing mail
 
-For each send, the adapter resolves all recipients before creating a draft marked `ivenna-outbound`. It uses the returned draft ID in `EmailSubmission/set`. If draft creation is unconfirmed, the call ends before submission.
+The adapter creates a draft marked `ivenna-outbound` with the resolved address as its sole recipient. It uses the returned draft ID in `EmailSubmission/set`. If draft creation is unconfirmed, the call ends before submission.
 
 When the submission outcome is uncertain, the adapter queries `EmailSubmission` by draft ID and sending identity. This includes a lost response or a `serverUnavailable` method error, which Stalwart can return after queuing delivery. A matching record confirms acceptance. If the lookup fails or finds no match, the outcome remains unknown. The sending identity may lack read access, and the service can discard submission records after sending. [RFC 8621 §7](https://www.rfc-editor.org/rfc/rfc8621.html#section-7)
 

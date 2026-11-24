@@ -44,6 +44,12 @@ The agent tests cover inference retries with the original request, delivery rete
 
 The CLI tests invoke both executables in an empty environment to verify that help works before configuration. For a mistyped reporter command, they check the JSON receipt on stdout and the diagnostic on stderr.
 
+### Channel delivery
+
+The kernel test checks the catalog presented to the model and sends messages from both roles when a focus and a feed share a local ID. The registry tests check that focus addresses track session lifetimes in ordinary and compaction snapshots. The input tests check that correspondence exposes channel addresses while preserving stored correspondent IDs. See the [kernel](../packages/agent/src/kernel.zig), [sessions](../packages/agent/src/sessions.zig), and [input](../packages/agent/src/input.zig) tests.
+
+The email tests check that a registered ID yields a draft with exactly its configured address and that an unregistered ID yields no draft request. The feed tests check that independent readers can see committed messages after restart and that a concurrent close preserves the reported outcome of publication. See the [email transport](../packages/email/src/email_transport.zig) and [feed store](../packages/channels/src/root.zig) tests.
+
 ### Subscription delivery
 
 - **Listener process.** Each request runs the reporter in a separate process against a temporary on-disk catalog. The tests check receipts and exit status for publication, same-key retries, cursor changes, invalid fields, and publication after withdrawal. See the [reporter process tests](../apps/ivenna-report/src/report_test.zig).

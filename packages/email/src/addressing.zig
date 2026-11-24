@@ -1,7 +1,6 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 
-/// Maps readable IDs to addresses in the configured mailbox's domain.
+/// Recognizes readable IDs in the configured mailbox's domain.
 pub const Addressing = struct {
     local_part: []const u8,
     domain: []const u8,
@@ -28,14 +27,8 @@ pub const Addressing = struct {
         return std.mem.eql(u8, local, self.local_part);
     }
 
-    /// Allocates a native address for an ID in this domain.
-    pub fn address(self: Addressing, a: Allocator, recipient_id: []const u8) ![]const u8 {
-        if (!validId(recipient_id)) return error.InvalidRecipientId;
-        return std.fmt.allocPrint(a, "{s}@{s}", .{ recipient_id, self.domain });
-    }
-
     /// IDs use ASCII dot-atom local parts without quoting or escaping.
-    pub fn validId(value: []const u8) bool {
+    fn validId(value: []const u8) bool {
         var atom_start = true;
         for (value) |character| switch (character) {
             '.' => {
@@ -62,16 +55,11 @@ fn validDomain(domain: []const u8) bool {
 
 test "correspondent IDs preserve local case and stay in the configured domain" {
     const addressing = try Addressing.init("Ivenna@ivenna.test");
-    const address = try addressing.address(std.testing.allocator, "Alice.work+notes");
-    defer std.testing.allocator.free(address);
-
-    try std.testing.expectEqualStrings("Alice.work+notes@ivenna.test", address);
-    try std.testing.expectEqualStrings("Alice.work+notes", addressing.id(address).?);
+    try std.testing.expectEqualStrings("Alice.work+notes", addressing.id("Alice.work+notes@ivenna.test").?);
     try std.testing.expectEqualStrings("Alice.work+notes", addressing.id("Alice.work+notes@IVENNA.TEST").?);
     try std.testing.expect(addressing.isSelf("Ivenna@IVENNA.TEST"));
     try std.testing.expect(!addressing.isSelf("ivenna@ivenna.test"));
 
     try std.testing.expectEqual(null, addressing.id("Alice@elsewhere.test"));
     try std.testing.expectEqual(null, addressing.id("Alice..work@ivenna.test"));
-    try std.testing.expectError(error.InvalidRecipientId, addressing.address(std.testing.allocator, "Alice@elsewhere.test"));
 }

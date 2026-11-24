@@ -1,0 +1,17 @@
+.{
+    .name = .ivenna_sqlite,
+    .version = "0.1.0",
+    .fingerprint = 0xf7ccf8f5b6f72183,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .zqlite = .{
+            .url = "https://codeload.github.com/karlseguin/zqlite.zig/zip/4fcb7569f12876522cff1e822877dc6f1ed0c523",
+            .hash = "zqlite-0.0.1-RWLaY3o_nABef7vfEg_1qMYOsuieweAwgEVHpxwOn5_f",
+        },
+        .amalgamation = .{
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+            .hash = "N-V-__8AAETTsABEodUZZFAyfdAm9hEyqBXuLw9pRSO0vFh9",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

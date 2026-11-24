@@ -23,7 +23,7 @@
 | Task | Guide |
 | --- | --- |
 | Interpret history records, inference turns, and runtime state | [Input contract](input.md) |
-| Use correspondent IDs and communicate with people and programs | [Communication](communication.md) |
+| Send to a channel, manage feeds, or read feed messages | [Communication](communication.md) |
 | Coordinate focuses, schedule wakeups, and manage subscriptions | [Attention](attention.md) |
 | Write a listener that reports observations and resumes from a saved cursor | [Subscription listener protocol](subscriptions.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |

@@ -255,11 +255,8 @@ pub const Registry = struct {
             work.session.borrowed_workers -= 1;
         };
         try ready.ensureTotalCapacity(a, self.sessions.count());
-        const sessions = try a.alloc(*Session, self.sessions.count());
+        const sessions = try self.liveSessionsLocked(a);
         defer a.free(sessions);
-        var iterator = self.sessions.valueIterator();
-        for (sessions) |*session| session.* = iterator.next().?.*;
-        std.mem.sort(*Session, sessions, {}, lessSessionId);
         for (sessions) |session| {
             if (try self.takeReady(session)) |work| ready.appendAssumeCapacity(work);
         }
@@ -499,42 +496,53 @@ pub const Registry = struct {
     pub fn current(self: *Registry, a: Allocator, session: *Session) !Input.Current {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        return self.currentLocked(a, session);
+        const live = try self.liveSessionsLocked(a);
+        defer a.free(live);
+        return self.currentLocked(a, session, live);
     }
 
     pub fn compactionSnapshot(self: *Registry, a: Allocator, session: *Session) !Input.Snapshot {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        var activities: std.ArrayList([]const u8) = .empty;
-        if (session == self.core) {
-            var sessions = self.sessions.valueIterator();
-            while (sessions.next()) |entry| {
-                const activity = entry.*;
-                if (activity == self.core) continue;
-                try activities.append(a, try a.dupe(u8, activity.focus_id));
-            }
-            std.mem.sort([]const u8, activities.items, {}, lessActivity);
-        }
+        const live = try self.liveSessionsLocked(a);
+        defer a.free(live);
+        const activities: []const []const u8 = if (session == self.core) blk: {
+            std.debug.assert(live[0] == self.core);
+            const ids = try a.alloc([]const u8, live.len - 1);
+            for (ids, live[1..]) |*id, activity| id.* = try a.dupe(u8, activity.focus_id);
+            break :blk ids;
+        } else &.{};
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
         for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
             .callback_id = try a.dupe(u8, callback.reference),
             .source = try cloneSource(a, callback.source),
         });
         return .{
-            .current = try self.currentLocked(a, session),
+            .current = try self.currentLocked(a, session, live),
             .state = .{
-                .activities = try activities.toOwnedSlice(a),
+                .activities = activities,
                 .callbacks = try own_callbacks.toOwnedSlice(a),
                 .subscriptions = try self.subscriptions.activeReferences(a, session.focus_id),
             },
         };
     }
 
-    fn currentLocked(self: *Registry, a: Allocator, session: *Session) !Input.Current {
+    fn liveSessionsLocked(self: *Registry, a: Allocator) ![]*Session {
+        const live = try a.alloc(*Session, self.sessions.count());
+        var sessions = self.sessions.valueIterator();
+        for (live) |*session| session.* = sessions.next().?.*;
+        std.mem.sort(*Session, live, {}, lessSessionId);
+        return live;
+    }
+
+    fn currentLocked(self: *Registry, a: Allocator, session: *Session, live: []const *Session) !Input.Current {
+        const focuses = try a.alloc([]const u8, live.len);
+        for (focuses, live) |*address, focus| address.* = try contracts.ChannelAddress.format(a, .focus, focus.focus_id);
         return .{
             .focus_id = try a.dupe(u8, session.focus_id),
             .role = session.role,
             .observed_at_unix_ms = self.now(),
+            .channels = .{ .focuses = focuses },
         };
     }
 
@@ -964,10 +972,6 @@ fn isInternal(event: Input.Event) bool {
     };
 }
 
-fn lessActivity(_: void, left: []const u8, right: []const u8) bool {
-    return (contracts.Reference.sequence(left) orelse unreachable) < (contracts.Reference.sequence(right) orelse unreachable);
-}
-
 fn lessSessionId(_: void, left: *Session, right: *Session) bool {
     return left.session_id < right.session_id;
 }
@@ -1044,6 +1048,45 @@ fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, histo
     try registry.commitInput(work, 1, &history);
     registry.releaseDeliveries(work);
     return .{ .work = work, .history = history };
+}
+
+test "both roles see focus addresses only while their sessions are live" {
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+    defer subscriptions.close();
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
+    defer registry.deinit();
+    var core = try admitTestInput(&registry, a);
+    defer core.history.deinit();
+    defer registry.endWorker(core.work.session);
+    var plans: std.ArrayList(ForkPlan) = .empty;
+    try plans.append(a, try registry.prepareFork(core.work, "research/notes", "Follow revisions."));
+
+    const core_only: []const []const u8 = &.{"ivenna:/focus/core-1"};
+    const both: []const []const u8 = &.{ "ivenna:/focus/core-1", "ivenna:/focus/research%2Fnotes-2" };
+    try std.testing.expectEqualDeep(core_only, (try registry.current(a, core.work.session)).channels.focuses);
+    try registry.commitToolRound(core.work, &core.history, &plans, null);
+    var activity = try admitTestInput(&registry, a);
+    defer activity.history.deinit();
+    defer registry.endWorker(activity.work.session);
+    try std.testing.expectEqualDeep(both, (try registry.current(a, core.work.session)).channels.focuses);
+    try std.testing.expectEqualDeep(both, (try registry.current(a, activity.work.session)).channels.focuses);
+    const core_sample = try registry.compactionSnapshot(a, core.work.session);
+    try std.testing.expectEqualDeep(both, core_sample.current.channels.focuses);
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{"research/notes-2"}), core_sample.state.activities);
+    const activity_sample = try registry.compactionSnapshot(a, activity.work.session);
+    try std.testing.expectEqualDeep(both, activity_sample.current.channels.focuses);
+    try std.testing.expectEqual(0, activity_sample.state.activities.len);
+
+    try std.testing.expect(try registry.commitResponse(activity.work, &activity.history, .{ .output = &.{}, .calls = &.{}, .text = null }));
+    try std.testing.expectEqualDeep(core_only, (try registry.current(a, core.work.session)).channels.focuses);
+    const ended_sample = try registry.compactionSnapshot(a, core.work.session);
+    try std.testing.expectEqualDeep(core_only, ended_sample.current.channels.focuses);
+    try std.testing.expectEqual(0, ended_sample.state.activities.len);
 }
 
 test "compaction samples the active subscriptions addressed to this focus" {

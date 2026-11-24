@@ -1,53 +1,110 @@
 # Communication
 
-Incoming correspondence from people and programs enters Ivenna's core. Both the core and its activities can write to correspondents through `send_message`. Assistant text and activity reports stay internal unless Ivenna chooses to send them. See the [usage guide](usage.md) for writing to Ivenna and [Attention](attention.md) for communication between focuses.
+Incoming correspondence from people and programs enters Ivenna's core. Both the core and its activities use `send` to write to a correspondent, reach a focus, or publish to a feed. See the [usage guide](usage.md) for writing to Ivenna and [Attention](attention.md) for communication between focuses.
 
 ## Correspondents and IDs
 
-Each [incoming message](input.md#incoming-messages) records the correspondent IDs it came `from` and its free-form text. If `operator` relays Alice's words, `from` contains only `operator`. The text can identify Alice as the original speaker. Receiving a message does not require a response.
+If `operator` relays Alice's words, the observation identifies `ivenna:/correspondent/operator` as the sender. The text can identify Alice as the original speaker. See [incoming message fields](input.md#incoming-messages).
 
 Ivenna chooses what to retain about correspondence in its understanding and shared memory. The communication interface has no operation for searching past correspondence. Stored copies follow the [communication-copy retention policy](running.md#communication-copies).
 
 ## Sending a message
 
-Call `send_message` with one or more correspondent IDs in `recipients` and nonempty `text`. The optional `channel` names the service to deliver through; omitting it uses the channel the host declares as its default, never the first channel registered. A host that declares no default rejects a message that names none. The current deployment registers one channel, `email`, so every message travels over email. The email adapter prepares one standalone message addressed to everyone listed, with subject `Ivenna` and the supplied text as its body. See the [tool declaration](../packages/agent/src/tools.json).
+Call `send` with nonempty `text` and one complete `channel_id`. The URI addresses a destination within the current Ivenna instance. Choose an address from the channel catalog or a creation result. See [the channel catalog](input.md#inference-turns) and [reaching a focus](attention.md#reaching-an-existing-focus).
+
+| Address | Destination | Successful result |
+| --- | --- | --- |
+| `ivenna:/correspondent/<id>` | One registered correspondent | `channel_id` and submission `reference` |
+| `ivenna:/focus/<id>` | An existing focus | `channel_id` |
+| `ivenna:/feed/<name>-<serial>` | An open feed | `channel_id` and storage `sequence` |
+
+Address prefixes and keys are case-sensitive. Keys use UTF-8 with ASCII control characters excluded. Keep ASCII letters, digits, `-`, `.`, `_`, and `~` as written. Encode other bytes as `%` followed by two uppercase hexadecimal digits. For example, `notes/release-1` becomes `notes%2Frelease-1`.
+
+Tool errors carry `error.code` and `error.message`. Malformed arguments, including invalid addresses and values outside the documented bounds, return `invalid_arguments`.
 
 ```json
-{
-  "recipients": ["operator"],
-  "text": "The analysis is complete. The updated files are ready for review."
-}
+{"channel_id":"ivenna:/correspondent/operator","text":"The updated files are ready for review."}
 ```
 
-The tool returns a reference when it can confirm that the mail service accepted the message for delivery. Delivery to a recipient can still fail afterward.
+The result includes a reference when the correspondence service accepts a message for delivery. Delivery can still fail afterward.
 
 ```json
-{"result":{"reference":"<submission-reference>"}}
+{"result":{"channel_id":"ivenna:/correspondent/operator","reference":"<submission-reference>"}}
 ```
 
-Tool errors carry an `error.code` and a human-readable `error.message`.
-
-| `error.code` | Meaning |
+| Correspondence error | Meaning |
 | --- | --- |
-| `invalid_arguments` | The call could not be parsed, the recipient list was empty, the message text was empty, or the channel name was empty. |
-| `unknown_channel` | No configured channel carries that name. The tool submitted no message. |
-| `no_default_channel` | The message named no channel and the host declares no default. The tool submitted no message. |
-| `invalid_recipient` | At least one recipient ID was unsupported. The tool submitted no message. |
+| `invalid_recipient` | The ID is outside the deployment's permitted correspondence destinations. The tool stops before preparing the message. |
 | `not_submitted` | Preparation stopped before the tool attempted submission. |
 | `submission_unknown` | The tool attempted submission and could not confirm the outcome. The service may already have accepted the message, so sending it again could produce a duplicate. |
 
-If the runtime loses required mail access, it closes reception and stops. See [runtime availability](design.md#runtime-availability).
+## Feeds
+
+A feed keeps an ordered sequence of messages. Any focus can call `create_channel` with a brief `name` and a `description` of what belongs in the feed. A name is one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. A description is nonblank UTF-8 up to 256 code points and can span lines. Embedded NUL bytes are invalid.
+
+```json
+{"name":"releases","description":"Release announcements and links to upgrade notes."}
+```
+
+The result contains a complete `channel_id`, such as `ivenna:/feed/releases-1`. Creating another feed with the same name issues a new ID. Feeds belong to the instance and persist across focus completion, context handover, and restart. Find open feeds by address and description in the [channel catalog](input.md#inference-turns).
+
+Send to a feed by its complete ID. Feed text must be nonempty UTF-8 without NUL bytes.
+
+```json
+{"channel_id":"ivenna:/feed/releases-1","text":"The release is ready for review."}
+```
+
+```json
+{"result":{"channel_id":"ivenna:/feed/releases-1","sequence":1}}
+```
+
+The sequence confirms that Ivenna stored the message for readers. A program can report back through [a subscription](subscriptions.md).
+
+### Closing feeds
+
+Use `close_channel` with the complete feed `channel_id` to stop writes. The feed's description and published messages remain readable. A close returns the ID and `changed: true` on the first closure, or `changed: false` if already closed.
+
+| Feed error | Meaning |
+| --- | --- |
+| `unknown_channel` | The supplied feed address has no matching feed. |
+| `channel_closed` | The feed closed before the write could be accepted. |
+| `channel_capacity` | The instance has reached its configured limit for open feeds. |
+| `channel_managed` | The close request addressed a focus or correspondent channel. |
+| `channel_storage_busy` | The feed store is busy. |
+| `channel_storage_full` | The feed store ran out of space. |
+| `channel_storage_failed` | The store could not confirm the operation. |
+
+A process interruption can leave a committed message without a saved tool result. Restart restores the store and does not replay tool calls. Sending the same text in a new call creates a new message.
+
+### Reading feeds
+
+A local program with access to the instance data directory can open `<DATA_DIR>/channels.sqlite3` using a read-only SQLite connection, including while the kernel is stopped. These views include closed feeds and their messages. See [feed storage and access](running.md#feed-storage) for deployment details.
+
+| View | Columns |
+| --- | --- |
+| `feeds` | Complete `channel_id`, `description`, `closed` (0 or 1) |
+| `feed_messages` | Complete `channel_id`, `sequence`, `focus_id`, `text`, `published_at_unix_ms` |
+
+For example, start at sequence 0 and read a bounded page. Supply the channel ID and previous sequence as bound parameters in a program.
+
+```sh
+sqlite3 -readonly -json "$DATA_DIR/channels.sqlite3" \
+  "SELECT sequence, focus_id, text, published_at_unix_ms
+   FROM feed_messages
+   WHERE channel_id = 'ivenna:/feed/releases-1' AND sequence > 0
+   ORDER BY sequence LIMIT 100;"
+```
+
+Each row is one message, including any newlines in its text. The store assigns increasing sequence numbers across all feeds, so one feed can have gaps in its sequence. A reader records the last sequence it processed and queries for larger values on its next read. A closed feed can still have unread messages.
 
 ## Current email addressing
 
-The [current email adapter](architecture.md#email-boundary) uses the domain of `MAIL_ADDRESS` to resolve correspondent IDs. For `MAIL_ADDRESS=ivenna@ivenna.test`, `operator@ivenna.test` becomes `operator`, and sending to `operator` resolves to that address. IDs remain usable across context unloading and restart with the same configured domain.
+For an instance in `ivenna.test`, the email adapter presents `operator@ivenna.test` as `ivenna:/correspondent/operator`. If that mailbox is registered for sending, the same channel reaches the exact registered address. The adapter prepares one standalone email with subject `Ivenna` and the supplied message as its body. See the [mail service setup](running.md#mail-service) and [email boundary](architecture.md#email-boundary).
 
 The adapter currently supports ASCII dot-atom local parts and ASCII hostname domains. It preserves ID case and ignores case only in the domain when comparing addresses.
 
-The adapter maps message From addresses to correspondent IDs, relying on the [mail service](running.md#mail-service) to establish sender identity. Incoming mail must have at least one From address, and every address must map to a supported ID in this domain. Missing, unsupported, or cross-domain From addresses exclude the message from intake.
+Incoming mail needs at least one From address, with every From address supported and in the instance's domain. The same addressing rules apply to registered mailboxes. See [mail intake](running.md#mail-intake).
 
 ## Incoming email text
 
-An eligible correspondence email becomes one [`input` observation](input.md#incoming-messages). Its `text` contains the subject, a blank line, and the selected body. With an empty subject, it contains just the body. The adapter uses decoded plain text when the message lists a plain-text body, otherwise HTML source. It joins multiple selected body parts with a newline and skips attachments. For ways to share a file or web page by letter, see [sharing material to read](usage.md#sharing-material-to-read).
-
-The selected body must be complete and decoded without encoding errors. Unsupported or incomplete bodies are skipped, leaving the original mail copy unchanged. Eligible text enters the observation in full and is subject to [request-budget admission](architecture.md#activation-admission).
+The observation's `text` contains the subject, a blank line, and the complete decoded body. An empty subject leaves just the body. The adapter selects plain-text parts when the message lists them, otherwise HTML source. It joins the selected parts with newlines and skips attachments. See [sharing material](usage.md#sharing-material-to-read) and [mail intake](running.md#mail-intake).

@@ -5,6 +5,7 @@
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .subscriptions = .{ .path = "../subscriptions" },
+        .channels = .{ .path = "../channels" },
         .agent_contracts = .{ .path = "../agent_contracts" },
         .content = .{ .path = "../content" },
         .yaml = .{

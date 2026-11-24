@@ -21,7 +21,7 @@ An ordinary turn contains `current` and any newly delivered `events`. A compacti
 
 Focus references remain stable across waiting, context unloading, and restart; ended activity references are not reused. Retained records identify the focus that admitted their events or produced their handover. A turn's `current.focus_id` identifies the focus performing this inference. Inherited records keep their original focus references, which can differ from the focus now reading them.
 
-Tools that create focuses, commands, or attention arrangements take a short `name`. The runtime appends a number to produce a complete reference such as `practice-2`. Names may repeat; complete references establish identity. Callback references connect an arrangement with its pending state and arriving observation. Command references identify executions and remain control handles only within their originating runtime.
+Tools that create focuses, commands, attention arrangements, or feeds take a short `name`. The runtime appends a number to produce a complete reference such as `practice-2`. Names may repeat. Complete references establish identity. Callback references connect an arrangement with its pending state and arriving observation. Command references identify executions and remain control handles only within their originating runtime.
 
 ## Retained records
 
@@ -39,22 +39,22 @@ An `events` record has `focus_id: Text` and `items: Event[]`. Each admission ret
 | `input` | `IncomingMessage` | Observation of what correspondents said |
 | `assignment` | `Assignment` | Initial work for a newly opened activity focus |
 | `activity` | `ActivityReport` | One activity's newly admitted messages and ending information |
-| `focus_message` | `FocusMessage` | Observation sent directly by the core |
+| `focus_message` | `FocusMessage` | Explicit message from a focus |
 | `focus_interrupted` | `FocusInterrupted` | Runtime observation that an activity could not continue reasoning |
 | `callback` | `Callback` | A registered wakeup or host completion observation |
 | `subscription` | `SubscriptionReport` | A listener's report to the focus that subscribed |
 
 #### Incoming messages
 
-Correspondence enters the core as an `input` observation of who said what; it implies no response obligation.
+Correspondence enters the core as an `input` observation of who said what.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `from` | `Text[]` | IDs of correspondents this message came from |
+| `from` | `Text[]` | Channel addresses of the correspondents this message came from |
 | `text` | `Text` | Complete message text |
 | `observed_at` | `Time` | Runtime observation time |
 
-`from` contains readable [correspondent IDs](communication.md#correspondents-and-ids) accepted by `send_message`. The observation time is sampled during intake, rather than when the correspondent wrote or sent the message. Restoring history preserves that time.
+`from` records who sent the message. `current.channels.correspondents` lists the addresses available for sending. `observed_at` records intake time and is preserved in history. See [correspondents and IDs](communication.md#correspondents-and-ids).
 
 #### Startup and restart
 
@@ -96,15 +96,15 @@ The activity may have resumed or even ended by the time the core reads the event
 
 #### Focus messages and callbacks
 
-The core's `send_focus_message` produces a `FocusMessage`:
+A `send` to a focus channel produces a `FocusMessage`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `from_focus` | `Text` | Sending core focus, supplied by the runtime |
+| `from_focus` | `Text` | ID of the sending focus, supplied by the runtime |
 | `observed_at` | `Time` | Time the runtime accepted the message |
 | `text` | `Text` | Observation or coordination message |
 
-A focus message enters the selected recipient's ordinary event queue. See [reaching an existing focus](attention.md#reaching-an-existing-focus) for when the recipient can read it.
+See [reaching an existing focus](attention.md#reaching-an-existing-focus) for queueing and delivery behavior.
 
 Registered observations arrive as `Callback` events for the focuses that arranged them:
 
@@ -161,7 +161,7 @@ A subscription withdrawn before the sample is absent from `subscriptions`. A rep
 
 Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after its result is published or queued. A pending host source identifies the execution being observed; it does not imply that its process is still running or its handle remains available. Observation text arrives separately as an event. The runtime routes and resumes registered observations without requiring the model to retain their IDs.
 
-The handover's `observed_at`, or the compaction turn's `current.observed_at`, dates this state sample. An activity can end before its ending report enters the core's history, so a later sample can omit an activity whose ending has not yet been admitted. Reports retain their source and original times. Sending a focus message to an activity that has ended returns [`unknown_focus`](attention.md#results-and-errors).
+The handover's `observed_at`, or the compaction turn's `current.observed_at`, dates this state sample. An activity can end before its ending report enters the core's history. Reports retain their source and original times.
 
 For example, the summary can explain the work while sampled state retains the references:
 
@@ -187,11 +187,21 @@ Each inference ends its input with a turn:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `current` | `Current` | Identity, role, and observation time of the focus performing this inference |
+| `current` | `Current` | The focus performing this inference, observation time, and channel catalog |
 | `events` | `Event[]`, when nonempty | New events for an ordinary inference |
 | `summarize` | Summary instructions and optional state | Compaction request, replacing ordinary observations |
 
-`Current` contains `focus_id: Text`, `role: Role`, and `observed_at: Time`. Its time dates the current inference input. Events and handovers keep their own observation times and sources. A historical record's focus can differ from the focus identified by `current`.
+`Current` contains `focus_id: Text`, `role: Role`, `observed_at: Time`, and `channels: ChannelCatalog`. Its time dates the current inference input. Events and handovers keep their own observation times and sources. A historical record's focus can differ from the focus identified by `current`.
+
+| `ChannelCatalog` field | Type | Meaning |
+| --- | --- | --- |
+| `focuses` | `Text[]` | Complete addresses for all existing focuses, including the current one and sleeping focuses |
+| `correspondents` | `Text[]` | Complete addresses for the registered destinations available to `send` |
+| `feeds` | `Feed[]` or `null` | Open feeds in creation order, `[]` when none are open, or `null` when the catalog could not be read |
+
+Each `Feed` has a complete `channel_id: Text` and the `description: Text` supplied when the feed was created.
+
+Both ordinary and compaction turns present sampled catalogs. A destination can change between the sample and a tool call. `send` resolves the destination when it runs. See [channel addresses](communication.md#sending-a-message).
 
 An ordinary turn with no new events contains only `current` and continues from the preceding history.
 
@@ -204,6 +214,14 @@ current:
   focus_id: core-1
   role: core
   observed_at: "2026-11-10T18:00:01.000Z"
+  channels:
+    focuses:
+      - ivenna:/focus/core-1
+    correspondents:
+      - ivenna:/correspondent/operator
+    feeds:
+      - channel_id: ivenna:/feed/releases-1
+        description: Release announcements and links to upgrade notes.
 events:
   - callback:
       callback_id: revisit-practice-5

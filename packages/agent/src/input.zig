@@ -129,14 +129,27 @@ pub const SubscriptionReport = struct {
     }
 };
 
-/// Identity and observation time accompanying one inference.
+/// Addresses available at the time of an inference.
+pub const ChannelCatalog = struct {
+    focuses: []const []const u8 = &.{},
+    correspondents: []const []const u8 = &.{},
+    feeds: ?[]const @import("channels").Feed = null,
+};
+
+/// Identity, observation time, and live channel addresses accompanying one inference.
 pub const Current = struct {
     focus_id: []const u8,
     role: Role,
     observed_at_unix_ms: i64,
+    channels: ChannelCatalog = .{},
 
     pub fn jsonStringify(self: Current, writer: anytype) !void {
-        try writer.write(.{ .focus_id = self.focus_id, .role = self.role, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms } });
+        try writer.write(.{
+            .focus_id = self.focus_id,
+            .role = self.role,
+            .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms },
+            .channels = self.channels,
+        });
     }
 };
 
@@ -352,11 +365,31 @@ pub const Turn = struct {
 
 /// Render the model-facing record as YAML. Returned bytes belong to arena.
 pub fn renderRecord(arena: Allocator, record: Record) ![]const u8 {
-    return render(arena, record);
+    var projected = record;
+    if (projected == .events) projected.events.items = try projectEvents(arena, projected.events.items);
+    return render(arena, projected);
 }
 
 pub fn renderTurn(arena: Allocator, turn: Turn) ![]const u8 {
-    return render(arena, turn);
+    var projected = turn;
+    if (projected.purpose == .work) projected.purpose.work = try projectEvents(arena, projected.purpose.work);
+    return render(arena, projected);
+}
+
+/// Retain correspondent IDs in stored events and give the model reply addresses.
+fn projectEvents(arena: Allocator, events: []const Event) ![]const Event {
+    for (events) |event| {
+        if (event == .input) break;
+    } else return events;
+
+    const projected = try arena.dupe(Event, events);
+    for (projected) |*event| {
+        if (event.* != .input) continue;
+        const addresses = try arena.alloc([]const u8, event.input.from.len);
+        for (event.input.from, addresses) |id, *address| address.* = try contracts.ChannelAddress.format(arena, .correspondent, id);
+        event.input.from = addresses;
+    }
+    return projected;
 }
 
 fn render(arena: Allocator, value: anytype) ![]const u8 {
@@ -366,6 +399,21 @@ fn render(arena: Allocator, value: anytype) ![]const u8 {
     defer output.deinit();
     try yaml.emit(&output.writer, document, .{});
     return output.toOwnedSlice();
+}
+
+test "live and retained observations present correspondent addresses without changing stored IDs" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const items: []const Event = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Continue.", .observed_at_unix_ms = 10 } }};
+    const record = try renderRecord(a, .{ .events = .{ .focus_id = "core-1", .items = items } });
+    const turn = try renderTurn(a, .{
+        .current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 10 },
+        .purpose = .{ .work = items },
+    });
+    try std.testing.expect(std.mem.indexOf(u8, record, "ivenna:/correspondent/operator") != null);
+    try std.testing.expect(std.mem.indexOf(u8, turn, "ivenna:/correspondent/operator") != null);
+    try std.testing.expectEqualStrings("operator", items[0].input.from[0]);
 }
 
 test "activity grouping retains each source's message order, times, and silent endings" {

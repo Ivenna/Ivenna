@@ -1,6 +1,6 @@
 const std = @import("std");
 const sql = @import("db.zig");
-const zqlite = @import("zqlite");
+const zqlite = @import("sqlite").zqlite;
 const c = zqlite.c;
 const Allocator = std.mem.Allocator;
 const Reference = @import("agent_contracts").Reference;

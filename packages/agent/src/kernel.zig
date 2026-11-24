@@ -8,6 +8,8 @@ const Input = @import("input.zig");
 const AgentTools = @import("tools.zig");
 const Sessions = @import("sessions.zig");
 const contracts = @import("agent_contracts");
+const Channels = @import("channels");
+const ChannelAddress = contracts.ChannelAddress;
 const Communication = contracts.Communication;
 const Model = contracts.Model;
 const Allocator = std.mem.Allocator;
@@ -20,7 +22,8 @@ pub const Kernel = struct {
     io: std.Io,
     engine: *Engine,
     inbox: contracts.Inbox,
-    channels: Communication.Roster,
+    sender: Communication.Sender,
+    channels: *Channels.Store,
     callbacks: contracts.Callback.Publisher,
     limits: Limits,
     poll_interval_ms: u32,
@@ -35,7 +38,8 @@ pub const Kernel = struct {
     pub const Dependencies = struct {
         engine: *Engine,
         inbox: contracts.Inbox,
-        channels: Communication.Roster,
+        sender: Communication.Sender,
+        channels: *Channels.Store,
         callbacks: contracts.Callback.Publisher,
         history: contracts.HistoryStore,
         subscriptions: *@import("subscriptions").Store,
@@ -54,6 +58,7 @@ pub const Kernel = struct {
             .io = io,
             .engine = dependencies.engine,
             .inbox = dependencies.inbox,
+            .sender = dependencies.sender,
             .channels = dependencies.channels,
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
@@ -189,29 +194,26 @@ pub const Kernel = struct {
         fn invoke(context: *anyopaque, a: Allocator, request: AgentTools.Request) anyerror!Content {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
             return switch (request) {
-                .send_message => |message| blk: {
-                    const channel: Communication.Channel = switch (self.kernel.channels.resolve(message.channel)) {
-                        .channel => |channel| channel,
-                        .unknown_channel => break :blk try runtimeError(a, "unknown_channel", "No configured channel carries that name."),
-                        .no_default_channel => break :blk try runtimeError(a, "no_default_channel", "This message names no channel and the host declares no default channel."),
-                    };
-                    break :blk switch (try channel.sender.send(a, .{ .recipients = message.recipients, .text = message.text })) {
-                        .submitted => |submission| try runtimeResult(a, submission),
-                        .invalid_recipient => try runtimeError(a, "invalid_recipient", "At least one recipient ID is unsupported. No message was submitted."),
-                        .not_submitted => try runtimeError(a, "not_submitted", "Preparation stopped before any attempt to submit this message."),
-                        .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
-                    };
+                .send => |message| self.send(a, message.channel_id, message.text),
+                .create_channel => |args| blk: {
+                    const id = self.kernel.channels.create(a, args.name, args.description) catch |err| return channelFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .channel_id = id });
                 },
-                .send_focus_message => |message| blk: {
-                    self.kernel.sessions.sendFocusMessage(self.work, message.focus_id, message.text) catch |err| return try toolFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .focus_id = message.focus_id });
+                .close_channel => |args| blk: {
+                    if (try parseChannel(a, args.channel_id) != .feed)
+                        break :blk try runtimeError(a, "channel_managed", "Choose a feed address to close a channel.");
+                    const changed = self.kernel.channels.closeChannel(args.channel_id) catch |err| return channelFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .channel_id = args.channel_id, .changed = changed });
                 },
                 .schedule_attention => |args| blk: {
-                    const id = self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text) catch |err| return try toolFailure(a, err);
+                    const id = try self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text);
                     break :blk try runtimeResult(a, .{ .callback_id = id });
                 },
                 .subscribe => |args| blk: {
-                    const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.listener) catch |err| return toolFailure(a, err);
+                    const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.listener) catch |err| switch (err) {
+                        error.InvalidArguments => return error.InvalidToolArguments,
+                        else => return err,
+                    };
                     break :blk try runtimeResult(a, subscription);
                 },
                 .withdraw_subscription => |args| blk: {
@@ -225,7 +227,30 @@ pub const Kernel = struct {
                         else => return err,
                     };
                     self.forks.appendAssumeCapacity(plan);
-                    break :blk try runtimeResult(a, .{ .focus_id = plan.session.focus_id });
+                    break :blk try runtimeResult(a, .{
+                        .focus_id = plan.session.focus_id,
+                        .channel_id = try ChannelAddress.format(a, .focus, plan.session.focus_id),
+                    });
+                },
+            };
+        }
+
+        fn send(self: *RuntimeRound, a: Allocator, channel_id: []const u8, text: []const u8) !Content {
+            return switch (try parseChannel(a, channel_id)) {
+                .correspondent => |recipient| switch (try self.kernel.sender.send(a, .{ .recipient = recipient, .text = text })) {
+                    .submitted => |submission| try runtimeResult(a, .{ .channel_id = channel_id, .reference = submission.reference }),
+                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "Check current.channels.correspondents for registered destinations."),
+                    .not_submitted => try runtimeError(a, "not_submitted", "Preparation stopped before submission."),
+                    .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
+                },
+                .feed => blk: {
+                    const now = std.Io.Clock.real.now(self.kernel.io).toMilliseconds();
+                    const sequence = self.kernel.channels.publish(channel_id, self.work.session.focus_id, text, now) catch |err| return channelFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .channel_id = channel_id, .sequence = sequence });
+                },
+                .focus => |id| blk: {
+                    self.kernel.sessions.sendFocusMessage(self.work, id, text) catch |err| return channelFailure(a, err);
+                    break :blk try runtimeResult(a, .{ .channel_id = channel_id });
                 },
             };
         }
@@ -325,10 +350,22 @@ pub const Kernel = struct {
         return self.engine.measure(trial, input, current.role);
     }
 
+    fn completeChannelCatalog(self: *Kernel, a: Allocator, catalog: *Input.ChannelCatalog) !void {
+        const correspondents = try a.alloc([]const u8, self.sender.correspondents.len);
+        for (self.sender.correspondents, correspondents) |id, *address|
+            address.* = try ChannelAddress.format(a, .correspondent, id);
+        catalog.correspondents = correspondents;
+        catalog.feeds = self.channels.openFeeds(a) catch |err| switch (err) {
+            error.ChannelStoreBusy, error.ChannelStoreFull, error.ChannelStorageFailed, error.InvalidChannelDatabase => null,
+            else => return err,
+        };
+    }
+
     /// Fit continuation and admission against the same snapshot. A rejected
     /// handover changes neither the selected history nor any inbox receipt.
     fn prepareRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, soft_compaction: *bool) !FocusResult([]const Model.Item) {
-        const current = try self.sessions.current(a, work.session);
+        var current = try self.sessions.current(a, work.session);
+        try self.completeChannelCatalog(a, &current.channels);
         const keep_pending: Context.CompactionScope = .keep_latest_tool_round;
         const fit = try self.fitRequest(a, work, history, current, !history.hasHistoryForCompaction(keep_pending));
         switch (fit) {
@@ -397,7 +434,8 @@ pub const Kernel = struct {
         const retry: Engine.Retry = if (trigger == .limit) .wait_for_service else .single_attempt;
         const summary_attempts: usize = if (trigger == .limit) 2 else 1;
         for (0..summary_attempts) |_| {
-            const state = try self.sessions.compactionSnapshot(a, work.session);
+            var state = try self.sessions.compactionSnapshot(a, work.session);
+            try self.completeChannelCatalog(a, &state.current.channels);
             switch (try Compaction.summarize(self.engine, a, history, state, scope, rejection, retry)) {
                 .interrupted => |reason| return .{ .interrupted = reason },
                 .rejected => |reason| rejection = reason,
@@ -473,11 +511,23 @@ fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
     return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .code = code, .message = message } }, .{}));
 }
 
-fn toolFailure(a: Allocator, err: anyerror) !Content {
+fn parseChannel(a: Allocator, value: []const u8) !ChannelAddress.Address {
+    return ChannelAddress.parse(a, value) catch |err| switch (err) {
+        error.InvalidAddress => error.InvalidToolArguments,
+        else => err,
+    };
+}
+
+fn channelFailure(a: Allocator, err: anyerror) !Content {
     return switch (err) {
         error.InvalidArguments => error.InvalidToolArguments,
-        error.UnknownSession => runtimeError(a, "unknown_focus", "The focus is not addressable."),
-        error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The focus cannot currently accept another observation."),
+        error.UnknownChannel, error.UnknownSession => runtimeError(a, "unknown_channel", "No channel matches this address. Check the complete address."),
+        error.ChannelClosed => runtimeError(a, "channel_closed", "This feed is closed to new messages."),
+        error.OpenChannelCapacity => runtimeError(a, "channel_capacity", "The limit for open feeds has been reached."),
+        error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The receiving focus's queue is full."),
+        error.ChannelStoreBusy => runtimeError(a, "channel_storage_busy", "Feed storage is busy."),
+        error.ChannelStoreFull => runtimeError(a, "channel_storage_full", "Feed storage is full."),
+        error.ChannelStorageFailed, error.InvalidChannelDatabase => runtimeError(a, "channel_storage_failed", "Feed storage could not confirm the operation. Inspect its state before repeating a write."),
         else => err,
     };
 }
@@ -488,8 +538,15 @@ const SubscriptionFixture = struct {
     const testing = std.testing;
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
     storage: TestStore = .{},
+    channel_store: ?Channels.Store = null,
+
+    fn deinit(self: *SubscriptionFixture) void {
+        if (self.channel_store) |*store| store.close();
+        self.storage.arena.deinit();
+    }
 
     fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *@import("subscriptions").Store) !Kernel {
+        if (self.channel_store == null) self.channel_store = try Channels.Store.open(testing.allocator, testing.io, ":memory:", 128);
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
@@ -501,7 +558,8 @@ const SubscriptionFixture = struct {
             .engine = engine,
             .subscriptions = subscriptions,
             .inbox = undefined,
-            .channels = .{ .channels = &.{} },
+            .sender = .{ .context = undefined, .submit = undefined, .correspondents = &.{ "operator", "reviewer+notes" } },
+            .channels = &self.channel_store.?,
             .callbacks = undefined,
             .history = self.storage.port(),
         }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
@@ -546,6 +604,65 @@ const SubscriptionFixture = struct {
     }
 };
 
+test "a focus and a feed with the same local ID are separate channels" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    defer kernel.sessions.endWorker(core.work.session);
+    var history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer history.deinit();
+
+    _ = try Kernel.RuntimeRound.invoke(&core, a, .{ .open_focus = .{ .name = "research", .task = "Collect findings." } });
+    try kernel.sessions.commitToolRound(core.work, &history, &core.forks, null);
+    var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer kernel.sessions.endWorker(activity.work.session);
+    const sender_id = activity.work.session.focus_id;
+
+    const purpose = "Keep release findings for readers.";
+    const created = try Kernel.RuntimeRound.invoke(&activity, a, .{ .create_channel = .{
+        .name = "core",
+        .description = purpose,
+    } });
+    const creation = try std.json.parseFromSliceLeaky(std.json.Value, a, created.parts[0].text, .{});
+    const feed_id = creation.object.get("result").?.object.get("channel_id").?.string;
+    try testing.expectEqualStrings("ivenna:/feed/core-1", feed_id);
+    var soft_compaction = true;
+    const input = (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready;
+    const turn = input[input.len - 1].message.text;
+    try testing.expect(std.mem.indexOf(u8, turn, "ivenna:/focus/core-1") != null);
+    try testing.expect(std.mem.indexOf(u8, turn, "ivenna:/correspondent/operator") != null);
+    try testing.expect(std.mem.indexOf(u8, turn, "ivenna:/correspondent/reviewer%2Bnotes") != null);
+    try testing.expect(std.mem.indexOf(u8, turn, feed_id) != null);
+    try testing.expect(std.mem.indexOf(u8, turn, purpose) != null);
+
+    const request = (try AgentTools.Request.parse(a, .activity, "send",
+        \\{"channel_id":"ivenna:/focus/core-1","text":"Findings are ready."}
+    )).?;
+    const reply = try Kernel.RuntimeRound.invoke(&activity, a, request);
+    const result = try std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
+    try testing.expectEqualStrings("ivenna:/focus/core-1", result.object.get("result").?.object.get("channel_id").?.string);
+    const publication_request = (try AgentTools.Request.parse(a, .core, "send",
+        \\{"channel_id":"ivenna:/feed/core-1","text":"A separate publication."}
+    )).?;
+    const published = try Kernel.RuntimeRound.invoke(&core, a, publication_request);
+    const publication = try std.json.parseFromSliceLeaky(std.json.Value, a, published.parts[0].text, .{});
+    try testing.expectEqual(1, publication.object.get("result").?.object.get("sequence").?.integer);
+    try kernel.sessions.collectPending(core.work);
+    const deliveries = core.work.activation.deliveries.items;
+    try testing.expectEqual(1, deliveries.len);
+    const message = deliveries[0].event.focus_message;
+    try testing.expectEqualStrings(sender_id, message.from_focus);
+    try testing.expectEqualStrings("Findings are ready.", message.text);
+}
+
 test "an activity can use the reference returned by subscribe to withdraw another focus's registration" {
     const testing = std.testing;
     const Tool = struct {
@@ -557,7 +674,7 @@ test "an activity can use the reference returned by subscribe to withdraw anothe
         }
     };
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
     var store = try @import("subscriptions").Store.open(a, ":memory:");
     defer store.close();
@@ -587,7 +704,7 @@ test "startup requires the subscription catalog and working history to belong to
     const testing = std.testing;
     const Store = @import("subscriptions").Store;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     var catalog = try Store.open(testing.allocator, ":memory:");
     defer catalog.close();
     var engine: Engine = undefined;
@@ -606,7 +723,7 @@ test "subscription admission and database acknowledgement survive either outcome
     const Subs = @import("subscriptions");
     for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
         var fixture: SubscriptionFixture = .{};
-        defer fixture.storage.arena.deinit();
+        defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
         var store = try Subs.Store.open(a, ":memory:");
         defer store.close();
@@ -649,7 +766,7 @@ test "dispatch retires a withdrawn activity once its accepted reports have been 
     const Case = enum { live, restart_empty, restart_with_report };
     for ([_]Case{ .live, .restart_empty, .restart_with_report }) |scenario| {
         var fixture: SubscriptionFixture = .{};
-        defer fixture.storage.arena.deinit();
+        defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
         var store = try @import("subscriptions").Store.open(a, ":memory:");
         defer store.close();
@@ -694,7 +811,7 @@ test "dispatch retires a withdrawn activity once its accepted reports have been 
 test "an activity admits its sampled backlog in one input and receives a later report after withdrawal" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
     var store = try @import("subscriptions").Store.open(a, ":memory:");
     defer store.close();
@@ -736,7 +853,7 @@ test "an activity admits its sampled backlog in one input and receives a later r
 test "a subscription backlog leaves another focus schedulable and each source gets a turn under a one-event budget" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
     var store = try @import("subscriptions").Store.open(a, ":memory:");
     defer store.close();
@@ -797,7 +914,7 @@ test "a subscription backlog leaves another focus schedulable and each source ge
 test "a rejected inference resumes for remaining reports while failed admission waits for fresh input" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
     var store = try @import("subscriptions").Store.open(a, ":memory:");
     defer store.close();
@@ -866,7 +983,9 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         fn next(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Outcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             try testing.expectEqual(@as(usize, 0), request.tools.len);
-            try testing.expect(std.mem.indexOf(u8, request.history[request.history.len - 1].message.text, "\nsummarize:") != null);
+            const turn = request.history[request.history.len - 1].message.text;
+            try testing.expect(std.mem.indexOf(u8, turn, "\nsummarize:") != null);
+            try testing.expect(std.mem.indexOf(u8, turn, "ivenna:/correspondent/reviewer%2Bnotes") != null);
             for (request.history) |item| {
                 if (item != .tool_result) continue;
                 try testing.expect(item.tool_result.content.parts[0] == .text);
@@ -908,7 +1027,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         .{ .ceiling = 8, .kept_image = false },
     }) |case| {
         var fixture: SubscriptionFixture = .{};
-        defer fixture.storage.arena.deinit();
+        defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
         var store = try @import("subscriptions").Store.open(a, ":memory:");
         defer store.close();
@@ -965,7 +1084,7 @@ test "a pending document can accompany completed exchanges across a handover" {
         }
     };
     var fixture: SubscriptionFixture = .{};
-    defer fixture.storage.arena.deinit();
+    defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
     var store = try @import("subscriptions").Store.open(a, ":memory:");
     defer store.close();

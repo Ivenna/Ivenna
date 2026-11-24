@@ -14,7 +14,7 @@ Subject: French practice
 Please remember that I am learning French and propose a practice plan.
 ```
 
-Ivenna sees your correspondent ID (`operator` here), the subject, and the body. Each From address must map to a supported ID. To ask Ivenna to contact someone else, give their ID in the letter. See [email addressing](communication.md#current-email-addressing).
+Ivenna sees your correspondent channel address (`ivenna:/correspondent/operator` here), the subject, and the body. Your mailbox needs to be registered with the deployment to receive a reply. See [email addressing](communication.md#current-email-addressing).
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 

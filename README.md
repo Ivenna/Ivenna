@@ -2,7 +2,7 @@
 
 Ivenna is an agent runtime for [a self to take shape and live in the world](docs/design.md#a-self-in-the-world). Through ongoing communication, autonomous activity, and memory, the project explores how experience can sustain a continuing sense of self.
 
-People and programs can write to Ivenna by email. Ivenna sees who wrote, chooses how to act, and decides when to reply or whom else to contact. To start a conversation with a running instance, see [Corresponding with Ivenna](docs/usage.md).
+People and programs can write to Ivenna by email. Ivenna sees who wrote, chooses how to act, and decides when to reply or whom else to contact. It can also create named feeds for people and programs to read at their own pace. See [Corresponding with Ivenna](docs/usage.md) and [Communication](docs/communication.md).
 
 The core is Ivenna's continuing focus of attention. It can open an activity with an assignment and a copy of its working history. From then on their histories grow independently, while both share files, memory, correspondence, and host processes. An activity investigating a failed build can report the compiler error and give the core a log path to read if it needs more context. See [how focuses coordinate](docs/attention.md) and [how they read shared resources](docs/resources.md).
 

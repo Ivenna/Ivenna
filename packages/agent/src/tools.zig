@@ -7,9 +7,10 @@ const Allocator = std.mem.Allocator;
 /// Agent-owned actions share one definition for recognition, arguments, and role
 /// selection. Kernel owns their effects within the calling model/tool round.
 pub const Request = union(enum) {
-    send_message: struct { recipients: []const []const u8, text: []const u8, channel: ?[]const u8 = null },
+    send: struct { channel_id: []const u8, text: []const u8 },
+    create_channel: struct { name: []const u8, description: []const u8 },
+    close_channel: struct { channel_id: []const u8 },
     open_focus: struct { name: []const u8, task: []const u8 },
-    send_focus_message: struct { focus_id: []const u8, text: []const u8 },
     schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
     subscribe: struct { name: []const u8, listener: []const u8 },
     withdraw_subscription: struct { subscription_id: []const u8 },
@@ -24,14 +25,13 @@ pub const Request = union(enum) {
             else => return error.InvalidToolArguments,
         };
         const request: Request = switch (tag) {
-            inline else => |active| @unionInit(Request, @tagName(active), try parseArguments(@FieldType(Request, @tagName(active)), a, value)),
+            inline else => |active| @unionInit(Request, @tagName(active), try parseArguments(@FieldType(Request, @tagName(active)), value)),
         };
         switch (request) {
-            .send_message => |args| if (args.recipients.len == 0 or args.text.len == 0 or (args.channel != null and args.channel.?.len == 0)) return error.InvalidToolArguments,
+            .send => |args| if (args.text.len == 0) return error.InvalidToolArguments,
+            .create_channel, .close_channel, .subscribe => {},
             .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
-            .send_focus_message => |args| if (args.focus_id.len == 0 or args.text.len == 0) return error.InvalidToolArguments,
             .schedule_attention => |args| if (!contracts.Reference.validName(args.name) or args.text.len == 0) return error.InvalidToolArguments,
-            .subscribe => {},
             .withdraw_subscription => |args| if (args.subscription_id.len == 0) return error.InvalidToolArguments,
         }
         return request;
@@ -44,48 +44,25 @@ fn string(value: std.json.Value) ![]const u8 {
 
 // Tool references and text are JSON strings. Decoding directly into a Zig
 // byte slice would also accept an array of integers as the same reference.
-fn parseArguments(comptime T: type, a: Allocator, value: std.json.Value) !T {
+fn parseArguments(comptime T: type, value: std.json.Value) !T {
     const fields = @typeInfo(T).@"struct";
-    if (value != .object or value.object.count() > fields.field_names.len) return error.InvalidToolArguments;
+    if (value != .object or value.object.count() != fields.field_names.len) return error.InvalidToolArguments;
     var result: T = undefined;
     inline for (fields.field_names, fields.field_types) |name, Field| {
-        const argument = value.object.get(name);
-        switch (@typeInfo(Field)) {
-            // An optional argument may be absent or null; both leave it null.
-            .optional => |optional| {
-                @field(result, name) = if (argument) |present| try optionalValue(optional.child, present) else null;
-            },
-            else => {
-                const present = argument orelse return error.InvalidToolArguments;
-                @field(result, name) = switch (Field) {
-                    []const u8 => try string(present),
-                    Time.Instant => Time.parse(try string(present)) catch return error.InvalidToolArguments,
-                    []const []const u8 => items: {
-                        if (present != .array) return error.InvalidToolArguments;
-                        const items = try a.alloc([]const u8, present.array.items.len);
-                        for (items, present.array.items) |*item, element| item.* = try string(element);
-                        break :items items;
-                    },
-                    else => @compileError("unsupported tool argument type: " ++ @typeName(Field)),
-                };
-            },
-        }
+        const present = value.object.get(name) orelse return error.InvalidToolArguments;
+        @field(result, name) = switch (Field) {
+            []const u8 => try string(present),
+            Time.Instant => Time.parse(try string(present)) catch return error.InvalidToolArguments,
+            else => @compileError("unsupported tool argument type: " ++ @typeName(Field)),
+        };
     }
     return result;
 }
 
-fn optionalValue(comptime T: type, value: std.json.Value) !?T {
-    if (value == .null) return null;
-    return switch (T) {
-        []const u8 => try string(value),
-        else => @compileError("unsupported optional tool argument type: " ++ @typeName(T)),
-    };
-}
-
 fn available(tag: std.meta.Tag(Request), role: Input.Role) bool {
     return switch (tag) {
-        .send_message, .subscribe, .withdraw_subscription => true,
-        .open_focus, .send_focus_message, .schedule_attention => role == .core,
+        .send, .create_channel, .close_channel, .subscribe, .withdraw_subscription => true,
+        .open_focus, .schedule_attention => role == .core,
     };
 }
 
@@ -108,13 +85,10 @@ test "a subscription reference must be supplied as a JSON string" {
     ));
 }
 
-test "a send_message call may omit the channel" {
+test "a new feed requires a description" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const a = arena.allocator();
-    const plain = (try Request.parse(a, .core, "send_message", "{\"recipients\":[\"operator\"],\"text\":\"hello\"}")).?;
-    try std.testing.expect(plain.send_message.channel == null);
-    const named = (try Request.parse(a, .core, "send_message", "{\"recipients\":[\"operator\"],\"text\":\"hello\",\"channel\":\"qq\"}")).?;
-    try std.testing.expectEqualStrings("qq", named.send_message.channel.?);
-    try std.testing.expectError(error.InvalidToolArguments, Request.parse(a, .core, "send_message", "{\"recipients\":[\"operator\"],\"text\":\"hello\",\"channel\":\"\"}"));
+    try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "create_channel",
+        \\{"name":"release"}
+    ));
 }

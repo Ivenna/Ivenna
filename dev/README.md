@@ -19,9 +19,9 @@ dev/prepare.sh
 
 The preparation script copies [.env.example](../.env.example) to `$DEV_INSTANCE_DIR/.env` and the [mail plan example](mail/provision.example.ndjson) to `$DEV_INSTANCE_DIR/mail/provision.ndjson`. Running it again preserves existing private files.
 
-In the instance's `.env`, set `LLM_API_KEY` for inference and configure the mail and memory connections. Match the kernel and operator credentials to the accounts in the [private mail plan](#configuring-mail). The [message example](#sending-a-message) uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD` for a separate account in the same domain as `MAIL_ADDRESS`.
+In the instance's `.env`, set `LLM_API_KEY` and match the kernel and operator credentials to the private mail plan. The SMTP example uses `OPERATOR_MAIL_ADDRESS` and `OPERATOR_MAIL_PASSWORD`. To receive Ivenna's replies in that account, set `MAIL_CORRESPONDENTS="$OPERATOR_MAIL_ADDRESS"` after the address definition, as in the sample. See [configuring mail](#configuring-mail).
 
-The kernel requires `DATA_DIR`; the example sets it to `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. The sample connections match the local services below. To use another [mail service](../docs/running.md#mail-service) or [memory workspace](../docs/running.md#memory-service), configure those connections and prepare only the services you run locally.
+The example stores kernel files in `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. To use other services, configure their connections and prepare the services you run locally. See [mail service setup](../docs/running.md#mail-service) and [memory service setup](../docs/running.md#memory-service).
 
 To enable optional web page retrieval, set `DEEPSEEK_API_KEY` in the same file. See [web page access](../docs/running.md#web-page-access).
 
@@ -122,7 +122,7 @@ Continue when the response is `200 OK` with `X-Ivenna-Ready: true`. Adjust the U
 
 ## Sending a message
 
-The operator account provides the `operator` correspondent ID for the local mailbox. Its sender address must use the domain of `MAIL_ADDRESS`; see [supported addressing](../docs/communication.md#current-email-addressing). With reception open, [load the instance configuration](#configuration) in a second terminal and submit through the local SMTP endpoint:
+With reception open, load the instance configuration in a second terminal and submit a message from the operator account through the local SMTP endpoint. See [loading the configuration](#configuration).
 
 ```sh
 curl --url "smtp://127.0.0.1:${MAIL_SMTP_PORT:-2525}" --crlf \
@@ -223,12 +223,11 @@ For another memory deployment, configure capacity at its [service entry point](.
 
 | Location | Contents |
 | --- | --- |
-| Stalwart volume, `ivenna-mail` by default | Correspondence, callback inbox, working-history records, checkpoints, Trash, accounts, and Stalwart configuration |
+| Stalwart volume, `ivenna-mail` by default | Mail accounts, the kernel's mailbox data, and Stalwart configuration |
 | Memory volume, `ivenna-memory` by default | Shared memory rooms and entries |
 | `$DEV_INSTANCE_DIR/.env` | Kernel and local service settings and credentials |
 | `$DEV_INSTANCE_DIR/mail/provision.ndjson` | Private mail configuration plan |
 | `$DEV_INSTANCE_DIR/memory/` | Local memory SSH configuration and keys |
-| `<DATA_DIR>/host/` | Full host command output |
-| `<DATA_DIR>/subscriptions.sqlite3` | Subscription catalog, listener progress, and pending observations |
+| `$DEV_INSTANCE_DIR/data/` | Host output and the subscription and feed databases. See [kernel data locations](../docs/running.md#data-and-retention). |
 
-The example sets `DATA_DIR` to `$DEV_INSTANCE_DIR/data/`. When moving the instance, [back up the subscription database and mailbox together](../docs/running.md#backups-and-transfers). Container removal and recreation preserve the external volumes and private instance files. See [data and retention](../docs/running.md#data-and-retention) for the kernel's artifacts and the retention responsibilities of each store.
+Container replacement preserves the external volumes and private instance files. To move the instance, follow the [backup and transfer procedures](../docs/running.md#backups-and-transfers).

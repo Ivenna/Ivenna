@@ -30,7 +30,7 @@ pub const Arrival = struct {
 };
 
 pub const Outgoing = struct {
-    to: []const Address,
+    recipient: []const u8,
     subject: []const u8,
     body: []const u8,
 };
@@ -891,7 +891,7 @@ pub const Mailbox = struct {
             .mailboxIds = Value{ .object = folders },
             .keywords = Value{ .object = keywords },
             .from = &[_]Address{.{ .email = self.address }},
-            .to = outgoing.to,
+            .to = &[_]Address{.{ .email = outgoing.recipient }},
             .subject = outgoing.subject,
             .textBody = &.{.{ .partId = "text", .type = "text/plain" }},
             .bodyValues = .{ .text = .{ .value = outgoing.body } },

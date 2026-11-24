@@ -6,9 +6,20 @@ const Allocator = std.mem.Allocator;
 /// Project incoming observations and submit explicit messages.
 pub const EmailTransport = struct {
     mailbox: *Mail.Mailbox,
+    recipients: std.StringArrayHashMapUnmanaged([]const u8),
 
-    pub fn init(mailbox: *Mail.Mailbox) EmailTransport {
-        return .{ .mailbox = mailbox };
+    /// Index the configured addresses once in the integration's discovery arena.
+    /// The entries borrow the configuration strings.
+    pub fn init(a: Allocator, mailbox: *Mail.Mailbox, addresses: []const []const u8) !EmailTransport {
+        var recipients: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+        errdefer recipients.deinit(a);
+        for (addresses) |address| {
+            const id = mailbox.addressing.id(address) orelse return error.InvalidCorrespondentAddress;
+            const entry = try recipients.getOrPut(a, id);
+            if (entry.found_existing) return error.DuplicateCorrespondentId;
+            entry.value_ptr.* = address;
+        }
+        return .{ .mailbox = mailbox, .recipients = recipients };
     }
 
     pub fn receive(self: *EmailTransport, a: Allocator, letter: Mail.Letter) !Communication.IncomingMessage {
@@ -20,19 +31,12 @@ pub const EmailTransport = struct {
     }
 
     pub fn send(self: *EmailTransport, a: Allocator, message: Communication.Message) !Communication.SendResult {
+        const recipient = self.recipients.get(message.recipient) orelse return .invalid_recipient;
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         const scratch = arena.allocator();
-        const recipients = try scratch.alloc(Mail.Address, message.recipients.len);
-        for (message.recipients, recipients) |id, *recipient| {
-            const address = self.mailbox.addressing.address(scratch, id) catch |err| switch (err) {
-                error.InvalidRecipientId => return .invalid_recipient,
-                else => return err,
-            };
-            recipient.* = .{ .email = address };
-        }
         const mail_id = self.mailbox.createDraft(scratch, .{
-            .to = recipients,
+            .recipient = recipient,
             .subject = "Ivenna",
             .body = message.text,
         }) catch |err| switch (err) {
@@ -79,7 +83,9 @@ test "an unconfirmed submission is checked for the same draft without resending"
         .{ .result = "{\"type\":\"forbidden\"}", .method_error = true },
     }) |case| {
         var fixture = try Fixture.init(&.{
-            .{ .method = "Email/set", .result = "{\"created\":{\"letter\":{\"id\":\"draft\"}}}" },
+            .{ .method = "Email/set", .result = "{\"created\":{\"letter\":{\"id\":\"draft\"}}}", .properties = &.{
+                .{ .path = &.{ "create", "letter", "to" }, .json = "[{\"email\":\"Operator@EXAMPLE.COM\"}]" },
+            } },
             .{ .method = "EmailSubmission/set", .result = case.submission_error, .method_error = case.submission_error != null },
             .{ .method = "EmailSubmission/query", .result = case.result, .method_error = case.method_error, .properties = &.{
                 .{ .path = &.{ "filter", "emailIds" }, .json = "[\"draft\"]" },
@@ -88,8 +94,8 @@ test "an unconfirmed submission is checked for the same draft without resending"
         });
         defer fixture.deinit();
         var mailbox = try fixture.start();
-        var transport = EmailTransport.init(&mailbox);
-        const outcome = try transport.send(fixture.arena.allocator(), .{ .recipients = &.{"operator"}, .text = "hello" });
+        var transport = try EmailTransport.init(fixture.arena.allocator(), &mailbox, &.{"Operator@EXAMPLE.COM"});
+        const outcome = try transport.send(fixture.arena.allocator(), .{ .recipient = "Operator", .text = "hello" });
         try std.testing.expectEqual(case.outcome, std.meta.activeTag(outcome));
         try fixture.finish();
     }
@@ -100,8 +106,62 @@ test "an interrupted draft create has no submission to reconcile" {
     var fixture = try Fixture.init(&.{.{ .method = "Email/set", .result = null }});
     defer fixture.deinit();
     var mailbox = try fixture.start();
-    var transport = EmailTransport.init(&mailbox);
-    const outcome = try transport.send(fixture.arena.allocator(), .{ .recipients = &.{"operator"}, .text = "hello" });
+    var transport = try EmailTransport.init(fixture.arena.allocator(), &mailbox, &.{"operator@example.com"});
+    const outcome = try transport.send(fixture.arena.allocator(), .{ .recipient = "operator", .text = "hello" });
     try std.testing.expect(outcome == .not_submitted);
+    try fixture.finish();
+}
+
+test "registered correspondent IDs each submit to their single configured address" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    var fixture = try Fixture.init(&.{
+        .{ .method = "Email/set", .result = "{\"created\":{\"letter\":{\"id\":\"draft-1\"}}}", .properties = &.{
+            .{ .path = &.{ "create", "letter", "to" }, .json = "[{\"email\":\"Reviewer+Ops@EXAMPLE.COM\"}]" },
+        } },
+        .{ .method = "EmailSubmission/set", .result = "{\"created\":{\"submission\":{\"id\":\"submitted-1\"}}}" },
+        .{ .method = "Email/set", .result = "{\"created\":{\"letter\":{\"id\":\"draft-2\"}}}", .properties = &.{
+            .{ .path = &.{ "create", "letter", "to" }, .json = "[{\"email\":\"operator@example.com\"}]" },
+        } },
+        .{ .method = "EmailSubmission/set", .result = "{\"created\":{\"submission\":{\"id\":\"submitted-2\"}}}" },
+    });
+    defer fixture.deinit();
+    var mailbox = try fixture.start();
+    const a = fixture.arena.allocator();
+    var transport = try EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "Reviewer+Ops@EXAMPLE.COM" });
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{ "operator", "Reviewer+Ops" }), transport.recipients.keys());
+    const review = try transport.send(a, .{ .recipient = "Reviewer+Ops", .text = "Review complete" });
+    try std.testing.expect(review == .submitted);
+    const operator = try transport.send(a, .{ .recipient = "operator", .text = "Deployment complete" });
+    try std.testing.expect(operator == .submitted);
+    try fixture.finish();
+}
+
+test "correspondent registration requires distinct IDs in the configured domain" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    var fixture = try Fixture.init(&.{});
+    defer fixture.deinit();
+    var mailbox = try fixture.start();
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "", "operator", "operator@other.example", "op..erator@example.com" }) |address| {
+        try std.testing.expectError(error.InvalidCorrespondentAddress, EmailTransport.init(a, &mailbox, &.{ "reviewer@example.com", address }));
+    }
+    try std.testing.expectError(error.DuplicateCorrespondentId, EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "operator@EXAMPLE.COM" }));
+    try fixture.finish();
+}
+
+test "unregistered recipient IDs never create drafts" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    var fixture = try Fixture.init(&.{});
+    defer fixture.deinit();
+    var mailbox = try fixture.start();
+    const a = fixture.arena.allocator();
+    var empty = try EmailTransport.init(a, &mailbox, &.{});
+    const denied = try empty.send(a, .{ .recipient = "operator", .text = "hello" });
+    try std.testing.expect(denied == .invalid_recipient);
+    var transport = try EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "Reviewer+Ops@EXAMPLE.COM" });
+    for ([_][]const u8{ "admin", "operator+notes", "Operator", "Reviewer", "reviewer+ops", "ivenna" }) |id| {
+        const outcome = try transport.send(a, .{ .recipient = id, .text = "hello" });
+        try std.testing.expect(outcome == .invalid_recipient);
+    }
     try fixture.finish();
 }
