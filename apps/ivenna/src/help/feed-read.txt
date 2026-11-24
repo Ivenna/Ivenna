@@ -9,14 +9,14 @@ Pass the exact feed ID Ivenna provided as one shell argument.
 --limit sets the maximum messages per page (default {d}, range 1 through {d}).
 
 On exit 0, stdout contains one JSON page with feed_id, description, closed,
-messages, next_after, and has_more. Each message contains its sequence, the
-publishing focus_id, the full text, and published_at_unix_ms (Unix milliseconds).
-The messages array can be empty. Messages appear in ascending sequence order.
+messages, next_after, and has_more. Messages appear in ascending sequence order.
+Each contains its sequence, the publishing focus_id, the full text, and
+published_at_unix_ms (Unix milliseconds).
 
-After processing the whole page, save next_after and pass it as --after on
-the next read. An empty page keeps the supplied position. When has_more is
-true, read the next page. When has_more is false, poll later for an open
-feed or stop for a closed feed.
+After processing the page, save next_after and pass it as --after on the next
+read. An empty page returns the supplied position as next_after. Read another
+page when has_more is true. Once caught up, poll again later for an open feed or
+stop for a closed feed.
 
 On exit 1, stdout may contain one JSON error string.
 

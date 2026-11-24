@@ -106,9 +106,9 @@ The [intake rules](#mail-intake) also apply to existing correspondence in the ac
 
 ### Outgoing correspondents
 
-Set `MAIL_CORRESPONDENTS` to the full mailbox addresses Ivenna may write to, for example `operator@ivenna.test,reviewer@ivenna.test`. Use addresses in the domain of `MAIL_ADDRESS`. Include `MAIL_ADDRESS` to allow Ivenna to write to itself. An unset or empty list registers no recipients. Inbound correspondence follows the [mail intake rules](#mail-intake).
+Set `MAIL_CORRESPONDENTS` to a comma-separated list of full mailbox addresses in the domain of `MAIL_ADDRESS`, such as `operator@ivenna.test,reviewer@ivenna.test`. Include `MAIL_ADDRESS` to allow Ivenna to write to itself. An unset or empty list registers no recipients. Inbound correspondence follows the [mail intake rules](#mail-intake).
 
-Spaces and tabs around entries are ignored. `InvalidCorrespondentAddress` indicates an empty entry, an unsupported mailbox address, or a different domain. `DuplicateCorrespondentId` indicates that several addresses share a case-sensitive local part. Restart the kernel to apply changes. See [correspondent IDs](communication.md#current-email-addressing).
+Spaces and tabs around entries are ignored. Repeated addresses for the same mailbox register one correspondent. `InvalidCorrespondentAddress` indicates an empty entry, an unsupported mailbox address, or a different domain. Restart the kernel to apply changes. See [correspondent IDs](communication.md#current-email-addressing).
 
 ### Mail intake
 
@@ -162,19 +162,19 @@ The executable embeds its model-facing resources and can run independently of th
 
 Give each kernel its own mailbox and `DATA_DIR`. The kernel binds `SERVICE_ADDRESS` before accessing the account. If the address is in use, startup exits. On Linux, an `AddressInUse` error just after an upgrade can persist until the older executable's connections leave `TIME_WAIT`.
 
-The kernel initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a message](usage.md#sending-a-request). The kernel writes diagnostics to standard error.
+The kernel opens the instance database, initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a message](usage.md#sending-a-request). The kernel writes diagnostics to standard error.
 
 Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
 
 ## Local programs
 
-Feed readers and subscription listeners call `ivenna` on the kernel host, including while the kernel is stopped. Set `DATA_DIR` to the instance's initialized data directory when launching the programs independently. Use an absolute path if they run from different working directories. Ivenna supplies both paths to its [host commands](host.md#command-environment).
+Feed readers and subscription listeners call `ivenna` on the kernel host and use the existing instance database, including while the kernel is stopped. When launching either program independently, set `DATA_DIR` to the instance's data directory. Use an absolute path if programs run from different working directories. Ivenna's [host commands](host.md#command-environment) inherit absolute paths to the executable and data directory in `IVENNA` and `DATA_DIR`.
 
-Database file permissions cover both feeds and subscriptions. A relay on the kernel host can forward selected messages to other consumers.
+Database file permissions cover all feeds and subscriptions. A relay on the kernel host can forward selected messages to other consumers.
 
 ### Feed readers
 
-Give the reader the `feed_id` supplied by Ivenna. `ivenna feed read` opens the database read-only. The reader needs access to the existing `-wal` and `-shm` files or permission to create them in `DATA_DIR`. See the [feed reader command](communication.md#reading-feeds) and [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
+Give the reader the `feed_id` supplied by Ivenna. `ivenna feed read` opens the database read-only. The reader needs read access to the database. It also needs read access to the existing `-wal` and `-shm` files or permission to create them in `DATA_DIR`. See the [feed reader command](communication.md#reading-feeds) and [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
 
 ### Subscription listeners
 
@@ -233,7 +233,7 @@ Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception
 
 Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries and preserve feed IDs and messages. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mailbox and instance database belong to the same instance. When restoring data, use [matched backups](#backups-and-transfers).
 
-The core receives a fresh startup observation on every restart. A restored activity receives one immediately if it had an unfinished activation or unread internal observations. Other restored activities receive startup with their next event. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
+At restart the core sees the current outgoing correspondent IDs, including changes to [`MAIL_CORRESPONDENTS`](#outgoing-correspondents). An activity with unfinished work can also resume on startup. See the [startup observation contract](input.md#startup-and-restart) for delivery timing. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
 Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose deadlines passed while the runtime was unavailable become due. Host completions without stored results receive interruption observations with unknown effects; already stored results are preserved.
 
@@ -258,8 +258,6 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
 Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).
-
-Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
 
 Ivenna moves correspondence and callback copies no longer needed for admission or submission, and history no longer selected for continuation, to Trash. Trash provides the mail service's retention window before deletion. Moving an object to Trash leaves its contents on the service until that policy takes effect; service maintenance controls expiry and physical storage reclamation independently of the kernel.
 
@@ -300,6 +298,12 @@ A sleeping activity retains its history even when its context is unloaded. When 
 
 Unread activity expressions retain each text in order with its original observation time. Ending times are also retained. The core admits reports that fit its ordinary request. Unread reference metadata grows with the backlog, and all unread bodies occupy mailbox storage. Activity messages and endings are outside `MAX_PENDING_EVENTS`, so size runtime memory and mailbox capacity for work that can accumulate before the core next reads it. See [activity reports](architecture.md#activity-reports) for reading and admission behavior.
 
+### Feed and subscription retention
+
+The instance database retains open and closed feeds and their messages without automatic expiry. See [backups and transfers](#backups-and-transfers).
+
+Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
+
 ### Uploaded model files
 
 When an upload returns a usable reference, saved working history includes the original bytes and the service identifier. Later inferences reuse that identifier, including after restart. The [working-history limits](#working-history) apply to the bytes. If an upload may have reached the service but returned no usable reference, the service account can also contain a file whose identifier Ivenna never received. See [file outcomes](content.md#complete-files).
@@ -333,10 +337,6 @@ Native `Email.id` values may change because restoration uses logical groups, rec
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 
 A mailbox backup preserves stored callbacks and wakeup arrangements, not running host processes or their output files. Preserve [host artifacts](#host-output-and-deployment-files) and memory data separately when continued work needs them.
-
-### Feed retention
-
-The instance database retains open and closed feeds and their messages without automatic expiry. See [backups and transfers](#backups-and-transfers).
 
 ### Host output and deployment files
 

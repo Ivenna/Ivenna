@@ -1,6 +1,6 @@
 # Development
 
-The [design intent](design.md) guides product and interface decisions; the [architecture guide](architecture.md) explains implementation responsibilities and ownership. Follow the [running guide](running.md) for deployment and configuration.
+The design guide sets Ivenna's goals and interface principles. The architecture and running guides describe the current implementation and its deployment. See the [design intent](design.md), [architecture guide](architecture.md), and [running guide](running.md).
 
 ## Development conventions
 
@@ -14,7 +14,7 @@ Communication and memory are operating requirements of the whole runtime. Compon
 
 Start with the intended behavior and its reason, then establish responsibilities and interfaces. Explain design changes through their effects on Ivenna, its correspondents, or the deployment user. Implementation experience can inform these choices; a current code path or service limitation alone does not establish a design requirement.
 
-Keep each document focused on its role:
+Keep each document focused on the decision it helps its reader make.
 
 | Document | Scope |
 | --- | --- |
@@ -23,6 +23,7 @@ Keep each document focused on its role:
 | Testing guide | Test selection, execution, and maintenance |
 | Interface guides | Operations, fields, formats, and outcomes |
 | Model-facing resources | Semantics needed to choose actions and interpret observations |
+| CLI help | Command syntax, defaults, examples, and exit results |
 | Architecture guide | The current implementation's package ownership, dependencies, algorithms, synchronization, storage representation, and service protocols |
 | Running and local development guides | Deployment configuration and service procedures |
 
@@ -40,15 +41,15 @@ Organize packages around cohesive capabilities, keeping their types, rules, reso
 
 Use `packages/agent_contracts` for shared communication and capability contracts. Keep execution policy, model-input types and rendering, prompts, and runtime tool declarations in `packages/agent`. Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities), and update producers and consumers together when changing a shared type or operation.
 
-Keep configuration with the behavior it controls. Execution owns scheduling, context limits, and reasoning selection; capability packages own connection settings and protocol encoding. The application translates environment values into those configurations and owns HTTP listener settings.
+Keep configuration with the behavior it controls. Execution owns scheduling, context limits, and reasoning selection. Capability packages own connection settings and protocol encoding. The application loads these settings from the environment and configures its own HTTP listener.
 
 ### Types and protocols
 
 Decode external protocols in the components that own them and pass typed values to execution. Model coexisting fields together and mutually exclusive alternatives as variants with their own payloads. Let the component performing the action check the current state and report the outcome it can confirm. See [message delivery](architecture.md#message-delivery).
 
-Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
+Keep native mail record IDs, headers, folders, and thread grouping in the email adapter. The adapter passes correspondence and callback observations in typed envelopes. The agent owns callback registration, source attribution, routing, and admission. See the [inbox contract](../packages/agent_contracts/src/inbox.zig).
 
-[Input](../packages/agent/src/input.zig) defines and renders the runtime's user messages. Choose what to present by which focus needs the information and when it can use it. When a result or observation supplies a reference, include the complete ID. Keep the state needed for delivery and resumption in runtime records through persistence and compaction. See [context and continuity](design.md#context-and-continuity) and the [input contract](input.md).
+`Input` defines and renders the runtime's user messages. Include the complete ID when an observation or result supplies a reference. Choose the information for the receiving focus and the decisions it can make at that point. Keep the state needed for delivery and resumption in runtime records through persistence and compaction. See [context and continuity](design.md#context-and-continuity), the [input contract](input.md), and the [input renderer](../packages/agent/src/input.zig).
 
 Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
@@ -56,7 +57,7 @@ The agent chooses tools and reasoning for each request and decides which history
 
 ### Model-facing resources
 
-Treat prompts and tool descriptions as editable interfaces:
+Prompts and tool declarations are interfaces. Each resource gives the model the information it needs at a different point in execution.
 
 | Resource | Purpose |
 | --- | --- |
@@ -73,7 +74,7 @@ Keep capability tool declarations with their implementation and register capabil
 
 Keep agent-owned action recognition, typed arguments, and role selection together in [tools.zig](../packages/agent/src/tools.zig); Kernel owns their effects. All sessions use the same system prompt. Express differences in available actions through tool selection, and identify the current focus, task, and circumstances in user input. Ordinary inference, admission measurement, and compaction prepend the same prompt independently of retained history.
 
-Follow the [capability principles](design.md#understanding-and-autonomy) when writing these resources. Read each tool declaration as one interface: names, structure, constraints, and descriptions appear together. Express value choices and bounds structurally, and mirror actual runtime defaults in schema annotations. Use descriptions for the action, its effects, and parameter or result semantics the structure cannot convey. Keep cues of ownership and continuity brief and open to Ivenna's judgment, leaving content, organization, and learned practices to its experience. Preserve precision about the operation behind a suggestive name.
+Read each tool declaration as a whole. Express value choices and bounds in its schema, and match schema defaults to runtime behavior. Use descriptions to explain effects and the implications of picking an argument or receiving a result. Keep cues of ownership and continuity brief and leave content, organization, and learned practices to Ivenna's judgment. See the [capability principles](design.md#understanding-and-autonomy).
 
 Put task facts and observations in user input. Prompts and tool descriptions should explain decisions and interpretation; field references belong in the [input contract](input.md), mechanisms in the architecture guide, and procedures in the running guides. Update affected resources and interface documentation together.
 
@@ -109,13 +110,11 @@ The [root build](../build.zig) and the [application build](../apps/ivenna/build.
 
 Each application owns its entry point. The [memory app](../apps/memory) has a Nushell entry point and a Containerfile. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
 
-The CLI owns [command summaries](../apps/ivenna/src/cli.zig) and the [subcommand reference and examples](../apps/ivenna/src/help). Rebuild `ivenna` to see changes to help or [model-facing resources](#model-facing-resources).
+The CLI provides command summaries and embeds detailed local command help. Rebuild `ivenna` after editing help or model-facing resources. See [cli.zig](../apps/ivenna/src/cli.zig), [local command help](../apps/ivenna/src/help), and [model-facing resources](#model-facing-resources).
 
 ## Validation
 
-Use the [testing guide](testing.md) to select, run, and maintain automated checks.
-
-Build the application. For changes across runtime boundaries, exercise the affected behavior through communication and model/tool work in the [local development environment](../dev/README.md). Choose checks from the contract being changed: establish what Ivenna or its correspondents should observe, then follow that outcome across the components that produce, deliver, and retain it. A boundary change needs evidence from its producers and consumers together.
+Build the application and select automated checks for the changed contract. For a change across runtime boundaries, exercise the affected behavior through communication and model/tool work in the local development environment. Start with what Ivenna or its correspondents should observe. Follow the outcome through the components that produce, deliver, and retain it. See the [testing guide](testing.md) and [local development environment](../dev/README.md).
 
 Exercise failure and interruption where they can separate an external effect from its recorded outcome. Confirm that the resulting observation exposes known effects and uncertainty. Where state or tasks survive a call, verify their restoration and cleanup through the owning component's contract. Scale these checks to the changed behavior and affected boundaries.
 

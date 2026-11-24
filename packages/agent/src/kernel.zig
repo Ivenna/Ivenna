@@ -64,7 +64,15 @@ pub const Kernel = struct {
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
             .poll_interval_ms = config.poll_interval_ms,
-            .sessions = try Sessions.Registry.init(allocator, io, config.max_sessions, config.max_pending_events, dependencies.history, dependencies.subscriptions),
+            .sessions = try Sessions.Registry.init(
+                allocator,
+                io,
+                config.max_sessions,
+                config.max_pending_events,
+                dependencies.history,
+                dependencies.subscriptions,
+                dependencies.sender.registered_correspondents,
+            ),
         };
     }
 
@@ -235,7 +243,7 @@ pub const Kernel = struct {
             return switch (to) {
                 .correspondent_id => |id| switch (try self.kernel.sender.send(a, .{ .recipient = id, .text = text })) {
                     .submitted => |submission| try runtimeResult(a, .{ .correspondent_id = id, .reference = submission.reference }),
-                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "That correspondent is not registered to receive messages."),
+                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "No outgoing correspondent is registered with that ID."),
                     .not_submitted => try runtimeError(a, "not_submitted", "Sending stopped before the submission attempt."),
                     .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
                 },
@@ -246,7 +254,7 @@ pub const Kernel = struct {
                 },
                 .focus_id => |id| blk: {
                     self.kernel.sessions.sendFocusMessage(self.work, id, text) catch |err| return switch (err) {
-                        error.UnknownSession => runtimeError(a, "unknown_focus", "That focus is unavailable."),
+                        error.UnknownSession => runtimeError(a, "unknown_focus", "No existing focus matches that ID."),
                         error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The receiving focus's queue is full."),
                         else => err,
                     };
@@ -538,6 +546,7 @@ const SubscriptionFixture = struct {
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
     storage: TestStore = .{},
     feed_store: ?Feeds.Store = null,
+    correspondents: []const []const u8 = &.{},
 
     fn deinit(self: *SubscriptionFixture) void {
         if (self.feed_store) |*store| store.close();
@@ -557,7 +566,7 @@ const SubscriptionFixture = struct {
             .engine = engine,
             .subscriptions = subscriptions,
             .inbox = undefined,
-            .sender = .{ .context = undefined, .submit = undefined },
+            .sender = .{ .context = undefined, .submit = undefined, .registered_correspondents = self.correspondents },
             .feeds = &self.feed_store.?,
             .callbacks = undefined,
             .history = self.storage.port(),
@@ -610,10 +619,43 @@ const SubscriptionFixture = struct {
     }
 };
 
-test "ordinary turns omit directories and send resolves known IDs by destination kind" {
+test "core startup reports the outgoing registration of each runtime" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    const registrations: []const []const []const u8 = &.{ &.{"operator"}, &.{"Reviewer+Ops"}, &.{} };
+    for (registrations) |ids| {
+        fixture.correspondents = ids;
+        var engine: Engine = undefined;
+        var kernel = try fixture.kernel(&engine, &store);
+        defer kernel.deinit();
+        const work = try SubscriptionFixture.takeWork(&kernel, a);
+        var history = try kernel.sessions.snapshot(work.session);
+        defer history.deinit();
+        var soft_compaction = true;
+        const input = (try kernel.prepareRequest(a, work, &history, &soft_compaction)).ready;
+        const turn = input[input.len - 1].message.text;
+        const marker = if (ids.len == 0) "correspondents: []" else ids[0];
+        try testing.expect(std.mem.indexOf(u8, turn, marker) != null);
+        const records = history.records();
+        const startup = records[records.len - 1].record.events.items[0].startup;
+        try testing.expectEqualDeep(ids, startup.correspondents.?);
+        if (ids.len == 0) {
+            const snapshot = try kernel.compactionSnapshot(a, work.session);
+            const summary = try history.summaryRequest(a, snapshot, "Summarize.", .keep_latest_tool_round);
+            try testing.expect(std.mem.indexOf(u8, summary[summary.len - 1].message.text, marker) != null);
+        }
+        try SubscriptionFixture.finish(&kernel, work, &history);
+    }
+}
+
+test "continuations omit destination directories and send uses the selected destination kind" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
-    var fixture: SubscriptionFixture = .{};
+    var fixture: SubscriptionFixture = .{ .correspondents = &.{"reviewer+notes"} };
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
     var store = try Subscriptions.Store.openInMemory(a);
@@ -621,7 +663,6 @@ test "ordinary turns omit directories and send resolves known IDs by destination
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
     defer kernel.deinit();
-    kernel.sender.registered_correspondents = &.{"reviewer+notes"};
     var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer core.deinit();
     defer kernel.sessions.endWorker(core.work.session);
@@ -641,17 +682,11 @@ test "ordinary turns omit directories and send resolves known IDs by destination
     const feed_id = created.object.get("result").?.object.get("feed_id").?.string;
     try testing.expectEqualStrings(core.work.session.focus_id, feed_id);
 
-    var activity_history = try kernel.sessions.snapshot(activity.work.session);
-    defer activity_history.deinit();
     var soft_compaction = true;
-    for ([_][]const Model.Item{
-        (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready,
-        (try kernel.prepareRequest(a, activity.work, &activity_history, &soft_compaction)).ready,
-    }) |input| {
-        const turn = input[input.len - 1].message.text;
-        for ([_][]const u8{ "focuses", "correspondents", "feeds", "reviewer+notes", "Keep release findings for readers." }) |marker| {
-            try testing.expect(std.mem.indexOf(u8, turn, marker) == null);
-        }
+    const input = (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready;
+    const turn = input[input.len - 1].message.text;
+    for ([_][]const u8{ "activities:", "correspondents:", "feeds:" }) |field| {
+        try testing.expect(std.mem.indexOf(u8, turn, field) == null);
     }
 
     const result = try call(a, &activity, "send", .{
@@ -681,7 +716,7 @@ test "ordinary turns omit directories and send resolves known IDs by destination
 test "core compaction picks up open feeds when their creating activities end" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
-    var fixture: SubscriptionFixture = .{};
+    var fixture: SubscriptionFixture = .{ .correspondents = &.{"operator"} };
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
     var store = try Subscriptions.Store.openInMemory(a);
@@ -689,7 +724,6 @@ test "core compaction picks up open feeds when their creating activities end" {
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
     defer kernel.deinit();
-    kernel.sender.registered_correspondents = &.{"operator"};
 
     var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer core.deinit();
@@ -727,12 +761,12 @@ test "core compaction picks up open feeds when their creating activities end" {
 
     const core_state = (try kernel.compactionSnapshot(a, core.work.session)).state;
     try testing.expectEqualDeep(@as([]const []const u8, &.{ core_feed, surviving_feed }), core_state.feeds);
-    try testing.expectEqualDeep(kernel.sender.registered_correspondents, core_state.correspondents);
+    try testing.expectEqualDeep(fixture.correspondents, core_state.correspondents.?);
     try testing.expectEqualDeep(@as([]const []const u8, &.{activity.work.session.focus_id}), core_state.activities);
 
     const activity_state = (try kernel.compactionSnapshot(a, activity.work.session)).state;
     try testing.expectEqualDeep(@as([]const []const u8, &.{own_feed}), activity_state.feeds);
-    try testing.expectEqual(0, activity_state.correspondents.len);
+    try testing.expect(activity_state.correspondents == null);
     try testing.expectEqual(0, activity_state.activities.len);
 }
 

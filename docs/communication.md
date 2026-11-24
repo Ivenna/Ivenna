@@ -12,15 +12,15 @@ Call `send` with nonempty `text` and a `to` object containing exactly one destin
 | `focus_id` | An [existing focus](attention.md#reaching-an-existing-focus) | `focus_id` |
 | `feed_id` | An [open feed](#publishing-to-a-feed) | `feed_id` and message `sequence` |
 
-Pass IDs as case-sensitive JSON strings, preserving spaces, punctuation, and non-ASCII characters. An ID is local to its instance and destination kind. For example, a focus and a feed can have the same ID.
+Pass IDs as case-sensitive JSON strings, preserving spaces, punctuation, and non-ASCII characters. Each ID has meaning within its instance and destination kind. For example, `to.focus_id` and `to.feed_id` can refer to different destinations with the same ID.
 
 Tool replies contain a JSON `result` or an `error` with `code` and `message`. Malformed arguments return `invalid_arguments`. The runtime resolves the selected destination when `send` runs.
 
 ## Correspondents and IDs
 
-An incoming observation's `from` field contains the sender IDs. If the operator relays Alice's words, `from` identifies the operator. The message text can attribute the words to Alice. See [correspondence observations](input.md#incoming-messages).
+An incoming observation's `from` field identifies who sent the email. If the operator relays Alice's words, `from` identifies the operator and the message text can attribute the words to Alice. See [correspondence observations](input.md#incoming-messages).
 
-Sending to a known correspondent ID requires outgoing registration, including when the ID comes from a letter Ivenna received. The core also receives the registered outgoing IDs at compaction. See [outgoing registration](running.md#outgoing-correspondents) and [sampled state](input.md#sampled-state).
+Ivenna can write to an ID while its mailbox is registered for outgoing correspondence. This applies to replies to incoming mail and to letters Ivenna initiates. The core sees the registered IDs at startup and compaction. See [outgoing registration](running.md#outgoing-correspondents), [startup observations](input.md#startup-and-restart), and [compaction samples](input.md#sampled-state).
 
 ### Writing to a correspondent
 
@@ -50,7 +50,7 @@ Registered mailboxes and incoming From addresses use ASCII dot-atom local parts 
 
 #### Incoming email text
 
-The observation's `text` contains the subject, a blank line, and the decoded text of the selected body parts. With an empty subject, it contains only the body. The adapter selects plain-text parts when the message lists them and uses HTML source when it lists only HTML body parts. It joins selected parts with newlines. See [sharing material](usage.md#sharing-material-to-read) and [mail intake](running.md#mail-intake).
+The observation's `text` contains the subject and body separated by a blank line. With an empty subject, it contains only the body. The adapter selects plain-text parts when available and uses HTML source when the message lists only HTML body parts. It joins selected parts with newlines. To share a file, send an accessible link or include the relevant text in the body. See [sharing material](usage.md#sharing-material-to-read) and [mail intake](running.md#mail-intake).
 
 ## Feeds
 
@@ -58,7 +58,7 @@ A feed is an instance-owned sequence of messages. An open feed stays available f
 
 ### Creating feeds
 
-Any focus can call `create_feed` with a short `name` and a nonempty `description` of what readers can expect. The description can span lines. See [names and references](input.md#names-and-references).
+Any focus can call `create_feed` with a short `name` and a nonempty `description` of what readers can expect. Readers see the description on every page. See [names and references](input.md#names-and-references).
 
 ```json
 {"name":"releases","description":"Release announcements and links to upgrade notes."}
@@ -90,11 +90,11 @@ Use `close_feed` with the `feed_id` to stop new publications. The feed's descrip
 {"feed_id":"releases-1"}
 ```
 
-The `changed` field indicates whether the call closed the feed. Closing an already closed feed returns `changed: false`.
-
 ```json
 {"result":{"feed_id":"releases-1","changed":true}}
 ```
+
+Closing an already closed feed returns `changed: false`.
 
 ### Feed tool errors
 
@@ -109,14 +109,13 @@ Loss of required access to instance state follows the [runtime availability poli
 
 ### Reading feeds
 
-With `DATA_DIR` set to the instance's data directory, run `ivenna feed read` on the kernel host. Pass the complete `feed_id` from Ivenna as one quoted argument. The command also works while the kernel is stopped. For filesystem access requirements, see [feed reader deployment](running.md#feed-readers).
+On the kernel host, set `DATA_DIR` to the instance's data directory and pass the complete `feed_id` as one quoted argument. The command also works while the kernel is stopped. For filesystem access requirements, see [feed reader deployment](running.md#feed-readers).
 
 ```sh
-feed_id='releases-1'
-ivenna feed read "$feed_id"
+ivenna feed read 'releases-1'
 ```
 
-The result is one JSON line on stdout. The feed metadata and messages in the page come from the same snapshot, including whether the feed has closed. Messages appear in ascending sequence order and sequence numbers can have gaps. Here is an example page with line breaks added for readability.
+The command prints one JSON page on a single line. The description, closure status, and messages come from the same read. Messages appear in ascending sequence order, with possible gaps.
 
 ```json
 {
@@ -136,6 +135,6 @@ The result is one JSON line on stdout. The feed metadata and messages in the pag
 }
 ```
 
-Save `next_after` after processing the whole page and pass it as `--after` on the next read. A reader that reports an observation for each message can save its position with that observation. See [reading a feed and reporting back](subscriptions.md#read-an-ivenna-feed-and-report-back).
+After processing the whole page, save `next_after` and pass it as `--after` on the next read. `has_more: false` means the reader has caught up with the feed at the time of the read. If the feed is open, poll later for new messages. A listener can save its position with each observation it reports. See [reading a feed and reporting back](subscriptions.md#read-an-ivenna-feed-and-report-back).
 
 Run `ivenna feed read --help` for the options, page fields, and exit statuses.

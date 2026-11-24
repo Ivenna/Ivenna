@@ -23,7 +23,7 @@
 
 | Task | Guide |
 | --- | --- |
-| Interpret ordinary inputs, retained records, and state sampled at compaction | [Input contract](input.md) |
+| Interpret startup and other observations, retained history, and handovers | [Input contract](input.md) |
 | Send a message or create, publish to, and close feeds | [Communication](communication.md) |
 | Read a feed by ID and resume from a saved sequence | [Reading feeds](communication.md#reading-feeds) |
 | Coordinate focuses, schedule wakeups, and manage subscriptions | [Attention](attention.md) |

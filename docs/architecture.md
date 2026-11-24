@@ -1,8 +1,6 @@
 # Architecture
 
-This guide covers package boundaries, execution, and the protocols Ivenna uses for services and storage. The application assembles the runtime and exposes health and reception status. The kernel restores working histories and builds execution state on startup.
-
-The [design intent](design.md) sets the behavioral goals and interface principles. The [input contract](input.md) defines runtime-generated user messages, [communication](communication.md) defines correspondence and explicit sending, and [attention](attention.md) defines focus coordination and observation lifetimes. The [usage guide](usage.md) explains correspondence with Ivenna.
+This guide describes how the application assembles Ivenna, how the kernel coordinates work, and how the runtime stores and restores it. For behavioral goals, configuration, and interface contracts, see the [documentation index](README.md).
 
 ## Responsibilities
 
@@ -23,7 +21,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 
 `ivenna serve` runs the kernel and its [HTTP listener](../apps/ivenna/src/service.zig) in the same process. Host commands receive the executable path and data directory so they can use the instance's [local commands](running.md#local-programs). The kernel reaches the memory app over SSH. See [local service setup](../dev/README.md).
 
-The agent and concrete capabilities share `agent_contracts`, which depends only on Content. Content supplies tool-result text, image, and file representation and source classification. YAML rendering belongs to the agent. The build declarations enforce the following module dependencies; each arrow points from a module to one it imports:
+The agent and its capability implementations share `agent_contracts`. That module uses Content to represent tool results. The graph follows imports between Ivenna's Zig modules and shows selected library dependencies.
 
 ```mermaid
 flowchart TD
@@ -56,19 +54,19 @@ flowchart TD
     Responses --> Zdt
 ```
 
-The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer. Session scheduling, owned deliveries, activations, and retained context remain internal to the agent. `Kernel.Config` and `Kernel.Limits` describe execution policy; `Engine.Reasoning` selects ordinary reasoning effort for core and activity roles. Connection settings and protocol encoding belong to their capability packages; the application loads environment values and owns HTTP listener settings.
+The agent exposes `Kernel`, `Engine`, and `Input`. It keeps session scheduling, deliveries, activations, and retained context internal. `Kernel.Config` and `Kernel.Limits` govern execution. `Engine.Reasoning` sets ordinary reasoning effort by role. Capability packages define service settings and protocols, and the application loads those settings from the environment.
 
 ### Shared contracts
 
-The application supplies the agent and host with capability implementations through in-process contracts. The agent owns model input and the checkpoint selecting retained working histories. Each adapter owns its service protocol.
+The application supplies the agent and host with capability implementations through in-process contracts. The agent encodes retained records and selects them with a checkpoint. Adapters translate their native service protocols.
 
 | Contract | Operations | Implementation |
 | --- | --- | --- |
 | [Inbox](../packages/agent_contracts/src/inbox.zig) | Poll typed correspondence and callback envelopes with opaque receipts and acknowledge durable admission | Email integration |
 | [Callback.Registrar](../packages/agent_contracts/src/callback.zig) | Persist a future observation's source and bind its destination to the invoking session | Agent execution |
 | [Callback.Publisher](../packages/agent_contracts/src/callback.zig) | Store one observation under a registered callback ID, preserving the first stored result | Email integration |
-| [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Expose the registered correspondent IDs and submit a message to one of them | Email integration |
-| [HistoryStore](../packages/agent_contracts/src/history.zig) | Load and save the current checkpoint; allocate groups, discover record metadata, read and create records in batches, and maintain the selected history | Email integration |
+| [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Expose registered outgoing correspondent IDs and submit messages by ID | Email integration |
+| [HistoryStore](../packages/agent_contracts/src/history.zig) | Publish and load checkpoints, allocate storage groups, read and write records, and maintain retained history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure encoded requests, and prepare tool results for model input | Responses adapter |
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
 | [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host, Memory, and Resources |
@@ -81,7 +79,7 @@ The callback registrar accepts a name and source and returns `Callback.Registrat
 
 ## Service and reception
 
-The application reserves `SERVICE_ADDRESS` before it accesses the mail account. If the address is already in use, startup stops there. After mail initialization, the memory check, and session restoration, the application starts serving probes and running the kernel and host supervisor. The kernel reconciles restored host registrations and completes initial history maintenance before opening reception. It then dispatches startup activations. [Startup and interruption](#startup-and-interruption) describes how work resumes.
+`ivenna serve` binds `SERVICE_ADDRESS` before opening the instance database or accessing the mail account. Once the runtime is assembled, the application serves probes concurrently with the kernel and host supervisor. The kernel reconciles restored host registrations and completes initial history maintenance before opening reception. It then dispatches ready focuses. See [startup and interruption](#startup-and-interruption).
 
 The listener handles probes independently of intake and model work. A health probe observes the listener. A readiness probe reads the kernel's reception state, which stays open while an individual focus waits for inference. The deployment's mail service uses readiness to decide whether to accept correspondence. Shutdown can follow a successful check, leaving accepted mail in the account. See the [reception contract](running.md#service-status-and-reception) and [local SMTP example](../dev/README.md#configuring-mail).
 
@@ -113,9 +111,9 @@ Sleeping activities retain their session slots. Completing an activity releases 
 
 ### Message delivery
 
-Incoming correspondence enters the core's FIFO queue independently of mail threads. During ordinary input, the core can receive activity expressions from their own outbox. Activity endings and interruptions request the core's attention. See [activity reports](#activity-reports) and [activation admission](#activation-admission).
+Incoming correspondence enters the core's queue in intake order, independently of mail threads. The core also reads activity reports during admission. See [activity reports](#activity-reports) and [activation admission](#activation-admission).
 
-The tool decoder selects the destination variant in `send.to`. The kernel passes the complete ID to the mail sender, session registry, or feed store for lookup at execution. The registry checks focus membership and queue capacity under its lock, then checkpoints the queued message with the sender's ID. The kernel renders each destination's reported outcome as a tool reply. See [tool decoding](../packages/agent/src/tools.zig), [outgoing mail](#outgoing-mail), [feed storage](#feed-storage), and [sending outcomes](communication.md#sending-a-message).
+The tool decoder reads the single field in `send.to` to select a destination variant. The kernel routes the complete ID to the mail sender, session registry, or feed store for lookup. For a focus destination, the registry checks membership and queue capacity under its lock, then checkpoints the queued message with the calling focus's ID. The kernel renders the outcome as a tool reply. See [tool decoding](../packages/agent/src/tools.zig), [outgoing mail](#outgoing-mail), [feed storage](#feed-storage), and [sending outcomes](communication.md#sending-a-message).
 
 ## Activation admission
 
@@ -172,13 +170,13 @@ Intake resolves the numeric delivery ID through its registration, adds the saved
 
 ## Instance database
 
-`ivenna serve` initializes `<DATA_DIR>/state.sqlite3` with the instance schema and format marker. The kernel opens separate connections for feeds and subscriptions. Each local command opens its own connection to the instance database. Feed readers open it read-only. In WAL mode, readers can proceed while SQLite serializes writers. See the [schema](../packages/instance_state/src/schema.sql) and [connection setup](../packages/instance_state/src/database.zig).
+`ivenna serve` initializes `<DATA_DIR>/state.sqlite3`, then opens separate connections for feeds and subscriptions. Initialization installs the instance schema and sets SQLite's `application_id` to identify its format. Each local command opens an existing database with that marker. Feed readers use a read-only connection. WAL mode lets readers proceed while SQLite serializes writers. See the [schema](../packages/instance_state/src/schema.sql) and [connection setup](../packages/instance_state/src/database.zig).
 
-The first mailbox checkpoint records the database identity before the kernel marks the database bound. When restoring a checkpoint, the kernel checks that its database identity matches the local database. See the [backup and transfer procedure](running.md#backups-and-transfers).
+The database also has an identity unique to the instance. The registry records it in the first mailbox checkpoint before marking the database bound. A checkpoint must match the local database identity on startup, and a bound database requires its checkpoint. See the [backup and transfer procedure](running.md#backups-and-transfers).
 
 ### Feed storage
 
-The feed store serializes creation, publication, and closure through one mutex per store and SQLite write transactions. Creation saves the originating focus ID with the feed, where it survives activity completion. Publication checks that the feed is open in the same transaction as the insert. It returns the sequence after commit. SQLite assigns sequences across all feeds, and feed writes commit independently of working history. See the [feed store](../packages/instance_state/src/feeds.zig).
+The feed store serializes access to its connection with a mutex. A write transaction creates, publishes to, or closes a feed. Creation records the creator's focus ID, which survives activity completion. Publication checks that the feed is open in the same transaction as the insert and returns the sequence after commit. SQLite assigns sequences across all feeds. Feed writes commit independently of working history. See the [feed store](../packages/instance_state/src/feeds.zig).
 
 The reader joins feed metadata and messages in one query, so the page and its closure state come from the same snapshot. See the [reader implementation](../packages/instance_state/src/feed_reader.zig) and [feed read interface](communication.md#reading-feeds).
 
@@ -248,7 +246,7 @@ The kernel normally carries forward the complete tool exchange awaiting continua
 
 ### Sampling state and preparing the request
 
-The kernel reads open feeds with their creator IDs before sampling the registry. A creator registers before it can create a feed, so the core can use the later activity IDs both in its own sample and to exclude feeds of activities that still exist. The registry reads the focus's identity, observation time, activity IDs, callbacks, and subscription IDs under its lock. The kernel gets the registered outgoing IDs from the sender. See the [sampling implementation](../packages/agent/src/kernel.zig) and [fields supplied to each role](input.md#sampled-state).
+The registry samples the focus's identity, observation time, live activity IDs, callbacks, and subscription IDs under its lock. The kernel queries open feeds before taking that snapshot. For the core, it excludes feeds whose creators appear in the snapshot. Since a creator registers before creating a feed, reading in this order lets the registry distinguish a newly opened creator from an ended activity. For an activity, the kernel queries feeds by creator ID. It takes the core's outgoing correspondent IDs from the sender. See the [sampling implementation](../packages/agent/src/kernel.zig) and [fields supplied to each role](input.md#sampled-state).
 
 `Context.summaryRequest` combines the system prompt, selected history, sampled state, and compaction instructions. The summary request uses `high` reasoning without tools. Observations awaiting admission stay queued. See the [summary instructions](../packages/agent/src/compaction.md) and [handover contract](input.md#handover-generation-and-replacement).
 
@@ -303,9 +301,9 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 ## Startup and interruption
 
-Startup opens the instance database, discovers mail, checks memory with `inspect_memory_space`, and loads the checkpoint or creates the core. It rebuilds identities, roles, unread internal work, activity outbox references, callbacks, and wakeups. The registry uses the checkpoint to resume [subscription delivery](#subscription-delivery). Requests receive the common system prompt independently of restored history. Communication-copy and history maintenance complete before reception opens.
+During assembly, the application opens the instance database, discovers the mail account, and checks memory with `inspect_memory_space`. The session registry loads the mailbox checkpoint or creates the core on first launch. The checkpoint restores session identities and roles, unread internal work, activity outbox references, callbacks, and wakeups. It also lets the registry resume [subscription delivery](#subscription-delivery).
 
-On every restart the core receives a fresh `startup` observation. For an activity, `was_running` records whether it had a running or interrupted activation or a startup observation waiting in its queue. The registry queues startup immediately for activities with that flag or unread internal observations. Other restored activities receive startup with their next event. A newly opened activity begins with its assignment.
+On each launch the registry queues `startup` for the core with a copy of the sender's registered IDs. Admission retains that list as part of the dated observation. An activity's `was_running` flag records whether it had a running or interrupted activation or a startup observation waiting in its queue. The registry queues startup during restoration for activities with that flag or unread internal observations. Other restored activities get startup when dispatched for new work. Newly opened activities begin with their assignment. See the [startup fields](input.md#startup-and-restart).
 
 Before dispatch, Kernel publishes an interruption observation for each restored host registration. The [callback publisher](#callback-delivery) preserves any identifiable result already stored for that ID. Wakeups publish when due. Processes and historical tool calls are not replayed, and source command IDs from the earlier runtime are not restored handles.
 
@@ -315,7 +313,7 @@ Use one kernel per account. Host effects, memory writes, mail submission, feed p
 
 ## Email boundary
 
-The mail service checks which From addresses a sender may use. The adapter maps supported senders in the configured domain to correspondent IDs for intake. At startup it indexes the addresses registered for sending by their case-sensitive local parts. The sender exposes those IDs to the kernel and looks up the exact registered address before creating a draft. See the [email transport](../packages/email/src/email_transport.zig) and the [mail service setup](running.md#mail-service).
+The mail service checks which From addresses a sender may use. On intake, the email adapter maps supported addresses in the configured domain to correspondent IDs. See [mail service setup](running.md#mail-service) and [mail intake and acknowledgement](#mail-intake-and-acknowledgement).
 
 ### JMAP requests
 
@@ -326,6 +324,8 @@ During [session discovery](running.md#mail-service), the client resolves each `L
 At startup the adapter locates `Ivenna Callbacks` and `Ivenna History` by their exact top-level names and null roles. It locates Trash by its `trash` role. If a folder is missing, it creates it. If the create outcome is uncertain, the adapter lists folders again and applies the same selection. Startup needs a matching folder to proceed.
 
 ### Outgoing mail
+
+At startup the application supplies the registered recipient addresses to the email integration. The transport indexes them by case-sensitive local part. Its sender exposes the keys as correspondent IDs and uses the same index to resolve the address on each send. See the [email transport](../packages/email/src/email_transport.zig) and [outgoing registration](running.md#outgoing-correspondents).
 
 The adapter creates a draft marked `ivenna-outbound` with the resolved address as its sole recipient. It uses the returned draft ID in `EmailSubmission/set`. If draft creation is unconfirmed, the call ends before submission.
 

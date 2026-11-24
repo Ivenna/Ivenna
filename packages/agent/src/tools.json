@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Write to a correspondent, reach a focus, or publish to a feed. A correspondence reference confirms the sending service accepted the message for delivery. A focus message enters its recipient's queue and can wake that focus. A feed sequence identifies the stored message.",
+    "description": "Send text to one correspondent, focus, or feed. A correspondence `reference` confirms that the sending service accepted the message for delivery. A focus message enters the recipient's queue and can wake it. A feed `sequence` identifies the stored message.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -23,7 +23,7 @@
               "properties": {
                 "focus_id": {
                   "type": "string",
-                  "description": "Complete ID of an existing focus."
+                  "description": "Complete ID of an existing focus, including your own."
                 }
               },
               "required": ["focus_id"],
@@ -53,7 +53,7 @@
   },
   {
     "name": "create_feed",
-    "description": "Create a feed that can outlive this focus and survives restart. Use the returned feed_id to publish and to direct readers to the feed. In an activity, \"$IVENNA\" feed read --help explains how to read it.",
+    "description": "Create a feed to publish updates people and programs can read. The feed survives restart and the end of this focus. Use the returned `feed_id` to publish, and pass it to readers who want to follow the feed. In an activity, `\"$IVENNA\" feed read --help` explains how to read it.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -70,7 +70,7 @@
   },
   {
     "name": "close_feed",
-    "description": "Close a feed to new messages. Published messages remain readable. The result's changed field is true when this call closes the feed.",
+    "description": "Close a feed to new messages. Published messages remain readable. `changed` is false when the feed was already closed.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -85,7 +85,7 @@
   },
   {
     "name": "open_focus",
-    "description": "Open an activity to pursue a task while the core continues. The activity can run host commands and report to the core. The result gives its focus_id.",
+    "description": "Open an activity to pursue a task while the core continues. The activity can run host commands and report to the core. The result gives its `focus_id`.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -108,7 +108,7 @@
   },
   {
     "name": "schedule_attention",
-    "description": "Leave yourself something to return to later by scheduling a wakeup for the core. The wakeup survives restart.",
+    "description": "Schedule a wakeup to return to something later. The core receives the supplied text in a callback identified by the returned `callback_id`. The wakeup survives restart.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -137,7 +137,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Register this focus for reports that can wake it. Give the returned subscription_id to a listener you set up. In an activity, \"$IVENNA\" subscription --help lists the listener commands.",
+    "description": "Subscribe this focus to reports from a listener you set up. Give the listener the returned `subscription_id`. Its reports can wake this focus. In an activity, `\"$IVENNA\" subscription --help` lists the listener commands.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -158,7 +158,7 @@
   },
   {
     "name": "withdraw_subscription",
-    "description": "Withdraw any subscription by ID. Accepted reports still reach the subscribing focus. Stop the listener separately if needed.",
+    "description": "Withdraw any subscription by ID. Accepted reports stay with the subscribing focus. Stop the listener separately if needed.",
     "parameters": {
       "type": "object",
       "properties": {

@@ -15,9 +15,8 @@ pub const EmailTransport = struct {
         errdefer recipients.deinit(a);
         for (addresses) |address| {
             const id = mailbox.addressing.id(address) orelse return error.InvalidCorrespondentAddress;
-            const entry = try recipients.getOrPut(a, id);
-            if (entry.found_existing) return error.DuplicateCorrespondentId;
-            entry.value_ptr.* = address;
+            // Matching IDs have the same local part and equivalent domains.
+            try recipients.put(a, id, address);
         }
         return .{ .mailbox = mailbox, .recipients = recipients };
     }
@@ -121,28 +120,14 @@ test "sending requires an exact registered ID and uses its configured address" {
     defer fixture.deinit();
     var mailbox = try fixture.start();
     const a = fixture.arena.allocator();
+    try std.testing.expectError(error.InvalidCorrespondentAddress, EmailTransport.init(a, &mailbox, &.{"operator@other.example"}));
     var empty = try EmailTransport.init(a, &mailbox, &.{});
     const unregistered = try empty.send(a, .{ .recipient = "Reviewer+Ops", .text = "Review complete" });
     try std.testing.expect(unregistered == .invalid_recipient);
-    var transport = try EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "Reviewer+Ops@EXAMPLE.COM" });
+    var transport = try EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "operator@EXAMPLE.COM", "Reviewer+Ops@EXAMPLE.COM" });
     const wrong_case = try transport.send(a, .{ .recipient = "reviewer+ops", .text = "Review complete" });
     try std.testing.expect(wrong_case == .invalid_recipient);
     const review = try transport.send(a, .{ .recipient = "Reviewer+Ops", .text = "Review complete" });
     try std.testing.expect(review == .submitted);
     try fixture.finish();
-}
-
-test "correspondent registration requires distinct IDs in the configured domain" {
-    const a = std.testing.allocator;
-    var jmap = @import("jmap.zig").Jmap.init(a, std.testing.io, "test");
-    defer jmap.deinit();
-    const address = "ivenna@example.com";
-    var mailbox: Mail.Mailbox = .{
-        .jmap = &jmap,
-        .session_url = "",
-        .address = address,
-        .addressing = try @import("addressing.zig").Addressing.init(address),
-    };
-    try std.testing.expectError(error.InvalidCorrespondentAddress, EmailTransport.init(a, &mailbox, &.{ "reviewer@example.com", "operator@other.example" }));
-    try std.testing.expectError(error.DuplicateCorrespondentId, EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "operator@EXAMPLE.COM" }));
 }

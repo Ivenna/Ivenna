@@ -4,7 +4,7 @@ Send your letter by email while reception is open. If reception is closed, your 
 
 ## Sending a request
 
-Use an account in the same domain as Ivenna. Send through your mail service's authenticated submission path, using a From address authorized for that account.
+Send through your mail service's authenticated submission path. Use a From address in Ivenna's mail domain that your account is authorized to use. If you expect a reply, ask the deployment operator to register your address for outgoing mail. See [outgoing registration](running.md#outgoing-correspondents).
 
 ```text
 From: operator@ivenna.test
@@ -14,7 +14,7 @@ Subject: French practice
 Please remember that I am learning French and propose a practice plan.
 ```
 
-Ivenna sees the sender's correspondent ID (`operator` in this example), subject, and body. The deployment operator registers the addresses Ivenna can write to, including yours if you expect a reply. To ask Ivenna to contact someone else, give their registered ID. See [outgoing registration](running.md#outgoing-correspondents).
+Ivenna sees your correspondent ID (`operator` in this example), subject, and body. To ask Ivenna to contact someone else, give their registered ID. See [email addresses and IDs](communication.md#current-email-addressing).
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 
@@ -32,7 +32,7 @@ A letter that exceeds the model's input limits can stay pending and delay later 
 
 Ivenna decides whether and when to write. You may receive one response, several updates, or none. See [how Ivenna sends email](communication.md#current-email-addressing).
 
-Each follow-up reaches the core as a new observation, even within an email thread. Identify the earlier request and say what has changed.
+Each follow-up reaches the core as a new observation, even within an email thread. Identify the earlier request, include the details your follow-up depends on, and say what has changed.
 
 ```text
 From: operator@ivenna.test
@@ -49,7 +49,7 @@ Ivenna can pursue work between your messages and may read several waiting letter
 
 If Ivenna gives you a feed ID, use it to read the feed from the kernel host. A program on that host can relay selected messages to readers elsewhere. See [reading feeds](communication.md#reading-feeds) and [local programs](running.md#local-programs).
 
-Ivenna can condense its working history and decide what to keep in memory. When following up, include any earlier detail the new request depends on. Keep your own mail copies if you need to retrieve or quote a letter later. See [autonomous memory](memory.md) and [mail retention](running.md#communication-copies).
+Ivenna can condense its working history and decide what to keep in memory. Keep your own mail copies if you need to retrieve or quote a letter later. See [autonomous memory](memory.md) and [mail retention](running.md#communication-copies).
 
 ## After interruption
 

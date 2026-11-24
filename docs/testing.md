@@ -4,7 +4,7 @@ Tests support Ivenna's exploratory development by catching consequential regress
 
 ## Choosing tests
 
-Choose checks from the intended behavior and the consequences of failure. Add a focused regression test when a failure would be costly or hard to notice during ordinary development. Existing tests can help identify affected behavior; revise or remove their expectations when the design changes.
+Choose checks from the intended behavior and the consequences of failure. Add a focused regression test when a failure would be costly or hard to notice during ordinary development. Review existing tests for affected behavior and revise or remove expectations when the design changes.
 
 Choose the smallest check that gives useful evidence at the boundary owning the behavior. Prefer observable outcomes over internal layout, exact prompt wording, or incidental serialization. A small, reversible change may need only review and a build. Judge a test by the failure it can expose and the maintenance it adds.
 
@@ -12,7 +12,7 @@ During development, do not write tests in advance or introduce test frameworks. 
 
 ## Running checks
 
-Run commands from the repository root. Install the Zig version in [`.zig-version`](../.zig-version), then check tracked Zig source formatting, build Ivenna, and run the registered Zig tests:
+Use the Zig version in [`.zig-version`](../.zig-version). Check tracked Zig files, build Ivenna, and run the Zig tests from the repository root.
 
 ```sh
 git ls-files -z '*.zig' '*.zig.zon' | xargs -0 zig fmt --check
@@ -20,7 +20,7 @@ zig build
 zig build test
 ```
 
-The [root build](../build.zig) runs the registered Zig library and application tests. Run `zig build test` from [apps/ivenna](../apps/ivenna) to run only the CLI process tests. Library roots include internal test files through `test` blocks in `src/root.zig`. Adding a package to the test step requires a root build entry and a [dependency manifest](../build.zig.zon) entry.
+The root test step runs the registered library and application suites. Run `zig build test` from `apps/ivenna` for the CLI process tests. Library roots include internal test files through `test` blocks in `src/root.zig`. To add a package suite, register it in the root build and dependency manifest. See the [root build](../build.zig), [application build](../apps/ivenna/build.zig), and [dependency manifest](../build.zig.zon).
 
 For the [memory protocol tests](../apps/memory/tests.nu), install Nushell at the version used in the memory [Containerfile](../apps/memory/Containerfile). These tests also use the standard `ln` command:
 
@@ -36,24 +36,24 @@ The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. Th
 
 ### Test boundaries
 
-- **Command line.** Process tests check help and argument errors in an empty environment. With a temporary instance database, they check listener receipts and exit statuses and read feeds with the kernel stopped. The feed test resumes across a sequence gap and checks that message text and descriptions arrive intact. [CLI process tests](../apps/ivenna/src/cli_test.zig)
-- **Instance state.** Feed tests reopen the database to check closure, sequence continuity, and creator identity. Subscription tests use two connections to verify that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. [Feed store](../packages/instance_state/src/feeds.zig) · [Subscription store](../packages/instance_state/src/subscriptions.zig)
-- **Focus execution.** Tests exercise ordinary turns without destination directories, routing when a focus and feed share an ID, and compaction sampling across activity completion. They also check that a complete tool exchange can survive a handover, observations that exceed the request limit stay pending, and an accepted subscription report enters the receiving history exactly once when a checkpoint fails or loses confirmation. [Kernel tests](../packages/agent/src/kernel.zig) · [Context tests](../packages/agent/src/context.zig) · [Session registry tests](../packages/agent/src/sessions.zig)
-- **Mail.** A local JMAP server checks the configured recipient on the wire and verifies that denied sends stop before draft creation. Dropped connections exercise submission reconciliation, mailbox read recovery, and confirmation of callback and history writes. [Email transport](../packages/email/src/email_transport.zig) · [Email tests](../packages/email/src/root.zig)
-- **Model transport and resources.** Responses tests compare request measurements with encoded HTTP bodies and exercise file upload outcomes. Web reader tests check that two focuses can read the same page snapshot with one fetch. [Responses tests](../packages/responses/src/provider_test.zig) · [Web reader tests](../packages/resources/src/web_test.zig)
+- **Command line.** Tests invoke `ivenna` in separate processes to check help and argument errors before configuration, listener receipts and exit status, and feed reads with the kernel stopped. The feed test resumes across a sequence gap and checks that message text and descriptions arrive intact. [CLI process tests](../apps/ivenna/src/cli_test.zig)
+- **Instance state.** Reopening the database tests whether feeds retain their closure state, sequence order, and creator IDs. Two subscription connections exercise cursor conflicts, retries after acknowledgement, and whether queued reports retain their destination after withdrawal. [Feed store](../packages/instance_state/src/feeds.zig) · [Subscription store](../packages/instance_state/src/subscriptions.zig)
+- **Focus execution.** Fixtures exercise startup with changed registrations, destination selection when two kinds share an ID, and how compaction samples open feeds after an activity ends. They also cover tool exchanges carried through handovers and reports admitted exactly once after a checkpoint failure or lost confirmation. [Kernel tests](../packages/agent/src/kernel.zig) · [Context tests](../packages/agent/src/context.zig) · [Session registry tests](../packages/agent/src/sessions.zig)
+- **Mail.** A local JMAP server verifies recipient lookup before draft creation and the address stored on the draft. Connection failures exercise mailbox read recovery, uncertain submission, and confirmation of callback and history writes. [Email transport](../packages/email/src/email_transport.zig) · [Email tests](../packages/email/src/root.zig)
+- **Model transport and resources.** HTTP fixtures compare measured request sizes with encoded bodies, exercise file upload outcomes, and verify that two focuses can read one page snapshot from a single fetch. [Responses tests](../packages/responses/src/provider_test.zig) · [Web reader tests](../packages/resources/src/web_test.zig)
 
 The email, Responses, and web reader tests check that canceling a stalled HTTP exchange closes the connection. The local server checks for further request bytes and open connections. Measuring bytes received over TLS requires exercising the request writer against a local HTTPS server. [Local server](../tests/http.zig) · [Model transport](architecture.md#model-transport)
 
 ## Validating with running services
 
-For process restart and communication through the configured services, exercise the running application in the [local development environment](../dev/README.md). See [validation across runtime boundaries](development.md#validation).
+Use the running application to validate process restart and communication through the configured services. To compare context behavior across runs, replay representative work with the same model and starting history. See the [local environment](../dev/README.md) and [validation across runtime boundaries](development.md#validation).
 
 ### Evaluating compaction
 
-To compare context settings, replay representative work from the same starting history with the deployed model in a test instance. Compare committed handovers by the focus's saved epoch and check stderr for interruptions. See [context budgets](running.md#context-budgets) and [persistent working history](architecture.md#persistent-working-history).
+Use the focus's saved epoch to identify committed handovers. Check stderr for interruptions. See [context budgets](running.md#context-budgets) and [persistent working history](architecture.md#persistent-working-history).
 
 Inspect the saved handover for the expected sampled IDs and observation time. Verify that a later callback or subscription report reaches the focus that arranged it. Follow the focus's subsequent work to see whether it carries a commitment and a correction forward and can find the evidence it used. See [sampled state](input.md#sampled-state).
 
 ### Evaluating context disclosure
 
-Compare disclosure choices with the same model and starting history. Include work where the information could inform the next decision and work where it is incidental. Observe what the focus does next, including whether it uses a relevant reference or turns to unrelated work. Record request size separately. See [context and continuity](design.md#context-and-continuity).
+Compare cases where the information could inform the next decision with cases where it is incidental. Observe whether the focus uses a relevant reference or turns to unrelated work. Record request size separately. See [context and continuity](design.md#context-and-continuity).

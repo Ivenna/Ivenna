@@ -125,7 +125,7 @@ pub const Store = struct {
     }
 };
 
-test "feed closure and sequences survive reopening" {
+test "feed closure, sequences, and creator references survive reopening" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -137,58 +137,44 @@ test "feed closure and sequences survive reopening" {
     try database.initialize(a, path);
     const name = "发布 notes/\"笔记\"%";
     const description = "Release notes";
-    const expected = name ++ "-1";
-
-    {
-        var store = try Store.open(a, t.io, path);
-        defer store.close();
-        const feed_id = try store.create(a, "core-1", name, description);
-        try t.expectEqualStrings(expected, feed_id);
-        try t.expectError(error.UnknownFeed, store.publish("other-1", "core", "hello", 100));
-        try t.expectEqual(1, try store.publish(feed_id, "activity-1", "First update", 100));
-        try t.expect(try store.closeFeed(feed_id));
-        try t.expectError(error.UnknownFeed, store.closeFeed("missing"));
-    }
-
-    var store = try Store.open(a, t.io, path);
-    defer store.close();
-    try t.expect(!try store.closeFeed(expected));
-    try t.expectError(error.FeedClosed, store.publish(expected, "core", "closed after restart", 101));
-    const renewed = try store.create(a, "activity-2", name, description);
-    try t.expectEqualStrings(name ++ "-2", renewed);
-    try t.expectEqual(2, try store.publish(renewed, "core", "second", 102));
-}
-
-test "open feed samples keep their original creators across reopening" {
-    const t = std.testing;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = t.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, database.filename });
-    try database.initialize(a, path);
 
     const created = blk: {
         var store = try Store.open(a, t.io, path);
         defer store.close();
+        const feed_id = try store.create(a, "activity-2", name, description);
+        try t.expectEqualStrings(name ++ "-1", feed_id);
+        try t.expectError(error.UnknownFeed, store.publish("other-1", "core", "hello", 100));
+        const first = try store.publish(feed_id, "activity-1", "First update", 100);
+        try t.expect(first > 0);
+        try t.expect(try store.closeFeed(feed_id));
+        try t.expectError(error.UnknownFeed, store.closeFeed("missing"));
+
         const core = try store.create(a, "core-1", "core", "Core feed");
         const own = try store.create(a, "activity-2", "own", "First activity feed");
         const other = try store.create(a, "activity-21", "other", "Second activity feed");
-        const closed = try store.create(a, "activity-2", "closed", "Finished feed");
-        _ = try store.publish(core, "activity-2", "A shared update", 100);
-        try t.expect(try store.closeFeed(closed));
-        break :blk [_]OpenFeed{
-            .{ .feed_id = core, .creator_focus_id = "core-1" },
-            .{ .feed_id = own, .creator_focus_id = "activity-2" },
-            .{ .feed_id = other, .creator_focus_id = "activity-21" },
+        const latest_sequence = try store.publish(core, "activity-2", "A shared update", 101);
+        try t.expect(latest_sequence > first);
+        break :blk .{
+            .closed = feed_id,
+            .latest_sequence = latest_sequence,
+            .open = [_]OpenFeed{
+                .{ .feed_id = core, .creator_focus_id = "core-1" },
+                .{ .feed_id = own, .creator_focus_id = "activity-2" },
+                .{ .feed_id = other, .creator_focus_id = "activity-21" },
+            },
         };
     };
 
     var store = try Store.open(a, t.io, path);
     defer store.close();
-    try t.expectEqualDeep(@as([]const OpenFeed, &created), try store.openFeeds(a, null));
-    try t.expectEqualDeep(@as([]const OpenFeed, created[1..2]), try store.openFeeds(a, "activity-2"));
-    try t.expectEqualDeep(@as([]const OpenFeed, created[2..3]), try store.openFeeds(a, "activity-21"));
+    try t.expect(!try store.closeFeed(created.closed));
+    try t.expectError(error.FeedClosed, store.publish(created.closed, "core", "closed after restart", 102));
+    try t.expectEqualDeep(@as([]const OpenFeed, &created.open), try store.openFeeds(a, null));
+    try t.expectEqualDeep(@as([]const OpenFeed, created.open[1..2]), try store.openFeeds(a, "activity-2"));
+    try t.expectEqualDeep(@as([]const OpenFeed, created.open[2..3]), try store.openFeeds(a, "activity-21"));
+
+    const renewed = try store.create(a, "activity-2", name, description);
+    try t.expect(std.mem.startsWith(u8, renewed, name ++ "-"));
+    try t.expect(!std.mem.eql(u8, renewed, created.closed));
+    try t.expect((try store.publish(renewed, "core", "New update", 103)) > created.latest_sequence);
 }

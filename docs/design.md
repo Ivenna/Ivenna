@@ -91,19 +91,19 @@ A focus's working history retains observations, model output, and tool results a
 
 #### What a focus receives
 
-Input shapes what the focus attends to and uses part of the context window. Even a short list of names can draw attention to unrelated work. Disclose information when it helps the receiving focus interpret an observation or choose what to do next. Ordinary turns identify the focus and present its newly admitted observations. Tool results can supply references when a focus acts on something.
+Even a short list of names uses context and can draw attention to unrelated work. Disclose information when it helps the focus interpret an observation or choose what to do next. Ordinary turns identify the focus and carry its new observations. Startup gives the core the current outgoing correspondent IDs so it can account for changes before resuming work. Tool results supply references when a focus acts on something. See the [input contract](input.md#records-and-turns).
 
 #### What a handover carries forward
 
 Compaction asks Ivenna to condense retained exchanges into a handover. The summary carries forward what Ivenna considers relevant to its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. See [bounded model context](architecture.md#bounded-model-context).
 
-The runtime supplies a dated state sample with the summary request. Callbacks and subscriptions follow the focus that arranged them. The core also receives references for coordination and correspondence. Feeds can outlive their creators, so the core receives references to open feeds left by activities that have ended. See [sampled state](input.md#sampled-state) for the fields each role receives.
+The runtime supplies a dated state sample with the summary request and keeps it beside the accepted summary. Callbacks and subscriptions stay with the focus that arranged them. The core also receives references for coordination and correspondence, including open feeds left by activities that have ended. See [sampled state](input.md#sampled-state) for the fields each role receives.
 
-When the runtime accepts a handover, it saves the same sample alongside the summary. It can also carry complete exchanges to preserve exact wording and sources. Delivery, wakeups, and resumption use the runtime's own records, even when the summary omits or misstates a reference. The runtime keeps the original history until it can continue with the handover. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
+Delivery, wakeups, and resumption use the runtime's own records. The runtime keeps the original history until it can continue with the handover. It can carry complete exchanges forward to preserve exact wording and sources. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
 
 #### Continuing work
 
-A focus's understanding can lag behind changes in the world. When Ivenna chooses to act on a reference it recalls, the component that owns the operation resolves it against current state. For example, a handover can show a feed as open, and a later publication attempt can return `feed_closed`. The handover dates the earlier sample, and the tool result gives the focus new evidence to revise its understanding. See [feed tool errors](communication.md#feed-tool-errors).
+A handover can show an open feed that closes before Ivenna tries to publish again. The handover dates the earlier observation. The runtime resolves the reference when Ivenna acts and reports the closure, giving the focus new evidence to revise its understanding. See [feed tool errors](communication.md#feed-tool-errors).
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 

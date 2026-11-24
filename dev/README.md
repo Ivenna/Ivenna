@@ -145,7 +145,7 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 ## Trying local programs
 
-In a second terminal at the repository root, load the same instance configuration and use the executable from startup. See [loading the instance environment](#configuration).
+In a second terminal at the repository root, [load the same instance environment](#configuration) to set `DATA_DIR`, then point `IVENNA` at the executable built at startup.
 
 ```sh
 export IVENNA="$PWD/zig-out/bin/ivenna"

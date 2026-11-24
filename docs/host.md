@@ -40,7 +40,7 @@ Each command starts a fresh shell. The `cwd` and `shell` arguments accept litera
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 
-Host commands inherit `IVENNA` and `DATA_DIR` as absolute paths to the executable and the instance's data directory. Use `"$IVENNA" feed read --help` for [reading a feed](communication.md#reading-feeds) and `"$IVENNA" subscription --help` for [reporting observations](subscriptions.md).
+Host commands receive the absolute path to the `ivenna` executable as `IVENNA` and the absolute path to the instance's data directory as `DATA_DIR`. Run `"$IVENNA" feed read --help` to look up feed reader options or `"$IVENNA" subscription --help` to find listener commands. See [reading feeds](communication.md#reading-feeds) and the [subscription listener protocol](subscriptions.md).
 
 ## Input modes
 
@@ -128,7 +128,7 @@ The portion of the log you see depends on how you observe the command.
 | --- | --- |
 | Initial call with a `callback_id` | Reads from byte zero independently of other activities. A later continuation can show the same bytes. |
 | `continue_host_shell` | Reads forward from one shared cursor per stream. A read by one activity advances the cursor for all activities. |
-| Direct final result or completion callback | Shows the beginning and end of long text with an omitted-byte count, independently of the cursors. The callback identifies the command in `source.host.command_id`. See [callback observations](input.md#focus-messages-and-callbacks). |
+| Direct final result or completion callback | Shows the beginning and end of long text with an omitted-byte count, independently of the cursors. The callback identifies the command in `source.host.command_id`. See [callback observations](input.md#callback-observations). |
 
 On the initial handoff and on continuations, a log object gives the byte `range` read, from `offset` up to but excluding `next_offset`. A text `preview` contains the characters in that range. Binary output omits the preview. Each stream's preview fits its share of `max_output_bytes` after JSON escaping.
 

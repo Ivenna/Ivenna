@@ -372,14 +372,7 @@ test "candidate handover retains sampled references and leaves earlier history a
         },
     };
     const current: Input.Current = .{ .focus_id = handover.focus_id, .role = .core, .observed_at_unix_ms = 900 };
-    const sampled_communication: Input.State = .{
-        .activities = &.{},
-        .callbacks = &.{},
-        .subscriptions = &.{},
-        .feeds = handover.state.feeds,
-        .correspondents = handover.state.correspondents,
-    };
-    const summary = try original.summaryRequest(a, .{ .current = current, .state = sampled_communication }, "Summarize.", .keep_latest_tool_round);
+    const summary = try original.summaryRequest(a, .{ .current = current, .state = handover.state }, "Summarize.", .keep_latest_tool_round);
     var replacement = try original.withHandover(std.testing.allocator, handover, .keep_latest_tool_round);
     defer replacement.deinit();
     @memset(&activity_id, 0);

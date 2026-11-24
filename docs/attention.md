@@ -1,14 +1,14 @@
 # Attention
 
-The core and activities are focuses of one Ivenna. Each has its own working history and event queue and is identified by its `focus_id`. The core's ID is `core-1`. See the [role overview](design.md#core-and-concurrent-attention) for the other actions available to each focus.
+The core and activities are focuses of one Ivenna. Each has a working history, an event queue, and a `focus_id`. The core's ID is `core-1`. See the [role overview](design.md#core-and-concurrent-attention) for the actions available to each focus.
 
-| Action | Tool | Available to |
-| --- | --- | --- |
-| [Open another focus on some work](#opening-a-focus) | `open_focus` | Core |
-| [Reach an existing focus](#reaching-an-existing-focus) | `send` | Core and activities |
-| [Return to something later](#returning-later) | `schedule_attention` | Core |
-| [Receive recurring observations in this focus](#subscriptions) | `subscribe` | Core and activities |
-| [Stop accepting reports for a subscription](#subscriptions) | `withdraw_subscription` | Core and activities |
+| Action | Tool |
+| --- | --- |
+| [Open a focus for an assignment](#opening-a-focus) | `open_focus` |
+| [Reach an existing focus](#reaching-an-existing-focus) | `send` |
+| [Return to something later](#returning-later) | `schedule_attention` |
+| [Receive recurring observations in this focus](#subscriptions) | `subscribe` |
+| [Withdraw a subscription](#subscriptions) | `withdraw_subscription` |
 
 See [names and references](input.md#names-and-references) for the `name` argument and the [tool schema](../packages/agent/src/tools.json) for the declarations.
 
@@ -46,11 +46,11 @@ A successful call saves the message in the recipient's queue and returns its foc
 {"result":{"focus_id":"practice-2"}}
 ```
 
-The observation identifies the sending focus. When relaying someone else's words, attribute them in the text. The message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds. Focus messages count toward the recipient's event queue limit. See [focus message fields](input.md#focus-messages-and-callbacks) and [session capacity](running.md#session-and-command-capacity).
+The observation identifies the sending focus. When relaying someone else's words, attribute them in the text. The message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds. Focus messages count toward the recipient's event queue limit. See [focus message fields](input.md#focus-messages) and [session capacity](running.md#session-and-command-capacity).
 
 ## Returning later
 
-Call `schedule_attention` with a short `name`, an `at` deadline in RFC 3339 form with an explicit UTC offset, and nonempty `text` describing what to return to. Use `Z` for UTC or an offset such as `+08:00`.
+The core calls `schedule_attention` with a short `name`, the wakeup time in `at`, and nonempty `text` describing what to return to. Pass `at` in RFC 3339 form with `Z` for UTC or an explicit offset such as `+08:00`.
 
 ```json
 {"name":"revisit-practice","at":"2026-11-10T18:00:00Z","text":"Revisit the French practice plan."}
@@ -66,7 +66,7 @@ The text reaches the core as a callback observation with source `wakeup`. Past t
 
 ### Callback observations
 
-Scheduled wakeups and host commands that outlive their initial call each arrange one callback. Its observation returns to the calling focus with the original ID and source, even after sleep or restart. See [command lifetimes](host.md#command-lifetimes), [observation fields](input.md#focus-messages-and-callbacks), and [pending callbacks in sampled state](input.md#sampled-state).
+Scheduled wakeups and host commands that outlive their initial call each arrange one callback. Its observation returns to the calling focus with the original ID and source, even after sleep or restart. See [command lifetimes](host.md#command-lifetimes), [observation fields](input.md#callback-observations), and [pending callbacks in sampled state](input.md#sampled-state).
 
 The focus admits each callback at most once. Repeated publication preserves the first identifiable stored result. See the [callback protocol](architecture.md#callback-delivery).
 

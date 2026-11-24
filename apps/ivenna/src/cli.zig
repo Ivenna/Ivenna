@@ -135,10 +135,10 @@ const serve_help =
 ;
 
 const environment =
-    \\Set DATA_DIR to the instance's data directory. Relative paths resolve
-    \\from the current directory. Local commands also work while the kernel is
-    \\stopped. Ivenna host commands receive absolute paths in DATA_DIR and
-    \\IVENNA and can invoke the executable as "$IVENNA".
+    \\Set DATA_DIR to the directory containing the instance database. Relative
+    \\paths resolve from the current directory. These commands work while the
+    \\kernel is stopped. Ivenna host commands inherit absolute paths in DATA_DIR
+    \\and IVENNA and can call the executable as "$IVENNA".
     \\
 ;
 
