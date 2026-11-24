@@ -48,7 +48,7 @@ Decode external protocols in the components that own them and pass typed values 
 
 Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
 
-[Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Execution projects internal session and delivery state into this interface, exposing facts that help Ivenna choose its next action. Keep runtime state and exact references under program ownership through persistence and compaction. Supply complete references in operation results and observations, and return invalid selections as operation outcomes.
+[Input](../packages/agent/src/input.zig) defines and renders the runtime's user messages. Choose what to present by which focus needs the information and when it can use it. When a result or observation supplies a reference, include the complete ID. Keep the state needed for delivery and resumption in runtime records through persistence and compaction. See [context and continuity](design.md#context-and-continuity) and the [input contract](input.md).
 
 Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
@@ -74,8 +74,6 @@ Keep capability tool declarations with their implementation and register capabil
 Keep agent-owned action recognition, typed arguments, and role selection together in [tools.zig](../packages/agent/src/tools.zig); Kernel owns their effects. All sessions use the same system prompt. Express differences in available actions through tool selection, and identify the current focus, task, and circumstances in user input. Ordinary inference, admission measurement, and compaction prepend the same prompt independently of retained history.
 
 Follow the [capability principles](design.md#understanding-and-autonomy) when writing these resources. Read each tool declaration as one interface: names, structure, constraints, and descriptions appear together. Express value choices and bounds structurally, and mirror actual runtime defaults in schema annotations. Use descriptions for the action, its effects, and parameter or result semantics the structure cannot convey. Keep cues of ownership and continuity brief and open to Ivenna's judgment, leaving content, organization, and learned practices to its experience. Preserve precision about the operation behind a suggestive name.
-
-Allow for mistaken reasoning and incomplete recall. Make references discoverable where Ivenna needs them, and report an invalid selection in the operation's result. Prompts explain meaning and invite judgment. The runtime component that owns an operation enforces its requirements.
 
 Put task facts and observations in user input. Prompts and tool descriptions should explain decisions and interpretation; field references belong in the [input contract](input.md), mechanisms in the architecture guide, and procedures in the running guides. Update affected resources and interface documentation together.
 

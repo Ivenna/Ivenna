@@ -13,6 +13,7 @@
 | Task | Guide |
 | --- | --- |
 | Understand the project's goals and interface principles | [Design intent](design.md) |
+| Decide what context to disclose and what to carry forward | [Context and continuity](design.md#context-and-continuity) |
 | Understand component ownership and how execution fits together | [Architecture guide](architecture.md) |
 | Change implementation and documentation, build from source, and validate work | [Development guide](development.md) |
 | Prepare, run, and update the supplied local services | [Local development](../dev/README.md) |

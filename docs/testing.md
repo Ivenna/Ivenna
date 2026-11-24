@@ -53,3 +53,7 @@ For process restart and communication through the configured services, exercise 
 To compare context settings, replay representative work from the same starting history with the deployed model in a test instance. Compare committed handovers by the focus's saved epoch and check stderr for interruptions. See [context budgets](running.md#context-budgets) and [persistent working history](architecture.md#persistent-working-history).
 
 Inspect the saved handover for the expected sampled IDs and observation time. Verify that a later callback or subscription report reaches the focus that arranged it. Follow the focus's subsequent work to see whether it carries a commitment and a correction forward and can find the evidence it used. See [sampled state](input.md#sampled-state).
+
+### Evaluating context disclosure
+
+Compare disclosure choices with the same model and starting history. Include work where the information could inform the next decision and work where it is incidental. Observe what the focus does next, including whether it uses a relevant reference or turns to unrelated work. Record request size separately. See [context and continuity](design.md#context-and-continuity).

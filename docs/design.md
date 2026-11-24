@@ -26,7 +26,7 @@ Correspondence and autonomous activity can both shape Ivenna's understanding, pr
 
 Model-facing inputs identify the current focus and bring it the observations that can guide its next decision. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect choices with their effects and later observations. When Ivenna names something it creates, the runtime adds a numeric suffix so the complete reference identifies the item. See [names and references](input.md#names-and-references).
 
-Reasoning can lose details, confuse references, or choose unsuccessful actions. Operation results, observations, and discoverable command handles support recognition and recovery. The runtime retains the references and routing state needed for delivery and resumption independently of Ivenna's recollection or generated summaries. Ivenna can reconsider an action from its outcome.
+Ivenna can forget details, confuse references, or choose actions that fail. Observations and operation results give it evidence to reconsider its choices. Command handles let it revisit ongoing host work. See [continuing a command](host.md#continuing-and-controlling-a-command).
 
 An operation should report enough for Ivenna to decide what to do next. Short text can fit directly in the result. For a longer source, a passage and a reference let Ivenna choose what to read. Ivenna can also give another tool a file's location and let the runtime transfer the bytes. When it chooses to inspect an image or a document, the tool can bring the content into its next inference.
 
@@ -73,7 +73,7 @@ A response without tool calls ends the activation when no queued arrivals requir
 
 ### Events and waiting
 
-Ivenna interprets observations; the runtime owns delivery and resumption. A known destination must not depend on a model remembering to relay a result or wake a waiting session. Messages preserve their actual sources for the receiver to weigh against its own evidence and understanding.
+The runtime delivers observations to their receiving focus, preserving their sources. Ivenna considers what each observation means in light of what it already knows.
 
 The core can schedule a wakeup for a particular time. A host command that outlives its initial tool call arranges a completion observation for the calling activity. Each callback binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [returning later](attention.md#returning-later) and [callback observations](attention.md#callback-observations).
 
@@ -87,11 +87,23 @@ The subscription stays with its focus across sleep, handover, and restart. Any f
 
 ### Context and continuity
 
-Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) asks Ivenna to condense retained exchanges into a handover, carrying forward relevant understanding and unfinished thought, relationships, preferences, commitments, uncertainty, and effects. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
+A focus's working history retains observations, model output, and tool results across interruptions. Shared autonomous memory lets Ivenna organize knowledge beyond any one session.
 
-Ordinary turns identify the focus and present its new observations so it can attend to the work in front of it. At compaction, the runtime samples pending and active references for that focus. The core also receives references for ongoing coordination, correspondence, and publications that outlive their creating activities. See [sampled state](input.md#sampled-state) for the fields each role receives.
+#### What a focus receives
 
-The runtime carries that dated sample alongside Ivenna's summary. It can also carry complete exchanges to preserve exact wording and sources. Ivenna decides what its experiences and relationships mean and what understanding to carry forward. The runtime keeps the original history until a continuation with the proposed handover fits. See [how the runtime selects a handover](architecture.md#bounded-model-context).
+Input shapes what the focus attends to and uses part of the context window. Even a short list of names can draw attention to unrelated work. Disclose information when it helps the receiving focus interpret an observation or choose what to do next. Ordinary turns identify the focus and present its newly admitted observations. Tool results can supply references when a focus acts on something.
+
+#### What a handover carries forward
+
+Compaction asks Ivenna to condense retained exchanges into a handover. The summary carries forward what Ivenna considers relevant to its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. See [bounded model context](architecture.md#bounded-model-context).
+
+The runtime supplies a dated state sample with the summary request. Callbacks and subscriptions follow the focus that arranged them. The core also receives references for coordination and correspondence. Feeds can outlive their creators, so the core receives references to open feeds left by activities that have ended. See [sampled state](input.md#sampled-state) for the fields each role receives.
+
+When the runtime accepts a handover, it saves the same sample alongside the summary. It can also carry complete exchanges to preserve exact wording and sources. Delivery, wakeups, and resumption use the runtime's own records, even when the summary omits or misstates a reference. The runtime keeps the original history until it can continue with the handover. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
+
+#### Continuing work
+
+A focus's understanding can lag behind changes in the world. When Ivenna chooses to act on a reference it recalls, the component that owns the operation resolves it against current state. For example, a handover can show a feed as open, and a later publication attempt can return `feed_closed`. The handover dates the earlier sample, and the tool result gives the focus new evidence to revise its understanding. See [feed tool errors](communication.md#feed-tool-errors).
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 
