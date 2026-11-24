@@ -20,7 +20,7 @@ zig build
 zig build test
 ```
 
-The root test step runs the registered library and application suites. Run `zig build test` from `apps/ivenna` for the CLI process tests. Library roots include internal test files through `test` blocks in `src/root.zig`. To add a package suite, register it in the root build and dependency manifest. See the [root build](../build.zig), [application build](../apps/ivenna/build.zig), and [dependency manifest](../build.zig.zon).
+The root test step runs the registered library and application suites. Run `zig build test` from `apps/ivenna` to run just the CLI process tests. Library roots include internal test files through `test` blocks in `src/root.zig`. To add a package suite, register it in the root build and dependency manifest. See the [root build](../build.zig), [application build](../apps/ivenna/build.zig), and [dependency manifest](../build.zig.zon).
 
 For the [memory protocol tests](../apps/memory/tests.nu), install Nushell at the version used in the memory [Containerfile](../apps/memory/Containerfile). These tests also use the standard `ln` command:
 
@@ -36,9 +36,11 @@ The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. Th
 
 ### Test boundaries
 
-- **Command line.** Tests invoke `ivenna` in separate processes to check help and argument errors before configuration, listener receipts and exit status, and feed reads with the kernel stopped. The feed test resumes across a sequence gap and checks that message text and descriptions arrive intact. [CLI process tests](../apps/ivenna/src/cli_test.zig)
-- **Instance state.** Reopening the database tests whether feeds retain their closure state, sequence order, and creator IDs. Two subscription connections exercise cursor conflicts, retries after acknowledgement, and whether queued reports retain their destination after withdrawal. [Feed store](../packages/instance_state/src/feeds.zig) · [Subscription store](../packages/instance_state/src/subscriptions.zig)
-- **Focus execution.** Fixtures exercise startup with changed registrations, destination selection when two kinds share an ID, and how compaction samples open feeds after an activity ends. They also cover tool exchanges carried through handovers and reports admitted exactly once after a checkpoint failure or lost confirmation. [Kernel tests](../packages/agent/src/kernel.zig) · [Context tests](../packages/agent/src/context.zig) · [Session registry tests](../packages/agent/src/sessions.zig)
+- **Command line.** Tests run `ivenna` as a separate process to check help and argument errors before configuration, listener receipts, and message input. They exercise immediate and timed reads, streamed output before end of input, and exit after a downstream reader takes one message. [CLI process tests](../apps/ivenna/src/cli_test.zig)
+- **Instance state.** Two subscription connections exercise cursor conflicts, retries after acknowledgement, and whether queued reports retain their destination after withdrawal. [Subscription store](../packages/instance_state/src/subscriptions.zig)
+- **Focus execution.** Fixtures exercise startup with changed registrations, routing by destination kind, and tool exchanges and references carried through handovers. They also check that each report is admitted once after a checkpoint failure or lost confirmation. [Kernel tests](../packages/agent/src/kernel.zig) · [Context tests](../packages/agent/src/context.zig) · [Session registry tests](../packages/agent/src/sessions.zig)
+- **Working history.** The persistence test loads a handover with retired fields, appends a new entry, and reloads the saved history. [History tests](../packages/agent/src/history.zig)
+- **Host execution.** Channel tests exercise send outcomes when a message is too long, the previous message is unread, or the command has exited. They also check that closing a channel lets its command read the pending message and keep running. [Host tests](../packages/host/src/root.zig) · [Command input tests](../packages/host/src/command_input.zig)
 - **Mail.** A local JMAP server verifies recipient lookup before draft creation and the address stored on the draft. Connection failures exercise mailbox read recovery, uncertain submission, and confirmation of callback and history writes. [Email transport](../packages/email/src/email_transport.zig) · [Email tests](../packages/email/src/root.zig)
 - **Model transport and resources.** HTTP fixtures compare measured request sizes with encoded bodies, exercise file upload outcomes, and verify that two focuses can read one page snapshot from a single fetch. [Responses tests](../packages/responses/src/provider_test.zig) · [Web reader tests](../packages/resources/src/web_test.zig)
 
@@ -47,6 +49,8 @@ The email, Responses, and web reader tests check that canceling a stalled HTTP e
 ## Validating with running services
 
 Use the running application to validate process restart and communication through the configured services. To compare context behavior across runs, replay representative work with the same model and starting history. See the [local environment](../dev/README.md) and [validation across runtime boundaries](development.md#validation).
+
+Use the [command channel walkthrough](../dev/README.md#trying-a-command-channel) to verify that a message reaches the receiver and that closing the channel lets it finish.
 
 ### Evaluating compaction
 

@@ -44,7 +44,8 @@ pub const History = struct {
         was_running: bool,
         subscription_through: u64,
         epoch: u64,
-        /// Null when unloaded; the confirmed checkpoint retains its selection.
+        /// Within an epoch, Context only appends. Null when unloaded; the
+        /// confirmed checkpoint retains its selection.
         entries: ?[]const Entry,
         observations: []const Input.Event,
     };
@@ -172,7 +173,7 @@ pub const Persistence = struct {
             self.published_checkpoint_digest = null;
             return null;
         };
-        const checkpoint = try Codec.decode(Checkpoint, a, document);
+        const checkpoint = try Codec.decode(Checkpoint, a, document, .{});
         if (checkpoint.sessions.len > max_sessions) return error.SessionCapacityUnavailable;
         const sessions = try a.alloc(History.Session, checkpoint.sessions.len);
         var candidate: Cache = .init(self.allocator);
@@ -295,7 +296,11 @@ pub const Persistence = struct {
             const bodies = try self.store.read(scratch.allocator(), references[0..count]);
             for (batch, bodies) |selected, body| {
                 if (!equalKey(Codec.digest(body), selected.reference.key)) return error.InvalidHistory;
-                switch (try Codec.decode(Source, a, body)) {
+                const source = try Codec.decode(Source, a, body, .{
+                    // Historical entries can contain retired handover fields.
+                    .ignore_unknown_fields = selected.destination == .entry,
+                });
+                switch (source) {
                     .entry => |entry| {
                         if (!equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
                         switch (selected.destination) {
@@ -349,20 +354,15 @@ pub const Persistence = struct {
             const cached = try candidate.add(saved.*);
             saved.group = cached.checkpoint.group;
             saved.focus_id = cached.checkpoint.focus_id;
+            if (current) |known| try cached.keys.appendSlice(candidate.arena.allocator(), known.keys.items);
             if (session.entries) |entries| {
-                if (current) |known| if (entries.len < known.keys.items.len) return error.InvalidHistory;
-                for (entries, 0..) |entry, index| {
-                    const previous = if (index == 0) null else cached.keys.items[index - 1];
-                    const key = try builder.entry(saved.group, previous, entry, if (current) |known|
-                        if (index < known.keys.items.len) known.keys.items[index] else null
-                    else
-                        null);
+                const confirmed = cached.keys.items.len;
+                if (entries.len < confirmed) return error.InvalidHistory;
+                for (entries[confirmed..]) |entry| {
+                    const key = try builder.entry(saved.group, cached.keys.getLastOrNull(), entry);
                     try cached.keys.append(candidate.arena.allocator(), key);
                 }
-            } else {
-                const known = current orelse return error.InvalidHistory;
-                try cached.keys.appendSlice(candidate.arena.allocator(), known.keys.items);
-            }
+            } else if (current == null) return error.InvalidHistory;
             saved.count = cached.keys.items.len;
             saved.head = if (saved.count == 0) null else cached.keys.items[saved.count - 1];
             if (session.observations.len != 0) saved.observations = try builder.observations(
@@ -477,13 +477,11 @@ const Builder = struct {
         self.batch.deinit();
     }
 
-    fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry, confirmed: ?Key) !Key {
+    fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
         const body = try Codec.encode(self.encoding.allocator(), Source{ .entry = .{ .previous = previous, .value = value } });
         const key = Codec.digest(body);
-        if (confirmed) |known| {
-            if (!equalKey(known, key)) return error.InvalidHistory;
-        } else try self.add(group, key, previous, body);
+        try self.add(group, key, previous, body);
         return key;
     }
 
@@ -526,4 +524,59 @@ fn equalKey(left: Key, right: Key) bool {
 fn equalPrevious(left: ?Key, right: ?Key) bool {
     if (left) |key| return if (right) |other| equalKey(key, other) else false;
     return right == null;
+}
+
+test "working history can append after a handover with a retired sampled field" {
+    const t = std.testing;
+    const TestStore = @import("test_history.zig").TestStore;
+    var store: TestStore = .{};
+    defer store.arena.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var persistence = Persistence.init(t.allocator, store.port());
+    defer persistence.deinit();
+    const body = ".{.entry=.{.previous=null,.value=.{.record=.{.handover=.{" ++
+        ".focus_id=\"core-1\",.observed_at_unix_ms=0,.summary=\"Keep investigating.\"," ++
+        ".state=.{.activities=.{},.callbacks=.{},.subscriptions=.{\"watch-1\"},.feeds=.{\"old-1\"},.correspondents=null}" ++
+        "}}}}}";
+    const group = try persistence.store.allocateGroup(a);
+    const key = Codec.digest(body);
+    try persistence.store.create(a, &.{.{ .group = group, .key = key, .previous = null, .body = body }});
+    try persistence.store.save(try Codec.encode(a, Checkpoint{
+        .subscription_catalog = @splat(0),
+        .next_session_id = 2,
+        .next_callback_id = 1,
+        .next_command_id = 1,
+        .sessions = &.{.{
+            .session_id = 1,
+            .focus_id = "core-1",
+            .role = .core,
+            .was_running = true,
+            .subscription_through = 0,
+            .epoch = 1,
+            .group = group,
+            .head = key,
+            .count = 1,
+            .observations = null,
+        }},
+        .wakeups = &.{},
+        .callbacks = &.{},
+        .activity_reports = null,
+    }));
+
+    var history = (try persistence.load(a, 1)).?;
+    var core = history.sessions[0];
+    const handover = core.entries.?[0].record.handover;
+    try t.expectEqualStrings("Keep investigating.", handover.summary);
+    try t.expectEqualStrings("watch-1", handover.state.subscriptions[0]);
+    core.entries = &.{ core.entries.?[0], .{ .exchange = &.{.{ .continuation = "Continuing." }} } };
+    history.sessions = &.{core};
+    try persistence.save(a, history);
+
+    try t.expectEqual(2, store.records.items.len);
+    try t.expectEqual(key, store.records.items[1].previous.?);
+    const continued = (try persistence.load(a, 1)).?.sessions[0].entries.?;
+    try t.expectEqualStrings("Keep investigating.", continued[0].record.handover.summary);
+    try t.expectEqualStrings("Continuing.", continued[1].exchange[0].continuation);
 }

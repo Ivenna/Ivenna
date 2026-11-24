@@ -1,5 +1,6 @@
 const std = @import("std");
 const state = @import("instance_state");
+const contracts = @import("agent_contracts");
 const cli = @import("cli.zig");
 const serve = @import("serve.zig");
 const subscription = @import("subscription.zig");
@@ -11,12 +12,13 @@ pub fn main(init: std.process.Init) !u8 {
     switch (command) {
         .serve => try serve.run(init),
         .help => |help| try std.Io.File.stdout().writeStreamingAll(init.io, help),
-        else => localCommand(init, command) catch |err| return failure(init.io, err),
+        .receive => |options| receive(init.io, options) catch |err| return failure(init.io, err),
+        .subscription => |request| runSubscription(init, request) catch |err| return failure(init.io, err),
     }
     return 0;
 }
 
-fn localCommand(init: std.process.Init, command: cli.Command) !void {
+fn runSubscription(init: std.process.Init, request: @FieldType(cli.Command, "subscription")) !void {
     const a = init.arena.allocator();
     const directory = init.environ_map.get("DATA_DIR") orelse "";
     if (directory.len == 0) {
@@ -24,83 +26,119 @@ fn localCommand(init: std.process.Init, command: cli.Command) !void {
         return error.MissingDataDirectory;
     }
     const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    switch (command) {
-        .feed => |query| {
-            var reader = try state.feeds.Reader.open(a, path);
-            defer reader.close();
-            try writeJson(init.io, try readFeed(init.io, a, &reader, query));
+    var store = try state.subscriptions.Store.open(a, path);
+    defer store.close();
+    switch (request.action) {
+        .inspect => try writeJson(init.io, try store.inspect(a, request.id)),
+        .publish => try writeJson(init.io, try subscription.publish(a, init.io, &store, request.id)),
+        .checkpoint => {
+            try subscription.checkpoint(a, init.io, &store, request.id);
+            try writeJson(init.io, "accepted");
         },
-        .subscription => |request| {
-            var store = try state.subscriptions.Store.open(a, path);
-            defer store.close();
-            switch (request.action) {
-                .inspect => try writeJson(init.io, try store.inspect(a, request.id)),
-                .publish => try writeJson(init.io, try subscription.publish(a, init.io, &store, request.id)),
-                .checkpoint => {
-                    try subscription.checkpoint(a, init.io, &store, request.id);
-                    try writeJson(init.io, "accepted");
-                },
-            }
-        },
-        .serve, .help => unreachable,
     }
 }
 
-/// How long a waiting read sleeps between looks at the database.
-const feed_poll_ms: u32 = 25;
-/// The longest single look waits for a writer while the read is waiting.
-const feed_busy_cap_ms: u32 = 100;
+fn receive(io: std.Io, options: cli.Receive) !void {
+    const linux = std.os.linux;
+    const stdin = std.Io.File.stdin();
+    const flags = linux.fcntl(stdin.handle, linux.F.GETFL, 0);
+    if (linux.errno(flags) != .SUCCESS) return error.InvalidReceiveInput;
+    const mode: linux.O = @bitCast(@as(u32, @intCast(flags)));
+    if (mode.ACCMODE != .RDONLY or !mode.NONBLOCK or (try stdin.stat(io)).kind != .named_pipe)
+        return error.InvalidReceiveInput;
+    var message: [contracts.Channels.max_bytes]u8 = undefined;
+    switch (options) {
+        .once => |wait_ms| try receiveOne(io, stdin.handle, &message, wait_ms),
+        .follow => try followMessages(io, stdin.handle, &message),
+    }
+}
 
-/// Reads a page and, when it holds no message, keeps looking until one arrives,
-/// the feed closes, or the requested wait expires. Time spent in the database
-/// counts against the wait, so the deadline is absolute rather than a total of
-/// sleeps. The caller owns the page.
-fn readFeed(io: std.Io, a: std.mem.Allocator, reader: *state.feeds.Reader, query: cli.Feed) !state.feeds.Reader.Page {
-    if (query.wait_ms == 0) return reader.read(a, query.feed_id, query.after, query.limit);
-    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
-        .raw = .fromMilliseconds(query.wait_ms),
-        .clock = .awake,
-    });
-    // Every look reuses one scratch arena that is reset between looks, so a
-    // long wait does not accumulate the metadata of each empty page. Only the
-    // page that ends the wait is allocated from the caller's allocator.
-    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer scratch.deinit();
+fn receiveOne(io: std.Io, fd: std.posix.fd_t, message: []u8, wait_ms: u32) !void {
+    const posix = std.posix;
+    const deadline = std.Io.Clock.awake.now(io).addDuration(.fromMilliseconds(wait_ms));
+    var input = [1]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
     while (true) {
-        const left = remainingMilliseconds(io, deadline);
-        try reader.setBusyTimeout(@min(left, feed_busy_cap_ms));
-        const look = reader.read(scratch.allocator(), query.feed_id, query.after, query.limit) catch |err| {
-            // A writer holding the lock must not stretch the wait past its
-            // deadline, and a wait should survive one that comes and goes.
-            if (err != error.StateStoreBusy or left == 0) return err;
-            _ = scratch.reset(.retain_capacity);
-            try io.sleep(.fromMilliseconds(@min(feed_poll_ms, left)), .awake);
-            continue;
+        const text = readMessage(fd, message) catch |err| switch (err) {
+            error.WouldBlock => {
+                if (wait_ms == 0) return writeJson(io, .{ .status = "empty" });
+                if (!try poll(io, &input, deadline)) return writeJson(io, .{ .status = "timeout" });
+                if (input[0].revents & (posix.POLL.IN | posix.POLL.HUP) == 0)
+                    return error.InvalidReceiveInput;
+                continue;
+            },
+            else => return err,
         };
-        const settled = look.messages.len != 0 or look.closed or left == 0;
-        _ = scratch.reset(.retain_capacity);
-        if (settled) return reader.read(a, query.feed_id, query.after, query.limit);
-        try io.sleep(.fromMilliseconds(@max(1, @min(feed_poll_ms, left))), .awake);
+        if (text) |value| return writeJson(io, .{ .status = "message", .text = value });
+        return writeJson(io, .{ .status = "closed" });
     }
 }
 
-/// Whole milliseconds left before the deadline, never negative.
-fn remainingMilliseconds(io: std.Io, deadline: std.Io.Clock.Timestamp) u32 {
-    const left = std.Io.Clock.awake.now(io).durationTo(deadline.raw).nanoseconds;
-    if (left <= 0) return 0;
-    const milliseconds = @divTrunc(left, std.time.ns_per_ms);
-    return if (milliseconds > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(milliseconds);
+fn followMessages(io: std.Io, fd: std.posix.fd_t, message: []u8) !void {
+    const posix = std.posix;
+    var descriptors = [_]posix.pollfd{
+        .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 },
+        // Watch the output for closure without waiting on writability.
+        .{ .fd = std.Io.File.stdout().handle, .events = 0, .revents = 0 },
+    };
+    while (true) {
+        _ = try poll(io, &descriptors, null);
+        if (descriptors[1].revents != 0) return;
+        if (descriptors[0].revents & (posix.POLL.IN | posix.POLL.HUP) == 0)
+            return error.InvalidReceiveInput;
+        const text = (readMessage(fd, message) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        }) orelse return;
+        writeJson(io, .{ .status = "message", .text = text }) catch |err| switch (err) {
+            error.BrokenPipe => return,
+            else => return err,
+        };
+    }
+}
+
+fn readMessage(fd: std.posix.fd_t, buffer: []u8) !?[]const u8 {
+    const size = try std.posix.read(fd, buffer);
+    if (size == 0) return null;
+    const text = buffer[0..size];
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidMessage;
+    return text;
+}
+
+fn poll(io: std.Io, descriptors: []std.posix.pollfd, deadline: ?std.Io.Timestamp) !bool {
+    const posix = std.posix;
+    while (true) {
+        const timeout: ?posix.timespec = if (deadline) |end| for_wait: {
+            const remaining = std.Io.Clock.awake.now(io).durationTo(end).toNanoseconds();
+            if (remaining <= 0) return false;
+            break :for_wait .{
+                .sec = @intCast(@divTrunc(remaining, std.time.ns_per_s)),
+                .nsec = @intCast(@rem(remaining, std.time.ns_per_s)),
+            };
+        } else null;
+        const ready = posix.ppoll(descriptors, if (timeout) |*value| value else null, null) catch |err| switch (err) {
+            error.SignalInterrupt => continue,
+            else => return err,
+        };
+        return ready != 0;
+    }
 }
 
 fn failure(io: std.Io, err: anyerror) !u8 {
     const reason: []const u8 = switch (err) {
         error.InvalidArguments => "invalid_request",
-        error.UnknownFeed => "unknown_feed",
         error.SubscriptionWithdrawn => "withdrawn",
         error.CursorConflict => "cursor_conflict",
         error.StateStoreBusy => "busy",
         error.StateStoreFull => "storage_full",
-        error.MissingDataDirectory, error.StateStorageFailed => return 1,
+        error.InvalidReceiveArguments, error.MissingDataDirectory, error.StateStorageFailed => return 1,
+        error.InvalidReceiveInput => {
+            std.log.err("run receive inside a host command in messages mode with its stdin inherited", .{});
+            return 1;
+        },
+        error.InvalidMessage => {
+            std.log.err("the input message contains invalid UTF-8", .{});
+            return 1;
+        },
         else => {
             std.log.err("{s}", .{@errorName(err)});
             return 1;
@@ -113,7 +151,6 @@ fn failure(io: std.Io, err: anyerror) !u8 {
 fn writeJson(io: std.Io, value: anytype) !void {
     var buffer: [1024]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
-    try std.json.Stringify.value(value, .{}, &stdout.interface);
-    try stdout.interface.writeByte('\n');
-    try stdout.interface.flush();
+    stdout.interface.print("{f}\n", .{std.json.fmt(value, .{})}) catch |err| return stdout.err orelse err;
+    stdout.interface.flush() catch |err| return stdout.err orelse err;
 }

@@ -32,7 +32,11 @@ fn runJson(a: std.mem.Allocator, env: *const std.process.Environ.Map, argv: []co
     if (input) |bytes| try child.stdin.?.writeStreamingAll(io, bytes);
     child.stdin.?.close(io);
     child.stdin = null;
+    return readJson(a, &child, success);
+}
 
+fn readJson(a: std.mem.Allocator, child: *std.process.Child, success: bool) !std.json.Value {
+    const io = testing.io;
     var buffer: [256]u8 = undefined;
     var output = child.stdout.?.readerStreaming(io, &buffer);
     const bytes = try output.interface.allocRemaining(a, .unlimited);
@@ -49,9 +53,10 @@ test "command help and argument errors work without instance or service settings
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const feed = try runWithoutConfig(a, &.{ executable, "feed", "read", "--help" });
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, feed.term);
-    try testing.expect(std.mem.indexOf(u8, feed.stdout, "FEED_ID") != null);
+    const receive = try runWithoutConfig(a, &.{ executable, "receive", "--help" });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, receive.term);
+    try testing.expect(std.mem.indexOf(u8, receive.stdout, "ivenna receive [--wait MS]") != null);
+    try testing.expect(std.mem.indexOf(u8, receive.stdout, "ivenna receive --follow") != null);
 
     const typo = try runWithoutConfig(a, &.{ executable, "subscription", "publsh", "news-1" });
     try testing.expect(typo.term == .exited and typo.term.exited != 0);
@@ -77,7 +82,7 @@ test "the subscription command accepts observations while the kernel is stopped 
         .reference = blk: {
             var owner = try state.subscriptions.Store.open(a, path);
             defer owner.close();
-            break :blk (try owner.create(a, "research-2", "-release feed", "test listener")).subscription_id;
+            break :blk (try owner.create(a, "research-2", "-release watch", "test listener")).subscription_id;
         },
     };
     const report = .{ .key = "item-1", .text = "first", .cursor = .{ .to = "1" } };
@@ -101,329 +106,237 @@ test "the subscription command accepts observations while the kernel is stopped 
     try testing.expect((try listener.request("inspect", null, true)) == .null);
 }
 
-test "the feed command reads by ID and resumes offline" {
-    const io = testing.io;
+test "receive validates its arguments before reading standard input" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-
-    const missing = try std.process.run(a, io, .{ .argv = &.{ executable, "feed", "read", "releases-1" }, .environ_map = &env });
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, missing.term);
-    try testing.expectError(error.FileNotFound, temporary.dir.access(io, state.filename, .{}));
-
-    try state.initialize(a, path);
-    const description = "Release notes\n更新记录\x00more";
-    const source = closed: {
-        var writer = try state.feeds.Store.open(a, io, path);
-        defer writer.close();
-        const first_feed = try writer.create(a, "core-1", "刊 /rc", description);
-        const other_feed = try writer.create(a, "activity-2", "刊 /rc", "Other work");
-        const after = try writer.publish(first_feed, "core-1", "Already processed", 100);
-        _ = try writer.publish(other_feed, "core-1", "Other update", 101);
-        const next = try writer.publish(first_feed, "activity-2", "First line\x00\n第二行", 102);
-        _ = try writer.publish(first_feed, "activity-2", "Later update", 103);
-        _ = try writer.closeFeed(first_feed);
-        break :closed .{ .id = first_feed, .after = after, .next = next };
+    const invalid_options = [_][]const []const u8{
+        &.{"command-1"},
+        &.{"--wait"},
+        &.{ "--wait", "4294967296" },
+        &.{ "--wait", "1.5" },
+        &.{ "--follow", "--wait", "1" },
+        &.{ "--wait", "1", "--follow" },
     };
-
-    const after = try std.fmt.allocPrint(a, "{d}", .{source.after});
-    const page = (try runJson(a, &env, &.{ executable, "feed", "read", source.id, "--after", after, "--limit", "1" }, null, true)).object;
-    try testing.expectEqualStrings(source.id, page.get("feed_id").?.string);
-    try testing.expectEqualStrings(description, page.get("description").?.string);
-    try testing.expect(page.get("closed").?.bool);
-    try testing.expect(page.get("has_more").?.bool);
-    try testing.expectEqual(@as(i64, @intCast(source.next)), page.get("next_after").?.integer);
-    const messages = page.get("messages").?.array.items;
-    try testing.expectEqual(1, messages.len);
-    const message = messages[0].object;
-    try testing.expectEqualStrings("First line\x00\n第二行", message.get("text").?.string);
-    try testing.expectEqualStrings("activity-2", message.get("focus_id").?.string);
-    try testing.expectEqual(102, message.get("published_at_unix_ms").?.integer);
-
-    const next_after = try std.fmt.allocPrint(a, "{d}", .{page.get("next_after").?.integer});
-    const final_page = (try runJson(a, &env, &.{ executable, "feed", "read", source.id, "--after", next_after }, null, true)).object;
-    try testing.expect(final_page.get("closed").?.bool and !final_page.get("has_more").?.bool);
-    const last_messages = final_page.get("messages").?.array.items;
-    try testing.expectEqual(1, last_messages.len);
-    try testing.expectEqualStrings("Later update", last_messages[0].object.get("text").?.string);
-
-    const end = final_page.get("next_after").?.integer;
-    const end_after = try std.fmt.allocPrint(a, "{d}", .{end});
-    const caught_up = (try runJson(a, &env, &.{ executable, "feed", "read", source.id, "--after", end_after }, null, true)).object;
-    try testing.expect(caught_up.get("closed").?.bool and !caught_up.get("has_more").?.bool);
-    try testing.expectEqual(0, caught_up.get("messages").?.array.items.len);
-    try testing.expectEqual(end, caught_up.get("next_after").?.integer);
-
-    const unknown = try runJson(a, &env, &.{ executable, "feed", "read", "missing" }, null, false);
-    try testing.expectEqualStrings("unknown_feed", unknown.string);
-}
-
-test "feed read rejects a wait outside its range" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const env = std.process.Environ.Map.init(a);
-    const too_long = try runJson(a, &env, &.{ executable, "feed", "read", "releases-1", "--wait", "60001" }, null, false);
-    try testing.expectEqualStrings("invalid_request", too_long.string);
-    const negative = try runJson(a, &env, &.{ executable, "feed", "read", "releases-1", "--wait", "-1" }, null, false);
-    try testing.expectEqualStrings("invalid_request", negative.string);
-}
-
-test "feed read waits out an empty feed without messages" {
-    const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-    try state.initialize(a, path);
-    const feed_id = try createEmptyFeed(a, io, path);
-
-    const started = std.Io.Clock.awake.now(io);
-    const page = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "100" }, null, true)).object;
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(elapsed >= 100);
-    try testing.expect(elapsed < 2000);
-    try testing.expectEqual(0, page.get("messages").?.array.items.len);
-    try testing.expectEqual(0, page.get("next_after").?.integer);
-    try testing.expect(!page.get("has_more").?.bool);
-}
-
-test "feed read returns a message published while it waits" {
-    const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-    try state.initialize(a, path);
-    const feed_id = try createEmptyFeed(a, io, path);
-
-    const started = std.Io.Clock.awake.now(io);
-    var child = try std.process.spawn(io, .{
-        .argv = &.{ executable, "feed", "read", feed_id, "--wait", "5000" },
-        .environ_map = &env,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .inherit,
-    });
-    defer child.kill(io);
-    child.stdin.?.close(io);
-    child.stdin = null;
-    try io.sleep(.fromMilliseconds(250), .awake);
-    {
-        var writer = try state.feeds.Store.open(a, io, path);
-        defer writer.close();
-        _ = try writer.publish(feed_id, "core-1", "While you waited", 500);
+    for (invalid_options) |options| {
+        const argv = try std.mem.concat(a, []const u8, &.{ &.{ executable, "receive" }, options });
+        const result = try runWithoutConfig(a, argv);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try testing.expectEqualStrings("", result.stdout);
+        try testing.expect(result.stderr.len != 0);
     }
+    const invalid_input = try runWithoutConfig(a, &.{ executable, "receive" });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, invalid_input.term);
+    try testing.expectEqualStrings("", invalid_input.stdout);
+    try testing.expect(std.mem.indexOf(u8, invalid_input.stderr, "messages mode") != null);
+}
 
+test "receive preserves one whole packet and drains before reporting closure" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var pipe = try MessagePipe.init();
+    defer pipe.deinit();
+
+    const first = "前半段\x00\n\"\\second half";
+    const second: [4096]u8 = @splat('s');
+    try pipe.write(first);
+    const first_result = try pipe.receive(a, &.{});
+    try testing.expectEqualStrings("message", first_result.object.get("status").?.string);
+    try testing.expectEqualStrings(first, first_result.object.get("text").?.string);
+
+    try pipe.write(&second);
+    pipe.closeWriter();
+    const second_result = try pipe.receive(a, &.{});
+    try testing.expectEqualStrings("message", second_result.object.get("status").?.string);
+    try testing.expectEqualStrings(&second, second_result.object.get("text").?.string);
+    try expectReceiveStatus(try pipe.receive(a, &.{ "--wait", "4294967295" }), "closed");
+}
+
+test "receive returns empty, times out, and wakes on a packet or closure" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var pipe = try MessagePipe.init();
+    defer pipe.deinit();
+
+    try expectReceiveStatus(try pipe.receive(a, &.{}), "empty");
+    try expectReceiveStatus(try pipe.receive(a, &.{ "--wait", "0" }), "empty");
+    try expectReceiveStatus(try pipe.receive(a, &.{ "--wait", "10" }), "timeout");
+    {
+        var child = try pipe.spawn(a, &.{ "--wait", "5000" });
+        defer child.kill(io);
+        try io.sleep(.fromMilliseconds(30), .awake);
+        try pipe.write("while waiting");
+        const result = try readJson(a, &child, true);
+        try testing.expectEqualStrings("message", result.object.get("status").?.string);
+        try testing.expectEqualStrings("while waiting", result.object.get("text").?.string);
+    }
+    var child = try pipe.spawn(a, &.{ "--wait", "5000" });
+    defer child.kill(io);
+    try io.sleep(.fromMilliseconds(30), .awake);
+    pipe.closeWriter();
+    try expectReceiveStatus(try readJson(a, &child, true), "closed");
+}
+
+test "receive rejects a packet containing invalid UTF-8" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var pipe = try MessagePipe.init();
+    defer pipe.deinit();
+    try pipe.write("\xff");
+    var child = try pipe.spawn(a, &.{});
+    defer child.kill(io);
+    var buffer: [128]u8 = undefined;
+    var output = child.stdout.?.readerStreaming(io, &buffer);
+    try testing.expectEqualStrings("", try output.interface.allocRemaining(a, .limited(128)));
+    var diagnostics = child.stderr.?.readerStreaming(io, &buffer);
+    const stderr = try diagnostics.interface.allocRemaining(a, .limited(128));
+    try testing.expect(std.mem.indexOf(u8, stderr, "UTF-8") != null);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, try child.wait(io));
+}
+
+test "receive follow flushes delayed messages and drains before closing" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var pipe = try MessagePipe.init();
+    defer pipe.deinit();
+    var child = try pipe.spawn(a, &.{"--follow"});
+    defer child.kill(io);
     var buffer: [256]u8 = undefined;
     var output = child.stdout.?.readerStreaming(io, &buffer);
-    const bytes = try output.interface.allocRemaining(a, .unlimited);
+
+    try pipe.write("first message\ncontinued");
+    try expectFollowMessage(a, &output.interface, "first message\ncontinued");
+    try pipe.write("later 消息");
+    try expectFollowMessage(a, &output.interface, "later 消息");
+    try pipe.write("before closing");
+    pipe.closeWriter();
+    try expectFollowMessage(a, &output.interface, "before closing");
+    try testing.expectEqual(null, try readFollowLine(&output.interface));
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(elapsed < 4000);
-    const page = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
-    const messages = page.object.get("messages").?.array.items;
-    try testing.expectEqual(1, messages.len);
-    try testing.expectEqualStrings("While you waited", messages[0].object.get("text").?.string);
 }
 
-test "feed read with a wait shorter than the poll interval looks once" {
+test "receive follow exits when a shell pipeline takes one message" {
     const io = testing.io;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-    try state.initialize(a, path);
-    const feed_id = try createEmptyFeed(a, io, path);
-
-    const started = std.Io.Clock.awake.now(io);
-    const page = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "10" }, null, true)).object;
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(elapsed >= 10);
-    try testing.expect(elapsed < 1500);
-    try testing.expectEqual(0, page.get("messages").?.array.items.len);
-    try testing.expect(!page.get("has_more").?.bool);
-}
-
-test "feed read returns an empty closed feed without waiting" {
-    const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-    try state.initialize(a, path);
-    const feed_id = try createEmptyFeed(a, io, path);
-    {
-        var writer = try state.feeds.Store.open(a, io, path);
-        defer writer.close();
-        try testing.expect(try writer.closeFeed(feed_id));
-    }
-
-    const started = std.Io.Clock.awake.now(io);
-    const page = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "5000" }, null, true)).object;
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(elapsed < 1000);
-    try testing.expect(page.get("closed").?.bool);
-    try testing.expectEqual(0, page.get("messages").?.array.items.len);
-}
-
-test "feed read with a wait returns a message that is already there" {
-    const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-    try state.initialize(a, path);
-    const feed_id = try createEmptyFeed(a, io, path);
-    {
-        var writer = try state.feeds.Store.open(a, io, path);
-        defer writer.close();
-        _ = try writer.publish(feed_id, "core-1", "Already here", 700);
-    }
-    const started = std.Io.Clock.awake.now(io);
-    const page = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "5000" }, null, true)).object;
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(elapsed < 1000);
-    const messages = page.get("messages").?.array.items;
-    try testing.expectEqual(1, messages.len);
-    try testing.expectEqualStrings("Already here", messages[0].object.get("text").?.string);
-}
-
-test "feed read with a wait resumes a non-zero cursor" {
-    const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-    try state.initialize(a, path);
-    const feed_id = try createEmptyFeed(a, io, path);
-    var seen: u64 = undefined;
-    var unseen: u64 = undefined;
-    {
-        var writer = try state.feeds.Store.open(a, io, path);
-        defer writer.close();
-        seen = try writer.publish(feed_id, "core-1", "Seen", 710);
-        unseen = try writer.publish(feed_id, "core-1", "Unseen", 711);
-    }
-    const cursor = try std.fmt.allocPrint(a, "{d}", .{seen});
-    const started = std.Io.Clock.awake.now(io);
-    const page = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--after", cursor, "--wait", "5000" }, null, true)).object;
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(elapsed < 1000);
-    const messages = page.get("messages").?.array.items;
-    try testing.expectEqual(1, messages.len);
-    try testing.expectEqualStrings("Unseen", messages[0].object.get("text").?.string);
-    try testing.expectEqual(@as(i64, @intCast(unseen)), page.get("next_after").?.integer);
-}
-
-test "feed read returns when the feed closes while it waits" {
-    const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-    try state.initialize(a, path);
-    const feed_id = try createEmptyFeed(a, io, path);
-    const started = std.Io.Clock.awake.now(io);
-    var child = try std.process.spawn(io, .{
-        .argv = &.{ executable, "feed", "read", feed_id, "--wait", "5000" },
-        .environ_map = &env,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .inherit,
-    });
-    defer child.kill(io);
-    child.stdin.?.close(io);
-    child.stdin = null;
-    try io.sleep(.fromMilliseconds(250), .awake);
-    {
-        var writer = try state.feeds.Store.open(a, io, path);
-        defer writer.close();
-        try testing.expect(try writer.closeFeed(feed_id));
+    var pipe = try MessagePipe.init();
+    defer pipe.deinit();
+    const script =
+        \\{
+        \\    "$1" receive --follow || printf '%s\n' 'receive failed' >&2
+        \\} | {
+        \\    IFS= read -r message && printf '%s\n' "$message"
+        \\}
+    ;
+    var child = try pipe.spawnCommand(a, &.{ "/bin/sh", "-c", script, "receive-test", executable });
+    defer {
+        pipe.closeWriter();
+        child.kill(io);
     }
     var buffer: [256]u8 = undefined;
     var output = child.stdout.?.readerStreaming(io, &buffer);
-    const bytes = try output.interface.allocRemaining(a, .unlimited);
+    try pipe.write("接收\n第二行");
+    try expectFollowMessage(a, &output.interface, "接收\n第二行");
+
+    // The source stays open while the pipeline and its follower finish.
+    try testing.expectEqual(null, try readFollowLine(&output.interface));
+    var diagnostics = child.stderr.?.readerStreaming(io, &buffer);
+    try testing.expectEqual(null, try readFollowLine(&diagnostics.interface));
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(elapsed < 4000);
-    const page = (try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{})).object;
-    try testing.expect(page.get("closed").?.bool);
-    try testing.expectEqual(0, page.get("messages").?.array.items.len);
 }
 
-test "feed read parses the wait bounds and rejects malformed ones" {
+fn expectFollowMessage(a: std.mem.Allocator, reader: *std.Io.Reader, expected: []const u8) !void {
+    const line = (try readFollowLine(reader)) orelse return error.MissingMessage;
+    const result = try std.json.parseFromSliceLeaky(std.json.Value, a, line, .{});
+    try testing.expectEqualStrings("message", result.object.get("status").?.string);
+    try testing.expectEqualStrings(expected, result.object.get("text").?.string);
+}
+
+fn readFollowLine(reader: *std.Io.Reader) !?[]u8 {
     const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, state.filename });
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", dir);
-    try state.initialize(a, path);
-    const feed_id = try createEmptyFeed(a, io, path);
-
-    const maximum = try runJson(a, &env, &.{ executable, "feed", "read", "missing", "--wait", "60000" }, null, false);
-    try testing.expectEqualStrings("unknown_feed", maximum.string);
-    const zero = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "0" }, null, true)).object;
-    try testing.expectEqual(0, zero.get("messages").?.array.items.len);
-
-    const duplicated = try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "10", "--wait", "10" }, null, false);
-    try testing.expectEqualStrings("invalid_request", duplicated.string);
-    const missing = try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait" }, null, false);
-    try testing.expectEqualStrings("invalid_request", missing.string);
-    const words = try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "soon" }, null, false);
-    try testing.expectEqualStrings("invalid_request", words.string);
-    const overflow = try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "99999999" }, null, false);
-    try testing.expectEqualStrings("invalid_request", overflow.string);
+    const Result = union(enum) { line: std.Io.Reader.DelimiterError![]u8, timeout: std.Io.Cancelable!void };
+    var results: [2]Result = undefined;
+    var pending = std.Io.Select(Result).init(io, &results);
+    defer pending.cancelDiscard();
+    try pending.concurrent(.line, std.Io.Reader.takeDelimiterInclusive, .{ reader, '\n' });
+    try pending.concurrent(.timeout, std.Io.sleep, .{ io, .fromSeconds(5), .awake });
+    switch (try pending.await()) {
+        .line => |line| return line catch |err| switch (err) {
+            error.EndOfStream => if (reader.bufferedLen() == 0) null else error.MissingLineBreak,
+            else => |read_error| return read_error,
+        },
+        .timeout => |result| {
+            try result;
+            return error.FollowOutputTimedOut;
+        },
+    }
 }
 
-fn createEmptyFeed(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    var writer = try state.feeds.Store.open(a, io, path);
-    defer writer.close();
-    return writer.create(a, "core-1", "wait/feed", "Feed for wait tests");
+fn expectReceiveStatus(result: std.json.Value, expected: []const u8) !void {
+    try testing.expectEqualStrings(expected, result.object.get("status").?.string);
 }
+
+const MessagePipe = struct {
+    input: std.Io.File,
+    output: ?std.os.linux.fd_t,
+
+    fn init() !MessagePipe {
+        const linux = std.os.linux;
+        var fds: [2]linux.fd_t = undefined;
+        const rc = linux.pipe2(&fds, .{ .DIRECT = true, .NONBLOCK = true, .CLOEXEC = true });
+        if (linux.errno(rc) != .SUCCESS) return error.PipeSetupFailed;
+        errdefer _ = linux.close(fds[0]);
+        errdefer _ = linux.close(fds[1]);
+        if (linux.fcntl(fds[1], linux.F.SETPIPE_SZ, std.heap.pageSize()) != std.heap.pageSize())
+            return error.PipeSetupFailed;
+        return .{
+            .input = .{ .handle = fds[0], .flags = .{ .nonblocking = true } },
+            .output = fds[1],
+        };
+    }
+
+    fn deinit(self: *MessagePipe) void {
+        self.closeWriter();
+        self.input.close(testing.io);
+    }
+
+    fn closeWriter(self: *MessagePipe) void {
+        if (self.output) |fd| _ = std.os.linux.close(fd);
+        self.output = null;
+    }
+
+    fn write(self: MessagePipe, message: []const u8) !void {
+        const size = std.os.linux.write(self.output.?, message.ptr, message.len);
+        try testing.expectEqual(message.len, size);
+    }
+
+    fn spawn(self: MessagePipe, a: std.mem.Allocator, options: []const []const u8) !std.process.Child {
+        const argv = try std.mem.concat(a, []const u8, &.{ &.{ executable, "receive" }, options });
+        return self.spawnCommand(a, argv);
+    }
+
+    fn spawnCommand(self: MessagePipe, a: std.mem.Allocator, argv: []const []const u8) !std.process.Child {
+        const env = std.process.Environ.Map.init(a);
+        return std.process.spawn(testing.io, .{
+            .argv = argv,
+            .environ_map = &env,
+            .stdin = .{ .file = self.input },
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
+    }
+
+    fn receive(self: MessagePipe, a: std.mem.Allocator, options: []const []const u8) !std.json.Value {
+        var child = try self.spawn(a, options);
+        defer child.kill(testing.io);
+        return readJson(a, &child, true);
+    }
+};

@@ -77,7 +77,7 @@ Call `subscribe` in the focus that should receive the reports. Describe in `list
 ```json
 {
   "name": "release-watch",
-  "listener": "Report each stable release announced on the feed."
+  "listener": "Report each stable release in the project changelog."
 }
 ```
 
@@ -127,6 +127,6 @@ If waiting observations make a request too large, the runtime can continue a too
 
 An activity with a pending callback or an active subscription can sleep with its identity and history intact. If its last subscription is withdrawn with reports still queued, the activity remains available to receive them.
 
-Withdraw subscriptions when the activity finishes following their sources. When no work or registrations remain, the activity ends and frees its capacity slot. Its ending calls for the core's attention even if it produced no text.
+Withdraw subscriptions when the activity finishes following their sources. The activity ends and frees its capacity slot when it has no work, pending callbacks, or active subscriptions left. Its ending calls for the core's attention even if it produced no text.
 
-The core can still receive the ended activity's expressions and ending with its original focus ID. An open feed can continue after its creating activity ends. See [report fields](input.md#assignments-and-reports) and [feed lifetimes](communication.md#feeds).
+The core can still receive the ended activity's expressions and ending with its original focus ID. See [report fields](input.md#assignments-and-reports).

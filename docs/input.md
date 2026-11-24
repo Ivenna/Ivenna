@@ -21,9 +21,9 @@ Retained records identify the focus that admitted their events or produced their
 
 ## Names and references
 
-The `name` supplied when opening a focus, running a command, scheduling attention, subscribing, or creating a feed contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
+The `name` supplied when opening a focus or channel, running a command, scheduling attention, or subscribing contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
 
-Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs remain usable as control handles within their originating runtime.
+Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control commands and channel IDs address their message inputs. Both belong to their originating runtime.
 
 ## Retained records
 
@@ -165,14 +165,14 @@ A `handover` record contains these fields.
 | `activities` | `Text[]` | IDs of existing activities, including sleeping and interrupted ones | — |
 | `callbacks` | `PendingCallback[]` | Core's pending callbacks | This activity's pending callbacks |
 | `subscriptions` | `Text[]` | Core's active subscription IDs | This activity's active subscription IDs |
-| `feeds` | `Text[]` | IDs of open feeds created by the core or by activities that have ended | IDs of open feeds created by this activity |
+| `channels` | `Text[]` | All open channel IDs | IDs of channels opened by this activity that are still open |
 | `correspondents` | `Text[]` | Registered outgoing correspondent IDs | — |
 
 The core's `correspondents` list is present even when empty. The renderer omits other empty collections and omits `state` when it has no fields to render. See [startup and restart](#startup-and-restart) for how to interpret the list.
 
-A core sample may already reflect an activity's completion and include its open feeds while the ending observation is still queued. Readers can still access closed feeds by ID. See [activity completion](attention.md#activity-completion) and [reading feeds](communication.md#reading-feeds).
-
 Active subscriptions include listeners that have yet to report. A report accepted before withdrawal can arrive after the ID has dropped out of a new sample.
+
+The `channels` list records the IDs of channels that were open when sampled. Earlier handovers retain those IDs after the input closes, the command exits, or the runtime restarts. See [channel send outcomes](communication.md#sending-to-a-channel).
 
 Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after the result is published or queued. A pending host source can identify a command that has already finished. Observation text arrives separately as an event. See [command lifetimes](host.md#command-lifetimes) for handle availability.
 
@@ -190,7 +190,7 @@ handover:
         source:
           wakeup: {}
     subscriptions: [release-watch-1]
-    feeds: [practice-updates-1]
+    channels: [task-input-18]
     correspondents: [operator]
 ```
 

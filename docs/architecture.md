@@ -12,14 +12,14 @@ This guide describes how the application assembles Ivenna, how the kernel coordi
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
 | [packages/responses](../packages/responses/src/root.zig) | Encode, measure, and decode model exchanges; own model HTTP transport, file uploads, and request content limits |
-| [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, incremental interaction, process cleanup, logs, and completion output |
+| [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, channels, process interaction and cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/resources](../packages/resources/src/root.zig) | Resolve resource references, read host files and directories, retrieve web pages, and present remote images by URL |
-| [packages/instance_state](../packages/instance_state/src/root.zig) | Own the local SQLite database and provide feed and subscription operations |
+| [packages/instance_state](../packages/instance_state/src/root.zig) | Own the local SQLite database and provide subscription operations |
 | [packages/sqlite](../packages/sqlite) | Provide the embedded SQLite build and shared bindings |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result parts, classify source bytes, interpret image references, and read local file contents within a byte limit |
 
-`ivenna serve` runs the kernel and its [HTTP listener](../apps/ivenna/src/service.zig) in the same process. Host commands receive the executable path and data directory so they can use the instance's [local commands](running.md#local-programs). The kernel reaches the memory app over SSH. See [local service setup](../dev/README.md).
+`ivenna serve` runs the kernel and its [HTTP listener](../apps/ivenna/src/service.zig) in the same process. Host commands receive the executable path and data directory in their [environment](host.md#command-environment). The kernel reaches the memory app over SSH. See [local service setup](../dev/README.md).
 
 The agent and its capability implementations share `agent_contracts`. That module uses Content to represent tool results. The graph follows imports between Ivenna's Zig modules and shows selected library dependencies.
 
@@ -66,6 +66,7 @@ The application supplies the agent and host with capability implementations thro
 | [Callback.Registrar](../packages/agent_contracts/src/callback.zig) | Persist a future observation's source and bind its destination to the invoking session | Agent execution |
 | [Callback.Publisher](../packages/agent_contracts/src/callback.zig) | Store one observation under a registered callback ID, preserving the first stored result | Email integration |
 | [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Expose registered outgoing correspondent IDs and submit messages by ID | Email integration |
+| [Channels](../packages/agent_contracts/src/channels.zig) | Open, sample, and close command channels and send messages by channel ID | Host |
 | [HistoryStore](../packages/agent_contracts/src/history.zig) | Publish and load checkpoints, allocate storage groups, read and write records, and maintain retained history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure encoded requests, and prepare tool results for model input | Responses adapter |
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
@@ -75,7 +76,7 @@ The application supplies the agent and host with capability implementations thro
 
 The callback registrar accepts a name and source and returns `Callback.Registration`: an internal numeric delivery ID and a complete reference allocated for the caller. A capability retains the numeric ID for publication through `Callback.Publisher` and presents the reference as `callback_id`; it does not retain the registrar or choose another receiving session.
 
-[Reference](../packages/agent_contracts/src/reference.zig) validates names and formats the references allocated by execution. The checkpoint retains the focus, callback, and command sequences. The subscription and feed stores each allocate their suffixes in SQLite. Resource lookup uses the complete reference. See [names and references](input.md#names-and-references).
+[Reference](../packages/agent_contracts/src/reference.zig) validates names and formats the references allocated by execution. The checkpoint retains the focus, callback, and host reference sequences. Commands and channels share the host reference sequence, which continues after restart. The subscription store allocates its suffixes in SQLite. Resource lookup uses the complete reference. See [names and references](input.md#names-and-references).
 
 ## Service and reception
 
@@ -113,7 +114,7 @@ Sleeping activities retain their session slots. Completing an activity releases 
 
 Incoming correspondence enters the core's queue in intake order, independently of mail threads. The core also reads activity reports during admission. See [activity reports](#activity-reports) and [activation admission](#activation-admission).
 
-The tool decoder reads the single field in `send.to` to select a destination variant. The kernel routes the complete ID to the mail sender, session registry, or feed store for lookup. For a focus destination, the registry checks membership and queue capacity under its lock, then checkpoints the queued message with the calling focus's ID. The kernel renders the outcome as a tool reply. See [tool decoding](../packages/agent/src/tools.zig), [outgoing mail](#outgoing-mail), [feed storage](#feed-storage), and [sending outcomes](communication.md#sending-a-message).
+The tool decoder reads the single field in `send.to` to select a destination variant. The kernel routes the complete ID to the mail sender, session registry, or Host's `Channels` interface. For a focus destination, the registry checks membership and queue capacity under its lock, then checkpoints the queued message with the calling focus's ID. The kernel renders the outcome as a tool reply. See [tool decoding](../packages/agent/src/tools.zig), [outgoing mail](#outgoing-mail), [command channels](#command-channels), and [sending outcomes](communication.md#sending-a-message).
 
 ## Activation admission
 
@@ -170,15 +171,9 @@ Intake resolves the numeric delivery ID through its registration, adds the saved
 
 ## Instance database
 
-`ivenna serve` initializes `<DATA_DIR>/state.sqlite3`, then opens separate connections for feeds and subscriptions. Initialization installs the instance schema and sets SQLite's `application_id` to identify its format. Each local command opens an existing database with that marker. Feed readers use a read-only connection. WAL mode lets readers proceed while SQLite serializes writers. See the [schema](../packages/instance_state/src/schema.sql) and [connection setup](../packages/instance_state/src/database.zig).
+`ivenna serve` initializes `<DATA_DIR>/state.sqlite3`, then opens a subscription connection. Initialization installs the instance schema and sets SQLite's `application_id` to identify its format. Subscription commands open the existing database with that marker. WAL mode lets readers proceed while SQLite serializes writers. See the [schema](../packages/instance_state/src/schema.sql) and [connection setup](../packages/instance_state/src/database.zig).
 
 The database also has an identity unique to the instance. The registry records it in the first mailbox checkpoint before marking the database bound. A checkpoint must match the local database identity on startup, and a bound database requires its checkpoint. See the [backup and transfer procedure](running.md#backups-and-transfers).
-
-### Feed storage
-
-The feed store serializes access to its connection with a mutex. A write transaction creates, publishes to, or closes a feed. Creation records the creator's focus ID, which survives activity completion. Publication checks that the feed is open in the same transaction as the insert and returns the sequence after commit. SQLite assigns sequences across all feeds. Feed writes commit independently of working history. See the [feed store](../packages/instance_state/src/feeds.zig).
-
-The reader joins feed metadata and messages in one query, so the page and its closure state come from the same snapshot. See the [reader implementation](../packages/instance_state/src/feed_reader.zig) and [feed read interface](communication.md#reading-feeds).
 
 ### Subscription delivery
 
@@ -246,7 +241,7 @@ The kernel normally carries forward the complete tool exchange awaiting continua
 
 ### Sampling state and preparing the request
 
-The registry samples the focus's identity, observation time, live activity IDs, callbacks, and subscription IDs under its lock. The kernel queries open feeds before taking that snapshot. For the core, it excludes feeds whose creators appear in the snapshot. Since a creator registers before creating a feed, reading in this order lets the registry distinguish a newly opened creator from an ended activity. For an activity, the kernel queries feeds by creator ID. It takes the core's outgoing correspondent IDs from the sender. See the [sampling implementation](../packages/agent/src/kernel.zig) and [fields supplied to each role](input.md#sampled-state).
+The session registry samples the focus's identity, observation time, live activity IDs, callbacks, and subscription IDs under its lock. Host samples open channel IDs under its own lock. It supplies all open channels for the core and limits an activity's sample to the channels it opened. The kernel takes the core's outgoing correspondent IDs from the sender. See the [sampling implementation](../packages/agent/src/kernel.zig) and [fields supplied to each role](input.md#sampled-state).
 
 `Context.summaryRequest` combines the system prompt, selected history, sampled state, and compaction instructions. The summary request uses `high` reasoning without tools. Observations awaiting admission stay queued. See the [summary instructions](../packages/agent/src/compaction.md) and [handover contract](input.md#handover-generation-and-replacement).
 
@@ -275,7 +270,7 @@ Each entry contains a retained `Input.Record` or an exchange of `Model.Item[]`. 
 
 Working history and the activity outbox share a [record codec](../packages/agent/src/record_codec.zig) for compact UTF-8 ZON bodies and content keys. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. The storage group and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal observations are stored together in a separate immutable observation-array record in the session's current group.
 
-One checkpoint covers all registered sessions and records the local database identity in `subscription_catalog`. For each session it records the internal ID, `focus_id`, role, epoch, storage group, committed head, entry count, and the last admitted subscription report sequence (zero before the first report). An optional key selects the unread internal observations in that group. The `was_running` flag helps determine which activities receive a [startup observation](#startup-and-interruption) immediately. Across sessions the checkpoint retains the next session, callback, and command numbers, callback registrations with their references, sources and destinations, scheduled wakeups with their deadlines and text, and the [unread activity reports](#activity-reports).
+One checkpoint covers all registered sessions and records the local database identity in `subscription_catalog`. For each session it records the internal ID, `focus_id`, role, epoch, storage group, committed head, entry count, and the last admitted subscription report sequence (zero before the first report). An optional key selects the unread internal observations in that group. The `was_running` flag helps determine which activities receive a [startup observation](#startup-and-interruption) immediately. Across sessions the checkpoint retains the next session, callback, and host reference numbers, callback registrations with their references, sources and destinations, scheduled wakeups with their deadlines and text, and the [unread activity reports](#activity-reports).
 
 Appending advances the head and count without adding a per-entry reference to the checkpoint. A sleeping session can retain this confirmed selection without materialized context entries. The latest confirmed checkpoint selects the records kept by [history maintenance](#history-retention) and available for subsequent restoration.
 
@@ -285,7 +280,7 @@ Appending advances the head and count without adding a per-entry reference to th
 
 The registry holds its lock through checkpoint publication at [admission](#activation-admission) and [round completion](#activation-and-session-completion). A tool can also change what a restart must recover before the round finishes. For example, the registry saves a host command's callback registration before returning its reference.
 
-Persistence encodes and hashes entries from loaded contexts against their confirmed chains. Unloaded contexts reuse their confirmed selections. It first writes any new records, then publishes the checkpoint that selects them. If record creation stops partway through, the previous checkpoint still selects the history to restore. A checkpoint whose digest matches the last confirmed publication needs no new revision. If checkpoint publication itself returns an error, the store may already have accepted it. Persistence discards the cached digest so the next save must confirm its selection before maintenance can retire records.
+Within an epoch, persistence carries forward the confirmed keys and encodes newly appended entries. It writes new records before publishing the checkpoint that selects them. If record creation stops partway through, the previous checkpoint still selects the history to restore. A checkpoint whose digest matches the last confirmed publication needs no new revision. If checkpoint publication itself returns an error, the store may already have accepted it. Persistence discards the cached digest so the next save must confirm its selection before maintenance can retire records.
 
 Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Complete focus references identifying the owner of retained event and handover records must identify either the restoring focus or the core (`core-1`). Matching physical duplicates can supply one logical occurrence. Missing or inconsistent committed records fail restoration.
 
@@ -309,7 +304,7 @@ Before dispatch, Kernel publishes an interruption observation for each restored 
 
 Unacknowledged correspondence remains eligible and can appear again after a crash between persistence and acknowledgement; callback IDs instead retain durable admission deduplication. Fresh startup observations identify this runtime; earlier records remain evidence of their original observations and outcomes.
 
-Use one kernel per account. Host effects, memory writes, mail submission, feed publication, subscription changes, acknowledgement, and history publication have separate commit points. Effects may precede their saved results, and repeating uncertain actions can duplicate them. An incomplete model/tool round is outside confirmed working history. The [availability contract](design.md#runtime-availability) determines when execution can continue.
+Use one kernel per account. Host effects, memory writes, mail submission, subscription changes, acknowledgement, and history publication have separate commit points. Effects may precede their saved results, and repeating uncertain actions can duplicate them. An incomplete model/tool round is outside confirmed working history. The [availability contract](design.md#runtime-availability) determines when execution can continue.
 
 ## Email boundary
 
@@ -413,7 +408,7 @@ One [snapshot store](../packages/resources/src/pages.zig) serves all focuses. Ea
 
 ### Command lifecycle
 
-Host reserves live capacity and requests a command reference from execution through its invocation context. Execution appends the next command number to the supplied name and saves the advanced counter in the checkpoint before returning the reference. Host then launches the command. Startup resumes the saved sequence.
+Host reserves live capacity and requests a command reference from execution through its invocation context. Execution appends the next host reference number to the supplied name and saves the advanced counter before returning the reference. Host then launches the command. See [reference allocation](#shared-contracts).
 
 `run_host_shell` waits on `std.Io.Condition` until process and input cleanup finish or the call's wait expires. If cleanup has completed, the call returns the final state and bounded output previews, then retires the handle. Otherwise Host persists a completion registration with source `host: { command_id }`, using the command name for its callback prefix, retains the command, and returns the complete command and callback references. Other activities can discover and control a command while its caller waits.
 
@@ -425,11 +420,17 @@ Retained commands belong to the host runtime, while a pending completion registr
 
 ### Interaction and synchronization
 
-The Host mutex protects registry state, references, capacity, and input admission. Each command has an operation lock for continuation calls consuming its shared stdout/stderr cursors. Input, signal, and resize actions apply before taking that lock so an observation wait does not delay interaction. One input write can be in flight per command. It runs separately from the observation call; completion cancels and joins it before releasing the live slot.
+The Host mutex protects registry state, references, capacity, and input admission. Each command has an operation lock for continuation calls consuming its shared stdout/stderr cursors. Input, signal, and resize actions apply before taking that lock so an observation wait does not delay interaction. One byte-stream input write can be in flight per command. It runs separately from the observation call; completion cancels and joins it before releasing the live slot.
 
 The initial call keeps `handoff_pending` set until it rejects handoff or has saved the registration and prepared its tool result. Supervision waits for that flag to clear before publishing a completion, covering commands that finish during registration. It sets `settled` after process and input cleanup. Failure cleanup waits for that state without waiting for publication, so it can finish while the initial call still owns the handoff decision.
 
 Command lookup checks the complete reference and is shared across activities; inspection records retain the originating `focus_id` as provenance. Inspection pages the current registry within a 32 KiB complete-reply budget, returning `offset`, `next_offset`, and the filtered `total_commands`. Registry changes can alter later pages. Initial observations and completion publication do not take the continuation lock; their [output collection](#output-and-delivery) is independent of the shared cursors.
+
+### Command channels
+
+Host stores the channel ID and the focus that opened it on the command's registry entry. It reports open channels in [command inspection](host.md#continuing-and-controlling-a-command) and [compaction samples](#sampling-state-and-preparing-the-request). Host retains a closed channel's ID until it retires the command handle, so it can report closure for late sends. See [channel send outcomes](communication.md#sending-to-a-channel).
+
+In `messages` mode, Host gives the command the read end of a nonblocking Linux packet pipe as stdin. Host sizes the pipe to one page, which holds one packet. A send tries the registry lock once. With the lock held, Host checks that the destination is live and the message fits the channel's byte limit, then attempts one nonblocking write. The limit fits within Linux `PIPE_BUF`, so the write is atomic. Host closes the write end when the channel closes or the command exits. A pending packet remains readable before end of input. See the [channel contract](../packages/agent_contracts/src/channels.zig), [packet transport](../packages/host/src/command_input.zig), and [receiving messages](host.md#receiving-messages-in-a-command).
 
 ### Processes and terminals
 
@@ -437,7 +438,7 @@ Command lookup checks the complete reference and is shared across activities; in
 
 [pty.zig](../packages/host/src/pty.zig) supplies the Linux terminal operations absent from `std.Io`. It opens the slave from the master with `TIOCGPTPEER`, resizes it with an ioctl, and uses `std.posix.tcgetpgrp` for foreground-group lookup. Launch uses `setsid --ctty` because `std.process.spawn` exposes process groups without a new-session option. The terminal master carries input and merged stdout/stderr; terminal EOF is a control byte rather than a pipe half-close.
 
-In terminal mode, interrupt targets the foreground group so an interactive shell can continue afterward. Terminal termination and cleanup cover the original session, including background job-control groups. The backend enumerates `/proc`, filters with `getsid`, then binds candidates with pidfds and rechecks their session before signaling. Batch and pipe cleanup uses the command's process group.
+In terminal mode, interrupt targets the foreground group so an interactive shell can continue afterward. Terminal termination and cleanup cover the original session, including background job-control groups. The backend enumerates `/proc`, filters with `getsid`, then binds candidates with pidfds and rechecks their session before signaling. Host cleans up `batch`, `pipe`, and `messages` commands by process group.
 
 Normal completion and timeout report cleanup failures as unavailable outcomes. Error unwinding and cancellation make a final best-effort cleanup before joining. A program can escape into another session; if it retains a terminal slave, output draining stops after a one-second wait. Terminal [deployment requirements](running.md#runtime-requirements) belong to the running guide.
 

@@ -40,10 +40,10 @@ Core and activity focuses use the same system prompt. Each receives observations
 
 | Action | Core | Activity |
 | --- | --- | --- |
-| Correspond with people and programs | Yes | Yes |
-| Create, publish to, and close feeds | Yes | Yes |
-| Remember, revisit, revise, arrange, and forget | Yes | Yes |
+| Send to a registered correspondent | Yes | Yes |
 | Reach an existing focus | Yes | Yes |
+| Open a channel, send to it, or close it | Yes | Yes |
+| Remember, revisit, revise, arrange, and forget | Yes | Yes |
 | Open an activity focus | Yes | — |
 | Schedule a wakeup | Yes | — |
 | Subscribe to observations for the current focus | Yes | Yes |
@@ -63,7 +63,7 @@ Correspondence reaches the core as observations of who said what and when the ru
 
 Ivenna chooses when to send, whom or what to reach, and what to say. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna acts and reports the outcome, so Ivenna can revise its understanding as circumstances change. Internal reasoning and activity completion stay within Ivenna. See [sending a message](communication.md#sending-a-message).
 
-A feed gives Ivenna a place to publish messages that people and programs can follow. It belongs to the instance and can outlive the focus that created it. The core can continue a publication that outlives an assignment. Readers can resume from their last processed message. See [feeds](communication.md#feeds).
+A channel lets Ivenna send messages to a program while both continue their work. An activity starts a program that accepts messages. Any focus with the command reference can open a channel and share the channel ID. Each send immediately reports whether it made the message available to read. The program chooses when to read and how to act. It can keep working after Ivenna closes the channel. See [channels](communication.md#channels).
 
 ## Sessions and continued work
 
@@ -97,13 +97,13 @@ Even a short list of names uses context and can draw attention to unrelated work
 
 Compaction asks Ivenna to condense retained exchanges into a handover. The summary carries forward what Ivenna considers relevant to its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. See [bounded model context](architecture.md#bounded-model-context).
 
-The runtime supplies a dated state sample with the summary request and keeps it beside the accepted summary. Callbacks and subscriptions stay with the focus that arranged them. The core also receives references for coordination and correspondence, including open feeds left by activities that have ended. See [sampled state](input.md#sampled-state) for the fields each role receives.
+The runtime supplies a dated state sample with the summary request and keeps it beside the accepted summary. Callbacks and subscriptions stay with the focus that arranged them. References to open channels can help a focus continue work with a running program. See [sampled state](input.md#sampled-state) for the fields each role receives.
 
 Delivery, wakeups, and resumption use the runtime's own records. The runtime keeps the original history until it can continue with the handover. It can carry complete exchanges forward to preserve exact wording and sources. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
 
 #### Continuing work
 
-A handover can show an open feed that closes before Ivenna tries to publish again. The handover dates the earlier observation. The runtime resolves the reference when Ivenna acts and reports the closure, giving the focus new evidence to revise its understanding. See [feed tool errors](communication.md#feed-tool-errors).
+A channel sampled in a handover can close before Ivenna uses it again. The next send checks the reference and reports the outcome. See [sending to a channel](communication.md#sending-to-a-channel).
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 
@@ -121,6 +121,6 @@ An independent listener can still report to an active subscription while the ker
 
 ## Data ownership
 
-The deployment user owns Ivenna's correspondence, working histories, subscriptions, feeds, artifacts, and autonomous memory, and chooses where they live. Keep them open to inspection and management.
+The deployment user owns Ivenna's correspondence, working histories, subscriptions, artifacts, and autonomous memory, and chooses where they live. Keep them open to inspection and management.
 
 Each kind of data has its own retention lifecycle. History remains available while a retained context needs it. Other material follows deployment policy. See [history retention](architecture.md#history-retention) and [running Ivenna](running.md#data-and-retention). Diagnostics remain separate from the source material and handovers used for continuity.

@@ -143,7 +143,15 @@ With the supplied readiness policy installed, this command receives a `550` reje
 
 Read messages from Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna chooses whether and when to reply. See the [usage guide](../docs/usage.md) for continuing correspondence and interpreting responses.
 
-## Trying local programs
+## Trying a command channel
+
+Use the [mail example](#sending-a-message) to ask Ivenna to try a channel.
+
+> Start an activity that runs `"$IVENNA" receive --follow` in messages mode. Open a channel to the running command, send `ready`, and close the channel. Report the receiver's output and exit status.
+
+The receiver should write one line containing `{"status":"message","text":"ready"}` and exit with status 0. See [receiving messages](../docs/host.md#receiving-messages-in-a-command) for the command setup and [sending to a channel](../docs/communication.md#sending-to-a-channel) for the send result.
+
+## Trying a subscription listener
 
 In a second terminal at the repository root, [load the same instance environment](#configuration) to set `DATA_DIR`, then point `IVENNA` at the executable built at startup.
 
@@ -151,20 +159,7 @@ In a second terminal at the repository root, [load the same instance environment
 export IVENNA="$PWD/zig-out/bin/ivenna"
 ```
 
-To set up an independent reader or listener, follow the [deployment guide](../docs/running.md#local-programs).
-
-### Trying a feed reader
-
-Ask Ivenna by email to create a feed, publish a message, and reply with the feed ID. Substitute the returned ID when reading the message.
-
-```sh
-feed_id='releases-1'
-"$IVENNA" feed read "$feed_id"
-```
-
-Run the same command after stopping the kernel to check offline access. See [reading feeds](../docs/communication.md#reading-feeds).
-
-### Trying a subscription listener
+To run the listener independently, follow the [deployment guide](../docs/running.md#subscription-listeners).
 
 Ask Ivenna to [register a subscription](../docs/attention.md#subscriptions) and give you its complete ID. Use that ID in place of the example.
 
@@ -195,7 +190,7 @@ For compatible updates, keep the same instance directory and [load its configura
 
 For a change in storage format, see [updating an existing instance](../docs/running.md#updating-the-executable). For a fresh development instance, choose a new `DEV_INSTANCE_DIR`. With the supplied Stalwart account plan, configure a new `MAIL_VOLUME_NAME` in that instance and provision it as described in [mail setup](#configuring-mail).
 
-After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent readers and listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
+After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent subscription listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
 
 ### Memory
 

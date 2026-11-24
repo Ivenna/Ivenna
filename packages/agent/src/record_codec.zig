@@ -14,13 +14,14 @@ pub fn encode(a: Allocator, value: anytype) ![]const u8 {
     return writer.toOwnedSlice();
 }
 
-pub fn decode(comptime T: type, a: Allocator, data: []const u8) !T {
+pub fn decode(comptime T: type, a: Allocator, data: []const u8, options: struct { ignore_unknown_fields: bool = false }) !T {
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     return std.zon.parse.fromSlice(T, .{
         .gpa = a,
         .arena = a,
         .source = try a.dupeSentinel(u8, data, 0),
         .diagnostics = &diagnostics,
+        .ignore_unknown_fields = options.ignore_unknown_fields,
     }) catch |err| switch (err) {
         error.ParseZon => error.InvalidHistory,
         else => err,

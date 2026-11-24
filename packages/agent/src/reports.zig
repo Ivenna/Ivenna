@@ -119,7 +119,7 @@ pub const Outbox = struct {
         var endings: usize = 0;
         for (references, bodies, reports) |reference, body, *report| {
             if (!equalKey(Codec.digest(body), reference.key)) return error.InvalidHistory;
-            const record = try Codec.decode(Record, a, body);
+            const record = try Codec.decode(Record, a, body, .{});
             if (!equalPrevious(record.previous, reference.previous)) return error.InvalidHistory;
             const source_id = contracts.Reference.sequence(record.value.from_focus) orelse return error.InvalidHistory;
             if (source_id <= 1) return error.InvalidHistory;

@@ -163,12 +163,12 @@ pub const State = struct {
     activities: []const []const u8,
     callbacks: []const PendingCallback,
     subscriptions: []const []const u8,
-    feeds: []const []const u8 = &.{},
+    channels: []const []const u8 = &.{},
     correspondents: ?[]const []const u8 = null,
 
     pub fn isEmpty(self: State) bool {
         return self.activities.len == 0 and self.callbacks.len == 0 and self.subscriptions.len == 0 and
-            self.feeds.len == 0 and self.correspondents == null;
+            self.channels.len == 0 and self.correspondents == null;
     }
 
     pub fn jsonStringify(self: State, writer: anytype) !void {
@@ -185,9 +185,9 @@ pub const State = struct {
             try writer.objectField("subscriptions");
             try writer.write(self.subscriptions);
         }
-        if (self.feeds.len != 0) {
-            try writer.objectField("feeds");
-            try writer.write(self.feeds);
+        if (self.channels.len != 0) {
+            try writer.objectField("channels");
+            try writer.write(self.channels);
         }
         if (self.correspondents) |ids| {
             try writer.objectField("correspondents");
@@ -202,7 +202,7 @@ pub fn cloneState(a: Allocator, state: State) !State {
         .activities = try cloneIds(a, state.activities),
         .callbacks = try cloneCallbacks(a, state.callbacks),
         .subscriptions = try cloneIds(a, state.subscriptions),
-        .feeds = try cloneIds(a, state.feeds),
+        .channels = try cloneIds(a, state.channels),
         .correspondents = if (state.correspondents) |ids| try cloneIds(a, ids) else null,
     };
 }

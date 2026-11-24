@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 pub const Destination = union(enum) {
     correspondent_id: []const u8,
     focus_id: []const u8,
-    feed_id: []const u8,
+    channel_id: []const u8,
 
     fn parse(value: std.json.Value) !Destination {
         if (value != .object or value.object.count() != 1) return error.InvalidToolArguments;
@@ -23,8 +23,8 @@ pub const Destination = union(enum) {
 /// selection. Kernel owns their effects within the calling model/tool round.
 pub const Request = union(enum) {
     send: struct { to: Destination, text: []const u8 },
-    create_feed: struct { name: []const u8, description: []const u8 },
-    close_feed: struct { feed_id: []const u8 },
+    open_channel: struct { name: []const u8, command_id: []const u8 },
+    close_channel: struct { channel_id: []const u8 },
     open_focus: struct { name: []const u8, task: []const u8 },
     schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
     subscribe: struct { name: []const u8, listener: []const u8 },
@@ -44,7 +44,9 @@ pub const Request = union(enum) {
         };
         switch (request) {
             .send => |args| if (args.text.len == 0) return error.InvalidToolArguments,
-            .create_feed, .close_feed, .subscribe => {},
+            .open_channel => |args| if (!contracts.Reference.validName(args.name) or args.command_id.len == 0) return error.InvalidToolArguments,
+            .close_channel => |args| if (args.channel_id.len == 0) return error.InvalidToolArguments,
+            .subscribe => {},
             .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
             .schedule_attention => |args| if (!contracts.Reference.validName(args.name) or args.text.len == 0) return error.InvalidToolArguments,
             .withdraw_subscription => |args| if (args.subscription_id.len == 0) return error.InvalidToolArguments,
@@ -77,7 +79,7 @@ fn parseArguments(comptime T: type, value: std.json.Value) !T {
 
 fn available(tag: std.meta.Tag(Request), role: Input.Role) bool {
     return switch (tag) {
-        .send, .create_feed, .close_feed, .subscribe, .withdraw_subscription => true,
+        .send, .open_channel, .close_channel, .subscribe, .withdraw_subscription => true,
         .open_focus, .schedule_attention => role == .core,
     };
 }
@@ -105,6 +107,6 @@ test "send rejects a call that selects two destinations" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "send",
-        \\{"to":{"focus_id":"core-1","feed_id":"core-1"},"text":"Hello"}
+        \\{"to":{"focus_id":"core-1","channel_id":"core-1"},"text":"Hello"}
     ));
 }

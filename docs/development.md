@@ -62,7 +62,7 @@ Prompts and tool declarations are interfaces. Each resource gives the model the 
 | Resource | Purpose |
 | --- | --- |
 | [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
-| [Agent tools](../packages/agent/src/tools.json) | Send messages, manage feeds, open focuses, schedule wakeups, and manage subscriptions |
+| [Agent tools](../packages/agent/src/tools.json) | Send messages, manage channels and subscriptions, open focuses, and schedule wakeups |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. The configured [web reader](../packages/resources/src/web.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |

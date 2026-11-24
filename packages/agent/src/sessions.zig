@@ -680,7 +680,7 @@ pub const Registry = struct {
         try self.saveLocked();
     }
 
-    pub fn issueCommandReference(self: *Registry, a: Allocator, work: Work, name: []const u8) ![]const u8 {
+    pub fn issueHostReference(self: *Registry, a: Allocator, work: Work, name: []const u8) ![]const u8 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);

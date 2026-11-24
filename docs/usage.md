@@ -47,8 +47,6 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring new versions to its attention. See [subscriptions](attention.md#subscriptions).
 
-If Ivenna gives you a feed ID, use it to read the feed from the kernel host. A program on that host can relay selected messages to readers elsewhere. See [reading feeds](communication.md#reading-feeds) and [local programs](running.md#local-programs).
-
 Ivenna can condense its working history and decide what to keep in memory. Keep your own mail copies if you need to retrieve or quote a letter later. See [autonomous memory](memory.md) and [mail retention](running.md#communication-copies).
 
 ## After interruption

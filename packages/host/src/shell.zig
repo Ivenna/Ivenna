@@ -13,7 +13,7 @@ pub const Shell = struct {
     environ: *const std.process.Environ.Map,
 
     pub const default_output_bytes = 4096;
-    pub const Mode = enum { batch, pipe, terminal };
+    pub const Mode = enum { batch, pipe, messages, terminal };
     pub const Command = struct {
         name: contracts.JsonString,
         command: contracts.JsonString,
@@ -139,7 +139,11 @@ pub const Shell = struct {
             .stdout = stdout,
             .stderr = stderr,
             .environ = &environment,
-            .stdin = if (args.mode == .batch) .closed else .pipe,
+            .stdin = switch (args.mode) {
+                .batch, .terminal => .closed,
+                .pipe => .pipe,
+                .messages => .messages,
+            },
             .terminal = args.mode == .terminal,
         })) |child| .{ .process = child } else |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,

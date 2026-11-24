@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 
 pub const filename = "state.sqlite3";
 const application_id = std.mem.readInt(u32, "IVDB", .big);
-const OpenMode = enum { initialize, read_write, read_only };
+const OpenMode = enum { initialize, read_write };
 
 pub fn initialize(a: Allocator, path: []const u8) !void {
     const conn = try open(a, path, .initialize);
@@ -20,15 +20,12 @@ pub fn open(a: Allocator, path: []const u8, mode: OpenMode) !zqlite.Conn {
     const flags = switch (mode) {
         .initialize => c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
         .read_write => c.SQLITE_OPEN_READWRITE,
-        .read_only => c.SQLITE_OPEN_READONLY,
     };
     const conn = try connect(path_z, flags);
     errdefer conn.close();
     try checked(conn.busyTimeout(5000));
-    if (mode != .read_only) {
-        try exec(conn, "PRAGMA foreign_keys=ON");
-        try exec(conn, "PRAGMA synchronous=FULL");
-    }
+    try exec(conn, "PRAGMA foreign_keys=ON");
+    try exec(conn, "PRAGMA synchronous=FULL");
     if (mode == .initialize) {
         try installSchema(conn);
         try exec(conn, "PRAGMA journal_mode=WAL");
@@ -155,7 +152,7 @@ test "initialization and existing open preserve an incompatible database" {
     try exec(prior, "DROP TABLE notes");
     const other_id = std.mem.readInt(u32, "TEST", .big);
     try exec(prior, std.fmt.comptimePrint("PRAGMA application_id={d}", .{other_id}));
-    try t.expectError(error.IncompatibleStateSchema, open(a, path, .read_only));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .read_write));
     try t.expectError(error.IncompatibleStateSchema, initialize(a, path));
     try t.expectEqual(other_id, try integer(prior, "PRAGMA application_id", .{}));
 }

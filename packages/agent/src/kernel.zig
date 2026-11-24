@@ -9,9 +9,9 @@ const AgentTools = @import("tools.zig");
 const Sessions = @import("sessions.zig");
 const contracts = @import("agent_contracts");
 const InstanceState = @import("instance_state");
-const Feeds = InstanceState.feeds;
 const Subscriptions = InstanceState.subscriptions;
 const Communication = contracts.Communication;
+const Channels = contracts.Channels;
 const Model = contracts.Model;
 const Allocator = std.mem.Allocator;
 const Work = Sessions.Work;
@@ -24,7 +24,7 @@ pub const Kernel = struct {
     engine: *Engine,
     inbox: contracts.Inbox,
     sender: Communication.Sender,
-    feeds: *Feeds.Store,
+    channels: Channels,
     callbacks: contracts.Callback.Publisher,
     limits: Limits,
     poll_interval_ms: u32,
@@ -40,7 +40,7 @@ pub const Kernel = struct {
         engine: *Engine,
         inbox: contracts.Inbox,
         sender: Communication.Sender,
-        feeds: *Feeds.Store,
+        channels: Channels,
         callbacks: contracts.Callback.Publisher,
         history: contracts.HistoryStore,
         subscriptions: *Subscriptions.Store,
@@ -60,7 +60,7 @@ pub const Kernel = struct {
             .engine = dependencies.engine,
             .inbox = dependencies.inbox,
             .sender = dependencies.sender,
-            .feeds = dependencies.feeds,
+            .channels = dependencies.channels,
             .callbacks = dependencies.callbacks,
             .limits = config.limits,
             .poll_interval_ms = config.poll_interval_ms,
@@ -197,20 +197,18 @@ pub const Kernel = struct {
 
         fn issueCommandReference(context: *anyopaque, a: Allocator, name: []const u8) anyerror![]const u8 {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
-            return self.kernel.sessions.issueCommandReference(a, self.work, name);
+            return self.kernel.sessions.issueHostReference(a, self.work, name);
         }
 
         fn invoke(context: *anyopaque, a: Allocator, request: AgentTools.Request) anyerror!Content {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
             return switch (request) {
                 .send => |message| self.send(a, message.to, message.text),
-                .create_feed => |args| blk: {
-                    const id = self.kernel.feeds.create(a, self.work.session.focus_id, args.name, args.description) catch |err| return feedFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .feed_id = id });
-                },
-                .close_feed => |args| blk: {
-                    const changed = self.kernel.feeds.closeFeed(args.feed_id) catch |err| return feedFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .feed_id = args.feed_id, .changed = changed });
+                .open_channel => |args| self.openChannel(a, args.name, args.command_id),
+                .close_channel => |args| blk: {
+                    const channels = self.kernel.channels;
+                    const changed = try channels.close(channels.context, args.channel_id);
+                    break :blk try runtimeResult(a, .{ .channel_id = args.channel_id, .changed = changed });
                 },
                 .schedule_attention => |args| blk: {
                     const id = try self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text);
@@ -239,6 +237,18 @@ pub const Kernel = struct {
             };
         }
 
+        fn openChannel(self: *RuntimeRound, a: Allocator, name: []const u8, command_id: []const u8) !Content {
+            const channels = self.kernel.channels;
+            const channel_id = try self.kernel.sessions.issueHostReference(a, self.work, name);
+            return switch (try channels.open(channels.context, command_id, channel_id, self.work.session.focus_id)) {
+                .opened => runtimeResult(a, .{ .channel_id = channel_id }),
+                .unknown_command => runtimeError(a, "unknown_command", "No command in this runtime matches the ID."),
+                .not_enabled => runtimeError(a, "command_messages_disabled", "Start the command in messages mode to open a channel for its input."),
+                .closed => runtimeError(a, "command_input_closed", "The command can no longer receive messages."),
+                .already_open => runtimeError(a, "channel_already_open", "The command already has an open channel."),
+            };
+        }
+
         fn send(self: *RuntimeRound, a: Allocator, to: AgentTools.Destination, text: []const u8) !Content {
             return switch (to) {
                 .correspondent_id => |id| switch (try self.kernel.sender.send(a, .{ .recipient = id, .text = text })) {
@@ -247,10 +257,16 @@ pub const Kernel = struct {
                     .not_submitted => try runtimeError(a, "not_submitted", "Sending stopped before the submission attempt."),
                     .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
                 },
-                .feed_id => |id| blk: {
-                    const now = std.Io.Clock.real.now(self.kernel.io).toMilliseconds();
-                    const sequence = self.kernel.feeds.publish(id, self.work.session.focus_id, text, now) catch |err| return feedFailure(a, err);
-                    break :blk try runtimeResult(a, .{ .feed_id = id, .sequence = sequence });
+                .channel_id => |id| switch (try self.kernel.channels.submit(id, text)) {
+                    .accepted => try runtimeResult(a, .{ .channel_id = id, .status = "accepted" }),
+                    .full => try runtimeError(a, "channel_full", "The previous message is still unread. Try again after the receiver reads it."),
+                    .closed => try runtimeError(a, "channel_closed", "This channel can no longer receive messages."),
+                    .unknown_channel => try runtimeError(a, "unknown_channel", "No channel in this runtime matches the ID."),
+                    .too_long => try runtimeError(a, "channel_message_too_long", std.fmt.comptimePrint(
+                        "Channel messages can contain up to {d} UTF-8 bytes.",
+                        .{Channels.max_bytes},
+                    )),
+                    .busy => try runtimeError(a, "channel_busy", "Sending is temporarily unavailable. Try again."),
                 },
                 .focus_id => |id| blk: {
                     self.kernel.sessions.sendFocusMessage(self.work, id, text) catch |err| return switch (err) {
@@ -426,24 +442,11 @@ pub const Kernel = struct {
     }
 
     fn compactionSnapshot(self: *Kernel, a: Allocator, session: *Sessions.Session) !Input.Snapshot {
-        const is_core = session.role == .core;
-        // Read feeds before the live IDs so a newly opened creator cannot be
-        // missing from the registry sample for a feed already present here.
-        const open_feeds = try self.feeds.openFeeds(a, if (is_core) null else session.focus_id);
         var snapshot = try self.sessions.compactionSnapshot(a, session);
+        const is_core = session.role == .core;
         if (is_core) snapshot.state.correspondents = self.sender.registered_correspondents;
-
-        var live_activities: std.StringHashMapUnmanaged(void) = .empty;
-        defer live_activities.deinit(a);
-        for (snapshot.state.activities) |id| try live_activities.put(a, id, {});
-
-        var references: std.ArrayList([]const u8) = .empty;
-        errdefer references.deinit(a);
-        for (open_feeds) |feed| {
-            if (live_activities.contains(feed.creator_focus_id)) continue;
-            try references.append(a, feed.feed_id);
-        }
-        snapshot.state.feeds = try references.toOwnedSlice(a);
+        const channels = self.channels;
+        snapshot.state.channels = try channels.sample(channels.context, a, if (is_core) null else session.focus_id);
         return snapshot;
     }
 
@@ -528,33 +531,22 @@ fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
     return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .code = code, .message = message } }, .{}));
 }
 
-fn feedFailure(a: Allocator, err: anyerror) !Content {
-    return switch (err) {
-        error.InvalidArguments => error.InvalidToolArguments,
-        error.UnknownFeed => runtimeError(a, "unknown_feed", "No feed matches the supplied ID."),
-        error.FeedClosed => runtimeError(a, "feed_closed", "This feed is closed to new messages."),
-        error.StateStoreBusy => runtimeError(a, "feed_storage_busy", "Feed storage is busy."),
-        error.StateStoreFull => runtimeError(a, "feed_storage_full", "Feed storage is full."),
-        else => err,
-    };
-}
-
 const TestStore = @import("test_history.zig").TestStore;
 
 const SubscriptionFixture = struct {
     const testing = std.testing;
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
     storage: TestStore = .{},
-    feed_store: ?Feeds.Store = null,
     correspondents: []const []const u8 = &.{},
+    send_outcome: Channels.Outcome = .accepted,
+    channel_message: ?struct { id: []const u8, text: []const u8 } = null,
+    channel: ?struct { command_id: []const u8, id: []const u8, focus_id: []const u8, closed: bool = false } = null,
 
     fn deinit(self: *SubscriptionFixture) void {
-        if (self.feed_store) |*store| store.close();
         self.storage.arena.deinit();
     }
 
     fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *Subscriptions.Store) !Kernel {
-        if (self.feed_store == null) self.feed_store = try Feeds.Store.openInMemory(testing.allocator, testing.io);
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
@@ -567,10 +559,50 @@ const SubscriptionFixture = struct {
             .subscriptions = subscriptions,
             .inbox = undefined,
             .sender = .{ .context = undefined, .submit = undefined, .registered_correspondents = self.correspondents },
-            .feeds = &self.feed_store.?,
+            .channels = .{
+                .context = self,
+                .send = sendToChannel,
+                .open = openChannel,
+                .close = closeChannel,
+                .sample = sampleChannels,
+            },
             .callbacks = undefined,
             .history = self.storage.port(),
         }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
+    }
+
+    fn sendToChannel(context: *anyopaque, id: []const u8, text: []const u8) !Channels.Outcome {
+        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
+        const channel = self.channel orelse return .unknown_channel;
+        if (!std.mem.eql(u8, channel.id, id)) return .unknown_channel;
+        if (channel.closed) return .closed;
+        self.channel_message = .{ .id = id, .text = text };
+        return self.send_outcome;
+    }
+
+    fn openChannel(context: *anyopaque, command_id: []const u8, channel_id: []const u8, focus_id: []const u8) !Channels.OpenOutcome {
+        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
+        if (self.channel) |channel| return if (channel.closed) .closed else .already_open;
+        self.channel = .{ .command_id = command_id, .id = channel_id, .focus_id = focus_id };
+        return .opened;
+    }
+
+    fn closeChannel(context: *anyopaque, channel_id: []const u8) !bool {
+        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
+        if (self.channel) |*channel| {
+            if (channel.closed or !std.mem.eql(u8, channel.id, channel_id)) return false;
+            channel.closed = true;
+            return true;
+        }
+        return false;
+    }
+
+    fn sampleChannels(context: *anyopaque, a: Allocator, focus_id: ?[]const u8) ![]const []const u8 {
+        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
+        const channel = self.channel orelse return &.{};
+        if (channel.closed) return &.{};
+        if (focus_id) |id| if (!std.mem.eql(u8, channel.focus_id, id)) return &.{};
+        return a.dupe([]const u8, &.{channel.id});
     }
 
     fn measure(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
@@ -652,7 +684,7 @@ test "core startup reports the outgoing registration of each runtime" {
     }
 }
 
-test "continuations omit destination directories and send uses the selected destination kind" {
+test "continuations omit destination directories and focus and channel sends resolve separately" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
     var fixture: SubscriptionFixture = .{ .correspondents = &.{"reviewer+notes"} };
@@ -675,17 +707,19 @@ test "continuations omit destination directories and send uses the selected dest
     var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer kernel.sessions.endWorker(activity.work.session);
 
-    const created = try call(a, &activity, "create_feed", .{
-        .name = "core",
-        .description = "Keep release findings for readers.",
-    });
-    const feed_id = created.object.get("result").?.object.get("feed_id").?.string;
-    try testing.expectEqualStrings(core.work.session.focus_id, feed_id);
+    const channel = try call(a, &activity, "open_channel", .{ .name = "core", .command_id = "consumer-9" });
+    const channel_id = channel.object.get("result").?.object.get("channel_id").?.string;
+    try testing.expectEqualStrings("consumer-9", fixture.channel.?.command_id);
+    try testing.expectEqualStrings(sender_id, fixture.channel.?.focus_id);
+    for ([_]*Sessions.Session{ core.work.session, activity.work.session }) |session| {
+        const sample = try kernel.compactionSnapshot(a, session);
+        try testing.expectEqualDeep(@as([]const []const u8, &.{channel_id}), sample.state.channels);
+    }
 
     var soft_compaction = true;
     const input = (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready;
     const turn = input[input.len - 1].message.text;
-    for ([_][]const u8{ "activities:", "correspondents:", "feeds:" }) |field| {
+    for ([_][]const u8{ "activities:", "correspondents:", "channels:" }) |field| {
         try testing.expect(std.mem.indexOf(u8, turn, field) == null);
     }
 
@@ -693,14 +727,17 @@ test "continuations omit destination directories and send uses the selected dest
         .to = .{ .focus_id = core.work.session.focus_id },
         .text = "Findings are ready.",
     });
-    try testing.expectEqualStrings(feed_id, result.object.get("result").?.object.get("focus_id").?.string);
-    const publication = try call(a, &core, "send", .{
-        .to = .{ .feed_id = feed_id },
-        .text = "A separate publication.",
+    const core_id = core.work.session.focus_id;
+    try testing.expectEqualStrings(core_id, result.object.get("result").?.object.get("focus_id").?.string);
+    const sent = try call(a, &core, "send", .{
+        .to = .{ .channel_id = channel_id },
+        .text = "Process these findings.",
     });
-    const published = publication.object.get("result").?.object;
-    try testing.expectEqualStrings(feed_id, published.get("feed_id").?.string);
-    try testing.expectEqual(1, published.get("sequence").?.integer);
+    const receipt = sent.object.get("result").?.object;
+    try testing.expectEqualStrings(channel_id, receipt.get("channel_id").?.string);
+    try testing.expectEqualStrings("accepted", receipt.get("status").?.string);
+    try testing.expectEqualStrings(channel_id, fixture.channel_message.?.id);
+    try testing.expectEqualStrings("Process these findings.", fixture.channel_message.?.text);
     try kernel.sessions.collectPending(core.work);
     const deliveries = core.work.activation.deliveries.items;
     try testing.expectEqual(1, deliveries.len);
@@ -708,66 +745,15 @@ test "continuations omit destination directories and send uses the selected dest
     try testing.expectEqualStrings(sender_id, message.from_focus);
     try testing.expectEqualStrings("Findings are ready.", message.text);
 
-    _ = try call(a, &core, "close_feed", .{ .feed_id = feed_id });
-    const closed = try call(a, &activity, "send", .{ .to = .{ .feed_id = feed_id }, .text = "Another publication." });
-    try testing.expectEqualStrings("feed_closed", closed.object.get("error").?.object.get("code").?.string);
-}
-
-test "core compaction picks up open feeds when their creating activities end" {
-    const testing = std.testing;
-    const call = SubscriptionFixture.callTool;
-    var fixture: SubscriptionFixture = .{ .correspondents = &.{"operator"} };
-    defer fixture.deinit();
-    const a = fixture.storage.arena.allocator();
-    var store = try Subscriptions.Store.openInMemory(a);
-    defer store.close();
-    var engine: Engine = undefined;
-    var kernel = try fixture.kernel(&engine, &store);
-    defer kernel.deinit();
-
-    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
-    defer core.deinit();
-    defer kernel.sessions.endWorker(core.work.session);
-    var history = try SubscriptionFixture.admit(&kernel, a, core.work);
-    defer history.deinit();
-    const core_feed = try kernel.feeds.create(a, core.work.session.focus_id, "core-news", "Core notes");
-    _ = try call(a, &core, "open_focus", .{ .name = "first", .task = "Follow the first release." });
-    const opened = try call(a, &core, "open_focus", .{ .name = "second", .task = "Follow the second release." });
-    const second_id = opened.object.get("result").?.object.get("focus_id").?.string;
-    try testing.expectEqual(0, (try kernel.compactionSnapshot(a, core.work.session)).state.activities.len);
-    try kernel.sessions.commitToolRound(core.work, &history, &core.forks, null);
-
-    const ready = try kernel.sessions.takeReadyBatch(a);
-    try testing.expectEqual(2, ready.len);
-    var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = ready[0] };
-    var activity_history = try SubscriptionFixture.admit(&kernel, a, activity.work);
-    defer activity_history.deinit();
-    const created = try call(a, &activity, "create_feed", .{ .name = "first-news", .description = "First release notes" });
-    const own_feed = created.object.get("result").?.object.get("feed_id").?.string;
-    _ = try kernel.feeds.publish(core_feed, activity.work.session.focus_id, "A shared update", 100);
-    const closed_feed = try kernel.feeds.create(a, activity.work.session.focus_id, "old-news", "Previous release notes");
-    try testing.expect(try kernel.feeds.closeFeed(closed_feed));
-    _ = try kernel.sessions.subscribe(a, activity.work, "releases", "Watch upcoming releases");
-    try SubscriptionFixture.finish(&kernel, activity.work, &activity_history);
-
-    const second = ready[1];
-    var second_history = try SubscriptionFixture.admit(&kernel, a, second);
-    defer second_history.deinit();
-    const surviving_feed = try kernel.feeds.create(a, second.session.focus_id, "second-news", "Second release notes");
-    const before_ending = (try kernel.compactionSnapshot(a, core.work.session)).state;
-    try testing.expectEqualDeep(@as([]const []const u8, &.{core_feed}), before_ending.feeds);
-    try SubscriptionFixture.finish(&kernel, second, &second_history);
-    try testing.expectEqualDeep(@as([]const []const u8, &.{ activity.work.session.focus_id, second_id }), before_ending.activities);
-
-    const core_state = (try kernel.compactionSnapshot(a, core.work.session)).state;
-    try testing.expectEqualDeep(@as([]const []const u8, &.{ core_feed, surviving_feed }), core_state.feeds);
-    try testing.expectEqualDeep(fixture.correspondents, core_state.correspondents.?);
-    try testing.expectEqualDeep(@as([]const []const u8, &.{activity.work.session.focus_id}), core_state.activities);
-
-    const activity_state = (try kernel.compactionSnapshot(a, activity.work.session)).state;
-    try testing.expectEqualDeep(@as([]const []const u8, &.{own_feed}), activity_state.feeds);
-    try testing.expect(activity_state.correspondents == null);
-    try testing.expectEqual(0, activity_state.activities.len);
+    fixture.send_outcome = .full;
+    const full = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Process more findings." });
+    try testing.expectEqualStrings("channel_full", full.object.get("error").?.object.get("code").?.string);
+    const closed = try call(a, &core, "close_channel", .{ .channel_id = channel_id });
+    try testing.expect(closed.object.get("result").?.object.get("changed").?.bool);
+    const late = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Late findings." });
+    try testing.expectEqualStrings("channel_closed", late.object.get("error").?.object.get("code").?.string);
+    const sampled = try kernel.compactionSnapshot(a, core.work.session);
+    try testing.expectEqual(0, sampled.state.channels.len);
 }
 
 test "an activity can use the reference returned by subscribe to withdraw another focus's registration" {

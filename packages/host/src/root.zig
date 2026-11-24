@@ -5,6 +5,7 @@ const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 const contracts = @import("agent_contracts");
 const Callback = contracts.Callback;
+const Channels = contracts.Channels;
 const Tools = contracts.Tools;
 const Model = contracts.Model;
 const Reference = contracts.Reference;
@@ -76,12 +77,15 @@ pub const Host = struct {
     };
 
     const State = union(enum) { running, finished: process.Outcome, failed: anyerror };
+    const Channel = struct { id: []const u8, focus_id: []const u8 };
     const Job = struct {
         arena: std.heap.ArenaAllocator,
         invocation: Shell.Invocation,
         args: Shell.Command,
         focus_id: []const u8,
         command_id: []const u8,
+        // Keep the ID through input closure so sends can report its state until retirement.
+        channel: ?Channel = null,
         retained: bool,
         callback_id: ?u64 = null,
         // Publish only after the initial call finishes its handoff decision.
@@ -95,8 +99,19 @@ pub const Host = struct {
         cursors: [2]u64 = .{ 0, 0 }, // Protected by operations, not the registry lock.
         input_pending: bool = false,
         input_error: ?anyerror = null,
-        input_open: bool,
+        raw_input_open: bool,
         input_tasks: std.Io.Group = .init,
+
+        fn stdinOpen(self: *const Job) bool {
+            if (self.state != .running) return false;
+            if (self.args.mode == .messages) return self.invocation.backend.process.messageInputOpen();
+            return self.raw_input_open;
+        }
+
+        fn activeChannel(self: *const Job) ?Channel {
+            const channel = self.channel orelse return null;
+            return if (self.stdinOpen()) channel else null;
+        }
 
         fn destroy(self: *Job, allocator: Allocator) void {
             self.invocation.deinit();
@@ -164,6 +179,74 @@ pub const Host = struct {
     pub fn tools(self: *Host, a: Allocator) !Tools {
         return .{ .context = self, .invoke = invokeTool, .declarations = try std.json.parseFromSliceLeaky([]const Model.Tool, a, @embedFile("tools.json"), .{}) };
     }
+
+    pub fn channels(self: *Host) Channels {
+        return .{ .context = self, .send = sendToChannel, .open = openChannel, .close = closeChannel, .sample = sampleChannels };
+    }
+
+    fn openChannel(context: *anyopaque, command_id: []const u8, channel_id: []const u8, focus_id: []const u8) anyerror!Channels.OpenOutcome {
+        const self: *Host = @ptrCast(@alignCast(context));
+        try self.mutex.lock(self.shell.io);
+        defer self.mutex.unlock(self.shell.io);
+
+        const job = self.jobLocked(command_id) orelse return .unknown_command;
+        if (job.args.mode != .messages) return .not_enabled;
+        if (self.stopping or !job.stdinOpen()) return .closed;
+        if (job.channel != null) return .already_open;
+
+        const owned = job.arena.allocator();
+        const id = try owned.dupe(u8, channel_id);
+        errdefer owned.free(id);
+        job.channel = .{ .id = id, .focus_id = try owned.dupe(u8, focus_id) };
+        return .opened;
+    }
+
+    fn closeChannel(context: *anyopaque, channel_id: []const u8) anyerror!bool {
+        const self: *Host = @ptrCast(@alignCast(context));
+        try self.mutex.lock(self.shell.io);
+        defer self.mutex.unlock(self.shell.io);
+
+        const job = self.channelJobLocked(channel_id) orelse return false;
+        if (self.stopping or !job.stdinOpen()) return false;
+        job.invocation.backend.process.closeMessageInput(self.shell.io);
+        return true;
+    }
+
+    fn sampleChannels(context: *anyopaque, a: Allocator, focus_id: ?[]const u8) anyerror![]const []const u8 {
+        const self: *Host = @ptrCast(@alignCast(context));
+        try self.mutex.lock(self.shell.io);
+        defer self.mutex.unlock(self.shell.io);
+        if (self.stopping) return &.{};
+
+        var ids: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (ids.items) |id| a.free(id);
+            ids.deinit(a);
+        }
+        for (self.jobs.items) |job| {
+            const channel = job.activeChannel() orelse continue;
+            if (focus_id) |focus| if (!std.mem.eql(u8, focus, channel.focus_id)) continue;
+            try ids.ensureUnusedCapacity(a, 1);
+            ids.appendAssumeCapacity(try a.dupe(u8, channel.id));
+        }
+        return ids.toOwnedSlice(a);
+    }
+
+    fn sendToChannel(context: *anyopaque, channel_id: []const u8, text: []const u8) anyerror!Channels.Outcome {
+        const self: *Host = @ptrCast(@alignCast(context));
+        try self.shell.io.checkCancel();
+        if (!self.mutex.tryLock()) return .busy;
+        defer self.mutex.unlock(self.shell.io);
+
+        const job = self.channelJobLocked(channel_id) orelse return .unknown_channel;
+        if (self.stopping or job.state != .running) return .closed;
+
+        const target = &job.invocation.backend.process;
+        const outcome = try target.sendMessage(self.shell.io, text);
+        if (outcome == .closed) target.closeMessageInput(self.shell.io);
+        return outcome;
+    }
+
     fn invokeTool(context: *anyopaque, a: Allocator, invocation: Tools.Invocation, name: []const u8, arguments: []const u8) anyerror!?Content {
         const self: *Host = @ptrCast(@alignCast(context));
         return try self.invoke(a, invocation, try Request.parse(a, name, arguments) orelse return null);
@@ -264,7 +347,7 @@ pub const Host = struct {
         job.* = .{ .arena = arena, .invocation = invocation, .args = command, .focus_id = focus_id, .command_id = reference, .retained = false, .state = switch (invocation.backend) {
             .process => .running,
             .not_started => |reason| .{ .finished = .{ .not_started = .{ .reason = reason } } },
-        }, .settled = invocation.backend == .not_started, .input_open = args.mode != .batch and invocation.backend == .process };
+        }, .settled = invocation.backend == .not_started, .raw_input_open = (args.mode == .pipe or args.mode == .terminal) and invocation.backend == .process };
         initialized = true;
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
@@ -313,7 +396,11 @@ pub const Host = struct {
         }
         switch (action) {
             .write => |write| {
-                if (!job.input_open) {
+                if (job.args.mode == .messages) {
+                    self.mutex.unlock(self.shell.io);
+                    return try toolError(a, "message_input_only", "Use send with the command's channel_id. Use inspect_host_shell to find an open channel or open_channel to create one.");
+                }
+                if (!job.raw_input_open) {
                     self.mutex.unlock(self.shell.io);
                     return try toolError(a, "stdin_closed", "This command has no writable stdin. Batch mode has no live input, and pipe stdin cannot reopen after EOF.");
                 }
@@ -362,7 +449,7 @@ pub const Host = struct {
         self.mutex.lockUncancelable(self.shell.io);
         job.input_pending = false;
         job.input_error = failure;
-        if (eof and job.args.mode == .pipe and failure == null) job.input_open = false;
+        if (eof and job.args.mode == .pipe and failure == null) job.raw_input_open = false;
         self.changed.broadcast(self.shell.io);
         self.mutex.unlock(self.shell.io);
         if (failure) |err| if (err == error.Canceled) return error.Canceled;
@@ -374,6 +461,7 @@ pub const Host = struct {
         self.mutex.lockUncancelable(self.shell.io);
         job.state = result;
         job.elapsed_ms = job.invocation.elapsed();
+        if (job.args.mode == .messages) job.invocation.backend.process.closeMessageInput(self.shell.io);
         self.mutex.unlock(self.shell.io);
         // Prevent new input, then cancel an outstanding write even when an
         // escaped descendant still holds the read end of the pipe.
@@ -450,7 +538,7 @@ pub const Host = struct {
             .running => .running,
             .finished => |outcome| .{ .finished = outcome },
             .failed => |err| .{ .unavailable = .{ .reason = @errorName(err) } },
-        }, .elapsed_ms = if (job.state == .running) job.invocation.elapsed() else job.elapsed_ms, .stdin = .{ .open = job.input_open and job.state == .running, .pending = job.input_pending, .@"error" = if (job.input_error) |err| @errorName(err) else null } };
+        }, .elapsed_ms = if (job.state == .running) job.invocation.elapsed() else job.elapsed_ms, .stdin = .{ .open = job.stdinOpen(), .pending = job.input_pending, .@"error" = if (job.input_error) |err| @errorName(err) else null } };
     }
 
     fn waitForCompletion(self: *Host, job: *Job, milliseconds: u32) !void {
@@ -482,7 +570,16 @@ pub const Host = struct {
     }
 
     fn describe(self: *Host, a: Allocator, args: Inspect) !Content {
-        const Entry = struct { command_id: []const u8, focus_id: []const u8, command_preview: []const u8, state: PublicState, mode: Shell.Mode, stdin_open: bool, input_pending: bool };
+        const Entry = struct {
+            command_id: []const u8,
+            focus_id: []const u8,
+            channel_id: ?[]const u8,
+            command_preview: []const u8,
+            state: PublicState,
+            mode: Shell.Mode,
+            stdin_open: bool,
+            input_pending: bool,
+        };
         const Page = struct {
             shell: ?[]const u8 = null,
             cwd: ?[]const u8 = null,
@@ -520,11 +617,21 @@ pub const Host = struct {
             }
             var preview_end = @min(job.args.command.bytes.len, 160);
             while (preview_end > 0 and preview_end < job.args.command.bytes.len and job.args.command.bytes[preview_end] & 0xc0 == 0x80) preview_end -= 1;
-            try entries.append(a, .{ .command_id = id, .focus_id = job.focus_id, .command_preview = job.args.command.bytes[0..preview_end], .state = switch (job.state) {
-                .running => .running,
-                .finished => |outcome| .{ .finished = outcome },
-                .failed => |err| .{ .unavailable = .{ .reason = @errorName(err) } },
-            }, .mode = job.args.mode, .stdin_open = job.input_open and job.state == .running, .input_pending = job.input_pending });
+            const channel = if (self.stopping) null else job.activeChannel();
+            try entries.append(a, .{
+                .command_id = id,
+                .focus_id = job.focus_id,
+                .channel_id = if (channel) |active| active.id else null,
+                .command_preview = job.args.command.bytes[0..preview_end],
+                .state = switch (job.state) {
+                    .running => .running,
+                    .finished => |outcome| .{ .finished = outcome },
+                    .failed => |err| .{ .unavailable = .{ .reason = @errorName(err) } },
+                },
+                .mode = job.args.mode,
+                .stdin_open = job.stdinOpen(),
+                .input_pending = job.input_pending,
+            });
             page.setEntries(entries.items);
             if (std.fmt.count("{f}", .{std.json.fmt(.{ .result = page }, options)}) > 32768) {
                 _ = entries.pop();
@@ -568,10 +675,21 @@ pub const Host = struct {
     fn acquire(self: *Host, id: []const u8) !?*Job {
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
+        const job = self.jobLocked(id) orelse return null;
+        job.refs += 1;
+        return job;
+    }
+    fn jobLocked(self: *Host, id: []const u8) ?*Job {
         for (self.jobs.items) |job| if (std.mem.eql(u8, job.command_id, id)) {
-            job.refs += 1;
             return job;
         };
+        return null;
+    }
+    fn channelJobLocked(self: *Host, id: []const u8) ?*Job {
+        for (self.jobs.items) |job| {
+            const channel = job.channel orelse continue;
+            if (std.mem.eql(u8, channel.id, id)) return job;
+        }
         return null;
     }
     fn release(self: *Host, job: *Job) void {
@@ -656,7 +774,7 @@ test "shell defaults appear only on the first unfiltered inspection" {
         .focus_id = "activity-1",
         .retained = true,
         .state = .running,
-        .input_open = false,
+        .raw_input_open = false,
     };
     try host.jobs.append(a, &job);
     for ([_]Host.Inspect{ .{}, .{ .command_id = .{ .bytes = job.command_id } }, .{ .offset = 1 } }, 0..) |args, i| {
@@ -723,6 +841,124 @@ test "binary output exposes its log path and a printed data URL stays inline" {
     const empty = try invocation.incremental(a, &cursors, true, 512);
     const encoded = try std.json.Stringify.valueAlloc(a, empty, .{ .emit_null_optional_fields = false });
     try t.expectEqualStrings("{}", encoded);
+}
+
+fn startMessageTestCommand(host: *Host, command: []const u8) !*Host.Job {
+    const Issuer = struct {
+        fn issue(_: *anyopaque, allocator: Allocator, name: []const u8) ![]const u8 {
+            return Reference.create(allocator, name, 1);
+        }
+    };
+    const created = try host.createJob(.{
+        .session_id = 1,
+        .focus_id = "activity-1",
+        .command_reference = .{ .context = host, .issue = Issuer.issue },
+    }, .{
+        .name = .{ .bytes = "receiver" },
+        .command = .{ .bytes = command },
+        .mode = .messages,
+        .timeout_ms = 5000,
+    });
+    const job = switch (created) {
+        .job => |job| job,
+        .unavailable => |err| return err,
+        .capacity => return error.TestUnexpectedResult,
+    };
+    host.finishHandoff(job);
+    return job;
+}
+
+test "a live channel is discoverable until its command completes" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const t = std.testing;
+    const io = t.io;
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const env = std.process.Environ.Map.init(a);
+    var host = Host.init(a, io, path, path, &env, undefined, 1);
+    defer host.deinit();
+
+    const job = try startMessageTestCommand(&host,
+        \\while [ ! -e finish ]; do sleep 0.01; done
+    );
+    defer host.release(job);
+    try t.expect((try host.snapshot(job)).stdin.open);
+
+    const channels = host.channels();
+    const channel_id = "events-2";
+    try t.expectEqual(.unknown_channel, try channels.submit(job.command_id, "Direct input"));
+    try t.expectEqual(.unknown_command, try channels.open(channels.context, "missing-1", channel_id, "activity-2"));
+    try t.expectEqual(.opened, try channels.open(channels.context, job.command_id, channel_id, "activity-2"));
+    try t.expectEqual(.already_open, try channels.open(channels.context, job.command_id, "another-3", "activity-1"));
+    try t.expectEqual(0, (try channels.sample(channels.context, a, "activity-1")).len);
+    const active = try channels.sample(channels.context, a, "activity-2");
+    try t.expectEqual(1, active.len);
+    try t.expectEqualStrings(channel_id, active[0]);
+    const inspection = try host.describe(a, .{});
+    const json = try std.json.parseFromSliceLeaky(std.json.Value, a, inspection.parts[0].text, .{});
+    const commands = json.object.get("result").?.object.get("commands").?.array.items;
+    try t.expectEqualStrings(channel_id, commands[0].object.get("channel_id").?.string);
+
+    const signal = try temporary.dir.createFile(io, "finish", .{});
+    signal.close(io);
+    try host.tasks.await(io);
+    const snapshot = try host.snapshot(job);
+    try t.expectEqual(std.process.Child.Term{ .exited = 0 }, snapshot.state.finished.completed);
+    try t.expect(!snapshot.stdin.open);
+    try t.expectEqual(null, job.invocation.backend.process.message_writer);
+    try t.expectEqual(.closed, try channels.submit(channel_id, "Late"));
+    try t.expectEqual(0, (try channels.sample(channels.context, a, null)).len);
+    try t.expect(!try channels.close(channels.context, channel_id));
+}
+
+test "closing a channel drains its packet and leaves the command running" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const t = std.testing;
+    const io = t.io;
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const env = std.process.Environ.Map.init(a);
+    var host = Host.init(a, io, path, path, &env, undefined, 1);
+    defer host.deinit();
+
+    const job = try startMessageTestCommand(&host,
+        \\while [ ! -e drain ]; do sleep 0.01; done
+        \\dd bs=4096 count=1 2>/dev/null || exit 2
+        \\extra=$(dd bs=4096 count=1 2>/dev/null) || exit 3
+        \\[ -z "$extra" ] || exit 4
+        \\printf ' EOF'
+    );
+    defer host.release(job);
+    const channels = host.channels();
+    const channel_id = "events-2";
+    try t.expectEqual(.opened, try channels.open(channels.context, job.command_id, channel_id, "activity-1"));
+    try t.expectEqual(.accepted, try channels.submit(channel_id, "Pending"));
+    try t.expectEqual(.full, try channels.submit(channel_id, "Another"));
+    try t.expect(try channels.close(channels.context, channel_id));
+    try t.expect(!try channels.close(channels.context, channel_id));
+    try t.expectEqual(.closed, try channels.submit(channel_id, "Later"));
+    try t.expectEqual(.closed, try channels.open(channels.context, job.command_id, "another-3", "activity-1"));
+    try t.expectEqual(0, (try channels.sample(channels.context, a, null)).len);
+    const snapshot = try host.snapshot(job);
+    try t.expect(snapshot.state == .running);
+    try t.expect(!snapshot.stdin.open);
+
+    const signal = try temporary.dir.createFile(io, "drain", .{});
+    signal.close(io);
+    try host.tasks.await(io);
+    try t.expectEqual(std.process.Child.Term{ .exited = 0 }, (try host.snapshot(job)).state.finished.completed);
+    try t.expectEqualStrings("Pending EOF", (try job.invocation.complete(a, 512)).stdout.?.text);
+    try t.expectEqual(.closed, try channels.submit(channel_id, "Finished"));
+    host.retire(job);
+    try t.expectEqual(.unknown_channel, try channels.submit(channel_id, "Retired"));
 }
 
 test "the shell accepts only text for a path" {

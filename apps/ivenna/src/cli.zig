@@ -1,24 +1,15 @@
 const std = @import("std");
 
-const default_feed_after: u63 = 0;
-const default_feed_limit = 100;
-const max_feed_limit = 1000;
-const default_feed_wait_ms = 0;
-const max_feed_wait_ms = 60000;
-
 pub const Command = union(enum) {
     serve,
-    feed: Feed,
+    receive: Receive,
     subscription: Subscription,
     help: []const u8,
 };
 
-pub const Feed = struct {
-    feed_id: []const u8,
-    after: u63,
-    limit: u32,
-    /// Milliseconds to wait for a first message when the read finds none.
-    wait_ms: u32,
+pub const Receive = union(enum) {
+    once: u32,
+    follow,
 };
 
 const Subscription = struct {
@@ -34,47 +25,22 @@ pub fn parse(args: []const []const u8) !Command {
         if (isHelp(args[1])) return help(args[2..], serve_help);
         return unexpected(args[1]);
     }
-    if (equal(args[0], "feed")) return parseFeed(args[1..]);
+    if (equal(args[0], "receive")) return parseReceive(args[1..]) catch return error.InvalidReceiveArguments;
     if (equal(args[0], "subscription")) return parseSubscription(args[1..]);
     return invalid("unknown command \"{f}\". See 'ivenna --help'.", .{std.zig.fmtString(args[0])});
 }
 
-fn parseFeed(args: []const []const u8) !Command {
-    if (args.len == 0) return .{ .help = feed_help };
-    if (isHelp(args[0])) return help(args[1..], feed_help);
-    const rest = args[1..];
-    if (!equal(args[0], "read"))
-        return invalid("unknown feed command \"{f}\". See 'ivenna feed --help'.", .{std.zig.fmtString(args[0])});
-    if (rest.len == 0) return invalid("missing FEED_ID. See 'ivenna feed read --help'.", .{});
-    const id = rest[0];
-    if (isHelp(id)) return help(rest[1..], feed_help);
-    var after: ?u63 = null;
-    var limit: ?u32 = null;
-    var wait_ms: ?u32 = null;
-    const options = rest[1..];
-    var i: usize = 0;
-    while (i < options.len) : (i += 2) {
-        const option = options[i];
-        if (equal(option, "--after") and after == null) {
-            after = try decimal(u63, options[i..]);
-        } else if (equal(option, "--limit") and limit == null) {
-            const value = try decimal(u32, options[i..]);
-            if (value == 0 or value > max_feed_limit)
-                return invalid("--limit must be between 1 and {d}", .{max_feed_limit});
-            limit = value;
-        } else if (equal(option, "--wait") and wait_ms == null) {
-            const value = try decimal(u32, options[i..]);
-            if (value > max_feed_wait_ms)
-                return invalid("--wait must be at most {d}", .{max_feed_wait_ms});
-            wait_ms = value;
-        } else return unexpected(option);
+fn parseReceive(args: []const []const u8) error{InvalidArguments}!Command {
+    if (args.len == 0) return .{ .receive = .{ .once = 0 } };
+    if (isHelp(args[0])) return help(args[1..], receive_help);
+    if (equal(args[0], "--follow")) {
+        if (args.len > 1) return unexpected(args[1]);
+        return .{ .receive = .follow };
     }
-    return .{ .feed = .{
-        .feed_id = id,
-        .after = after orelse default_feed_after,
-        .limit = limit orelse default_feed_limit,
-        .wait_ms = wait_ms orelse default_feed_wait_ms,
-    } };
+    if (!equal(args[0], "--wait")) return unexpected(args[0]);
+    const wait_ms = try decimal(u32, args);
+    if (args.len > 2) return unexpected(args[2]);
+    return .{ .receive = .{ .once = wait_ms } };
 }
 
 fn parseSubscription(args: []const []const u8) !Command {
@@ -93,7 +59,7 @@ fn parseSubscription(args: []const []const u8) !Command {
     return .{ .subscription = .{ .action = action, .id = args[1] } };
 }
 
-fn decimal(comptime Int: type, args: []const []const u8) !Int {
+fn decimal(comptime Int: type, args: []const []const u8) error{InvalidArguments}!Int {
     if (args.len < 2) return invalid("missing value for {s}", .{args[0]});
     const value = args[1];
     for (value) |byte| {
@@ -103,7 +69,7 @@ fn decimal(comptime Int: type, args: []const []const u8) !Int {
         return invalid("decimal integer out of range for {s}", .{args[0]});
 }
 
-fn help(args: []const []const u8, usage: []const u8) !Command {
+fn help(args: []const []const u8, usage: []const u8) error{InvalidArguments}!Command {
     if (args.len != 0) return unexpected(args[0]);
     return .{ .help = usage };
 }
@@ -129,7 +95,7 @@ const overview =
     \\ivenna COMMAND [ARGUMENTS]
     \\
     \\  serve          Run the kernel.
-    \\  feed           Read a feed by ID.
+    \\  receive        Read channel messages in a host command.
     \\  subscription   Report observations and save source positions.
     \\
     \\Run ivenna COMMAND --help for command usage.
@@ -153,14 +119,7 @@ const environment =
     \\
 ;
 
-const feed_help = std.fmt.comptimePrint(@embedFile("help/feed-read.txt"), .{
-    default_feed_after,
-    std.math.maxInt(@FieldType(Feed, "after")),
-    default_feed_limit,
-    max_feed_limit,
-    default_feed_wait_ms,
-    max_feed_wait_ms,
-}) ++ "\n" ++ environment;
+const receive_help = std.fmt.comptimePrint(@embedFile("help/receive.txt"), .{std.math.maxInt(u32)});
 
 const inspect = @embedFile("help/inspect.txt");
 const publish = @embedFile("help/publish.txt");

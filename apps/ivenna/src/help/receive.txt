@@ -1,0 +1,23 @@
+ivenna receive [--wait MS]
+ivenna receive --follow
+
+Read messages from the inherited standard input of a host command started
+in messages mode. Invoke the receiver as "$IVENNA" receive.
+
+For a single read, omit --wait or use --wait 0 to check immediately.
+Use --wait MS to wait up to MS milliseconds, from 0 through {d}.
+
+A successful single read writes one JSON object to stdout and exits
+with code 0. The status field describes the result.
+
+  message    One message was read. The text field contains the message.
+  empty      The immediate check found no message.
+  timeout    The wait elapsed before a message arrived.
+  closed     The input has ended after any pending message was read.
+
+Use --follow to keep reading. It flushes one JSON line with status "message"
+per message. A script can pipe stdout to a handler. Follow mode exits with
+code 0 after draining closed input or when the output pipe closes. It prints
+only message records.
+
+On error, the receiver writes a diagnostic to stderr and exits with code 1.

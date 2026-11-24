@@ -327,7 +327,7 @@ test "encoded native exchanges restore independently of their source buffers" {
         defer arena.deinit();
         const codec = @import("record_codec.zig");
         const encoded = try codec.encode(arena.allocator(), source.records());
-        const entries = try codec.decode([]const Entry, arena.allocator(), encoded);
+        const entries = try codec.decode([]const Entry, arena.allocator(), encoded, .{});
         break :blk try Context.restore(std.testing.allocator, source.scope, source.focus_id, entries);
     };
     var context = restored;
@@ -357,7 +357,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     var activity_id = "practice-2".*;
     var command_id = "inspect-7".*;
     var subscription_id = "releases-4".*;
-    var feed_id = "public-3".*;
+    var channel_id = "consumer-8".*;
     var correspondent_id = "reviewer+notes".*;
     const handover: Input.Handover = .{
         .focus_id = "core-1",
@@ -367,7 +367,7 @@ test "candidate handover retains sampled references and leaves earlier history a
             .activities = &.{&activity_id},
             .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = &command_id } } }},
             .subscriptions = &.{&subscription_id},
-            .feeds = &.{&feed_id},
+            .channels = &.{&channel_id},
             .correspondents = &.{&correspondent_id},
         },
     };
@@ -378,7 +378,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     @memset(&activity_id, 0);
     @memset(&command_id, 0);
     @memset(&subscription_id, 0);
-    @memset(&feed_id, 0);
+    @memset(&channel_id, 0);
     @memset(&correspondent_id, 0);
 
     try std.testing.expectEqual(@as(usize, 1), original.records().len);
@@ -391,13 +391,14 @@ test "candidate handover retains sampled references and leaves earlier history a
         .activities = &.{"practice-2"},
         .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = "inspect-7" } } }},
         .subscriptions = &.{"releases-4"},
-        .feeds = &.{"public-3"},
+        .channels = &.{"consumer-8"},
         .correspondents = &.{"reviewer+notes"},
     };
     try std.testing.expectEqualDeep(expected_state, retained.state);
     const next = try replacement.request(a, current, &.{});
     for ([_][]const u8{ summary[summary.len - 1].message.text, next[1].message.text }) |rendered| {
-        try std.testing.expect(std.mem.indexOf(u8, rendered, "public-3") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "releases-4") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "consumer-8") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered, "reviewer+notes") != null);
     }
 }

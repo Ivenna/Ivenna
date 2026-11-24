@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send text to one correspondent, focus, or feed. A correspondence `reference` confirms that the sending service accepted the message for delivery. A focus message enters the recipient's queue and can wake it. A feed `sequence` identifies the stored message.",
+    "description": "Send text to one correspondent, focus, or open channel. A correspondence `reference` confirms that the sending service accepted the message for delivery. A focus message becomes an observation and can wake the recipient. A channel send returns immediately. `accepted` confirms the message reached the command's input.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -32,12 +32,12 @@
             {
               "type": "object",
               "properties": {
-                "feed_id": {
+                "channel_id": {
                   "type": "string",
-                  "description": "Complete ID of an open feed."
+                  "description": "Complete ID of an open channel."
                 }
               },
-              "required": ["feed_id"],
+              "required": ["channel_id"],
               "additionalProperties": false
             }
           ]
@@ -52,34 +52,35 @@
     }
   },
   {
-    "name": "create_feed",
-    "description": "Create a feed to publish updates people and programs can read. The feed survives restart and the end of this focus. Use the returned `feed_id` to publish, and pass it to readers who want to follow the feed. In an activity, `\"$IVENNA\" feed read --help` explains how to read it.",
+    "name": "open_channel",
+    "description": "Open a channel to a running command. Use the returned `channel_id` with `send`. The channel closes when the command exits.",
     "parameters": {
       "type": "object",
       "properties": {
         "name": { "type": "string", "minLength": 1, "maxLength": 32 },
-        "description": {
+        "command_id": {
           "type": "string",
           "minLength": 1,
-          "description": "Briefly describe what readers can expect to find in the feed."
+          "description": "Complete ID of a command started in `messages` mode."
         }
       },
-      "required": ["name", "description"],
+      "required": ["name", "command_id"],
       "additionalProperties": false
     }
   },
   {
-    "name": "close_feed",
-    "description": "Close a feed to new messages. Published messages remain readable. `changed` is false when the feed was already closed.",
+    "name": "close_channel",
+    "description": "Close a channel to new messages. The command can read a pending message and keep running. `changed` is true if this call closed the channel.",
     "parameters": {
       "type": "object",
       "properties": {
-        "feed_id": {
+        "channel_id": {
           "type": "string",
-          "description": "Complete feed ID."
+          "minLength": 1,
+          "description": "Complete channel ID."
         }
       },
-      "required": ["feed_id"],
+      "required": ["channel_id"],
       "additionalProperties": false
     }
   },

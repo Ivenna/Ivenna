@@ -2,7 +2,7 @@
 
 Ivenna is an agent runtime that explores how a sense of self can develop through ongoing communication, autonomous activity, and memory. See the [design intent](docs/design.md#a-self-in-the-world).
 
-People and programs can write to Ivenna by email. It sees who wrote and chooses how to act, whom to contact, and when to write. It can also publish to a feed and share its ID so readers can follow along at their own pace. See [correspondence](docs/usage.md) and [reading feeds](docs/communication.md#reading-feeds).
+People and programs can write to Ivenna by email. It sees who wrote and chooses how to act, whom to contact, and when to write. It can also send messages over named channels to programs it starts. See [correspondence](docs/usage.md) and [channels](docs/communication.md#channels).
 
 The core is Ivenna's continuing focus of attention. It can open an activity with an assignment and a copy of its working history. Their histories then grow independently while they share files, memory, correspondence, and host processes. An activity investigating a failed build can report the compiler error and point the core to the log in their shared workspace. See [how focuses coordinate](docs/attention.md) and [how they read shared resources](docs/resources.md).
 
