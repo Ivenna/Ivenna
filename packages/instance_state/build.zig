@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const options = .{ .target = target, .optimize = optimize };
-    const mod = b.addModule("channels", .{
+    const mod = b.addModule("instance_state", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -13,5 +13,5 @@ pub fn build(b: *std.Build) void {
             .{ .name = "agent_contracts", .module = b.dependency("agent_contracts", options).module("agent_contracts") },
         },
     });
-    b.step("test", "Test feed storage").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
+    b.step("test", "Test instance state storage").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
 }

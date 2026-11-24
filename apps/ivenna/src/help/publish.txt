@@ -1,0 +1,21 @@
+ivenna subscription publish SUBSCRIPTION_ID
+
+Queue an observation for the subscribing focus. With an unset cursor, this
+request also saves source position "17".
+
+  printf '%s\n' '{
+    "key": "release-v2.4.0",
+    "text": "Stable release v2.4.0 is available",
+    "cursor": {"to": "17"}
+  }' | "$IVENNA" subscription publish releases-1
+
+Send one JSON object on stdin with these fields.
+
+  key                  Nonempty string identifying the update within this
+                       subscription. Reuse this key when retrying the same
+                       report. Give a later revision its own key.
+  text                 Observation as a string of 1–2048 UTF-8 bytes.
+  source_time_unix_ms  Optional source event time in integer Unix milliseconds
+                       from -62167219200000 through 253402300799000.
+  cursor               Optional object with the cursor change to commit.
+                       Omitting it leaves the saved position in place.

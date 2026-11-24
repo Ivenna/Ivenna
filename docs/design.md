@@ -24,7 +24,7 @@ The repertoire connects four kinds of action: expression to people and programs,
 
 Correspondence and autonomous activity can both shape Ivenna's understanding, preferences, commitments, and working methods. Retained conversations, handovers, and shared memory support continuity as that understanding develops.
 
-Model-facing inputs describe current attention, observations, and possible actions. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect earlier choices with their effects and later observations. Ivenna supplies brief names when opening a focus, starting a command, arranging future attention, or creating a feed. The runtime adds numeric suffixes for distinction. Names remain its own choice, while the complete references support exact addressing and association.
+Model-facing inputs describe current attention, observations, and possible actions. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect earlier choices with their effects and later observations. Ivenna supplies brief names when opening a focus, starting a command, scheduling attention, subscribing to observations, or creating a feed. The runtime adds numeric suffixes so each complete reference identifies the item Ivenna chose.
 
 Reasoning can lose details, confuse references, or choose unsuccessful actions. Operation results, observations, and discoverable command handles support recognition and recovery. The runtime retains the references and routing state needed for delivery and resumption independently of Ivenna's recollection or generated summaries. Ivenna can reconsider an action from its outcome.
 
@@ -62,7 +62,7 @@ Messages enter the core as observations of who said what, with the senders' chan
 
 Ivenna chooses when to send, whom or what to reach, and what to say. A channel address can reach a correspondent, a focus, or a feed. Each focus sees open feeds, existing focuses, and the correspondents the deployment has registered for sending. One arrival can lead to zero, one, or several sends. Internal reasoning and activity completion remain within Ivenna unless it chooses to send a message. See [communication](communication.md) and [coordination among focuses](attention.md#reaching-an-existing-focus).
 
-The core and activities can create named feeds and publish on them directly. A feed keeps a sequence of whole messages so readers can catch up independently. It belongs to the instance, and its description lets another focus recognize its purpose and take up publication. Closing a feed ends publication while preserving accepted messages.
+The core and activities can create named feeds and publish to them directly. A feed belongs to the instance. Its description lets any focus recognize its purpose before publishing or giving its complete address to a program Ivenna chooses or writes. Each reader can catch up from the last message it processed. Closing a feed ends publication while preserving whole messages for readers, even while Ivenna is stopped. See [reading feeds](communication.md#reading-feeds).
 
 ## Sessions and continued work
 
@@ -80,7 +80,7 @@ Activities choose how long to wait for host work before continuing their own rea
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
 
-A focus can subscribe to a source it wants to follow over time. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. Ivenna chooses which changes its listener reports. A report can bring a sleeping focus back to its work, and a working focus can consider several reports together after its current round.
+A focus can subscribe to a source it wants to follow over time. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. Ivenna gives the subscription reference to the listener it sets up and chooses which changes the listener reports. A report can bring a sleeping focus back to its work, and a working focus can consider several reports together after its current round.
 
 The subscription stays with its focus across sleep, handover, and restart. Any focus with its reference can withdraw it when the source no longer needs attention. Observations already accepted still belong to the focus that subscribed. See [subscriptions](attention.md#subscriptions).
 
@@ -110,4 +110,4 @@ An independent listener can still report to an active subscription while the ker
 
 The deployment user owns Ivenna's correspondence, working histories, subscriptions, feeds, artifacts, and autonomous memory, and chooses where they live. Keep them open to inspection and management.
 
-These stores have separate retention lifecycles. History remains available while a retained context needs it; other material follows deployment policy. See [history retention](architecture.md#history-retention) and [running Ivenna](running.md#data-and-retention). Diagnostics remain separate from the source material and handovers used for continuity.
+Each kind of data has its own retention lifecycle. History remains available while a retained context needs it. Other material follows deployment policy. See [history retention](architecture.md#history-retention) and [running Ivenna](running.md#data-and-retention). Diagnostics remain separate from the source material and handovers used for continuity.

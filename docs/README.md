@@ -7,7 +7,7 @@
 | Write to a running Ivenna, share material to read, or follow up | [Corresponding with Ivenna](usage.md) |
 | Prepare, run, and update the supplied local development environment | [Local development](../dev/README.md) |
 | Run Ivenna, diagnose stalled work, and manage services and retained data | [Running guide](running.md) |
-| Run a listener that keeps collecting while the kernel is stopped | [Subscription listeners](running.md#subscription-listeners) |
+| Run a local feed reader or subscription listener | [Local programs](running.md#local-programs) |
 
 ## Design and development
 
@@ -23,7 +23,8 @@
 | Task | Guide |
 | --- | --- |
 | Interpret history records, inference turns, and runtime state | [Input contract](input.md) |
-| Send to a channel, manage feeds, or read feed messages | [Communication](communication.md) |
+| Send to a channel or manage a feed | [Communication](communication.md) |
+| Read feed messages by address and resume from a saved position | [Reading feeds](communication.md#reading-feeds) |
 | Coordinate focuses, schedule wakeups, and manage subscriptions | [Attention](attention.md) |
 | Write a listener that reports observations and resumes from a saved cursor | [Subscription listener protocol](subscriptions.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |

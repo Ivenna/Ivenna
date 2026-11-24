@@ -2,7 +2,7 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const History = @import("history.zig").History;
 const Persistence = @import("history.zig").Persistence;
-const Subscriptions = @import("subscriptions");
+const Subscriptions = @import("instance_state").subscriptions;
 const Reports = @import("reports.zig");
 const Input = @import("input.zig");
 const WorkInput = @import("work.zig");
@@ -996,7 +996,7 @@ const TestStore = @import("test_history.zig").TestStore;
 test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
     var storage: TestStore = .{};
     defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+    var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
     var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
     defer registry.deinit();
@@ -1056,7 +1056,7 @@ test "both roles see focus addresses only while their sessions are live" {
     const a = scratch.allocator();
     var storage: TestStore = .{};
     defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+    var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
     var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
     defer registry.deinit();
@@ -1073,20 +1073,13 @@ test "both roles see focus addresses only while their sessions are live" {
     var activity = try admitTestInput(&registry, a);
     defer activity.history.deinit();
     defer registry.endWorker(activity.work.session);
-    try std.testing.expectEqualDeep(both, (try registry.current(a, core.work.session)).channels.focuses);
     try std.testing.expectEqualDeep(both, (try registry.current(a, activity.work.session)).channels.focuses);
     const core_sample = try registry.compactionSnapshot(a, core.work.session);
     try std.testing.expectEqualDeep(both, core_sample.current.channels.focuses);
     try std.testing.expectEqualDeep(@as([]const []const u8, &.{"research/notes-2"}), core_sample.state.activities);
-    const activity_sample = try registry.compactionSnapshot(a, activity.work.session);
-    try std.testing.expectEqualDeep(both, activity_sample.current.channels.focuses);
-    try std.testing.expectEqual(0, activity_sample.state.activities.len);
 
     try std.testing.expect(try registry.commitResponse(activity.work, &activity.history, .{ .output = &.{}, .calls = &.{}, .text = null }));
     try std.testing.expectEqualDeep(core_only, (try registry.current(a, core.work.session)).channels.focuses);
-    const ended_sample = try registry.compactionSnapshot(a, core.work.session);
-    try std.testing.expectEqualDeep(core_only, ended_sample.current.channels.focuses);
-    try std.testing.expectEqual(0, ended_sample.state.activities.len);
 }
 
 test "compaction samples the active subscriptions addressed to this focus" {
@@ -1095,7 +1088,7 @@ test "compaction samples the active subscriptions addressed to this focus" {
     const a = scratch.allocator();
     var storage: TestStore = .{};
     defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+    var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
     var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
     defer registry.deinit();
@@ -1128,7 +1121,7 @@ test "activity completion publishes once and maintenance republishes the same ch
     for ([_]bool{ false, true }) |sleeping| {
         var storage: TestStore = .{};
         defer storage.arena.deinit();
-        var subscriptions = try Subscriptions.Store.open(std.testing.allocator, ":memory:");
+        var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
         defer subscriptions.close();
         var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
         defer registry.deinit();

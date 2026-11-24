@@ -1,9 +1,27 @@
-CREATE TABLE metadata (
+CREATE TABLE feeds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stem TEXT NOT NULL,
+    reference TEXT AS (stem || '-' || id) UNIQUE,
+    description TEXT NOT NULL,
+    closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1))
+) STRICT;
+CREATE INDEX open_feeds_by_id ON feeds(id) WHERE closed=0;
+CREATE TABLE feed_messages (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel INTEGER NOT NULL REFERENCES feeds(id),
+    focus_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    published_at_unix_ms INTEGER NOT NULL
+) STRICT;
+-- The sequence is the rowid and already sorts entries within each channel.
+CREATE INDEX feed_messages_by_channel ON feed_messages(channel);
+
+CREATE TABLE mailbox_binding (
     singleton INTEGER PRIMARY KEY CHECK (singleton=1),
     identity TEXT NOT NULL,
     bound INTEGER NOT NULL DEFAULT 0 CHECK (bound IN (0, 1))
 ) STRICT;
-INSERT INTO metadata(singleton, identity) VALUES(1, lower(hex(randomblob(16))));
+INSERT INTO mailbox_binding(singleton, identity) VALUES(1, lower(hex(randomblob(16))));
 CREATE TABLE subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -14,7 +32,7 @@ CREATE TABLE subscriptions (
 ) STRICT;
 CREATE INDEX subscriptions_by_focus ON subscriptions(focus_id);
 -- Each report keeps its destination after the registration is withdrawn.
-CREATE TABLE reports (
+CREATE TABLE subscription_reports (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     reference TEXT NOT NULL,
     focus_id TEXT NOT NULL,
@@ -22,7 +40,7 @@ CREATE TABLE reports (
     source_time INTEGER,
     received INTEGER NOT NULL
 ) STRICT;
-CREATE INDEX reports_by_focus ON reports(focus_id);
+CREATE INDEX subscription_reports_by_focus ON subscription_reports(focus_id);
 -- Keep keys until withdrawal so a listener that loses its receipt can retry
 -- even after the focus receives the report. See docs/subscriptions.md#withdrawal.
 CREATE TABLE accepted_report_keys (

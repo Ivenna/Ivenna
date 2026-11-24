@@ -17,11 +17,11 @@ The interfaces have two lifetimes:
 
 An ordinary turn contains `current` and any newly delivered `events`. A compaction turn contains `current` and `summarize`, which asks for a summary and supplies sampled state for recollection. The runtime records admitted events and complete model/tool exchanges in working history.
 
-`Text` denotes a free-form string. `Time` denotes a UTC RFC 3339 string with millisecond precision, such as `2026-11-06T12:00:01.000Z`. Records, events, and callback sources serialize as mappings containing one branch name and its payload. Focus roles serialize as enum values, `core` or `activity`.
+`Text` denotes a string. `Time` denotes a UTC RFC 3339 string with millisecond precision, such as `2026-11-06T12:00:01.000Z`. Records, events, and callback sources serialize as mappings containing one branch name and its payload. Focus roles serialize as enum values, `core` or `activity`.
 
 Focus references remain stable across waiting, context unloading, and restart; ended activity references are not reused. Retained records identify the focus that admitted their events or produced their handover. A turn's `current.focus_id` identifies the focus performing this inference. Inherited records keep their original focus references, which can differ from the focus now reading them.
 
-Tools that create focuses, commands, attention arrangements, or feeds take a short `name`. The runtime appends a number to produce a complete reference such as `practice-2`. Names may repeat. Complete references establish identity. Callback references connect an arrangement with its pending state and arriving observation. Command references identify executions and remain control handles only within their originating runtime.
+Tools that create focuses, commands, attention arrangements, subscriptions, or feeds take a short `name`. It contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime adds a numeric suffix to distinguish repeated names. Use the complete reference returned by the tool. Focus and feed channels use [complete channel addresses](communication.md#sending-a-message), such as `ivenna:/focus/practice-2`. Callback references connect an arrangement with its pending state and arriving observation. Command references identify executions and remain control handles only within their originating runtime.
 
 ## Retained records
 
@@ -52,9 +52,9 @@ Correspondence enters the core as an `input` observation of who said what.
 | --- | --- | --- |
 | `from` | `Text[]` | Channel addresses of the correspondents this message came from |
 | `text` | `Text` | Complete message text |
-| `observed_at` | `Time` | Runtime observation time |
+| `observed_at` | `Time` | Time the runtime observed the message during intake |
 
-`from` records who sent the message. `current.channels.correspondents` lists the addresses available for sending. `observed_at` records intake time and is preserved in history. See [correspondents and IDs](communication.md#correspondents-and-ids).
+Use `from` for attribution and `current.channels.correspondents` when choosing a destination. See [correspondents and IDs](communication.md#correspondents-and-ids).
 
 #### Startup and restart
 
@@ -128,7 +128,7 @@ Each `subscription` event carries one listener report to the focus that subscrib
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `subscription_id` | `Text` | Complete reference returned by `subscribe`, shared by all reports for that subscription |
-| `observed_at` | `Time` | Time the local reporter received the submission |
+| `observed_at` | `Time` | Time the local `subscription publish` command received the report |
 | `source_time` | `Time`, when supplied | Time the listener attributes to the upstream event |
 | `text` | `Text` | Listener's account of what it observed |
 
@@ -197,11 +197,11 @@ Each inference ends its input with a turn:
 | --- | --- | --- |
 | `focuses` | `Text[]` | Complete addresses for all existing focuses, including the current one and sleeping focuses |
 | `correspondents` | `Text[]` | Complete addresses for the registered destinations available to `send` |
-| `feeds` | `Feed[]` or `null` | Open feeds in creation order, `[]` when none are open, or `null` when the catalog could not be read |
+| `feeds` | `Feed[]` or `null` | Open feeds in creation order, `[]` when none are open, or `null` when the store is temporarily busy |
 
 Each `Feed` has a complete `channel_id: Text` and the `description: Text` supplied when the feed was created.
 
-Both ordinary and compaction turns present sampled catalogs. A destination can change between the sample and a tool call. `send` resolves the destination when it runs. See [channel addresses](communication.md#sending-a-message).
+Both ordinary and compaction turns present sampled catalogs. A destination can change between the sample and a tool call. `send` checks the destination when it runs. See [channel addresses](communication.md#sending-a-message).
 
 An ordinary turn with no new events contains only `current` and continues from the preceding history.
 
@@ -235,7 +235,7 @@ events:
       text: Stable release v2.4.0 is available
 ```
 
-Each event carries the reference returned by the tool that arranged it. The release report gives the reporter's local receipt time. The listener supplied no source time, so the event omits `source_time`.
+Each event carries the reference returned by the tool that arranged it. The release report shows only the local receipt time because the listener omitted the source time.
 
 ## Handover generation and replacement
 

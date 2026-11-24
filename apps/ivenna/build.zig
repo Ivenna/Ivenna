@@ -6,8 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const options = .{ .target = target, .optimize = optimize };
     const agent = b.dependency("agent", options).module("agent");
-    const subscriptions = b.dependency("subscriptions", options).module("subscriptions");
-    const channels = b.dependency("channels", options).module("channels");
+    const state = b.dependency("instance_state", options).module("instance_state");
     const contracts = b.dependency("agent_contracts", options).module("agent_contracts");
     const email = b.dependency("email", options).module("email");
     const responses = b.dependency("responses", options).module("responses");
@@ -22,8 +21,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "agent", .module = agent },
-                .{ .name = "subscriptions", .module = subscriptions },
-                .{ .name = "channels", .module = channels },
+                .{ .name = "instance_state", .module = state },
                 .{ .name = "agent_contracts", .module = contracts },
                 .{ .name = "email", .module = email },
                 .{ .name = "responses", .module = responses },
@@ -35,10 +33,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(app);
 
-    const reporter = b.dependency("ivenna_report", options);
-    b.installArtifact(reporter.artifact("ivenna-report"));
     const run = b.addRunFile(.{ .relative = .{ .base = .install_bin, .sub_path = "ivenna" } });
     run.step.dependOn(b.getInstallStep());
     run.addPassthruArgs();
     b.step("run", "Run Ivenna").dependOn(&run.step);
+
+    const cli_tests = b.addModule("cli_tests", .{
+        .root_source_file = b.path("src/cli_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "instance_state", .module = state }},
+    });
+    const app_options = b.addOptions();
+    app_options.addOptionPath("executable", app.getEmittedBin());
+    cli_tests.addOptions("app_options", app_options);
+    const test_run = b.addRunArtifact(b.addTest(.{ .root_module = cli_tests }));
+    b.step("test", "Test the Ivenna command line").dependOn(&test_run.step);
 }

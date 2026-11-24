@@ -133,7 +133,7 @@ pub const SubscriptionReport = struct {
 pub const ChannelCatalog = struct {
     focuses: []const []const u8 = &.{},
     correspondents: []const []const u8 = &.{},
-    feeds: ?[]const @import("channels").Feed = null,
+    feeds: ?[]const @import("instance_state").feeds.Feed = null,
 };
 
 /// Identity, observation time, and live channel addresses accompanying one inference.

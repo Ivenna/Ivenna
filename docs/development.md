@@ -46,7 +46,7 @@ Decode external protocols in their owning components and supply typed contracts 
 
 Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
 
-Keep channel address syntax in the shared contract. The runtime routes by namespace and presents available addresses to the model. Each destination owner checks whether it can accept a message and reports the outcome it can confirm. See [channel delivery](architecture.md#channel-delivery).
+Keep [channel address syntax](../packages/agent_contracts/src/channel_address.zig) in the shared contract. The kernel presents available destinations to the model and routes sends by namespace. Each destination owner checks whether it can accept the message and reports the outcome it can confirm. See [channel delivery](architecture.md#channel-delivery).
 
 [Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Execution projects internal session and delivery state into this interface, exposing facts that help Ivenna choose its next action. Keep runtime state and exact references under program ownership through persistence and compaction. Supply complete references in operation results and observations, and return invalid selections as operation outcomes.
 
@@ -101,17 +101,17 @@ Storage failures must not silently replace history with an empty context. [Start
 
 ## Repository and build
 
-Use the Zig version in [`.zig-version`](../.zig-version). From the repository root, build the kernel (`ivenna`) and the subscription reporter (`ivenna-report`) together.
+Use the Zig version in [`.zig-version`](../.zig-version). Build the `ivenna` executable from the repository root.
 
 ```sh
 zig build
 ```
 
-The [root build](../build.zig) and the [kernel application build](../apps/ivenna/build.zig) both install the two executables in `zig-out/bin`. From either build directory, `zig build run -- --help` displays the kernel's usage before you configure the services. To build and test just the reporter, run `zig build` and `zig build test` from [apps/ivenna-report](../apps/ivenna-report).
+The [root build](../build.zig) and the [application build](../apps/ivenna/build.zig) both install `zig-out/bin/ivenna`. From either build directory, run `zig build run -- --help` to see the available commands before configuring services. The [local development guide](../dev/README.md#starting-the-kernel) covers service preparation and startup from source.
 
 Each application owns its entry point. The [memory app](../apps/memory) has a Nushell entry point and a Containerfile. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
 
-The kernel embeds its [model-facing resources](#model-facing-resources), and the reporter embeds its [command help](../apps/ivenna-report/src/help). Rebuild the corresponding executable after editing those files. For service preparation and running from source, see the [local development guide](../dev/README.md). For starting the installed kernel, see the [running guide](running.md#starting-the-kernel).
+The executable embeds its [model-facing resources](#model-facing-resources) and [command help](../apps/ivenna/src/help). Rebuild it after editing those files. The [running guide](running.md#starting-the-kernel) covers startup with the installed executable.
 
 ## Validation
 

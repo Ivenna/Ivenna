@@ -1,7 +1,7 @@
 .{
-    .name = .subscriptions,
+    .name = .instance_state,
     .version = "0.1.0",
-    .fingerprint = 0x4778a0119bedd7b,
+    .fingerprint = 0xaf0dc3939c91e68c,
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .agent_contracts = .{ .path = "../agent_contracts" },

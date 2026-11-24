@@ -4,8 +4,7 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
-        .subscriptions = .{ .path = "../subscriptions" },
-        .channels = .{ .path = "../channels" },
+        .instance_state = .{ .path = "../instance_state" },
         .agent_contracts = .{ .path = "../agent_contracts" },
         .content = .{ .path = "../content" },
         .yaml = .{

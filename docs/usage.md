@@ -14,7 +14,7 @@ Subject: French practice
 Please remember that I am learning French and propose a practice plan.
 ```
 
-Ivenna sees your correspondent channel address (`ivenna:/correspondent/operator` here), the subject, and the body. Your mailbox needs to be registered with the deployment to receive a reply. See [email addressing](communication.md#current-email-addressing).
+Ivenna sees your correspondent channel address (`ivenna:/correspondent/operator` here), the subject, and the body. Ivenna can address a reply to you once the deployment registers your mailbox. See [email addressing](communication.md#current-email-addressing).
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 
@@ -45,9 +45,9 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 ## Ongoing work and memory
 
-Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring a new version to its attention without another letter from you. See [how focuses coordinate and resume work](attention.md).
+Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring new versions to its attention. If Ivenna gives you a feed address for updates, keep it to [read those updates](communication.md#reading-feeds). See [how focuses coordinate and resume work](attention.md).
 
-Continued work uses retained understanding and [autonomous memory](memory.md). Ivenna chooses what to retain, revisit, and revise as its understanding develops. Include relevant context when following up, since Ivenna can condense its working history. Keep your own copy if you need the exact wording after [Ivenna's mail copies expire](running.md#communication-copies).
+Continued work uses retained understanding and [autonomous memory](memory.md). Ivenna chooses what to retain, revisit, and revise as its understanding develops. Include relevant context when following up, since Ivenna can condense its working history. To retrieve an earlier letter or quote its exact wording, keep your own mail copies. Ivenna's copies follow the [deployment's retention policy](running.md#communication-copies).
 
 ## After interruption
 

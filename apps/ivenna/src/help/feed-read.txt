@@ -1,0 +1,17 @@
+ivenna feed read CHANNEL_ID [--after SEQUENCE] [--limit N]
+
+Read a feed by the complete channel ID Ivenna provided. The command writes
+one JSON line to stdout, with messages in ascending sequence order.
+
+Pass the last processed sequence to --after to read messages with greater
+sequences. Start at 0 by default. --limit defaults to 100 and accepts 1
+through 1000.
+
+Every page has channel_id, description, closed, messages, next_after, and
+has_more. Each message has sequence, focus_id, text, and published_at_unix_ms.
+Save next_after after processing the whole page. An empty page keeps the
+supplied position. Read the next page when has_more is true. Once you process
+a page with closed=true and has_more=false, you have caught up. An open feed
+can receive new messages after the read.
+
+An unknown feed returns "unknown_channel" with exit status 1.

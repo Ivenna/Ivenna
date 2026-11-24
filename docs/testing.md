@@ -20,7 +20,7 @@ zig build
 zig build test
 ```
 
-The [root build](../build.zig) runs the registered Zig library and application tests. Library roots include internal test files through `test` blocks in `src/root.zig`. Adding a package to the test step requires a root build entry and a [dependency manifest](../build.zig.zon) entry.
+The [root build](../build.zig) runs the registered Zig library and application tests. Run `zig build test` from [apps/ivenna](../apps/ivenna) to run only the CLI process tests. Library roots include internal test files through `test` blocks in `src/root.zig`. Adding a package to the test step requires a root build entry and a [dependency manifest](../build.zig.zon) entry.
 
 For the [memory protocol tests](../apps/memory/tests.nu), install Nushell at the version used in the memory [Containerfile](../apps/memory/Containerfile). These tests also use the standard `ln` command:
 
@@ -42,19 +42,21 @@ The [web reader tests](../packages/resources/src/web_test.zig) check that two fo
 
 The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The [kernel tests](../packages/agent/src/kernel.zig) also check that a complete tool exchange can reach the next request across a handover and that an observation stays pending when it cannot fit. The session registry tests inject a save failure after receiving a checkpoint to check that activity completion publishes once and a later maintenance pass republishes the same selection when confirmation was lost.
 
-The CLI tests invoke both executables in an empty environment to verify that help works before configuration. For a mistyped reporter command, they check the JSON receipt on stdout and the diagnostic on stderr.
+The [CLI process tests](../apps/ivenna/src/cli_test.zig) invoke `ivenna` in an empty environment to verify that help works before configuration. For a mistyped command, they check the JSON result on stdout and the diagnostic on stderr.
 
 ### Channel delivery
 
-The kernel test checks the catalog presented to the model and sends messages from both roles when a focus and a feed share a local ID. The registry tests check that focus addresses track session lifetimes in ordinary and compaction snapshots. The input tests check that correspondence exposes channel addresses while preserving stored correspondent IDs. See the [kernel](../packages/agent/src/kernel.zig), [sessions](../packages/agent/src/sessions.zig), and [input](../packages/agent/src/input.zig) tests.
+The [kernel test](../packages/agent/src/kernel.zig) checks the model's catalog and routes sends from both roles when a focus and a feed share a local ID. The [session registry test](../packages/agent/src/sessions.zig) follows a focus address through registration, compaction, and completion. The [input tests](../packages/agent/src/input.zig) check that incoming observations expose channel addresses while retained records preserve correspondent IDs.
 
-The email tests check that a registered ID yields a draft with exactly its configured address and that an unregistered ID yields no draft request. The feed tests check that independent readers can see committed messages after restart and that a concurrent close preserves the reported outcome of publication. See the [email transport](../packages/email/src/email_transport.zig) and [feed store](../packages/channels/src/root.zig) tests.
+The [email tests](../packages/email/src/email_transport.zig) check the exact recipient on a draft for a registered ID and the absence of a draft request for an unregistered ID. The [feed store tests](../packages/instance_state/src/feeds.zig) check persistence across reopen and the outcome of publication racing with closure. The [feed reader test](../packages/instance_state/src/feed_reader.zig) follows a feed across gaps in message sequences and drains it after closure.
+
+The [feed CLI test](../apps/ivenna/src/cli_test.zig) reads one of two same-named feeds by complete address with the kernel stopped. It checks pagination arguments, preservation of the complete message text in JSON, and distinct results for a closed feed, an unknown feed, and a malformed address.
 
 ### Subscription delivery
 
-- **Listener process.** Each request runs the reporter in a separate process against a temporary on-disk catalog. The tests check receipts and exit status for publication, same-key retries, cursor changes, invalid fields, and publication after withdrawal. See the [reporter process tests](../apps/ivenna-report/src/report_test.zig).
-- **Subscription store.** Two SQLite connections exercise publication and withdrawal. The tests check that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. See the [store tests](../packages/subscriptions/src/root.zig).
-- **Focus history.** The kernel tests cover ordered admission across pages, later arrivals, tight request limits, interrupted admission, and withdrawal of a sleeping activity's last subscription. To exercise recovery, they inject a failure before checkpoint commit or a lost confirmation after commit. In each case they rebuild the kernel against the same test history store and in-memory SQLite catalog and check that the receiving history contains the report exactly once. See the [kernel tests](../packages/agent/src/kernel.zig).
+- **Listener process.** Each request runs `ivenna subscription` against a temporary instance database. The tests check receipts and exit status for publication, same-key retries, cursor changes, invalid fields, and publication after withdrawal. See the [CLI process tests](../apps/ivenna/src/cli_test.zig).
+- **Subscription store.** Two SQLite connections exercise publication and withdrawal. The tests check that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. See the [store tests](../packages/instance_state/src/subscriptions.zig).
+- **Focus history.** The kernel tests cover ordered admission across pages, later arrivals, tight request limits, interrupted admission, and withdrawal of a sleeping activity's last subscription. The recovery test rebuilds the kernel against the same test history store and in-memory instance database after a failure before checkpoint commit or a lost confirmation after commit. In both cases the receiving history must contain the report exactly once. See the [kernel tests](../packages/agent/src/kernel.zig).
 
 ## Validating with running services
 

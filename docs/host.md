@@ -40,7 +40,7 @@ Each command starts a fresh shell. The `cwd` and `shell` arguments accept litera
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 
-Host commands inherit the absolute path to `ivenna-report` in `IVENNA_REPORT` and the instance's data directory in `DATA_DIR`. Run `"$IVENNA_REPORT" --help` in the host shell for reporting commands and examples. See the [listener protocol](subscriptions.md).
+Host commands inherit `IVENNA` and `DATA_DIR` as absolute paths to the executable and the instance's data directory. Use `"$IVENNA" feed read --help` for [reading a feed](communication.md#reading-feeds) and `"$IVENNA" subscription --help` for [reporting observations](subscriptions.md).
 
 ## Input modes
 

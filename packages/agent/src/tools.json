@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send a text message to one channel. Success means a focus message was queued, a correspondence message was accepted for delivery, or a feed message was stored.",
+    "description": "Send text to a correspondent, focus, or feed. A successful send queues a focus message, confirms acceptance of correspondence for delivery, or stores a feed message for readers. A focus message can wake its recipient.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -21,7 +21,7 @@
   },
   {
     "name": "create_channel",
-    "description": "Create a feed whose readers can catch up on messages in order. All focuses can use the feed, and it survives restart.",
+    "description": "Create a feed that any focus can publish to. Readers can catch up in order, including after restart. Give the complete channel_id to a program you set up to read it. An activity can run \"$IVENNA\" feed read --help.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -107,7 +107,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Create a subscription whose reports can wake this focus. Give the new subscription_id to a listener you set up separately. An activity can run \"$IVENNA_REPORT\" --help for reporting commands and examples.",
+    "description": "Register a subscription whose reports can wake this focus. Give the complete subscription_id to a listener you set up to report observations. An activity can run \"$IVENNA\" subscription --help.",
     "parameters": {
       "type": "object",
       "properties": {

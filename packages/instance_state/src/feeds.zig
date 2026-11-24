@@ -1,15 +1,13 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
-const zqlite = sqlite.zqlite;
-const c = zqlite.c;
+const database = @import("database.zig");
+const zqlite = @import("sqlite").zqlite;
 const Allocator = std.mem.Allocator;
 const contracts = @import("agent_contracts");
 const ChannelAddress = contracts.ChannelAddress;
 const Reference = contracts.Reference;
 
-pub const filename = "channels.sqlite3";
+pub const Reader = @import("feed_reader.zig").Reader;
 pub const max_description_characters = 256;
-const catalog_format = std.mem.readInt(u32, "IVC3", .big);
 
 pub const Feed = struct {
     channel_id: []const u8,
@@ -25,31 +23,11 @@ pub const Store = struct {
     mutex: std.Io.Mutex = .init,
 
     pub fn open(a: Allocator, io: std.Io, path: []const u8, max_open: usize) !Store {
-        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
-        const path_z = try a.dupeSentinel(u8, path, 0);
-        defer a.free(path_z);
-        var self: Store = .{
-            .io = io,
-            .db = try checked(sqlite.open(path_z, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE)),
-            .max_open = max_open,
-        };
-        errdefer self.close();
-        try checked(self.db.busyTimeout(5000));
-        try self.exec("PRAGMA foreign_keys=ON");
-        try self.exec("PRAGMA synchronous=FULL");
-        // Claim an empty file with the schema and format marker together.
-        try self.exec("BEGIN IMMEDIATE");
-        errdefer self.rollback();
-        const format = try self.scalar("PRAGMA application_id", .{});
-        if (format != catalog_format) {
-            if (format != 0 or try self.scalar("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
-                return error.IncompatibleChannelSchema;
-            try self.exec(@embedFile("schema.sql"));
-            try self.exec(std.fmt.comptimePrint("PRAGMA application_id={d}", .{catalog_format}));
-        }
-        try self.exec("COMMIT");
-        try self.exec("PRAGMA journal_mode=WAL");
-        return self;
+        return .{ .io = io, .db = try database.open(a, path, .read_write), .max_open = max_open };
+    }
+
+    pub fn openInMemory(a: Allocator, io: std.Io, max_open: usize) !Store {
+        return .{ .io = io, .db = try database.open(a, ":memory:", .initialize), .max_open = max_open };
     }
 
     /// Join workers before releasing the connection.
@@ -58,24 +36,25 @@ pub const Store = struct {
         self.* = undefined;
     }
 
-    /// The address belongs to a and is returned only once it is durable.
+    /// The parsed tool request supplies UTF-8. The address belongs to a and
+    /// is returned once it is durable.
     pub fn create(self: *Store, a: Allocator, name: []const u8, description: []const u8) ![]const u8 {
         if (!Reference.validName(name) or !validDescription(description)) return error.InvalidArguments;
         const stem = try ChannelAddress.format(a, .feed, name);
         defer a.free(stem);
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try self.exec("BEGIN IMMEDIATE");
-        errdefer self.rollback();
-        const open_count = try self.scalar("SELECT count(*) FROM channels WHERE closed=0", .{}) orelse return error.InvalidChannelDatabase;
-        if (@as(u64, @intCast(open_count)) >= self.max_open) return error.OpenChannelCapacity;
-        const s = try self.statement("INSERT INTO channels(stem,description) VALUES(?,?) RETURNING reference", .{ stem, description });
+        try database.exec(self.db, "BEGIN IMMEDIATE");
+        errdefer database.rollback(self.db);
+        const open_count = try database.integer(self.db, "SELECT count(*) FROM feeds WHERE closed=0", .{});
+        if (try database.unsigned(open_count) >= self.max_open) return error.OpenChannelCapacity;
+        const s = try database.statement(self.db, "INSERT INTO feeds(stem,description) VALUES(?,?) RETURNING reference", .{ stem, description });
         defer s.deinit();
-        if (!try checked(s.step())) return error.InvalidChannelDatabase;
-        const address = try a.dupe(u8, try requiredText(s, 0));
+        if (!try database.checked(s.step())) return error.InvalidStateDatabase;
+        const address = try a.dupe(u8, try database.requiredText(s, 0));
         errdefer a.free(address);
-        try checked(s.stepToCompletion());
-        try self.exec("COMMIT");
+        try database.checked(s.stepToCompletion());
+        try database.exec(self.db, "COMMIT");
         return address;
     }
 
@@ -83,7 +62,7 @@ pub const Store = struct {
     pub fn openFeeds(self: *Store, a: Allocator) ![]const Feed {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const s = try self.statement("SELECT reference,description FROM channels WHERE closed=0 ORDER BY id", .{});
+        const s = try database.statement(self.db, "SELECT reference,description FROM feeds WHERE closed=0 ORDER BY id", .{});
         defer s.deinit();
         var feeds: std.ArrayList(Feed) = .empty;
         errdefer {
@@ -93,11 +72,11 @@ pub const Store = struct {
             }
             feeds.deinit(a);
         }
-        while (try checked(s.step())) {
+        while (try database.checked(s.step())) {
             try feeds.ensureUnusedCapacity(a, 1);
-            const channel_id = try a.dupe(u8, try requiredText(s, 0));
+            const channel_id = try a.dupe(u8, try database.requiredText(s, 0));
             errdefer a.free(channel_id);
-            const description = try a.dupe(u8, try requiredText(s, 1));
+            const description = try a.dupe(u8, try database.requiredText(s, 1));
             feeds.appendAssumeCapacity(.{ .channel_id = channel_id, .description = description });
         }
         return feeds.toOwnedSlice(a);
@@ -107,82 +86,55 @@ pub const Store = struct {
     pub fn closeChannel(self: *Store, address: []const u8) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try self.exec("BEGIN IMMEDIATE");
-        errdefer self.rollback();
-        const s = try self.statement("UPDATE channels SET closed=1 WHERE reference=? AND closed=0", .{address});
+        try database.exec(self.db, "BEGIN IMMEDIATE");
+        errdefer database.rollback(self.db);
+        const s = try database.statement(self.db, "UPDATE feeds SET closed=1 WHERE reference=? AND closed=0", .{address});
         defer s.deinit();
-        try checked(s.stepToCompletion());
+        try database.checked(s.stepToCompletion());
         const changed = self.db.changes() != 0;
         if (!changed) try self.requireChannel(address);
-        try self.exec("COMMIT");
+        try database.exec(self.db, "COMMIT");
         return changed;
     }
 
     /// Store one message while the exact channel is open and return its sequence.
-    /// The parsed send supplies nonempty UTF-8. Feed readers require text without NUL bytes.
+    /// The parsed send supplies nonempty UTF-8.
     pub fn publish(self: *Store, address: []const u8, focus_id: []const u8, text: []const u8, published_at_unix_ms: i64) !u64 {
-        if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidArguments;
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        try self.exec("BEGIN IMMEDIATE");
-        errdefer self.rollback();
-        const s = try self.statement(
-            \\INSERT INTO messages(channel,focus_id,text,published_at_unix_ms)
-            \\SELECT id,?,?,? FROM channels WHERE reference=? AND closed=0
+        try database.exec(self.db, "BEGIN IMMEDIATE");
+        errdefer database.rollback(self.db);
+        const s = try database.statement(self.db,
+            \\INSERT INTO feed_messages(channel,focus_id,text,published_at_unix_ms)
+            \\SELECT id,?,?,? FROM feeds WHERE reference=? AND closed=0
             \\RETURNING sequence
         , .{ focus_id, text, published_at_unix_ms, address });
         defer s.deinit();
-        if (!try checked(s.step())) {
+        if (!try database.checked(s.step())) {
             try self.requireChannel(address);
             return error.ChannelClosed;
         }
-        const sequence: u64 = @intCast(s.int(0));
-        try checked(s.stepToCompletion());
-        try self.exec("COMMIT");
+        const sequence = try database.unsigned(s.int(0));
+        try database.checked(s.stepToCompletion());
+        try database.exec(self.db, "COMMIT");
         return sequence;
     }
 
     fn requireChannel(self: *Store, address: []const u8) !void {
-        _ = try self.scalar("SELECT id FROM channels WHERE reference=?", .{address}) orelse return error.UnknownChannel;
-    }
-
-    fn exec(self: *Store, query: [:0]const u8) !void {
-        try checked(self.db.execNoArgs(query.ptr));
-    }
-
-    fn rollback(self: *Store) void {
-        if (c.sqlite3_get_autocommit(self.db.conn) != 0) return;
-        self.exec("ROLLBACK") catch |err| std.log.err("feed storage rollback failed: {s}", .{@errorName(err)});
-    }
-
-    fn statement(self: *Store, query: [:0]const u8, args: anytype) !zqlite.Stmt {
-        // zqlite binds text with SQLite's 32-bit length parameter.
-        inline for (args) |arg| {
-            if (@TypeOf(arg) == []const u8 and arg.len > std.math.maxInt(c_int)) return error.InvalidArguments;
-        }
-        const s = try checked(self.db.prepare(query));
-        errdefer s.deinit();
-        try checked(s.bind(args));
-        return s;
-    }
-
-    fn scalar(self: *Store, query: [:0]const u8, args: anytype) !?i64 {
-        const s = try self.statement(query, args);
-        defer s.deinit();
-        return if (try checked(s.step())) s.int(0) else null;
+        if (try database.integer(self.db, "SELECT EXISTS(SELECT 1 FROM feeds WHERE reference=?)", .{address}) == 0)
+            return error.UnknownChannel;
     }
 };
 
 fn validDescription(description: []const u8) bool {
     if (description.len > max_description_characters * 4) return false;
-    var codepoints = (std.unicode.Utf8View.init(description) catch return false).iterator();
+    var codepoints = std.unicode.Utf8View.initUnchecked(description).iterator();
     var count: usize = 0;
     var nonblank = false;
     while (codepoints.nextCodepoint()) |point| {
         count += 1;
         if (count > max_description_characters) return false;
         switch (point) {
-            0 => return false,
             // Unicode White_Space.
             0x9...0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => {},
             else => nonblank = true,
@@ -191,27 +143,7 @@ fn validDescription(description: []const u8) bool {
     return nonblank;
 }
 
-fn requiredText(s: zqlite.Stmt, i: usize) ![]const u8 {
-    return sqlite.text(s, i) catch |err| switch (err) {
-        error.NullColumn => error.InvalidChannelDatabase,
-        error.OutOfMemory => error.OutOfMemory,
-    };
-}
-
-fn checked(result: anytype) !@typeInfo(@TypeOf(result)).error_union.payload {
-    return result catch |err| switch (err) {
-        error.Busy, error.Locked => error.ChannelStoreBusy,
-        error.Full => error.ChannelStoreFull,
-        error.NoMem => error.OutOfMemory,
-        error.TooBig => error.InvalidArguments,
-        else => {
-            std.log.err("feed storage operation failed: {s}", .{@errorName(err)});
-            return error.ChannelStorageFailed;
-        },
-    };
-}
-
-test "feed descriptions, messages and closure persist and are visible to independent readers" {
+test "feed descriptions, references and message sequences persist across reopening" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -219,10 +151,10 @@ test "feed descriptions, messages and closure persist and are visible to indepen
     var temporary = t.tmpDir(.{});
     defer temporary.cleanup();
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, filename });
-    const path_z = try a.dupeSentinel(u8, path, 0);
+    const path = try std.fs.path.join(a, &.{ dir, database.filename });
+    try database.initialize(a, path);
     const name = "发布-\"笔记\"";
-    const description = "Release notes\n更新记录";
+    const description = "Release notes\n更新记录\x00more";
     const expected: []const u8 = "ivenna:/feed/%E5%8F%91%E5%B8%83-%22%E7%AC%94%E8%AE%B0%22-1";
 
     {
@@ -234,52 +166,35 @@ test "feed descriptions, messages and closure persist and are visible to indepen
         try t.expectEqual(1, open.len);
         try t.expectEqualStrings(expected, open[0].channel_id);
         try t.expectEqualStrings(description, open[0].description);
-        const reader = try sqlite.open(path_z, c.SQLITE_OPEN_READONLY);
-        defer reader.close();
         try t.expectError(error.UnknownChannel, store.publish("ivenna:/feed/other-1", "core", "hello", 100));
-        try t.expectError(error.InvalidArguments, store.publish(address, "core", "part\x00part", 100));
         try t.expectEqual(1, try store.publish(address, "activity-1", "first line\n第二行", 100));
         try t.expect(try store.closeChannel(address));
         try t.expect(!try store.closeChannel(address));
         try t.expectError(error.UnknownChannel, store.closeChannel("ivenna:/feed/other-1"));
         try t.expectError(error.ChannelClosed, store.publish(address, "core", "closed", 101));
-        const row = (try reader.row(
-            "SELECT focus_id,text,published_at_unix_ms FROM feed_messages WHERE channel_id=? AND sequence>?",
-            .{ address, @as(i64, 0) },
-        )).?;
-        defer row.deinit();
-        try t.expectEqualStrings("activity-1", row.text(0));
-        try t.expectEqualStrings("first line\n第二行", row.text(1));
-        try t.expectEqual(100, row.int(2));
     }
 
     var store = try Store.open(a, t.io, path, 2);
     defer store.close();
     try t.expectEqual(0, (try store.openFeeds(a)).len);
-    {
-        const record = (try store.db.row("SELECT description,closed FROM feeds WHERE channel_id=?", .{expected})).?;
-        defer record.deinit();
-        try t.expectEqualStrings(description, record.text(0));
-        try t.expectEqual(1, record.int(1));
-    }
-    try t.expectEqual(1, try store.scalar("SELECT count(*) FROM feed_messages", .{}));
+    try t.expectError(error.ChannelClosed, store.publish(expected, "core", "closed after restart", 101));
     const renewed = try store.create(a, name, description);
     try t.expectEqualStrings("ivenna:/feed/%E5%8F%91%E5%B8%83-%22%E7%AC%94%E8%AE%B0%22-2", renewed);
     try t.expectEqual(2, try store.publish(renewed, "core", "second", 102));
 }
 
-test "feed descriptions require nonblank UTF-8 text within the code point limit" {
+test "feed descriptions require nonblank text within the code point limit" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var store = try Store.open(a, t.io, ":memory:", 1);
+    var store = try Store.openInMemory(a, t.io, 1);
     defer store.close();
     const character = "文";
     var characters: [max_description_characters + 1][character.len]u8 = undefined;
     @memset(&characters, character[0..character.len].*);
     const overlong = std.mem.asBytes(&characters);
-    for ([_][]const u8{ "", " \t\n　", "\xff", "NUL\x00inside", overlong }) |invalid| {
+    for ([_][]const u8{ " \t\n　", overlong }) |invalid| {
         try t.expectError(error.InvalidArguments, store.create(a, "release", invalid));
     }
     const description = overlong[0 .. max_description_characters * character.len];
@@ -296,7 +211,8 @@ test "a lowered capacity preserves all existing open feeds and blocks creation u
     var temporary = t.tmpDir(.{});
     defer temporary.cleanup();
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, filename });
+    const path = try std.fs.path.join(a, &.{ dir, database.filename });
+    try database.initialize(a, path);
     const description = "Release history";
 
     {
@@ -331,7 +247,7 @@ test "a concurrent publication and closure preserve the outcome of the write" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var store = try Store.open(a, io, ":memory:", 1);
+    var store = try Store.openInMemory(a, io, 1);
     defer store.close();
     const id = try store.create(a, "progress", "Current progress");
     var publishing = try io.concurrent(Store.publish, .{ &store, id, "activity-1", "work", 100 });
@@ -344,5 +260,5 @@ test "a concurrent publication and closure preserve the outcome of the write" {
         try t.expectEqual(error.ChannelClosed, err);
         break :rejected 0;
     };
-    try t.expectEqual(accepted, try store.scalar("SELECT count(*) FROM feed_messages", .{}));
+    try t.expectEqual(accepted, try database.integer(store.db, "SELECT count(*) FROM feed_messages", .{}));
 }

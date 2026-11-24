@@ -12,7 +12,7 @@ These [attention tools](../packages/agent/src/tools.json) let each focus decide 
 | Receive [recurring observations](#subscriptions) in this focus | `subscribe` | Core and activities |
 | Stop accepting reports for a subscription | `withdraw_subscription` | Core and activities |
 
-Names may repeat. Use the complete channel address to reach a focus and the complete subscription ID to withdraw a subscription. The core's focus ID is `core-1`. Names must contain 1–32 Unicode code points and exclude ASCII control characters. Spaces alone are invalid.
+Use the complete channel address to reach a focus and the complete subscription ID to withdraw a subscription. The core's focus ID is `core-1`. See [names and references](input.md#records-and-turns) for the name format.
 
 ## Opening a focus
 
@@ -42,7 +42,7 @@ A successful call saves the message in the recipient's queue and returns its cha
 {"result":{"channel_id":"ivenna:/focus/practice-2"}}
 ```
 
-The observation identifies the sending focus as its source. When relaying someone else's words, include their attribution in the text. The message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds, so a long tool call can delay delivery. See [focus message fields](input.md#focus-messages-and-callbacks).
+The observation identifies the sending focus as its source. When relaying someone else's words, include their attribution in the text. The message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds, so a long tool call can delay delivery. Focus messages count toward the recipient's [event queue limit](running.md#session-and-command-capacity). See [focus message fields](input.md#focus-messages-and-callbacks).
 
 ## Returning later
 
@@ -83,7 +83,7 @@ Each call creates a subscription and returns its complete reference, even if thi
 {"result":{"subscription_id":"releases-1"}}
 ```
 
-Set up the listener separately and give it the returned `subscription_id`. If an activity runs the listener for `releases-1` on the host, its reports still go to the core. A replacement listener can use the same ID to resume from the saved feed position. See the [listener protocol](subscriptions.md).
+Give the returned `subscription_id` to the listener you set up. If an activity runs the listener for `releases-1` on the host, the subscription still directs its reports to the core. See the [listener protocol](subscriptions.md) for reporting and resuming from a saved position.
 
 An accepted report makes a sleeping focus ready. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. See [subscription observations](input.md#subscription-observations).
 
@@ -103,7 +103,7 @@ These actions return a JSON text part containing either `result` or an operation
 | `unknown_channel` | The addressed focus is unknown or has ended |
 | `focus_queue_full` | The recipient cannot currently accept another event |
 
-Focus messages use the recipient's ordinary event allowance. See [capacity limits](running.md#configuration) and [runtime availability](design.md#runtime-availability).
+See [runtime availability](design.md#runtime-availability) for failures that interrupt reasoning or stop the kernel.
 
 ## Activity expressions
 

@@ -8,7 +8,9 @@ const Input = @import("input.zig");
 const AgentTools = @import("tools.zig");
 const Sessions = @import("sessions.zig");
 const contracts = @import("agent_contracts");
-const Channels = @import("channels");
+const InstanceState = @import("instance_state");
+const Feeds = InstanceState.feeds;
+const Subscriptions = InstanceState.subscriptions;
 const ChannelAddress = contracts.ChannelAddress;
 const Communication = contracts.Communication;
 const Model = contracts.Model;
@@ -23,7 +25,7 @@ pub const Kernel = struct {
     engine: *Engine,
     inbox: contracts.Inbox,
     sender: Communication.Sender,
-    channels: *Channels.Store,
+    channels: *Feeds.Store,
     callbacks: contracts.Callback.Publisher,
     limits: Limits,
     poll_interval_ms: u32,
@@ -39,10 +41,10 @@ pub const Kernel = struct {
         engine: *Engine,
         inbox: contracts.Inbox,
         sender: Communication.Sender,
-        channels: *Channels.Store,
+        channels: *Feeds.Store,
         callbacks: contracts.Callback.Publisher,
         history: contracts.HistoryStore,
-        subscriptions: *@import("subscriptions").Store,
+        subscriptions: *Subscriptions.Store,
     };
 
     pub const Config = struct {
@@ -201,7 +203,7 @@ pub const Kernel = struct {
                 },
                 .close_channel => |args| blk: {
                     if (try parseChannel(a, args.channel_id) != .feed)
-                        break :blk try runtimeError(a, "channel_managed", "Choose a feed address to close a channel.");
+                        break :blk try runtimeError(a, "channel_managed", "Choose the complete address of a feed.");
                     const changed = self.kernel.channels.closeChannel(args.channel_id) catch |err| return channelFailure(a, err);
                     break :blk try runtimeResult(a, .{ .channel_id = args.channel_id, .changed = changed });
                 },
@@ -356,7 +358,7 @@ pub const Kernel = struct {
             address.* = try ChannelAddress.format(a, .correspondent, id);
         catalog.correspondents = correspondents;
         catalog.feeds = self.channels.openFeeds(a) catch |err| switch (err) {
-            error.ChannelStoreBusy, error.ChannelStoreFull, error.ChannelStorageFailed, error.InvalidChannelDatabase => null,
+            error.StateStoreBusy => null,
             else => return err,
         };
     }
@@ -525,9 +527,9 @@ fn channelFailure(a: Allocator, err: anyerror) !Content {
         error.ChannelClosed => runtimeError(a, "channel_closed", "This feed is closed to new messages."),
         error.OpenChannelCapacity => runtimeError(a, "channel_capacity", "The limit for open feeds has been reached."),
         error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The receiving focus's queue is full."),
-        error.ChannelStoreBusy => runtimeError(a, "channel_storage_busy", "Feed storage is busy."),
-        error.ChannelStoreFull => runtimeError(a, "channel_storage_full", "Feed storage is full."),
-        error.ChannelStorageFailed, error.InvalidChannelDatabase => runtimeError(a, "channel_storage_failed", "Feed storage could not confirm the operation. Inspect its state before repeating a write."),
+        error.StateStoreBusy => runtimeError(a, "channel_storage_busy", "Feed storage is busy."),
+        error.StateStoreFull => runtimeError(a, "channel_storage_full", "Feed storage is full."),
+        error.StateStorageFailed, error.InvalidStateDatabase => runtimeError(a, "channel_storage_failed", "Feed storage could not confirm the operation. Check for the intended change before retrying."),
         else => err,
     };
 }
@@ -538,15 +540,15 @@ const SubscriptionFixture = struct {
     const testing = std.testing;
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
     storage: TestStore = .{},
-    channel_store: ?Channels.Store = null,
+    channel_store: ?Feeds.Store = null,
 
     fn deinit(self: *SubscriptionFixture) void {
         if (self.channel_store) |*store| store.close();
         self.storage.arena.deinit();
     }
 
-    fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *@import("subscriptions").Store) !Kernel {
-        if (self.channel_store == null) self.channel_store = try Channels.Store.open(testing.allocator, testing.io, ":memory:", 128);
+    fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *Subscriptions.Store) !Kernel {
+        if (self.channel_store == null) self.channel_store = try Feeds.Store.openInMemory(testing.allocator, testing.io, 128);
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
@@ -609,7 +611,7 @@ test "a focus and a feed with the same local ID are separate channels" {
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -676,7 +678,7 @@ test "an activity can use the reference returned by subscribe to withdraw anothe
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -702,16 +704,16 @@ test "an activity can use the reference returned by subscribe to withdraw anothe
 
 test "startup requires the subscription catalog and working history to belong together" {
     const testing = std.testing;
-    const Store = @import("subscriptions").Store;
+    const Store = Subscriptions.Store;
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
-    var catalog = try Store.open(testing.allocator, ":memory:");
+    var catalog = try Store.openInMemory(testing.allocator);
     defer catalog.close();
     var engine: Engine = undefined;
     var initial = try fixture.kernel(&engine, &catalog);
     initial.deinit();
 
-    var other = try Store.open(testing.allocator, ":memory:");
+    var other = try Store.openInMemory(testing.allocator);
     defer other.close();
     try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &other));
     fixture.storage.checkpoint = null;
@@ -720,12 +722,11 @@ test "startup requires the subscription catalog and working history to belong to
 
 test "subscription admission and database acknowledgement survive either outcome of an unconfirmed checkpoint" {
     const testing = std.testing;
-    const Subs = @import("subscriptions");
     for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
         var fixture: SubscriptionFixture = .{};
         defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
-        var store = try Subs.Store.open(a, ":memory:");
+        var store = try Subscriptions.Store.openInMemory(a);
         defer store.close();
         var engine: Engine = undefined;
         {
@@ -768,7 +769,7 @@ test "dispatch retires a withdrawn activity once its accepted reports have been 
         var fixture: SubscriptionFixture = .{};
         defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
-        var store = try @import("subscriptions").Store.open(a, ":memory:");
+        var store = try Subscriptions.Store.openInMemory(a);
         defer store.close();
         var engine: Engine = undefined;
         var kernel = try fixture.kernel(&engine, &store);
@@ -813,7 +814,7 @@ test "an activity admits its sampled backlog in one input and receives a later r
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -855,7 +856,7 @@ test "a subscription backlog leaves another focus schedulable and each source ge
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -916,7 +917,7 @@ test "a rejected inference resumes for remaining reports while failed admission 
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
@@ -937,7 +938,7 @@ test "a rejected inference resumes for remaining reports while failed admission 
     kernel.sessions.endWorker(first.session);
     const second = try SubscriptionFixture.takeWork(&kernel, a);
     try testing.expectEqual(1, second.activation.deliveries.items.len);
-    const third = @import("subscriptions").NewReport{ .key = "third", .text = "budget-marker" };
+    const third = Subscriptions.NewReport{ .key = "third", .text = "budget-marker" };
     _ = try store.publish(subscription.subscription_id, third, 110);
     try kernel.sessions.interrupt(second, "The remaining observation could not be admitted.");
     kernel.sessions.endWorker(second.session);
@@ -1029,7 +1030,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         var fixture: SubscriptionFixture = .{};
         defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
-        var store = try @import("subscriptions").Store.open(a, ":memory:");
+        var store = try Subscriptions.Store.openInMemory(a);
         defer store.close();
         var engine: Engine = undefined;
         var kernel = try fixture.kernel(&engine, &store);
@@ -1086,7 +1087,7 @@ test "a pending document can accompany completed exchanges across a handover" {
     var fixture: SubscriptionFixture = .{};
     defer fixture.deinit();
     const a = fixture.storage.arena.allocator();
-    var store = try @import("subscriptions").Store.open(a, ":memory:");
+    var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);

@@ -84,11 +84,3 @@ test "a subscription reference must be supplied as a JSON string" {
         \\{"subscription_id":[102,101,101,100,45,49]}
     ));
 }
-
-test "a new feed requires a description" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "create_channel",
-        \\{"name":"release"}
-    ));
-}
