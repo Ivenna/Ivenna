@@ -197,7 +197,7 @@ pub const Kernel = struct {
             return switch (request) {
                 .send => |message| self.send(a, message.to, message.text),
                 .create_feed => |args| blk: {
-                    const id = self.kernel.feeds.create(a, args.name, args.description) catch |err| return feedFailure(a, err);
+                    const id = self.kernel.feeds.create(a, self.work.session.focus_id, args.name, args.description) catch |err| return feedFailure(a, err);
                     break :blk try runtimeResult(a, .{ .feed_id = id });
                 },
                 .close_feed => |args| blk: {
@@ -235,7 +235,7 @@ pub const Kernel = struct {
             return switch (to) {
                 .correspondent_id => |id| switch (try self.kernel.sender.send(a, .{ .recipient = id, .text = text })) {
                     .submitted => |submission| try runtimeResult(a, .{ .correspondent_id = id, .reference = submission.reference }),
-                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "Choose a registered ID from current.correspondents."),
+                    .invalid_recipient => try runtimeError(a, "invalid_recipient", "That correspondent is not registered to receive messages."),
                     .not_submitted => try runtimeError(a, "not_submitted", "Sending stopped before the submission attempt."),
                     .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
                 },
@@ -246,7 +246,7 @@ pub const Kernel = struct {
                 },
                 .focus_id => |id| blk: {
                     self.kernel.sessions.sendFocusMessage(self.work, id, text) catch |err| return switch (err) {
-                        error.UnknownSession => runtimeError(a, "unknown_focus", "That focus is unavailable. Choose an ID from current.focuses."),
+                        error.UnknownSession => runtimeError(a, "unknown_focus", "That focus is unavailable."),
                         error.SessionQueueFull => runtimeError(a, "focus_queue_full", "The receiving focus's queue is full."),
                         else => err,
                     };
@@ -353,9 +353,7 @@ pub const Kernel = struct {
     /// Fit continuation and admission against the same snapshot. A rejected
     /// handover changes neither the selected history nor any inbox receipt.
     fn prepareRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, soft_compaction: *bool) !FocusResult([]const Model.Item) {
-        var current = try self.sessions.current(a, work.session);
-        current.correspondents = self.sender.correspondents;
-        current.feeds = try self.feeds.openFeeds(a);
+        const current = try self.sessions.current(a, work.session);
         const keep_pending: Context.CompactionScope = .keep_latest_tool_round;
         const fit = try self.fitRequest(a, work, history, current, !history.hasHistoryForCompaction(keep_pending));
         switch (fit) {
@@ -419,13 +417,35 @@ pub const Kernel = struct {
         return if (measured.bytes <= core_extra_history_bytes) .keep_recent_rounds else .keep_latest_tool_round;
     }
 
+    fn compactionSnapshot(self: *Kernel, a: Allocator, session: *Sessions.Session) !Input.Snapshot {
+        const is_core = session.role == .core;
+        // Read feeds before the live IDs so a newly opened creator cannot be
+        // missing from the registry sample for a feed already present here.
+        const open_feeds = try self.feeds.openFeeds(a, if (is_core) null else session.focus_id);
+        var snapshot = try self.sessions.compactionSnapshot(a, session);
+        if (is_core) snapshot.state.correspondents = self.sender.registered_correspondents;
+
+        var live_activities: std.StringHashMapUnmanaged(void) = .empty;
+        defer live_activities.deinit(a);
+        for (snapshot.state.activities) |id| try live_activities.put(a, id, {});
+
+        var references: std.ArrayList([]const u8) = .empty;
+        errdefer references.deinit(a);
+        for (open_feeds) |feed| {
+            if (live_activities.contains(feed.creator_focus_id)) continue;
+            try references.append(a, feed.feed_id);
+        }
+        snapshot.state.feeds = try references.toOwnedSlice(a);
+        return snapshot;
+    }
+
     fn compactRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, current: Input.Current, scope: Context.CompactionScope, trigger: CompactionTrigger) !FocusResult([]const Model.Item) {
         var rejection: ?Compaction.Rejection = null;
         const retry: Engine.Retry = if (trigger == .limit) .wait_for_service else .single_attempt;
         const summary_attempts: usize = if (trigger == .limit) 2 else 1;
         for (0..summary_attempts) |_| {
-            const state = try self.sessions.compactionSnapshot(a, work.session);
-            switch (try Compaction.summarize(self.engine, a, history, state, scope, rejection, retry)) {
+            const snapshot = try self.compactionSnapshot(a, work.session);
+            switch (try Compaction.summarize(self.engine, a, history, snapshot, scope, rejection, retry)) {
                 .interrupted => |reason| return .{ .interrupted = reason },
                 .rejected => |reason| rejection = reason,
                 .handover => |handover| {
@@ -503,12 +523,10 @@ fn runtimeError(a: Allocator, code: []const u8, message: []const u8) !Content {
 fn feedFailure(a: Allocator, err: anyerror) !Content {
     return switch (err) {
         error.InvalidArguments => error.InvalidToolArguments,
-        error.UnknownFeed => runtimeError(a, "unknown_feed", "No feed matches the supplied reference."),
+        error.UnknownFeed => runtimeError(a, "unknown_feed", "No feed matches the supplied ID."),
         error.FeedClosed => runtimeError(a, "feed_closed", "This feed is closed to new messages."),
-        error.OpenFeedCapacity => runtimeError(a, "feed_capacity", "The limit for open feeds has been reached."),
         error.StateStoreBusy => runtimeError(a, "feed_storage_busy", "Feed storage is busy."),
         error.StateStoreFull => runtimeError(a, "feed_storage_full", "Feed storage is full."),
-        error.StateStorageFailed => runtimeError(a, "feed_storage_failed", "The feed store could not confirm the change."),
         else => err,
     };
 }
@@ -527,7 +545,7 @@ const SubscriptionFixture = struct {
     }
 
     fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *Subscriptions.Store) !Kernel {
-        if (self.feed_store == null) self.feed_store = try Feeds.Store.openInMemory(testing.allocator, testing.io, 128);
+        if (self.feed_store == null) self.feed_store = try Feeds.Store.openInMemory(testing.allocator, testing.io);
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
@@ -539,7 +557,7 @@ const SubscriptionFixture = struct {
             .engine = engine,
             .subscriptions = subscriptions,
             .inbox = undefined,
-            .sender = .{ .context = undefined, .submit = undefined, .correspondents = &.{ "operator", "reviewer+notes" } },
+            .sender = .{ .context = undefined, .submit = undefined },
             .feeds = &self.feed_store.?,
             .callbacks = undefined,
             .history = self.storage.port(),
@@ -592,7 +610,7 @@ const SubscriptionFixture = struct {
     }
 };
 
-test "send distinguishes a focus from a feed with the same ID" {
+test "ordinary turns omit directories and send resolves known IDs by destination kind" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
     var fixture: SubscriptionFixture = .{};
@@ -603,6 +621,7 @@ test "send distinguishes a focus from a feed with the same ID" {
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
     defer kernel.deinit();
+    kernel.sender.registered_correspondents = &.{"reviewer+notes"};
     var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer core.deinit();
     defer kernel.sessions.endWorker(core.work.session);
@@ -621,14 +640,22 @@ test "send distinguishes a focus from a feed with the same ID" {
     });
     const feed_id = created.object.get("result").?.object.get("feed_id").?.string;
     try testing.expectEqualStrings(core.work.session.focus_id, feed_id);
+
+    var activity_history = try kernel.sessions.snapshot(activity.work.session);
+    defer activity_history.deinit();
     var soft_compaction = true;
-    const input = (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready;
-    const turn = input[input.len - 1].message.text;
-    try testing.expect(std.mem.indexOf(u8, turn, "- reviewer+notes") != null);
-    try testing.expect(std.mem.indexOf(u8, turn, "feed_id: core-1") != null);
+    for ([_][]const Model.Item{
+        (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready,
+        (try kernel.prepareRequest(a, activity.work, &activity_history, &soft_compaction)).ready,
+    }) |input| {
+        const turn = input[input.len - 1].message.text;
+        for ([_][]const u8{ "focuses", "correspondents", "feeds", "reviewer+notes", "Keep release findings for readers." }) |marker| {
+            try testing.expect(std.mem.indexOf(u8, turn, marker) == null);
+        }
+    }
 
     const result = try call(a, &activity, "send", .{
-        .to = .{ .focus_id = feed_id },
+        .to = .{ .focus_id = core.work.session.focus_id },
         .text = "Findings are ready.",
     });
     try testing.expectEqualStrings(feed_id, result.object.get("result").?.object.get("focus_id").?.string);
@@ -645,6 +672,68 @@ test "send distinguishes a focus from a feed with the same ID" {
     const message = deliveries[0].event.focus_message;
     try testing.expectEqualStrings(sender_id, message.from_focus);
     try testing.expectEqualStrings("Findings are ready.", message.text);
+
+    _ = try call(a, &core, "close_feed", .{ .feed_id = feed_id });
+    const closed = try call(a, &activity, "send", .{ .to = .{ .feed_id = feed_id }, .text = "Another publication." });
+    try testing.expectEqualStrings("feed_closed", closed.object.get("error").?.object.get("code").?.string);
+}
+
+test "core compaction picks up open feeds when their creating activities end" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    kernel.sender.registered_correspondents = &.{"operator"};
+
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    defer kernel.sessions.endWorker(core.work.session);
+    var history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer history.deinit();
+    const core_feed = try kernel.feeds.create(a, core.work.session.focus_id, "core-news", "Core notes");
+    _ = try call(a, &core, "open_focus", .{ .name = "first", .task = "Follow the first release." });
+    const opened = try call(a, &core, "open_focus", .{ .name = "second", .task = "Follow the second release." });
+    const second_id = opened.object.get("result").?.object.get("focus_id").?.string;
+    try testing.expectEqual(0, (try kernel.compactionSnapshot(a, core.work.session)).state.activities.len);
+    try kernel.sessions.commitToolRound(core.work, &history, &core.forks, null);
+
+    const ready = try kernel.sessions.takeReadyBatch(a);
+    try testing.expectEqual(2, ready.len);
+    var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = ready[0] };
+    var activity_history = try SubscriptionFixture.admit(&kernel, a, activity.work);
+    defer activity_history.deinit();
+    const created = try call(a, &activity, "create_feed", .{ .name = "first-news", .description = "First release notes" });
+    const own_feed = created.object.get("result").?.object.get("feed_id").?.string;
+    _ = try kernel.feeds.publish(core_feed, activity.work.session.focus_id, "A shared update", 100);
+    const closed_feed = try kernel.feeds.create(a, activity.work.session.focus_id, "old-news", "Previous release notes");
+    try testing.expect(try kernel.feeds.closeFeed(closed_feed));
+    _ = try kernel.sessions.subscribe(a, activity.work, "releases", "Watch upcoming releases");
+    try SubscriptionFixture.finish(&kernel, activity.work, &activity_history);
+
+    const second = ready[1];
+    var second_history = try SubscriptionFixture.admit(&kernel, a, second);
+    defer second_history.deinit();
+    const surviving_feed = try kernel.feeds.create(a, second.session.focus_id, "second-news", "Second release notes");
+    const before_ending = (try kernel.compactionSnapshot(a, core.work.session)).state;
+    try testing.expectEqualDeep(@as([]const []const u8, &.{core_feed}), before_ending.feeds);
+    try SubscriptionFixture.finish(&kernel, second, &second_history);
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ activity.work.session.focus_id, second_id }), before_ending.activities);
+
+    const core_state = (try kernel.compactionSnapshot(a, core.work.session)).state;
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ core_feed, surviving_feed }), core_state.feeds);
+    try testing.expectEqualDeep(kernel.sender.registered_correspondents, core_state.correspondents);
+    try testing.expectEqualDeep(@as([]const []const u8, &.{activity.work.session.focus_id}), core_state.activities);
+
+    const activity_state = (try kernel.compactionSnapshot(a, activity.work.session)).state;
+    try testing.expectEqualDeep(@as([]const []const u8, &.{own_feed}), activity_state.feeds);
+    try testing.expectEqual(0, activity_state.correspondents.len);
+    try testing.expectEqual(0, activity_state.activities.len);
 }
 
 test "an activity can use the reference returned by subscribe to withdraw another focus's registration" {

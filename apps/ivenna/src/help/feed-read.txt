@@ -5,16 +5,24 @@ Pass the exact feed ID Ivenna provided as one shell argument.
   ivenna feed read 'releases-1' --after 17
 
 --after selects messages with a sequence greater than the supplied number
-(default 0). --limit defaults to 100 and accepts 1 through 1000.
+(default {d}). Pass a decimal integer from 0 through {d}.
+--limit sets the maximum messages per page (default {d}, range 1 through {d}).
 
-A successful read writes one page as a JSON line on stdout. The page contains
-feed_id, description, closed, messages, next_after, and has_more. Messages
-are in ascending sequence order. Each message has sequence, focus_id, text,
-and published_at_unix_ms.
+On exit 0, stdout contains one JSON page with feed_id, description, closed,
+messages, next_after, and has_more. Each message contains its sequence, the
+publishing focus_id, the full text, and published_at_unix_ms (Unix milliseconds).
+The messages array can be empty. Messages appear in ascending sequence order.
 
 After processing the whole page, save next_after and pass it as --after on
 the next read. An empty page keeps the supplied position. When has_more is
 true, read the next page. When has_more is false, poll later for an open
 feed or stop for a closed feed.
 
-For an unknown feed, stdout contains "unknown_feed" and the exit status is 1.
+On exit 1, stdout may contain one JSON error string.
+
+  "invalid_request"  Correct the command arguments.
+  "unknown_feed"      Check the complete feed ID.
+  "busy"              The database is busy. Retry later.
+  "storage_full"      Free storage before retrying.
+
+If stdout has no complete page or error, check stderr for diagnostics.

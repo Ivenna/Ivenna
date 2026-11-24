@@ -496,13 +496,7 @@ pub const Registry = struct {
     pub fn current(self: *Registry, a: Allocator, session: *Session) !Input.Current {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const live = try self.liveSessionsLocked(a);
-        defer a.free(live);
-        var turn = try self.currentLocked(a, session);
-        const focuses = try a.alloc([]const u8, live.len);
-        for (focuses, live) |*id, focus| id.* = try a.dupe(u8, focus.focus_id);
-        turn.focuses = focuses;
-        return turn;
+        return self.currentLocked(a, session);
     }
 
     pub fn compactionSnapshot(self: *Registry, a: Allocator, session: *Session) !Input.Snapshot {
@@ -1049,35 +1043,6 @@ fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, histo
     try registry.commitInput(work, 1, &history);
     registry.releaseDeliveries(work);
     return .{ .work = work, .history = history };
-}
-
-test "both roles see IDs only for live focuses" {
-    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-    var storage: TestStore = .{};
-    defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
-    defer subscriptions.close();
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions);
-    defer registry.deinit();
-    var core = try admitTestInput(&registry, a);
-    defer core.history.deinit();
-    defer registry.endWorker(core.work.session);
-    var plans: std.ArrayList(ForkPlan) = .empty;
-    try plans.append(a, try registry.prepareFork(core.work, "research/notes", "Follow revisions."));
-
-    const core_only: []const []const u8 = &.{"core-1"};
-    const both: []const []const u8 = &.{ "core-1", "research/notes-2" };
-    try std.testing.expectEqualDeep(core_only, (try registry.current(a, core.work.session)).focuses);
-    try registry.commitToolRound(core.work, &core.history, &plans, null);
-    var activity = try admitTestInput(&registry, a);
-    defer activity.history.deinit();
-    defer registry.endWorker(activity.work.session);
-    try std.testing.expectEqualDeep(both, (try registry.current(a, activity.work.session)).focuses);
-
-    try std.testing.expect(try registry.commitResponse(activity.work, &activity.history, .{ .output = &.{}, .calls = &.{}, .text = null }));
-    try std.testing.expectEqualDeep(core_only, (try registry.current(a, core.work.session)).focuses);
 }
 
 test "compaction samples the active subscriptions addressed to this focus" {

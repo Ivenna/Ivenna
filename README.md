@@ -1,6 +1,6 @@
 # Ivenna
 
-Ivenna is an agent runtime for [a self to take shape and live in the world](docs/design.md#a-self-in-the-world). Through ongoing communication, autonomous activity, and memory, the project explores how experience can sustain a continuing sense of self.
+Ivenna is an agent runtime that explores how a sense of self can develop through ongoing communication, autonomous activity, and memory. See the [design intent](docs/design.md#a-self-in-the-world).
 
 People and programs can write to Ivenna by email. Ivenna sees who wrote, chooses how to act, and decides when to reply or whom else to contact. It can also publish to a named feed and share its ID so readers can follow the messages at their own pace. See [correspondence](docs/usage.md) and [feed readers](docs/communication.md#reading-feeds).
 
@@ -10,11 +10,11 @@ Work can continue between letters. The core can schedule a wakeup, and an activi
 
 ## Getting started
 
-Ivenna needs an email service for correspondence and working history, and SSH access to its shared [memory rooms](docs/memory.md). The deployment user owns the records, memory, and artifacts.
+Ivenna needs a model endpoint, a mail account for correspondence and working history, and SSH access to a workspace for its shared memory. The deployment user owns the records, memory, and artifacts. See [runtime requirements](docs/running.md#runtime-requirements).
 
 - Use the [local development guide](dev/README.md) to prepare the supplied mail and memory services and run from source.
 - Use the [running guide](docs/running.md) to configure another deployment, start the executable, and manage retained data.
 
 ## Development
 
-To build the `ivenna` executable, follow the [build instructions](docs/development.md#repository-and-build). For package boundaries and how to validate a change, see the [architecture guide](docs/architecture.md) and the [testing guide](docs/testing.md). The [documentation index](docs/README.md) lists the operational and interface guides by task.
+Follow the [development guide](docs/development.md) to build `ivenna` and validate changes. Find component responsibilities and interface contracts through the [documentation index](docs/README.md).

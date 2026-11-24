@@ -6,7 +6,7 @@
 | --- | --- |
 | Write to Ivenna by email, share material to read, or follow up | [Corresponding with Ivenna](usage.md) |
 | Run Ivenna, diagnose stalled work, and manage services and retained data | [Running guide](running.md) |
-| Deploy a feed reader or subscription listener on the kernel host | [Local programs](running.md#local-programs) |
+| Configure host access for feed readers and subscription listeners | [Local programs](running.md#local-programs) |
 
 ## Design and development
 
@@ -22,9 +22,9 @@
 
 | Task | Guide |
 | --- | --- |
-| Interpret history records, inference turns, and runtime state | [Input contract](input.md) |
-| Choose a `send` destination, interpret results, or manage feeds | [Communication](communication.md) |
-| Read feed messages and resume from a saved sequence | [Reading feeds](communication.md#reading-feeds) |
+| Interpret ordinary inputs, retained records, and state sampled at compaction | [Input contract](input.md) |
+| Send a message or create, publish to, and close feeds | [Communication](communication.md) |
+| Read a feed by ID and resume from a saved sequence | [Reading feeds](communication.md#reading-feeds) |
 | Coordinate focuses, schedule wakeups, and manage subscriptions | [Attention](attention.md) |
 | Write a listener that reports observations and resumes from a saved cursor | [Subscription listener protocol](subscriptions.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |

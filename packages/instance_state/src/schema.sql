@@ -3,9 +3,9 @@ CREATE TABLE feeds (
     name TEXT NOT NULL,
     reference TEXT AS (name || '-' || id) UNIQUE,
     description TEXT NOT NULL,
-    closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1))
+    closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1)),
+    creator_focus_id TEXT NOT NULL
 ) STRICT;
-CREATE INDEX open_feeds_by_id ON feeds(id) WHERE closed=0;
 CREATE TABLE feed_messages (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     feed_id INTEGER NOT NULL REFERENCES feeds(id),

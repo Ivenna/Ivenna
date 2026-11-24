@@ -67,7 +67,7 @@ pub const Integration = struct {
     }
 
     pub fn sender(self: *Integration) contracts.Communication.Sender {
-        return .{ .context = self, .submit = submit, .correspondents = self.transport.recipients.keys() };
+        return .{ .context = self, .submit = submit, .registered_correspondents = self.transport.recipients.keys() };
     }
 
     pub fn callbackPublisher(self: *Integration) contracts.Callback.Publisher {

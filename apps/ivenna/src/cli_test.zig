@@ -118,11 +118,12 @@ test "the feed command reads by ID and resumes offline" {
     try testing.expectError(error.FileNotFound, temporary.dir.access(io, state.filename, .{}));
 
     try state.initialize(a, path);
+    const description = "Release notes\n更新记录\x00more";
     const source = closed: {
-        var writer = try state.feeds.Store.open(a, io, path, 2);
+        var writer = try state.feeds.Store.open(a, io, path);
         defer writer.close();
-        const first_feed = try writer.create(a, "刊 /rc", "Release updates");
-        const other_feed = try writer.create(a, "刊 /rc", "Other work");
+        const first_feed = try writer.create(a, "core-1", "刊 /rc", description);
+        const other_feed = try writer.create(a, "activity-2", "刊 /rc", "Other work");
         const after = try writer.publish(first_feed, "core-1", "Already processed", 100);
         _ = try writer.publish(other_feed, "core-1", "Other update", 101);
         const next = try writer.publish(first_feed, "activity-2", "First line\x00\n第二行", 102);
@@ -134,7 +135,7 @@ test "the feed command reads by ID and resumes offline" {
     const after = try std.fmt.allocPrint(a, "{d}", .{source.after});
     const page = (try runJson(a, &env, &.{ executable, "feed", "read", source.id, "--after", after, "--limit", "1" }, null, true)).object;
     try testing.expectEqualStrings(source.id, page.get("feed_id").?.string);
-    try testing.expectEqualStrings("Release updates", page.get("description").?.string);
+    try testing.expectEqualStrings(description, page.get("description").?.string);
     try testing.expect(page.get("closed").?.bool);
     try testing.expect(page.get("has_more").?.bool);
     try testing.expectEqual(@as(i64, @intCast(source.next)), page.get("next_after").?.integer);

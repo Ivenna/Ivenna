@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const default_feed_after: u63 = 0;
 const default_feed_limit = 100;
 const max_feed_limit = 1000;
 
@@ -60,7 +61,7 @@ fn parseFeed(args: []const []const u8) !Command {
     }
     return .{ .feed = .{
         .feed_id = id,
-        .after = after orelse 0,
+        .after = after orelse default_feed_after,
         .limit = limit orelse default_feed_limit,
     } };
 }
@@ -117,7 +118,7 @@ const overview =
     \\ivenna COMMAND [ARGUMENTS]
     \\
     \\  serve          Run the kernel.
-    \\  feed           Read messages by feed ID.
+    \\  feed           Read a feed by ID.
     \\  subscription   Report observations and save source positions.
     \\
     \\Run ivenna COMMAND --help for command usage.
@@ -141,7 +142,12 @@ const environment =
     \\
 ;
 
-const feed_help = @embedFile("help/feed-read.txt") ++ "\n" ++ environment;
+const feed_help = std.fmt.comptimePrint(@embedFile("help/feed-read.txt"), .{
+    default_feed_after,
+    std.math.maxInt(@FieldType(Feed, "after")),
+    default_feed_limit,
+    max_feed_limit,
+}) ++ "\n" ++ environment;
 
 const inspect = @embedFile("help/inspect.txt");
 const publish = @embedFile("help/publish.txt");

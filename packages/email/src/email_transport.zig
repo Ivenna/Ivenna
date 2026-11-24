@@ -110,7 +110,7 @@ test "an interrupted draft create has no submission to reconcile" {
     try fixture.finish();
 }
 
-test "sending selects the exact registered address" {
+test "sending requires an exact registered ID and uses its configured address" {
     const Fixture = @import("test_jmap.zig").Fixture;
     var fixture = try Fixture.init(&.{
         .{ .method = "Email/set", .result = "{\"created\":{\"letter\":{\"id\":\"draft\"}}}", .properties = &.{
@@ -121,7 +121,12 @@ test "sending selects the exact registered address" {
     defer fixture.deinit();
     var mailbox = try fixture.start();
     const a = fixture.arena.allocator();
+    var empty = try EmailTransport.init(a, &mailbox, &.{});
+    const unregistered = try empty.send(a, .{ .recipient = "Reviewer+Ops", .text = "Review complete" });
+    try std.testing.expect(unregistered == .invalid_recipient);
     var transport = try EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "Reviewer+Ops@EXAMPLE.COM" });
+    const wrong_case = try transport.send(a, .{ .recipient = "reviewer+ops", .text = "Review complete" });
+    try std.testing.expect(wrong_case == .invalid_recipient);
     const review = try transport.send(a, .{ .recipient = "Reviewer+Ops", .text = "Review complete" });
     try std.testing.expect(review == .submitted);
     try fixture.finish();
@@ -140,19 +145,4 @@ test "correspondent registration requires distinct IDs in the configured domain"
     };
     try std.testing.expectError(error.InvalidCorrespondentAddress, EmailTransport.init(a, &mailbox, &.{ "reviewer@example.com", "operator@other.example" }));
     try std.testing.expectError(error.DuplicateCorrespondentId, EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "operator@EXAMPLE.COM" }));
-}
-
-test "unregistered recipient IDs never create drafts" {
-    const Fixture = @import("test_jmap.zig").Fixture;
-    var fixture = try Fixture.init(&.{});
-    defer fixture.deinit();
-    var mailbox = try fixture.start();
-    const a = fixture.arena.allocator();
-    var empty = try EmailTransport.init(a, &mailbox, &.{});
-    const denied = try empty.send(a, .{ .recipient = "operator", .text = "hello" });
-    try std.testing.expect(denied == .invalid_recipient);
-    var transport = try EmailTransport.init(a, &mailbox, &.{ "operator@example.com", "Reviewer+Ops@EXAMPLE.COM" });
-    const wrong_case = try transport.send(a, .{ .recipient = "Operator", .text = "hello" });
-    try std.testing.expect(wrong_case == .invalid_recipient);
-    try fixture.finish();
 }

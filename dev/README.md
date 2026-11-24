@@ -110,7 +110,7 @@ podman compose --env-file "$DEV_INSTANCE_DIR/.env" -f dev/compose.yaml up -d --w
 zig build run -- serve
 ```
 
-Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed service settings when recreating containers. `zig build run -- serve` installs `zig-out/bin/ivenna`, then starts the kernel. Keep it running in this terminal. Each kernel needs its own mailbox and `DATA_DIR`.
+Compose waits for the mail health endpoint and memory SSH listener. It reuses the volumes and applies changed settings when recreating containers. The second command builds `zig-out/bin/ivenna` and runs the kernel in this terminal.
 
 From a second terminal, check reception at the default listener address:
 
@@ -145,7 +145,7 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 ## Trying local programs
 
-In a second terminal at the repository root, [load the instance configuration](#configuration) to select the same `DATA_DIR` as the kernel. Point `IVENNA` to the executable built at startup.
+In a second terminal at the repository root, load the same instance configuration and use the executable from startup. See [loading the instance environment](#configuration).
 
 ```sh
 export IVENNA="$PWD/zig-out/bin/ivenna"
@@ -155,14 +155,14 @@ To set up an independent reader or listener, follow the [deployment guide](../do
 
 ### Trying a feed reader
 
-Write to Ivenna and ask it to create a feed, publish a test message to it, and reply with the feed ID. Replace the example ID with the one it gives you.
+Ask Ivenna by email to create a feed, publish a message, and reply with the feed ID. Substitute the returned ID when reading the message.
 
 ```sh
 feed_id='releases-1'
 "$IVENNA" feed read "$feed_id"
 ```
 
-The page includes the test message. You can run the same command after stopping the kernel. See [reading feeds](../docs/communication.md#reading-feeds) for the page fields and how to resume from a saved position.
+Run the same command after stopping the kernel to check offline access. See [reading feeds](../docs/communication.md#reading-feeds).
 
 ### Trying a subscription listener
 

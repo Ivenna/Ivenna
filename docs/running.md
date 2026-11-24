@@ -42,7 +42,6 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
-| `MAX_OPEN_FEEDS` | Instance-wide limit on open feeds when creating a feed | `128` |
 | `DATA_DIR` | Persistent directory for instance state and host command output | Required |
 | `MEMORY_SSH_TARGET` | Memory SSH target | `ivenna-memory` |
 | `MEMORY_SSH_CONFIG` | Dedicated SSH configuration file | Standard OpenSSH configuration |
@@ -77,8 +76,6 @@ For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKEN
 
 The [model request limits](content.md#model-request-checks) apply to the complete encoded request. The model service checks its own limits after processing the input.
 
-Set `MAX_OPEN_FEEDS` with the model's context window in mind. Each open feed adds its ID and description to every [ordinary inference request](input.md#inference-turns). The limit applies when creating a feed. If you lower it below the current count, close enough feeds to make room before creating another. If the list of open feeds alone exceeds the model's window, use a compatible model with enough context to close feeds before switching back. See [changing the model](#changing-the-model).
-
 When compaction is optional and a usable handover cannot be prepared, the original request can proceed while it fits. If the kernel cannot assemble a request within the adapter's limits, the focus waits with its history and any unadmitted observations intact. See [handover outcomes](architecture.md#continuing-with-a-handover).
 
 ### Session and command capacity
@@ -109,9 +106,9 @@ The [intake rules](#mail-intake) also apply to existing correspondence in the ac
 
 ### Outgoing correspondents
 
-Set `MAIL_CORRESPONDENTS` to the full mailbox addresses Ivenna can write to, such as `operator@ivenna.test,reviewer@ivenna.test`. Use addresses in the same domain as `MAIL_ADDRESS`. To let Ivenna write to its own mailbox, include `MAIL_ADDRESS` in the list. An unset or empty list registers zero recipients. Incoming mail follows the [intake rules](#mail-intake).
+Set `MAIL_CORRESPONDENTS` to the full mailbox addresses Ivenna may write to, for example `operator@ivenna.test,reviewer@ivenna.test`. Use addresses in the domain of `MAIL_ADDRESS`. Include `MAIL_ADDRESS` to allow Ivenna to write to itself. An unset or empty list registers no recipients. Inbound correspondence follows the [mail intake rules](#mail-intake).
 
-The application trims spaces and tabs around each entry in a nonempty list. Startup reports `InvalidCorrespondentAddress` for an empty entry or an unsupported or cross-domain address. It reports `DuplicateCorrespondentId` if entries share the same case-sensitive local part. Restart the kernel to apply changes to the list. See [correspondent IDs](communication.md#current-email-addressing).
+Spaces and tabs around entries are ignored. `InvalidCorrespondentAddress` indicates an empty entry, an unsupported mailbox address, or a different domain. `DuplicateCorrespondentId` indicates that several addresses share a case-sensitive local part. Restart the kernel to apply changes. See [correspondent IDs](communication.md#current-email-addressing).
 
 ### Mail intake
 
@@ -171,19 +168,19 @@ Startup reads and validates all selected session history, including sleeping ses
 
 ## Local programs
 
-Run feed readers and subscription listeners on the kernel host. For a program you launch independently, give it the installed `ivenna` executable and set `DATA_DIR` to the instance's initialized data directory. An absolute path selects the same directory from any working directory. Programs Ivenna starts inherit both paths in the [host shell](host.md#command-environment). The local commands work while the kernel is stopped.
+Feed readers and subscription listeners call `ivenna` on the kernel host, including while the kernel is stopped. Set `DATA_DIR` to the instance's initialized data directory when launching the programs independently. Use an absolute path if they run from different working directories. Ivenna supplies both paths to its [host commands](host.md#command-environment).
 
-Grant filesystem access to programs you trust with both feed and subscription data. A relay on the kernel host can forward selected messages to other consumers.
+Database file permissions cover both feeds and subscriptions. A relay on the kernel host can forward selected messages to other consumers.
 
 ### Feed readers
 
-Give the reader the `feed_id` supplied by Ivenna. `ivenna feed read` opens the database read-only. The reader also needs access to the existing `-wal` and `-shm` files or directory permission to create them. See the [feed reader command](communication.md#reading-feeds) and [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
+Give the reader the `feed_id` supplied by Ivenna. `ivenna feed read` opens the database read-only. The reader needs access to the existing `-wal` and `-shm` files or permission to create them in `DATA_DIR`. See the [feed reader command](communication.md#reading-feeds) and [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
 
 ### Subscription listeners
 
-Give the listener the `subscription_id` returned when a focus [registers the subscription](attention.md#subscriptions). The listener reports through `ivenna subscription` and needs write access to the database and its directory.
+Give the listener the `subscription_id` returned when a focus registers the subscription. The listener needs write access to the instance database and its directory. See [subscription registration](attention.md#subscriptions).
 
-Run the listener independently to collect across kernel stops. Reports accepted during downtime are available for delivery after restart. A listener Ivenna launches as a host command stops with the kernel. Its [completion callback](host.md#command-lifetimes) keeps the launching activity available while the command runs. See the [listener protocol](subscriptions.md) for publication, cursor recovery, and withdrawal.
+Run the listener independently to keep collecting during kernel downtime. Reports accepted while the kernel is stopped wait for delivery after restart. A listener launched as a host command stops with the kernel. If the command outlasts the tool call, its completion callback lets the activity sleep until the command ends. See [host command lifetimes](host.md#command-lifetimes) and the [listener protocol](subscriptions.md).
 
 ## Service status and reception
 
@@ -257,7 +254,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
-| `<DATA_DIR>/state.sqlite3` | Feed IDs, descriptions, closure state and messages, plus subscriptions, listener cursors, accepted report keys and pending reports |
+| `<DATA_DIR>/state.sqlite3` | Feed IDs, descriptions, creators, closure state and messages, plus subscriptions, listener cursors, accepted report keys and pending reports |
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
 Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).

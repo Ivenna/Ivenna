@@ -24,7 +24,7 @@ The repertoire connects four kinds of action: expression to people and programs,
 
 Correspondence and autonomous activity can both shape Ivenna's understanding, preferences, commitments, and working methods. Retained conversations, handovers, and shared memory support continuity as that understanding develops.
 
-Model-facing inputs describe current attention, observations, and possible actions. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect earlier choices with their effects and later observations. Ivenna supplies brief names when opening a focus, starting a command, scheduling attention, subscribing to observations, or creating a feed. The runtime adds numeric suffixes so each complete reference identifies the item Ivenna chose.
+Model-facing inputs identify the current focus and bring it the observations that can guide its next decision. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect choices with their effects and later observations. When Ivenna names something it creates, the runtime adds a numeric suffix so the complete reference identifies the item. See [names and references](input.md#names-and-references).
 
 Reasoning can lose details, confuse references, or choose unsuccessful actions. Operation results, observations, and discoverable command handles support recognition and recovery. The runtime retains the references and routing state needed for delivery and resumption independently of Ivenna's recollection or generated summaries. Ivenna can reconsider an action from its outcome.
 
@@ -59,11 +59,11 @@ An activity that ends calls for the core's attention even if it said nothing. Wh
 
 ## Communication with people and programs
 
-Correspondence reaches the core as observations of who said what and when the runtime observed it. Ivenna can consider a message addressed to it or a conversation someone relays. Retained exchanges connect these observations with what Ivenna chose to say and the effects that followed.
+Correspondence reaches the core as observations of who said what and when the runtime observed it. Ivenna can consider a message addressed to it or a conversation someone relays. Retained exchanges connect these observations with what Ivenna chose to say and the effects that followed. The core carries these relationships across assignments.
 
-Ivenna chooses when to send, whom or what to reach, and what to say. Each ordinary turn shows live focuses, open feeds, and registered correspondents. Ivenna chooses the kind of destination and uses its existing ID. Internal reasoning and activity completion stay within Ivenna. See [sending a message](communication.md#sending-a-message).
+Ivenna chooses when to send, whom or what to reach, and what to say. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna acts and reports the outcome, so Ivenna can revise its understanding as circumstances change. Internal reasoning and activity completion stay within Ivenna. See [sending a message](communication.md#sending-a-message).
 
-A feed gives Ivenna a place to publish messages that people and programs can follow. It belongs to the instance and can outlive the focus that created it. The description helps Ivenna recognize what belongs in the feed and tell readers what to expect. Each reader can resume from its last processed message, including after the feed closes or the kernel stops. See [reading feeds](communication.md#reading-feeds).
+A feed gives Ivenna a place to publish messages that people and programs can follow. It belongs to the instance and can outlive the focus that created it. The core can continue a publication that outlives an assignment. Readers can resume from their last processed message. See [feeds](communication.md#feeds).
 
 ## Sessions and continued work
 
@@ -89,9 +89,9 @@ The subscription stays with its focus across sleep, handover, and restart. Any f
 
 Working contexts retain observations, model output, and tool results across interruption. Within a bounded context, [compaction](architecture.md#bounded-model-context) asks Ivenna to condense retained exchanges into a handover, carrying forward relevant understanding and unfinished thought, relationships, preferences, commitments, uncertainty, and effects. Shared autonomous memory lets Ivenna organize knowledge beyond a session's working history.
 
-Compaction can begin early to make room for new observations and tool replies. A full tool exchange awaiting continuation can accompany a handover. The core can also carry forward completed exchanges so their exact wording and sources remain available. A handover combines Ivenna's summary with the runtime state supplied for that summary. The runtime carries the state forward unchanged, while Ivenna decides what its experiences and relationships mean and what to retain about them.
+Ordinary turns identify the focus and present its new observations so it can attend to the work in front of it. At compaction, the runtime samples pending and active references for that focus. The core also receives references for ongoing coordination, correspondence, and publications that outlive their creating activities. See [sampled state](input.md#sampled-state) for the fields each role receives.
 
-The runtime keeps the original history while it tests a proposed handover. It saves the replacement once it can assemble an ordinary request with that handover within the adapter's limits. Observations awaiting admission stay queued until the runtime can include them. See [how the runtime selects a handover](architecture.md#bounded-model-context).
+The runtime carries that dated sample alongside Ivenna's summary. It can also carry complete exchanges to preserve exact wording and sources. Ivenna decides what its experiences and relationships mean and what understanding to carry forward. The runtime keeps the original history until a continuation with the proposed handover fits. See [how the runtime selects a handover](architecture.md#bounded-model-context).
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 
@@ -103,7 +103,7 @@ A failure interrupts the work that depends on it. During a temporary model outag
 
 A lost response can leave an action's effects uncertain. The runtime can repeat a mailbox read or check stored records to confirm a write. If it still cannot tell whether the mail service accepted a message, the [sending result](communication.md#sending-a-message) tells Ivenna that sending again could produce a duplicate. If the response to a file upload is lost, the tool result still identifies the source and tells Ivenna that the file service may already have stored it.
 
-The receiving mail service checks the kernel's readiness before accepting correspondence. Reception opens after initialization and stays open while a focus waits for inference. If the kernel loses required access to its configured model, communication, memory, or working history, it closes reception and stops. The sender decides whether to queue or retry a letter it could not deliver. See [reception readiness](running.md#service-status-and-reception).
+The receiving mail service checks the kernel's readiness before accepting correspondence. Reception opens after initialization and stays open while a focus waits for inference. If the kernel loses required access to its configured model, communication, memory, working history, or instance state, it closes reception and stops. The sender decides whether to queue or retry a letter it could not deliver. See [reception readiness](running.md#service-status-and-reception).
 
 An independent listener can still report to an active subscription while the kernel is stopped. Those observations are available for delivery when the kernel resumes. If collection was interrupted, the listener can tell the focus which part of the source's history it could recover. See [listener deployment](running.md#subscription-listeners).
 

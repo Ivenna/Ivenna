@@ -34,8 +34,8 @@ pub const SendResult = union(enum) {
 pub const Sender = struct {
     context: *anyopaque,
     submit: *const fn (*anyopaque, std.mem.Allocator, Message) anyerror!SendResult,
-    /// Authorized correspondent IDs, borrowed for the lifetime of the sender.
-    correspondents: []const []const u8,
+    /// The configured outgoing IDs, borrowed for the lifetime of the sender.
+    registered_correspondents: []const []const u8 = &.{},
 
     pub fn send(self: Sender, a: std.mem.Allocator, message: Message) !SendResult {
         return self.submit(self.context, a, message);

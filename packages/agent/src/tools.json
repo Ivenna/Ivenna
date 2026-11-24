@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Write to a correspondent, reach a focus, or publish to a feed. For correspondence, the reference confirms that the service accepted the message for delivery. Sending to a focus queues the message and can wake that focus. For a feed, the sequence identifies the stored message.",
+    "description": "Write to a correspondent, reach a focus, or publish to a feed. A correspondence reference confirms the sending service accepted the message for delivery. A focus message enters its recipient's queue and can wake that focus. A feed sequence identifies the stored message.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -12,7 +12,7 @@
               "properties": {
                 "correspondent_id": {
                   "type": "string",
-                  "description": "Use an ID from current.correspondents."
+                  "description": "Complete registered correspondent ID."
                 }
               },
               "required": ["correspondent_id"],
@@ -23,7 +23,7 @@
               "properties": {
                 "focus_id": {
                   "type": "string",
-                  "description": "Use an ID from current.focuses or open_focus."
+                  "description": "Complete ID of an existing focus."
                 }
               },
               "required": ["focus_id"],
@@ -34,7 +34,7 @@
               "properties": {
                 "feed_id": {
                   "type": "string",
-                  "description": "Use a feed ID from current.feeds or create_feed."
+                  "description": "Complete ID of an open feed."
                 }
               },
               "required": ["feed_id"],
@@ -53,7 +53,7 @@
   },
   {
     "name": "create_feed",
-    "description": "Create a shared feed whose messages stay available across restarts. Give readers the returned feed_id. From an activity, run \"$IVENNA\" feed read --help for reading instructions.",
+    "description": "Create a feed that can outlive this focus and survives restart. Use the returned feed_id to publish and to direct readers to the feed. In an activity, \"$IVENNA\" feed read --help explains how to read it.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -61,8 +61,7 @@
         "description": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256,
-          "description": "Describe what readers can expect to find in the feed."
+          "description": "Briefly describe what readers can expect to find in the feed."
         }
       },
       "required": ["name", "description"],
@@ -71,13 +70,13 @@
   },
   {
     "name": "close_feed",
-    "description": "Close a feed to new messages while keeping published messages available to readers. The result's changed field is true when this call closes the feed.",
+    "description": "Close a feed to new messages. Published messages remain readable. The result's changed field is true when this call closes the feed.",
     "parameters": {
       "type": "object",
       "properties": {
         "feed_id": {
           "type": "string",
-          "description": "Use a feed ID from current.feeds or create_feed."
+          "description": "Complete feed ID."
         }
       },
       "required": ["feed_id"],
@@ -138,7 +137,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Register this focus to receive reports from a listener you set up. Give that listener the returned subscription_id. Reports can wake this focus. An activity can run \"$IVENNA\" subscription --help to find reporting commands.",
+    "description": "Register this focus for reports that can wake it. Give the returned subscription_id to a listener you set up. In an activity, \"$IVENNA\" subscription --help lists the listener commands.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -159,7 +158,7 @@
   },
   {
     "name": "withdraw_subscription",
-    "description": "Close any focus's subscription to new reports. Reports already accepted still reach the subscribing focus. Stop the listener separately if needed.",
+    "description": "Withdraw any subscription by ID. Accepted reports still reach the subscribing focus. Stop the listener separately if needed.",
     "parameters": {
       "type": "object",
       "properties": {

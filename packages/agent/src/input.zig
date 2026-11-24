@@ -3,7 +3,6 @@ const yaml = @import("yaml");
 const contracts = @import("agent_contracts");
 const Allocator = std.mem.Allocator;
 const IncomingMessage = contracts.Communication.IncomingMessage;
-const Feed = @import("instance_state").feeds.Feed;
 const Time = @import("time.zig");
 
 pub const Role = enum { core, activity };
@@ -130,32 +129,18 @@ pub const SubscriptionReport = struct {
     }
 };
 
-/// Identity and observation time for an inference, with destinations for ordinary turns.
+/// Identity and observation time for an inference.
 pub const Current = struct {
     focus_id: []const u8,
     role: Role,
     observed_at_unix_ms: i64,
-    focuses: []const []const u8 = &.{},
-    correspondents: []const []const u8 = &.{},
-    feeds: []const Feed = &.{},
 
-    fn write(self: Current, writer: anytype, include_destinations: bool) !void {
-        try writer.beginObject();
-        try writer.objectField("focus_id");
-        try writer.write(self.focus_id);
-        try writer.objectField("role");
-        try writer.write(self.role);
-        try writer.objectField("observed_at");
-        try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
-        if (include_destinations) {
-            try writer.objectField("focuses");
-            try writer.write(self.focuses);
-            try writer.objectField("correspondents");
-            try writer.write(self.correspondents);
-            try writer.objectField("feeds");
-            try writer.write(self.feeds);
-        }
-        try writer.endObject();
+    pub fn jsonStringify(self: Current, writer: anytype) !void {
+        try writer.write(.{
+            .focus_id = self.focus_id,
+            .role = self.role,
+            .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms },
+        });
     }
 };
 
@@ -165,15 +150,17 @@ pub const Snapshot = struct {
     state: State,
 };
 
-/// The sampled focus's pending callbacks and active subscriptions. The core
-/// also sees the existing activities.
+/// Facts sampled for compaction and carried alongside the model's summary.
 pub const State = struct {
     activities: []const []const u8,
     callbacks: []const PendingCallback,
     subscriptions: []const []const u8,
+    feeds: []const []const u8 = &.{},
+    correspondents: []const []const u8 = &.{},
 
     pub fn isEmpty(self: State) bool {
-        return self.activities.len == 0 and self.callbacks.len == 0 and self.subscriptions.len == 0;
+        return self.activities.len == 0 and self.callbacks.len == 0 and self.subscriptions.len == 0 and
+            self.feeds.len == 0 and self.correspondents.len == 0;
     }
 
     pub fn jsonStringify(self: State, writer: anytype) !void {
@@ -190,6 +177,14 @@ pub const State = struct {
             try writer.objectField("subscriptions");
             try writer.write(self.subscriptions);
         }
+        if (self.feeds.len != 0) {
+            try writer.objectField("feeds");
+            try writer.write(self.feeds);
+        }
+        if (self.correspondents.len != 0) {
+            try writer.objectField("correspondents");
+            try writer.write(self.correspondents);
+        }
         try writer.endObject();
     }
 };
@@ -199,6 +194,8 @@ pub fn cloneState(a: Allocator, state: State) !State {
         .activities = try cloneIds(a, state.activities),
         .callbacks = try cloneCallbacks(a, state.callbacks),
         .subscriptions = try cloneIds(a, state.subscriptions),
+        .feeds = try cloneIds(a, state.feeds),
+        .correspondents = try cloneIds(a, state.correspondents),
     };
 }
 
@@ -345,7 +342,7 @@ pub const Turn = struct {
     pub fn jsonStringify(self: Turn, writer: anytype) !void {
         try writer.beginObject();
         try writer.objectField("current");
-        try self.current.write(writer, self.purpose == .work);
+        try writer.write(self.current);
         switch (self.purpose) {
             .work => |events| {
                 if (events.len != 0) {

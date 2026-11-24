@@ -111,7 +111,7 @@ The [root build](../build.zig) and the [application build](../apps/ivenna/build.
 
 Each application owns its entry point. The [memory app](../apps/memory) has a Nushell entry point and a Containerfile. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
 
-The executable embeds its [model-facing resources](#model-facing-resources) and [command help](../apps/ivenna/src/help). Rebuild it after editing those files.
+The CLI owns [command summaries](../apps/ivenna/src/cli.zig) and the [subcommand reference and examples](../apps/ivenna/src/help). Rebuild `ivenna` to see changes to help or [model-facing resources](#model-facing-resources).
 
 ## Validation
 

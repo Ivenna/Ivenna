@@ -14,7 +14,7 @@ Subject: French practice
 Please remember that I am learning French and propose a practice plan.
 ```
 
-Ivenna sees who wrote, along with the subject and body. Before Ivenna can reply to you, the deployment operator must [register your mailbox for outgoing correspondence](running.md#outgoing-correspondents).
+Ivenna sees the sender's correspondent ID (`operator` in this example), subject, and body. The deployment operator registers the addresses Ivenna can write to, including yours if you expect a reply. To ask Ivenna to contact someone else, give their registered ID. See [outgoing registration](running.md#outgoing-correspondents).
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 
@@ -26,11 +26,11 @@ Put a short passage in the body of your letter. Ivenna skips email attachments. 
 - For a screenshot, include a direct HTTP(S) link that Ivenna's model service can open.
 - For an article, include its URL. Ivenna can retrieve the page when the deployment enables [web page access](running.md#web-page-access).
 
-A letter that cannot fit stays pending in the mailbox and can delay later mail. If the model service rejects a request after Ivenna saves your letter, the letter remains in working history for when reasoning resumes. See the [operator's recovery steps for a pending letter](running.md#recovering-from-an-admission-failure).
+A letter that exceeds the model's input limits can stay pending and delay later mail. See the [operator's recovery steps](running.md#recovering-from-an-admission-failure).
 
 ## Continuing correspondence
 
-Ivenna decides whether and when to write. You may receive one response, several updates, or none. Its messages arrive under the subject `Ivenna`.
+Ivenna decides whether and when to write. You may receive one response, several updates, or none. See [how Ivenna sends email](communication.md#current-email-addressing).
 
 Each follow-up reaches the core as a new observation, even within an email thread. Identify the earlier request and say what has changed.
 
@@ -45,16 +45,16 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 
 ## Ongoing work and memory
 
-Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring new versions to its attention. See [how focuses coordinate and resume work](attention.md).
+Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring new versions to its attention. See [subscriptions](attention.md#subscriptions).
 
-If Ivenna gives you a feed ID, use it to [read the feed](communication.md#reading-feeds) from Ivenna's host. To follow it from elsewhere, a program on that host can [relay messages](running.md#local-programs) to you.
+If Ivenna gives you a feed ID, use it to read the feed from the kernel host. A program on that host can relay selected messages to readers elsewhere. See [reading feeds](communication.md#reading-feeds) and [local programs](running.md#local-programs).
 
-Continued work uses retained understanding and [autonomous memory](memory.md). Ivenna chooses what to retain, revisit, and revise as its understanding develops. Include relevant context when following up, since Ivenna can condense its working history. To retrieve an earlier letter or quote its exact wording, keep your own mail copies. Ivenna's copies follow the [deployment's retention policy](running.md#communication-copies).
+Ivenna can condense its working history and decide what to keep in memory. When following up, include any earlier detail the new request depends on. Keep your own mail copies if you need to retrieve or quote a letter later. See [autonomous memory](memory.md) and [mail retention](running.md#communication-copies).
 
 ## After interruption
 
-During a temporary model outage, Ivenna can still receive mail. It retries the pending decision and can continue when the service recovers. If the kernel stops, reception closes. On restart Ivenna restores saved history, pending wakeups, and stored results. It can continue interrupted work without a new letter. See [service status and reception](running.md#service-status-and-reception).
+During a temporary model outage, reception stays open while Ivenna retries the pending inference. If the kernel stops, reception closes and Ivenna can continue saved work after restart. See [service status and reception](running.md#service-status-and-reception).
 
 If the kernel stopped after saving your letter but before acknowledging its copy, Ivenna can see the same letter again. You can also receive a reply even if Ivenna lost confirmation while sending it.
 
-The kernel does not resume or replay host commands. Ivenna receives a stored completion it was waiting for, or learns that the outcome is unknown. If you follow up, mention which replies reached you and any changes you observed, such as a file the command wrote before the interruption. See [stopping and restarting](running.md#stopping-and-restarting).
+If you follow up, mention which replies reached you and any changes you observed, such as a file a command wrote before the interruption. See [what the kernel restores on restart](running.md#stopping-and-restarting).

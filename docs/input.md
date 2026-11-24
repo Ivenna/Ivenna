@@ -13,7 +13,7 @@ All focuses use the same system prompt. The focus's current identity, observatio
 | `Input.Record` | `events` or `handover` | Observations and handovers retained in working history |
 | `Input.Turn` | `current` with optional `events`, or `current` with `summarize` | Current identity, observation time, and input for one inference |
 
-An ordinary turn contains `current` and any newly delivered `events`. A compaction turn contains `current` and `summarize`, which asks for a summary and supplies sampled state for recollection. The runtime records admitted events and complete model/tool exchanges in working history.
+Newly admitted events enter working history as records. The runtime also retains complete model/tool exchanges when their rounds commit.
 
 `Text` denotes a string. `Time` denotes a UTC RFC 3339 string with millisecond precision, such as `2026-11-06T12:00:01.000Z`. Records, events, and callback sources serialize as mappings containing one branch name and its payload. Focus roles serialize as enum values, `core` or `activity`.
 
@@ -56,7 +56,7 @@ Correspondence enters the core as an `input` observation of who said what.
 | `text` | `Text` | Complete message text |
 | `observed_at` | `Time` | Time the runtime observed the message during intake |
 
-Use `current.correspondents` when choosing a destination for a reply. See [correspondents and IDs](communication.md#correspondents-and-ids) and [how email text is presented](communication.md#incoming-email-text).
+The sender IDs attribute the observation. Outgoing correspondence uses registered recipients. See [correspondents and IDs](communication.md#correspondents-and-ids) and [how email text is presented](communication.md#incoming-email-text).
 
 #### Startup and restart
 
@@ -130,7 +130,7 @@ Each `subscription` event carries one listener report to the focus that subscrib
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `subscription_id` | `Text` | ID returned by `subscribe`, shared by all reports for that subscription |
-| `observed_at` | `Time` | Time the local `subscription publish` command received the report |
+| `observed_at` | `Time` | Time recorded by `ivenna subscription publish` before saving the report |
 | `source_time` | `Time`, when supplied | Time the listener attributes to the upstream event |
 | `text` | `Text` | Listener's account of what it observed |
 
@@ -149,37 +149,39 @@ A `handover` record contains:
 
 #### Sampled state
 
-A `State` can contain three collections. The renderer omits empty collections and omits `state` when all three are empty.
+The runtime supplies `summarize.state` for compaction and carries the same sample into the accepted `handover.state` alongside the model's summary. The corresponding `observed_at` dates the sample. Retained and inherited handovers keep their focus IDs, observation times, and samples.
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `activities` | `Text[]` | Existing activity focus IDs, including sleeping activities, supplied only to the core |
-| `callbacks` | `PendingCallback[]` | Observations arranged for the sampled focus and awaiting admission |
-| `subscriptions` | `Text[]` | IDs of the subscriptions active for this focus at the time of the sample, including those whose listeners have never reported |
+| Field | Type | Core sample | Activity sample |
+| --- | --- | --- | --- |
+| `activities` | `Text[]` | IDs of existing activities, including sleeping and interrupted ones | — |
+| `callbacks` | `PendingCallback[]` | Core's pending callbacks | This activity's pending callbacks |
+| `subscriptions` | `Text[]` | Core's active subscription IDs | This activity's active subscription IDs |
+| `feeds` | `Text[]` | IDs of open feeds created by the core or by activities that have ended | IDs of open feeds created by this activity |
+| `correspondents` | `Text[]` | Registered outgoing correspondent IDs | — |
 
-A subscription withdrawn before the sample is absent from `subscriptions`. A report accepted before withdrawal can still arrive with that ID.
+The renderer omits empty collections and omits `state` when every collection is empty. An activity's open feed can appear in a core sample once the activity ends, even while its ending observation is still queued. The sample draws from feeds that are open when queried. Readers can still access closed feeds by ID. See [activity completion](attention.md#activity-completion) and [reading feeds](communication.md#reading-feeds).
 
-Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after the result is published or queued. A pending host source can therefore identify a command that has already finished. Observation text arrives separately as an event. See [command lifetimes](host.md#command-lifetimes) for handle availability.
+Active subscriptions include listeners that have yet to report. A report accepted before withdrawal can arrive after the ID has dropped out of a new sample.
 
-The handover's `observed_at`, or the compaction turn's `current.observed_at`, dates this state sample. An activity can end before its ending report enters the core's history. Reports retain their source and original times.
+Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after the result is published or queued. A pending host source can identify a command that has already finished. Observation text arrives separately as an event. See [command lifetimes](host.md#command-lifetimes) for handle availability.
 
-The summary describes the work. The sampled state carries the runtime IDs.
+In this handover, the summary carries the reason to revisit the practice plan, and `state` carries the scheduled callback's ID and source.
 
 ```yaml
 handover:
   focus_id: core-1
   observed_at: "2026-11-06T12:00:01.000Z"
-  summary: A 20-minute practice outline is being prepared. Revisit the plan when it arrives.
+  summary: A 20-minute practice outline is being prepared. Revisit the plan tomorrow.
   state:
     activities: [practice-2]
-    subscriptions: [release-watch-1]
     callbacks:
       - callback_id: revisit-practice-5
         source:
           wakeup: {}
+    subscriptions: [release-watch-1]
+    feeds: [practice-updates-1]
+    correspondents: [operator]
 ```
-
-The runtime carries sampled state independently of the generated summary. Inherited handovers keep their producing focus. Earlier storage records follow the separate [history lifecycle](architecture.md#history-retention).
 
 ## Inference turns
 
@@ -187,39 +189,27 @@ Each inference ends its input with a turn.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `current` | `Current` | Identity, role, observation time, and ordinary-turn destinations |
+| `current` | `Current` | Identity, role, and observation time |
 | `events` | `Event[]`, when nonempty | New events for an ordinary inference |
 | `summarize` | `instructions: Text` and optional `state: State` | Compaction request with any sampled state |
 
-`current` always contains `focus_id`, `role`, and `observed_at`. Ordinary turns also include the three destination lists. `correspondents` and `feeds` can be empty.
+`current` has the same fields in ordinary and compaction turns.
 
 | Field in `current` | Type | Meaning |
 | --- | --- | --- |
 | `focus_id` | `Text` | ID of the focus receiving the turn |
 | `role` | `Role` | `core` or `activity` |
 | `observed_at` | `Time` | Time the runtime sampled this turn |
-| `focuses` | `Text[]` | IDs of existing focuses, including the current focus and sleeping focuses |
-| `correspondents` | `Text[]` | IDs of correspondents registered to receive messages |
-| `feeds` | `Feed[]` | Open feeds in creation order |
 
-Each `Feed` has a `feed_id: Text` and the `description: Text` supplied at creation. See [sending a message](communication.md#sending-a-message) for how `send` checks the chosen ID.
+An ordinary turn with no new events contains only `current`. The retained prefix can still include an earlier [state sample](#sampled-state) in a handover.
 
-An ordinary turn with no new events contains only `current` and continues from the preceding history.
-
-In this ordinary turn, a letter from `reviewer` and a release report reach the core together. `operator` is the registered correspondence destination. See [incoming messages](#incoming-messages) and [how a listener reports observations](subscriptions.md#publish-an-observation).
+In this ordinary turn, a letter from `reviewer` and a release report reach the core together. See [incoming messages](#incoming-messages) and [how a listener reports observations](subscriptions.md#publish-an-observation).
 
 ```yaml
 current:
   focus_id: core-1
   role: core
   observed_at: "2026-11-10T18:00:01.000Z"
-  focuses:
-    - core-1
-  correspondents:
-    - operator
-  feeds:
-    - feed_id: releases-1
-      description: Release announcements and links to upgrade notes.
 events:
   - input:
       from:
@@ -231,8 +221,6 @@ events:
       observed_at: "2026-11-10T17:59:59.200Z"
       text: Stable release v2.4.0 is available
 ```
-
-The release report carries the listener's `subscription_id` and the local receipt time. The listener can also supply a separate source time.
 
 ## Handover generation and replacement
 

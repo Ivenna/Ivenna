@@ -34,7 +34,7 @@ Opening an activity once the focus limit is reached returns `focus_unavailable`.
 
 ## Reaching an existing focus
 
-Call `send` with `to.focus_id` set to the recipient's ID and `text` set to the message. A focus can send to itself. See [where to find destination IDs](communication.md#sending-a-message).
+Call `send` with the recipient's complete ID in `to.focus_id` and the message in `text`. A focus can send to itself using `current.focus_id`. See [sending a message](communication.md#sending-a-message) for sources of IDs and other destination types.
 
 ```json
 {"to":{"focus_id":"practice-2"},"text":"Include a short warm-up in your plan."}
@@ -62,7 +62,7 @@ The arrangement survives restart. Success returns its `callback_id`.
 {"result":{"callback_id":"revisit-practice-5"}}
 ```
 
-The text later reaches the core as a callback observation with source `wakeup`. Past timestamps are due immediately. Polling, queue capacity, and scheduling can delay inference. The core can sleep while waiting. Cancellation is unavailable.
+The text reaches the core as a callback observation with source `wakeup`. Past timestamps are due immediately. Polling, queue capacity, and scheduling can delay inference. The core stays available for other work while waiting. Cancellation is unavailable.
 
 ### Callback observations
 
@@ -129,4 +129,4 @@ An activity with a pending callback or an active subscription can sleep with its
 
 Withdraw subscriptions when the activity finishes following their sources. When no work or registrations remain, the activity ends and frees its capacity slot. Its ending calls for the core's attention even if it produced no text.
 
-The core can still receive the ended activity's expressions and ending with its original focus ID. See [report fields](input.md#assignments-and-reports) and [sending errors](#results-and-errors).
+The core can still receive the ended activity's expressions and ending with its original focus ID. An open feed can continue after its creating activity ends. See [report fields](input.md#assignments-and-reports) and [feed lifetimes](communication.md#feeds).

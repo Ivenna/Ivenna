@@ -115,9 +115,7 @@ Sleeping activities retain their session slots. Completing an activity releases 
 
 Incoming correspondence enters the core's FIFO queue independently of mail threads. During ordinary input, the core can receive activity expressions from their own outbox. Activity endings and interruptions request the core's attention. See [activity reports](#activity-reports) and [activation admission](#activation-admission).
 
-In an ordinary inference, the kernel includes the registered correspondent IDs in `current`. The session registry copies live focus IDs under its lock, and the feed store reads open feed IDs and descriptions under its own lock. Feed listing failures reach kernel supervision. See the [input contract](input.md#inference-turns).
-
-The [tool decoder](../packages/agent/src/tools.zig) parses `send.to` as a destination variant. The kernel passes the exact ID to the owner, which resolves it when the call runs. The [sender](../packages/agent_contracts/src/communication.zig) reports what it can confirm about mail submission. The session registry checks membership and queue capacity under its lock, then saves the focus message and its sender in the same checkpoint as other queued work. The feed store receives the publishing focus ID and publication time with the text. The kernel turns expected outcomes into [tool replies](communication.md#sending-a-message).
+The tool decoder selects the destination variant in `send.to`. The kernel passes the complete ID to the mail sender, session registry, or feed store for lookup at execution. The registry checks focus membership and queue capacity under its lock, then checkpoints the queued message with the sender's ID. The kernel renders each destination's reported outcome as a tool reply. See [tool decoding](../packages/agent/src/tools.zig), [outgoing mail](#outgoing-mail), [feed storage](#feed-storage), and [sending outcomes](communication.md#sending-a-message).
 
 ## Activation admission
 
@@ -180,7 +178,7 @@ The first mailbox checkpoint records the database identity before the kernel mar
 
 ### Feed storage
 
-The feed store serializes publication and closure through one mutex per store and SQLite write transactions. Publication checks that the feed is open in the same transaction as the insert. It returns the sequence after commit. SQLite assigns sequences across all feeds, and feed writes commit independently of working history. See the [feed store](../packages/instance_state/src/feeds.zig).
+The feed store serializes creation, publication, and closure through one mutex per store and SQLite write transactions. Creation saves the originating focus ID with the feed, where it survives activity completion. Publication checks that the feed is open in the same transaction as the insert. It returns the sequence after commit. SQLite assigns sequences across all feeds, and feed writes commit independently of working history. See the [feed store](../packages/instance_state/src/feeds.zig).
 
 The reader joins feed metadata and messages in one query, so the page and its closure state come from the same snapshot. See the [reader implementation](../packages/instance_state/src/feed_reader.zig) and [feed read interface](communication.md#reading-feeds).
 
@@ -248,7 +246,11 @@ When an ordinary request exceeds the adapter's body or attachment limits, the ke
 
 The kernel normally carries forward the complete tool exchange awaiting continuation and the observation records admitted after it. When an adapter limit requires compaction, the kernel includes these records in the summary if an ordinary request with just this portion of history exceeds a limit. During soft compaction the core can also carry forward up to two completed exchanges and their preceding observations. It keeps this additional history when its encoded size fits 256 KiB and it contains no file references. The model service determines how much input a referenced file expands into.
 
-For each attempt, `Registry.compactionSnapshot` samples the focus's identity, time, and [runtime state](input.md#sampled-state) under the registry lock. `Context.summaryRequest` assembles the system prompt, the history to summarize, the sample, and the [summary instructions](../packages/agent/src/compaction.md). The summary request uses `high` reasoning without tools. Observations awaiting admission stay queued.
+### Sampling state and preparing the request
+
+The kernel reads open feeds with their creator IDs before sampling the registry. A creator registers before it can create a feed, so the core can use the later activity IDs both in its own sample and to exclude feeds of activities that still exist. The registry reads the focus's identity, observation time, activity IDs, callbacks, and subscription IDs under its lock. The kernel gets the registered outgoing IDs from the sender. See the [sampling implementation](../packages/agent/src/kernel.zig) and [fields supplied to each role](input.md#sampled-state).
+
+`Context.summaryRequest` combines the system prompt, selected history, sampled state, and compaction instructions. The summary request uses `high` reasoning without tools. Observations awaiting admission stay queued. See the [summary instructions](../packages/agent/src/compaction.md) and [handover contract](input.md#handover-generation-and-replacement).
 
 If the summary request exceeds an adapter limit, the runtime replaces attachment parts in that request with short omission notices and measures again if any parts changed. Tool-call IDs and text parts, including source descriptions, stay in the summary request. For example, a tool result for `file:///srv/output/chart.png` keeps that URI in its source text and carries `[Image omitted from this summary input.]` in place of the image. The saved history stays intact during preparation.
 

@@ -32,29 +32,17 @@ The script uses Nushell's standard assertions, sends JSON requests directly to t
 
 ## Automation and validation limits
 
-The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. The checks run directly with Zig and Nushell and require no deployed services or model credentials. Extend or replace automated checks when the evidence they provide justifies their execution and maintenance cost.
+The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. The suites use local fixtures and run without deployed services or model credentials.
 
-The email adapter tests use a local HTTP server to drop connections and count the requests that reach it. They check that a mailbox read can recover and that an interrupted send submits its draft at most once. For callbacks and working history, the tests check what stored evidence lets the adapter confirm a write after it loses the response.
+### Test boundaries
 
-The email, Responses, and web page reader tests check that canceling a stalled HTTP exchange closes the connection. The [local server](../tests/http.zig) detects further request bytes or a connection left open. Measuring how many bytes reach a TLS peer requires exercising the [request writer](architecture.md#model-transport) against a local HTTPS server.
+- **Command line.** Process tests check help and argument errors in an empty environment. With a temporary instance database, they check listener receipts and exit statuses and read feeds with the kernel stopped. The feed test resumes across a sequence gap and checks that message text and descriptions arrive intact. [CLI process tests](../apps/ivenna/src/cli_test.zig)
+- **Instance state.** Feed tests reopen the database to check closure, sequence continuity, and creator identity. Subscription tests use two connections to verify that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. [Feed store](../packages/instance_state/src/feeds.zig) · [Subscription store](../packages/instance_state/src/subscriptions.zig)
+- **Focus execution.** Tests exercise ordinary turns without destination directories, routing when a focus and feed share an ID, and compaction sampling across activity completion. They also check that a complete tool exchange can survive a handover, observations that exceed the request limit stay pending, and an accepted subscription report enters the receiving history exactly once when a checkpoint fails or loses confirmation. [Kernel tests](../packages/agent/src/kernel.zig) · [Context tests](../packages/agent/src/context.zig) · [Session registry tests](../packages/agent/src/sessions.zig)
+- **Mail.** A local JMAP server checks the configured recipient on the wire and verifies that denied sends stop before draft creation. Dropped connections exercise submission reconciliation, mailbox read recovery, and confirmation of callback and history writes. [Email transport](../packages/email/src/email_transport.zig) · [Email tests](../packages/email/src/root.zig)
+- **Model transport and resources.** Responses tests compare request measurements with encoded HTTP bodies and exercise file upload outcomes. Web reader tests check that two focuses can read the same page snapshot with one fetch. [Responses tests](../packages/responses/src/provider_test.zig) · [Web reader tests](../packages/resources/src/web_test.zig)
 
-The [web reader tests](../packages/resources/src/web_test.zig) check that two focuses can read the same page snapshot with one fetch. The [Responses tests](../packages/responses/src/provider_test.zig) compare measured request sizes with bodies sent over loopback HTTP. They also check what the next inference receives after a file upload fails and whether the adapter repeats an upload whose outcome is uncertain.
-
-The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The [kernel tests](../packages/agent/src/kernel.zig) also check that a complete tool exchange can reach the next request across a handover and that an observation stays pending when it cannot fit. The session registry tests inject a save failure after receiving a checkpoint to check that activity completion publishes once and a later maintenance pass republishes the same selection when confirmation was lost.
-
-One CLI process test runs help and a mistyped command in an empty environment. It checks that help works before configuration and that argument errors produce JSON on stdout and a diagnostic on stderr. See the [CLI process tests](../apps/ivenna/src/cli_test.zig).
-
-### Message delivery
-
-- **Destination selection.** The decoder rejects a call that selects two destinations. The kernel delivers to the correct owner when a focus and a feed share an ID. The registry tests track which focus IDs are visible as sessions open and end. [Decoder](../packages/agent/src/tools.zig) · [Kernel](../packages/agent/src/kernel.zig) · [Registry](../packages/agent/src/sessions.zig)
-- **Correspondence.** A registered ID selects its configured recipient. An unregistered ID stops the call before draft creation. [Email transport](../packages/email/src/email_transport.zig)
-- **Feeds.** Closure survives reopening and prevents further publication. The CLI can read a closed feed with the kernel stopped, resume across sequence gaps, and preserve the full message text. [Feed store](../packages/instance_state/src/feeds.zig) · [CLI process tests](../apps/ivenna/src/cli_test.zig)
-
-### Subscription delivery
-
-- **Listener process.** Each request runs `ivenna subscription` against a temporary instance database. The tests check receipts and exit status for publication, same-key retries, cursor changes, invalid fields, and publication after withdrawal. See the [CLI process tests](../apps/ivenna/src/cli_test.zig).
-- **Subscription store.** Two SQLite connections exercise publication and withdrawal. The tests check that a cursor conflict leaves the key available, a retry after acknowledgement returns `duplicate`, and a queued report keeps its destination after withdrawal. See the [store tests](../packages/instance_state/src/subscriptions.zig).
-- **Focus history.** The kernel tests cover ordered admission across pages, later arrivals, tight request limits, interrupted admission, and withdrawal of a sleeping activity's last subscription. The recovery test rebuilds the kernel against the same test history store and in-memory instance database after a failure before checkpoint commit or a lost confirmation after commit. In both cases the receiving history must contain the report exactly once. See the [kernel tests](../packages/agent/src/kernel.zig).
+The email, Responses, and web reader tests check that canceling a stalled HTTP exchange closes the connection. The local server checks for further request bytes and open connections. Measuring bytes received over TLS requires exercising the request writer against a local HTTPS server. [Local server](../tests/http.zig) · [Model transport](architecture.md#model-transport)
 
 ## Validating with running services
 
@@ -62,6 +50,6 @@ For process restart and communication through the configured services, exercise 
 
 ### Evaluating compaction
 
-To compare [context settings](running.md#context-budgets), replay representative work from the same starting history with the deployed model in a test instance. After a handover, check whether the focus carries a commitment and a correction forward and can find the original evidence. Check that an activity resumes when its callback or subscription report arrives.
+To compare context settings, replay representative work from the same starting history with the deployed model in a test instance. Compare committed handovers by the focus's saved epoch and check stderr for interruptions. See [context budgets](running.md#context-budgets) and [persistent working history](architecture.md#persistent-working-history).
 
-The kernel advances the [focus's saved epoch](architecture.md#persistent-working-history) when it commits a handover. Compare epoch changes across runs and check stderr for interruptions.
+Inspect the saved handover for the expected sampled IDs and observation time. Verify that a later callback or subscription report reaches the focus that arranged it. Follow the focus's subsequent work to see whether it carries a commitment and a correction forward and can find the evidence it used. See [sampled state](input.md#sampled-state).
