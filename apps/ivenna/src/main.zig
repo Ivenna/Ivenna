@@ -48,20 +48,41 @@ fn localCommand(init: std.process.Init, command: cli.Command) !void {
 
 /// How long a waiting read sleeps between looks at the database.
 const feed_poll_ms: u32 = 25;
+/// The longest single look waits for a writer while the read is waiting.
+const feed_busy_cap_ms: u32 = 100;
 
 /// Reads a page and, when it holds no message, keeps looking until one arrives,
-/// the feed closes, or the requested wait expires. The caller owns the page.
+/// the feed closes, or the requested wait expires. Time spent in the database
+/// counts against the wait, so the deadline is absolute rather than a total of
+/// sleeps. The caller owns the page.
 fn readFeed(io: std.Io, a: std.mem.Allocator, reader: *state.feeds.Reader, query: cli.Feed) !state.feeds.Reader.Page {
-    var page = try reader.read(a, query.feed_id, query.after, query.limit);
-    var waited: u32 = 0;
-    while (page.messages.len == 0 and !page.closed and waited < query.wait_ms) {
+    if (query.wait_ms == 0) return reader.read(a, query.feed_id, query.after, query.limit);
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromMilliseconds(query.wait_ms),
+        .clock = .awake,
+    });
+    while (true) {
+        const left = remainingMilliseconds(io, deadline);
+        try reader.setBusyTimeout(@min(left, feed_busy_cap_ms));
+        const page = reader.read(a, query.feed_id, query.after, query.limit) catch |err| {
+            // A writer holding the lock must not stretch the wait past its
+            // deadline, and a wait should survive one that comes and goes.
+            if (err != error.StateStoreBusy or left == 0) return err;
+            try io.sleep(.fromMilliseconds(@min(feed_poll_ms, left)), .awake);
+            continue;
+        };
+        if (page.messages.len != 0 or page.closed or left == 0) return page;
         freePage(a, page);
-        const step: u32 = @min(feed_poll_ms, query.wait_ms - waited);
-        try io.sleep(.fromMilliseconds(step), .awake);
-        waited += step;
-        page = try reader.read(a, query.feed_id, query.after, query.limit);
+        try io.sleep(.fromMilliseconds(@max(1, @min(feed_poll_ms, left))), .awake);
     }
-    return page;
+}
+
+/// Whole milliseconds left before the deadline, never negative.
+fn remainingMilliseconds(io: std.Io, deadline: std.Io.Clock.Timestamp) u32 {
+    const left = std.Io.Clock.awake.now(io).durationTo(deadline.raw).nanoseconds;
+    if (left <= 0) return 0;
+    const milliseconds = @divTrunc(left, std.time.ns_per_ms);
+    return if (milliseconds > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(milliseconds);
 }
 
 fn freePage(a: std.mem.Allocator, page: state.feeds.Reader.Page) void {

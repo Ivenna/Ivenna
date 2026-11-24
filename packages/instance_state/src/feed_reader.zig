@@ -32,6 +32,11 @@ pub const Reader = struct {
         self.* = undefined;
     }
 
+    /// Cap how long a read waits for a writer. Zero reports contention at once.
+    pub fn setBusyTimeout(self: *Reader, milliseconds: u32) !void {
+        try database.checked(self.db.busyTimeout(@intCast(milliseconds)));
+    }
+
     /// Read a page after an exclusive sequence. The caller supplies a positive
     /// limit. The page's data belongs to a.
     pub fn read(self: *Reader, a: Allocator, feed_id: []const u8, after: u63, limit: u32) !Page {

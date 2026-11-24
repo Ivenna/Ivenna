@@ -189,10 +189,11 @@ test "feed read waits out an empty feed without messages" {
     try state.initialize(a, path);
     const feed_id = try createEmptyFeed(a, io, path);
 
-    const started = std.Io.Clock.real.now(io).toMilliseconds();
+    const started = std.Io.Clock.awake.now(io);
     const page = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "100" }, null, true)).object;
-    const elapsed = std.Io.Clock.real.now(io).toMilliseconds() - started;
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
     try testing.expect(elapsed >= 100);
+    try testing.expect(elapsed < 2000);
     try testing.expectEqual(0, page.get("messages").?.array.items.len);
     try testing.expectEqual(0, page.get("next_after").?.integer);
     try testing.expect(!page.get("has_more").?.bool);
@@ -212,6 +213,7 @@ test "feed read returns a message published while it waits" {
     try state.initialize(a, path);
     const feed_id = try createEmptyFeed(a, io, path);
 
+    const started = std.Io.Clock.awake.now(io);
     var child = try std.process.spawn(io, .{
         .argv = &.{ executable, "feed", "read", feed_id, "--wait", "5000" },
         .environ_map = &env,
@@ -233,10 +235,62 @@ test "feed read returns a message published while it waits" {
     var output = child.stdout.?.readerStreaming(io, &buffer);
     const bytes = try output.interface.allocRemaining(a, .unlimited);
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    try testing.expect(elapsed < 4000);
     const page = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
     const messages = page.object.get("messages").?.array.items;
     try testing.expectEqual(1, messages.len);
     try testing.expectEqualStrings("While you waited", messages[0].object.get("text").?.string);
+}
+
+test "feed read with a wait shorter than the poll interval looks once" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, state.filename });
+    var env = std.process.Environ.Map.init(a);
+    try env.put("DATA_DIR", dir);
+    try state.initialize(a, path);
+    const feed_id = try createEmptyFeed(a, io, path);
+
+    const started = std.Io.Clock.awake.now(io);
+    const page = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "10" }, null, true)).object;
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    try testing.expect(elapsed >= 10);
+    try testing.expect(elapsed < 1500);
+    try testing.expectEqual(0, page.get("messages").?.array.items.len);
+    try testing.expect(!page.get("has_more").?.bool);
+}
+
+test "feed read returns an empty closed feed without waiting" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, state.filename });
+    var env = std.process.Environ.Map.init(a);
+    try env.put("DATA_DIR", dir);
+    try state.initialize(a, path);
+    const feed_id = try createEmptyFeed(a, io, path);
+    {
+        var writer = try state.feeds.Store.open(a, io, path);
+        defer writer.close();
+        try testing.expect(try writer.closeFeed(feed_id));
+    }
+
+    const started = std.Io.Clock.awake.now(io);
+    const page = (try runJson(a, &env, &.{ executable, "feed", "read", feed_id, "--wait", "5000" }, null, true)).object;
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    try testing.expect(elapsed < 1000);
+    try testing.expect(page.get("closed").?.bool);
+    try testing.expectEqual(0, page.get("messages").?.array.items.len);
 }
 
 fn createEmptyFeed(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
