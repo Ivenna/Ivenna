@@ -9,6 +9,7 @@ const resources = @import("resources");
 const state = @import("instance_state");
 const Config = @import("config.zig").Config;
 const Service = @import("service.zig").Service;
+const ChannelRegistry = @import("channels.zig").Registry;
 
 var stopping: std.atomic.Value(bool) = .init(false);
 
@@ -21,8 +22,11 @@ pub fn run(init: std.process.Init) !void {
     defer arena.deinit();
     const a = arena.allocator();
     const host_directory = try std.process.currentPathAlloc(io, a);
-    const data_directory = try std.fs.path.resolve(a, &.{ host_directory, config.data_dir });
-    _ = try std.Io.Dir.cwd().createDirPathStatus(io, data_directory, .fromMode(0o700));
+    const configured_directory = try std.fs.path.resolve(a, &.{ host_directory, config.data_dir });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, configured_directory, .fromMode(0o700));
+    const data_directory = try std.Io.Dir.cwd().realPathFileAlloc(io, configured_directory, a);
+    var channels = try ChannelRegistry.listen(init.gpa, io, data_directory);
+    defer channels.deinit();
     const database_path = try std.fs.path.join(a, &.{ data_directory, state.filename });
     try state.initialize(a, database_path);
     var subscription_store = try state.subscriptions.Store.open(init.gpa, database_path);
@@ -75,7 +79,7 @@ pub fn run(init: std.process.Init) !void {
         .engine = &engine,
         .inbox = mail.inbox(),
         .sender = mail.sender(),
-        .channels = host_tools.channels(),
+        .channels = channels.port(),
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),
         .subscriptions = &subscription_store,
@@ -98,8 +102,14 @@ pub fn run(init: std.process.Init) !void {
     std.posix.sigaction(.TERM, &action, &previous_term);
     defer std.posix.sigaction(.TERM, &previous_term, null);
 
-    const Result = union(enum) { service: anyerror!void, kernel: anyerror!void, host: anyerror!void, shutdown: std.Io.Cancelable!void };
-    var result_buffer: [4]Result = undefined;
+    const Result = union(enum) {
+        service: anyerror!void,
+        kernel: anyerror!void,
+        host: anyerror!void,
+        channels: anyerror!void,
+        shutdown: std.Io.Cancelable!void,
+    };
+    var result_buffer: [5]Result = undefined;
     var select = std.Io.Select(Result).init(io, &result_buffer);
     defer {
         kernel.closeReception();
@@ -107,6 +117,7 @@ pub fn run(init: std.process.Init) !void {
     }
     try select.concurrent(.service, Service.run, .{ &service, &kernel });
     try select.concurrent(.host, host.Host.run, .{&host_tools});
+    try select.concurrent(.channels, ChannelRegistry.run, .{&channels});
     try select.concurrent(.kernel, agent.Kernel.run, .{&kernel});
     try select.concurrent(.shutdown, waitForStop, .{io});
     std.log.info("Ivenna listening on {f} as {s} (model: {s})", .{ service.listener.socket.address, config.mail_address, config.llm_model });
@@ -114,6 +125,7 @@ pub fn run(init: std.process.Init) !void {
         .service => |result| try result,
         .kernel => |result| try result,
         .host => |result| try result,
+        .channels => |result| try result,
         .shutdown => |result| {
             try result;
             std.log.info("stopping Ivenna and waiting for active work", .{});

@@ -24,9 +24,9 @@
 | Task | Guide |
 | --- | --- |
 | Interpret startup and other observations, retained history, and handovers | [Input contract](input.md) |
-| Send a message to a correspondent or focus | [Sending a message](communication.md#sending-a-message) |
-| Open a channel, send to it, or close it | [Channels](communication.md#channels) |
-| Read channel messages in a command or script | [Receiving messages](host.md#receiving-messages-in-a-command) |
+| Send a message to a correspondent, focus, or channel | [Sending a message](communication.md#sending-a-message) |
+| Open or close a channel | [Opening](communication.md#opening-a-channel) · [Closing](communication.md#closing-a-channel) |
+| Read channel messages in a local program | [Receiving from a channel](communication.md#receiving-from-a-channel) |
 | Coordinate focuses, schedule wakeups, and manage subscriptions | [Attention](attention.md) |
 | Write a listener that reports observations and resumes from a saved cursor | [Subscription listener protocol](subscriptions.md) |
 | Use shared autonomous memory | [Memory rooms](memory.md) |

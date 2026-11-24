@@ -23,7 +23,7 @@ Retained records identify the focus that admitted their events or produced their
 
 The `name` supplied when opening a focus or channel, running a command, scheduling attention, or subscribing contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
 
-Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control commands and channel IDs address their message inputs. Both belong to their originating runtime.
+Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control host commands. Channel IDs address open channels. Both are scoped to the issuing runtime.
 
 ## Retained records
 
@@ -172,7 +172,7 @@ The core's `correspondents` list is present even when empty. The renderer omits 
 
 Active subscriptions include listeners that have yet to report. A report accepted before withdrawal can arrive after the ID has dropped out of a new sample.
 
-The `channels` list records the IDs of channels that were open when sampled. Earlier handovers retain those IDs after the input closes, the command exits, or the runtime restarts. See [channel send outcomes](communication.md#sending-to-a-channel).
+The `channels` list reflects the sample time. A retained handover can still show an ID after its channel closes or the runtime restarts. See [channel send outcomes](communication.md#sending-to-a-channel).
 
 Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after the result is published or queued. A pending host source can identify a command that has already finished. Observation text arrives separately as an event. See [command lifetimes](host.md#command-lifetimes) for handle availability.
 

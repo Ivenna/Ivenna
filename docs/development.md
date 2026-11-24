@@ -41,7 +41,7 @@ Organize packages around cohesive capabilities, keeping their types, rules, reso
 
 Use `packages/agent_contracts` for shared communication and capability contracts. Keep execution policy, model-input types and rendering, prompts, and runtime tool declarations in `packages/agent`. Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities), and update producers and consumers together when changing a shared type or operation.
 
-Keep configuration with the behavior it controls. Execution owns scheduling, context limits, and reasoning selection. Capability packages own connection settings and protocol encoding. The application loads these settings from the environment and configures its own HTTP listener.
+Keep configuration with the behavior it controls. Execution owns scheduling, context limits, and reasoning selection. Capability implementations own their connection settings and protocol encoding. The application loads deployment settings from the environment and owns its listeners.
 
 ### Types and protocols
 

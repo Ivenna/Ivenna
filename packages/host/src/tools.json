@@ -1,7 +1,7 @@
 [
   {
     "name": "inspect_host_shell",
-    "description": "Inspect shell defaults and find commands and their open channels across activities.",
+    "description": "Inspect shell defaults and commands shared across activities.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -56,11 +56,10 @@
           "enum": [
             "batch",
             "pipe",
-            "messages",
             "terminal"
           ],
           "default": "batch",
-          "description": "`batch` has no live stdin. `pipe` accepts writes to stdin. `messages` lets the command read from a channel. Run `\"$IVENNA\" receive --help` for reading options. `terminal` merges stdout and stderr and can alter bytes."
+          "description": "`batch` has no live stdin. `pipe` accepts writes to stdin. `terminal` provides a pseudo-terminal, merges stdout and stderr, and can alter input and output bytes."
         },
         "timeout_ms": {
           "type": "integer",
@@ -138,7 +137,7 @@
                     "text"
                   ],
                   "additionalProperties": false,
-                  "description": "One pending write per command. Use `send` for channel messages."
+                  "description": "One pending write per command."
                 }
               },
               "required": [

@@ -143,13 +143,15 @@ With the supplied readiness policy installed, this command receives a `550` reje
 
 Read messages from Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna chooses whether and when to reply. See the [usage guide](../docs/usage.md) for continuing correspondence and interpreting responses.
 
-## Trying a command channel
+## Trying a channel
 
-Use the [mail example](#sending-a-message) to ask Ivenna to try a channel.
+Use the [mail example](#sending-a-message) to give Ivenna this assignment.
 
-> Start an activity that runs `"$IVENNA" receive --follow` in messages mode. Open a channel to the running command, send `ready`, and close the channel. Report the receiver's output and exit status.
+> Open an activity to try a channel. In that activity, open `task-input` with the description `Send test messages to local receivers`. Try sending `first` before starting a receiver.
+>
+> In the same activity, start `"$IVENNA" receive CHANNEL_ID` with `yield_ms` set to `0`, substituting the complete channel ID. Send `first` while the command waits. If the send reports `channel_no_receiver`, check that the command is still running before retrying. Once it exits, start a second receiver and send `second` to the same channel. Close the channel and report the send results, command output, and exit statuses.
 
-The receiver should write one line containing `{"status":"message","text":"ready"}` and exit with status 0. See [receiving messages](../docs/host.md#receiving-messages-in-a-command) for the command setup and [sending to a channel](../docs/communication.md#sending-to-a-channel) for the send result.
+The first attempt should return `channel_no_receiver`. The sends made while a reader is waiting should return `accepted`. Each receiver should print one JSON `message` record with the expected text and exit with status 0. See the [channel interface](../docs/communication.md#channels).
 
 ## Trying a subscription listener
 

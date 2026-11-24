@@ -129,4 +129,4 @@ An activity with a pending callback or an active subscription can sleep with its
 
 Withdraw subscriptions when the activity finishes following their sources. The activity ends and frees its capacity slot when it has no work, pending callbacks, or active subscriptions left. Its ending calls for the core's attention even if it produced no text.
 
-The core can still receive the ended activity's expressions and ending with its original focus ID. See [report fields](input.md#assignments-and-reports).
+The core can still receive the ended activity's expressions and ending with its original focus ID. An activity can pass a channel ID in a report for the core to use after the activity ends. See [the channel's lifetime](communication.md#closing-a-channel) and [report fields](input.md#assignments-and-reports).

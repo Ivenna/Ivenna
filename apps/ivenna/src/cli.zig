@@ -7,9 +7,9 @@ pub const Command = union(enum) {
     help: []const u8,
 };
 
-pub const Receive = union(enum) {
-    once: u32,
-    follow,
+pub const Receive = struct {
+    id: []const u8,
+    mode: union(enum) { once: ?u32, follow },
 };
 
 const Subscription = struct {
@@ -31,16 +31,28 @@ pub fn parse(args: []const []const u8) !Command {
 }
 
 fn parseReceive(args: []const []const u8) error{InvalidArguments}!Command {
-    if (args.len == 0) return .{ .receive = .{ .once = 0 } };
+    if (args.len == 0 or args[0].len == 0)
+        return invalid("missing CHANNEL_ID. See 'ivenna receive --help'.", .{});
     if (isHelp(args[0])) return help(args[1..], receive_help);
-    if (equal(args[0], "--follow")) {
-        if (args.len > 1) return unexpected(args[1]);
-        return .{ .receive = .follow };
+    const id = args[0];
+    const options = args[1..];
+    if (options.len == 0) return .{ .receive = .{ .id = id, .mode = .{ .once = null } } };
+    if (equal(options[0], "--follow")) {
+        if (options.len > 1) return unexpected(options[1]);
+        return .{ .receive = .{ .id = id, .mode = .follow } };
     }
-    if (!equal(args[0], "--wait")) return unexpected(args[0]);
-    const wait_ms = try decimal(u32, args);
-    if (args.len > 2) return unexpected(args[2]);
-    return .{ .receive = .{ .once = wait_ms } };
+    if (!equal(options[0], "--wait")) return unexpected(options[0]);
+    const wait_ms = try decimal(u32, options);
+    if (wait_ms == 0) return invalid("--wait requires a positive duration in milliseconds", .{});
+    if (options.len > 2) return unexpected(options[2]);
+    return .{ .receive = .{ .id = id, .mode = .{ .once = wait_ms } } };
+}
+
+pub fn writeJson(io: std.Io, value: anytype) !void {
+    var buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
+    stdout.interface.print("{f}\n", .{std.json.fmt(value, .{})}) catch |err| return stdout.err orelse err;
+    stdout.interface.flush() catch |err| return stdout.err orelse err;
 }
 
 fn parseSubscription(args: []const []const u8) !Command {
@@ -95,7 +107,7 @@ const overview =
     \\ivenna COMMAND [ARGUMENTS]
     \\
     \\  serve          Run the kernel.
-    \\  receive        Read channel messages in a host command.
+    \\  receive        Read messages from an open channel.
     \\  subscription   Report observations and save source positions.
     \\
     \\Run ivenna COMMAND --help for command usage.

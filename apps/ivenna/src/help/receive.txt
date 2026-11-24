@@ -1,23 +1,24 @@
-ivenna receive [--wait MS]
-ivenna receive --follow
+ivenna receive CHANNEL_ID [--wait MS]
+ivenna receive CHANNEL_ID --follow
 
-Read messages from the inherited standard input of a host command started
-in messages mode. Invoke the receiver as "$IVENNA" receive.
+Use the ID returned by open_channel. Run under the kernel's OS account with
+DATA_DIR set to the running instance's data directory. Ivenna host commands
+inherit DATA_DIR and can call the executable as "$IVENNA".
 
-For a single read, omit --wait or use --wait 0 to check immediately.
-Use --wait MS to wait up to MS milliseconds, from 0 through {d}.
+Without options, wait for one message. Start the receive before sending.
+Use --wait MS to set a timeout of 1 through {d} milliseconds.
 
-A successful single read writes one JSON object to stdout and exits
-with code 0. The status field describes the result.
+For any of the results below, a single read exits with code 0 and writes
+one JSON object to stdout. Its status field gives the outcome.
 
   message    One message was read. The text field contains the message.
-  empty      The immediate check found no message.
   timeout    The wait elapsed before a message arrived.
-  closed     The input has ended after any pending message was read.
+  closed     The channel closed during the wait.
 
-Use --follow to keep reading. It flushes one JSON line with status "message"
-per message. A script can pipe stdout to a handler. Follow mode exits with
-code 0 after draining closed input or when the output pipe closes. It prints
-only message records.
+Use --follow to receive successive messages as JSON lines. Each line is
+flushed before the next read begins. Closing the channel ends the stream
+with exit code 0. If the output pipe closes during a wait, either mode
+exits with code 0 without printing another record.
 
-On error, the receiver writes a diagnostic to stderr and exits with code 1.
+An unknown ID or unavailable channel service produces a diagnostic on
+stderr and exit code 1.

@@ -8,7 +8,7 @@ Install the `ivenna` executable. The kernel's execution environment needs `/bin/
 
 The core and activities can read regular files and list directories wherever the kernel's OS account has access. Choose the account and filesystem mounts accordingly. Host commands run as the same account.
 
-Messages mode requires Linux with packet-mode pipe support. See [receiving messages in a command](host.md#receiving-messages-in-a-command).
+Channels require Linux with abstract Unix sockets. Run receivers under the kernel's effective UID and in its network namespace, including when running them in a separate container. `DATA_DIR` must resolve to the same canonical absolute path in both environments. See [receiving from a channel](communication.md#receiving-from-a-channel).
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
@@ -231,7 +231,7 @@ At restart the core sees the current outgoing correspondent IDs, including chang
 
 Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose deadlines passed while the runtime was unavailable become due. Host completions without stored results receive interruption observations with unknown effects; already stored results are preserved.
 
-Stopping the kernel cleans up its host commands and retires their handles and channels. On restart, Ivenna continues from saved working history and pending observations. An interrupted operation may have produced effects without a saved result. Include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) and [startup and interruption](architecture.md#startup-and-interruption).
+Stopping the kernel cleans up its host commands, ends the channel service, and retires its open channel IDs. On restart, Ivenna continues from saved working history and pending observations. An interrupted operation may have produced effects without a saved result. Include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) and [startup and interruption](architecture.md#startup-and-interruption).
 
 ### Updating the executable
 

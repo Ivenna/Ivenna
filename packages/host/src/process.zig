@@ -1,7 +1,5 @@
 const std = @import("std");
 const Pty = @import("pty.zig").Pty;
-const command_input = @import("command_input.zig");
-const Channels = @import("agent_contracts").Channels;
 
 pub const Outcome = union(enum) {
     completed: std.process.Child.Term,
@@ -17,7 +15,6 @@ pub const Process = struct {
     child: std.process.Child,
     group_id: std.posix.pid_t,
     input: ?std.Io.File,
-    message_writer: ?std.Io.File = null,
     terminal: ?Pty,
     stdout: std.Io.File,
     input_closed: bool,
@@ -30,7 +27,7 @@ pub const Process = struct {
         stdout: std.Io.File,
         stderr: std.Io.File,
         environ: *const std.process.Environ.Map,
-        stdin: enum { closed, pipe, messages } = .closed,
+        stdin: enum { closed, pipe } = .closed,
         terminal: bool = false,
         rows: u16 = 24,
         cols: u16 = 80,
@@ -64,18 +61,11 @@ pub const Process = struct {
                 .input_closed = false,
             };
         }
-        const message_pipe = if (options.stdin == .messages) try command_input.open(io) else null;
-        defer if (message_pipe) |pipe| pipe.reader.close(io);
-        errdefer if (message_pipe) |pipe| pipe.writer.close(io);
         var child = try std.process.spawn(io, .{
             .argv = options.argv,
             .cwd = .{ .path = options.directory },
             .environ_map = options.environ,
-            .stdin = switch (options.stdin) {
-                .closed => .ignore,
-                .pipe => .pipe,
-                .messages => .{ .file = message_pipe.?.reader },
-            },
+            .stdin = if (options.stdin == .pipe) .pipe else .ignore,
             .stdout = .{ .file = options.stdout },
             .stderr = .{ .file = options.stderr },
             .pgid = 0,
@@ -86,10 +76,9 @@ pub const Process = struct {
             .child = child,
             .group_id = child.id.?,
             .input = input,
-            .message_writer = if (message_pipe) |pipe| pipe.writer else null,
             .terminal = null,
             .stdout = options.stdout,
-            .input_closed = options.stdin != .pipe,
+            .input_closed = options.stdin == .closed,
         };
     }
 
@@ -179,24 +168,6 @@ pub const Process = struct {
         self.input_closed = true;
     }
 
-    fn liveMessageWriter(self: *const Process) ?std.Io.File {
-        return if (self.exited.load(.acquire)) null else self.message_writer;
-    }
-
-    pub fn messageInputOpen(self: *const Process) bool {
-        return self.liveMessageWriter() != null;
-    }
-
-    pub fn sendMessage(self: *const Process, io: std.Io, text: []const u8) !Channels.Outcome {
-        const writer = self.liveMessageWriter() orelse return .closed;
-        return command_input.send(writer, io, text);
-    }
-
-    pub fn closeMessageInput(self: *Process, io: std.Io) void {
-        if (self.message_writer) |writer| writer.close(io);
-        self.message_writer = null;
-    }
-
     pub fn signal(self: *Process, io: std.Io, which: Signal) !void {
         try io.checkCancel();
         if (self.exited.load(.acquire)) return error.ProcessNotFound;
@@ -233,7 +204,6 @@ pub const Process = struct {
             self.child.kill(io);
         }
         if (self.input) |input| input.close(io);
-        self.closeMessageInput(io);
         if (self.terminal) |*terminal| terminal.deinit(io);
         self.* = undefined;
     }

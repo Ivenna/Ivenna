@@ -23,7 +23,7 @@ pub const Destination = union(enum) {
 /// selection. Kernel owns their effects within the calling model/tool round.
 pub const Request = union(enum) {
     send: struct { to: Destination, text: []const u8 },
-    open_channel: struct { name: []const u8, command_id: []const u8 },
+    open_channel: struct { name: []const u8, description: []const u8 },
     close_channel: struct { channel_id: []const u8 },
     open_focus: struct { name: []const u8, task: []const u8 },
     schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
@@ -44,7 +44,7 @@ pub const Request = union(enum) {
         };
         switch (request) {
             .send => |args| if (args.text.len == 0) return error.InvalidToolArguments,
-            .open_channel => |args| if (!contracts.Reference.validName(args.name) or args.command_id.len == 0) return error.InvalidToolArguments,
+            .open_channel => |args| if (!contracts.Reference.validName(args.name) or args.description.len == 0) return error.InvalidToolArguments,
             .close_channel => |args| if (args.channel_id.len == 0) return error.InvalidToolArguments,
             .subscribe => {},
             .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
@@ -108,5 +108,13 @@ test "send rejects a call that selects two destinations" {
     defer arena.deinit();
     try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "send",
         \\{"to":{"focus_id":"core-1","channel_id":"core-1"},"text":"Hello"}
+    ));
+}
+
+test "opening a channel requires a nonempty description" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "open_channel",
+        \\{"name":"task-input","description":""}
     ));
 }

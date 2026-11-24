@@ -6,13 +6,13 @@ This guide describes how the application assembles Ivenna, how the kernel coordi
 
 | Unit | Responsibility |
 | --- | --- |
-| [apps/ivenna](../apps/ivenna) | Provide the CLI, load configuration, assemble the runtime, serve HTTP status, and manage process startup and shutdown |
+| [apps/ivenna](../apps/ivenna) | Provide the CLI, load configuration, assemble the runtime, serve HTTP status and local channels, and manage process startup and shutdown |
 | [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
 | [packages/agent](../packages/agent/src/root.zig) | Own sessions, scheduling, retained history, model input, prompts, and the communication and attention tools |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
 | [packages/responses](../packages/responses/src/root.zig) | Encode, measure, and decode model exchanges; own model HTTP transport, file uploads, and request content limits |
-| [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, channels, process interaction and cleanup, logs, and completion output |
+| [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, process interaction and cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/resources](../packages/resources/src/root.zig) | Resolve resource references, read host files and directories, retrieve web pages, and present remote images by URL |
 | [packages/instance_state](../packages/instance_state/src/root.zig) | Own the local SQLite database and provide subscription operations |
@@ -66,7 +66,7 @@ The application supplies the agent and host with capability implementations thro
 | [Callback.Registrar](../packages/agent_contracts/src/callback.zig) | Persist a future observation's source and bind its destination to the invoking session | Agent execution |
 | [Callback.Publisher](../packages/agent_contracts/src/callback.zig) | Store one observation under a registered callback ID, preserving the first stored result | Email integration |
 | [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Expose registered outgoing correspondent IDs and submit messages by ID | Email integration |
-| [Channels](../packages/agent_contracts/src/channels.zig) | Open, sample, and close command channels and send messages by channel ID | Host |
+| [Channels](../packages/agent_contracts/src/channels.zig) | Open, sample, and close local channels and send messages by channel ID | Application |
 | [HistoryStore](../packages/agent_contracts/src/history.zig) | Publish and load checkpoints, allocate storage groups, read and write records, and maintain retained history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure encoded requests, and prepare tool results for model input | Responses adapter |
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
@@ -76,15 +76,15 @@ The application supplies the agent and host with capability implementations thro
 
 The callback registrar accepts a name and source and returns `Callback.Registration`: an internal numeric delivery ID and a complete reference allocated for the caller. A capability retains the numeric ID for publication through `Callback.Publisher` and presents the reference as `callback_id`; it does not retain the registrar or choose another receiving session.
 
-[Reference](../packages/agent_contracts/src/reference.zig) validates names and formats the references allocated by execution. The checkpoint retains the focus, callback, and host reference sequences. Commands and channels share the host reference sequence, which continues after restart. The subscription store allocates its suffixes in SQLite. Resource lookup uses the complete reference. See [names and references](input.md#names-and-references).
+[Reference](../packages/agent_contracts/src/reference.zig) validates names and formats the references allocated by execution. The checkpoint retains the focus and callback sequences and the sequence used for command and channel suffixes. These sequences continue after restart. The subscription store allocates its suffixes in SQLite. Resource lookup uses the complete reference. See [names and references](input.md#names-and-references).
 
 ## Service and reception
 
-`ivenna serve` binds `SERVICE_ADDRESS` before opening the instance database or accessing the mail account. Once the runtime is assembled, the application serves probes concurrently with the kernel and host supervisor. The kernel reconciles restored host registrations and completes initial history maintenance before opening reception. It then dispatches ready focuses. See [startup and interruption](#startup-and-interruption).
+`ivenna serve` binds `SERVICE_ADDRESS` and the local channel socket before opening the instance database or accessing the mail account. Once the runtime is assembled, the application serves probes and channel readers concurrently with the kernel and host supervisor. The kernel reconciles restored host registrations and completes initial history maintenance before opening reception. It then dispatches ready focuses. See [startup and interruption](#startup-and-interruption).
 
-The listener handles probes independently of intake and model work. A health probe observes the listener. A readiness probe reads the kernel's reception state, which stays open while an individual focus waits for inference. The deployment's mail service uses readiness to decide whether to accept correspondence. Shutdown can follow a successful check, leaving accepted mail in the account. See the [reception contract](running.md#service-status-and-reception) and [local SMTP example](../dev/README.md#configuring-mail).
+The HTTP listener handles probes independently of intake and model work. A health probe observes the listener. A readiness probe reads the kernel's reception state, which stays open while an individual focus waits for inference. The deployment's mail service uses readiness to decide whether to accept correspondence. Shutdown can follow a successful check, leaving accepted mail in the account. See the [reception contract](running.md#service-status-and-reception) and [local SMTP example](../dev/README.md#configuring-mail).
 
-Each probe handler owns its connection, the kernel owns intake and session workers, and Host supervises commands independently of the session that launched them. A failed probe ends its connection. An HTTP listener failure or an unrecovered kernel or host error closes reception for this instance. The application cancels and joins concurrent work before releasing shared dependencies.
+Each probe handler owns its connection. The kernel owns intake and session workers, and Host supervises commands independently of the session that launched them. A failed probe or receive request ends its connection. A listener failure or an unrecovered kernel or host error closes reception for this instance. The application cancels and joins concurrent work before releasing shared dependencies.
 
 ## Sessions, work, and communication
 
@@ -114,7 +114,13 @@ Sleeping activities retain their session slots. Completing an activity releases 
 
 Incoming correspondence enters the core's queue in intake order, independently of mail threads. The core also reads activity reports during admission. See [activity reports](#activity-reports) and [activation admission](#activation-admission).
 
-The tool decoder reads the single field in `send.to` to select a destination variant. The kernel routes the complete ID to the mail sender, session registry, or Host's `Channels` interface. For a focus destination, the registry checks membership and queue capacity under its lock, then checkpoints the queued message with the calling focus's ID. The kernel renders the outcome as a tool reply. See [tool decoding](../packages/agent/src/tools.zig), [outgoing mail](#outgoing-mail), [command channels](#command-channels), and [sending outcomes](communication.md#sending-a-message).
+The tool decoder reads the single field in `send.to` to select a destination variant. The kernel routes the complete ID to the mail sender, session registry, or channel registry. For a focus destination, the registry checks membership and queue capacity under its lock, then checkpoints the queued message with the calling focus's ID. The kernel renders the outcome as a tool reply. See [tool decoding](../packages/agent/src/tools.zig), [outgoing mail](#outgoing-mail), [local channels](#local-channels), and [sending outcomes](communication.md#sending-a-message).
+
+### Local channels
+
+The application's channel registry records each open ID, its opening focus, and its waiting receive requests. A send tries the registry lock once and attempts a nonblocking packet write to the first eligible reader. The registry removes each request at handoff, expiration, disconnect, or channel close. See the [registry implementation](../apps/ivenna/src/channels.zig), [channel contract](../packages/agent_contracts/src/channels.zig), and [send outcomes](communication.md#sending-to-a-channel).
+
+The runtime listens on an abstract Unix `SOCK_SEQPACKET` socket named from the canonical instance directory and effective UID. Each receive uses one connection, and both peers check that their effective UIDs match. The listener admits up to 128 concurrent receive requests to bound open sockets and request tasks. At shutdown the application cancels and joins those tasks before it releases the registry and listener. See the [local socket transport](../apps/ivenna/src/channel_ipc.zig) and [receiving from a channel](communication.md#receiving-from-a-channel).
 
 ## Activation admission
 
@@ -241,7 +247,7 @@ The kernel normally carries forward the complete tool exchange awaiting continua
 
 ### Sampling state and preparing the request
 
-The session registry samples the focus's identity, observation time, live activity IDs, callbacks, and subscription IDs under its lock. Host samples open channel IDs under its own lock. It supplies all open channels for the core and limits an activity's sample to the channels it opened. The kernel takes the core's outgoing correspondent IDs from the sender. See the [sampling implementation](../packages/agent/src/kernel.zig) and [fields supplied to each role](input.md#sampled-state).
+The session registry samples the focus's identity, observation time, live activity IDs, callbacks, and subscription IDs under its lock. For the core, the kernel requests all open channel IDs from the channel registry. For an activity, it requests the IDs of open channels that focus created. The kernel takes the core's outgoing correspondent IDs from the sender. See the [sampling implementation](../packages/agent/src/kernel.zig) and [fields supplied to each role](input.md#sampled-state).
 
 `Context.summaryRequest` combines the system prompt, selected history, sampled state, and compaction instructions. The summary request uses `high` reasoning without tools. Observations awaiting admission stay queued. See the [summary instructions](../packages/agent/src/compaction.md) and [handover contract](input.md#handover-generation-and-replacement).
 
@@ -270,7 +276,7 @@ Each entry contains a retained `Input.Record` or an exchange of `Model.Item[]`. 
 
 Working history and the activity outbox share a [record codec](../packages/agent/src/record_codec.zig) for compact UTF-8 ZON bodies and content keys. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the complete encoded body. The storage group and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal observations are stored together in a separate immutable observation-array record in the session's current group.
 
-One checkpoint covers all registered sessions and records the local database identity in `subscription_catalog`. For each session it records the internal ID, `focus_id`, role, epoch, storage group, committed head, entry count, and the last admitted subscription report sequence (zero before the first report). An optional key selects the unread internal observations in that group. The `was_running` flag helps determine which activities receive a [startup observation](#startup-and-interruption) immediately. Across sessions the checkpoint retains the next session, callback, and host reference numbers, callback registrations with their references, sources and destinations, scheduled wakeups with their deadlines and text, and the [unread activity reports](#activity-reports).
+One checkpoint covers all registered sessions and records the local database identity in `subscription_catalog`. For each session it records the internal ID, `focus_id`, role, epoch, storage group, committed head, entry count, and the last admitted subscription report sequence (zero before the first report). An optional key selects the unread internal observations in that group. The `was_running` flag helps determine which activities receive a [startup observation](#startup-and-interruption) immediately. Across sessions the checkpoint retains the [reference sequences](#shared-contracts), callback registrations with their references, sources and destinations, scheduled wakeups with their deadlines and text, and the [unread activity reports](#activity-reports).
 
 Appending advances the head and count without adding a per-entry reference to the checkpoint. A sleeping session can retain this confirmed selection without materialized context entries. The latest confirmed checkpoint selects the records kept by [history maintenance](#history-retention) and available for subsequent restoration.
 
@@ -408,7 +414,7 @@ One [snapshot store](../packages/resources/src/pages.zig) serves all focuses. Ea
 
 ### Command lifecycle
 
-Host reserves live capacity and requests a command reference from execution through its invocation context. Execution appends the next host reference number to the supplied name and saves the advanced counter before returning the reference. Host then launches the command. See [reference allocation](#shared-contracts).
+Host reserves live capacity and requests a command reference from execution through its invocation context. Execution appends the next suffix to the supplied name and saves the advanced counter before returning the reference. Host then launches the command. See [reference allocation](#shared-contracts).
 
 `run_host_shell` waits on `std.Io.Condition` until process and input cleanup finish or the call's wait expires. If cleanup has completed, the call returns the final state and bounded output previews, then retires the handle. Otherwise Host persists a completion registration with source `host: { command_id }`, using the command name for its callback prefix, retains the command, and returns the complete command and callback references. Other activities can discover and control a command while its caller waits.
 
@@ -426,19 +432,13 @@ The initial call keeps `handoff_pending` set until it rejects handoff or has sav
 
 Command lookup checks the complete reference and is shared across activities; inspection records retain the originating `focus_id` as provenance. Inspection pages the current registry within a 32 KiB complete-reply budget, returning `offset`, `next_offset`, and the filtered `total_commands`. Registry changes can alter later pages. Initial observations and completion publication do not take the continuation lock; their [output collection](#output-and-delivery) is independent of the shared cursors.
 
-### Command channels
-
-Host stores the channel ID and the focus that opened it on the command's registry entry. It reports open channels in [command inspection](host.md#continuing-and-controlling-a-command) and [compaction samples](#sampling-state-and-preparing-the-request). Host retains a closed channel's ID until it retires the command handle, so it can report closure for late sends. See [channel send outcomes](communication.md#sending-to-a-channel).
-
-In `messages` mode, Host gives the command the read end of a nonblocking Linux packet pipe as stdin. Host sizes the pipe to one page, which holds one packet. A send tries the registry lock once. With the lock held, Host checks that the destination is live and the message fits the channel's byte limit, then attempts one nonblocking write. The limit fits within Linux `PIPE_BUF`, so the write is atomic. Host closes the write end when the channel closes or the command exits. A pending packet remains readable before end of input. See the [channel contract](../packages/agent_contracts/src/channels.zig), [packet transport](../packages/host/src/command_input.zig), and [receiving messages](host.md#receiving-messages-in-a-command).
-
 ### Processes and terminals
 
 [process.zig](../packages/host/src/process.zig) owns child supervision through `std.process.Child` and `std.Io.Select`, including deadlines, cancellation, and protected reaping. It selects the process transport from the command's input mode.
 
 [pty.zig](../packages/host/src/pty.zig) supplies the Linux terminal operations absent from `std.Io`. It opens the slave from the master with `TIOCGPTPEER`, resizes it with an ioctl, and uses `std.posix.tcgetpgrp` for foreground-group lookup. Launch uses `setsid --ctty` because `std.process.spawn` exposes process groups without a new-session option. The terminal master carries input and merged stdout/stderr; terminal EOF is a control byte rather than a pipe half-close.
 
-In terminal mode, interrupt targets the foreground group so an interactive shell can continue afterward. Terminal termination and cleanup cover the original session, including background job-control groups. The backend enumerates `/proc`, filters with `getsid`, then binds candidates with pidfds and rechecks their session before signaling. Host cleans up `batch`, `pipe`, and `messages` commands by process group.
+In terminal mode, interrupt targets the foreground group so an interactive shell can continue afterward. Terminal termination and cleanup cover the original session, including background job-control groups. The backend enumerates `/proc`, filters with `getsid`, then binds candidates with pidfds and rechecks their session before signaling. Host cleans up `batch` and `pipe` commands by process group.
 
 Normal completion and timeout report cleanup failures as unavailable outcomes. Error unwinding and cancellation make a final best-effort cleanup before joining. A program can escape into another session; if it retains a terminal slave, output draining stops after a one-second wait. Terminal [deployment requirements](running.md#runtime-requirements) belong to the running guide.
 

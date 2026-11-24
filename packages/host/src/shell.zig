@@ -13,7 +13,7 @@ pub const Shell = struct {
     environ: *const std.process.Environ.Map,
 
     pub const default_output_bytes = 4096;
-    pub const Mode = enum { batch, pipe, messages, terminal };
+    pub const Mode = enum { batch, pipe, terminal };
     pub const Command = struct {
         name: contracts.JsonString,
         command: contracts.JsonString,
@@ -139,11 +139,7 @@ pub const Shell = struct {
             .stdout = stdout,
             .stderr = stderr,
             .environ = &environment,
-            .stdin = switch (args.mode) {
-                .batch, .terminal => .closed,
-                .pipe => .pipe,
-                .messages => .messages,
-            },
+            .stdin = if (args.mode == .pipe) .pipe else .closed,
             .terminal = args.mode == .terminal,
         })) |child| .{ .process = child } else |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,
@@ -218,7 +214,7 @@ test "partial text carries the retained path and incremental reads identify thei
     try t.expectEqualStrings(bytes[@intCast(offset)..], last.preview.?);
     try t.expectEqualStrings(invocation.stdout_reference, last.path);
 
-    // The concrete input fits in the combined budget with either channel empty.
+    // The concrete input fits in the combined budget with either stream empty.
     try tmp.dir.writeFile(t.io, .{ .sub_path = "stdout", .data = bytes[0..400] });
     try t.expectEqualStrings(bytes[0..400], (try invocation.complete(a, 512)).stdout.?.text);
     try tmp.dir.writeFile(t.io, .{ .sub_path = "stderr", .data = bytes[0..400] });

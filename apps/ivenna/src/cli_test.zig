@@ -1,5 +1,8 @@
 const std = @import("std");
 const state = @import("instance_state");
+const contracts = @import("agent_contracts");
+const channel_ipc = @import("channel_ipc.zig");
+const Registry = @import("channels.zig").Registry;
 const testing = std.testing;
 const executable = @import("app_options").executable;
 
@@ -55,8 +58,9 @@ test "command help and argument errors work without instance or service settings
     const a = arena.allocator();
     const receive = try runWithoutConfig(a, &.{ executable, "receive", "--help" });
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, receive.term);
-    try testing.expect(std.mem.indexOf(u8, receive.stdout, "ivenna receive [--wait MS]") != null);
-    try testing.expect(std.mem.indexOf(u8, receive.stdout, "ivenna receive --follow") != null);
+    try testing.expect(std.mem.indexOf(u8, receive.stdout, "ivenna receive CHANNEL_ID") != null);
+    try testing.expect(std.mem.indexOf(u8, receive.stdout, "--wait MS") != null);
+    try testing.expect(std.mem.indexOf(u8, receive.stdout, "--follow") != null);
 
     const typo = try runWithoutConfig(a, &.{ executable, "subscription", "publsh", "news-1" });
     try testing.expect(typo.term == .exited and typo.term.exited != 0);
@@ -106,120 +110,116 @@ test "the subscription command accepts observations while the kernel is stopped 
     try testing.expect((try listener.request("inspect", null, true)) == .null);
 }
 
-test "receive validates its arguments before reading standard input" {
+test "receive validates its arguments before looking for a channel" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const invalid_options = [_][]const []const u8{
-        &.{"command-1"},
-        &.{"--wait"},
-        &.{ "--wait", "4294967296" },
-        &.{ "--wait", "1.5" },
-        &.{ "--follow", "--wait", "1" },
-        &.{ "--wait", "1", "--follow" },
+    const invalid_args = [_][]const []const u8{
+        &.{},
+        &.{ "events-1", "--wait" },
+        &.{ "events-1", "--wait", "0" },
+        &.{ "events-1", "--wait", "4294967296" },
+        &.{ "events-1", "--wait", "1.5" },
+        &.{ "events-1", "--follow", "--wait", "1" },
     };
-    for (invalid_options) |options| {
-        const argv = try std.mem.concat(a, []const u8, &.{ &.{ executable, "receive" }, options });
+    for (invalid_args) |args| {
+        const argv = try std.mem.concat(a, []const u8, &.{ &.{ executable, "receive" }, args });
         const result = try runWithoutConfig(a, argv);
         try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
         try testing.expectEqualStrings("", result.stdout);
         try testing.expect(result.stderr.len != 0);
     }
-    const invalid_input = try runWithoutConfig(a, &.{ executable, "receive" });
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, invalid_input.term);
-    try testing.expectEqualStrings("", invalid_input.stdout);
-    try testing.expect(std.mem.indexOf(u8, invalid_input.stderr, "messages mode") != null);
+    const missing_data_dir = try runWithoutConfig(a, &.{ executable, "receive", "events-1" });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, missing_data_dir.term);
+    try testing.expectEqualStrings("", missing_data_dir.stdout);
+    try testing.expect(std.mem.indexOf(u8, missing_data_dir.stderr, "DATA_DIR") != null);
 }
 
-test "receive preserves one whole packet and drains before reporting closure" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var pipe = try MessagePipe.init();
-    defer pipe.deinit();
-
-    const first = "前半段\x00\n\"\\second half";
-    const second: [4096]u8 = @splat('s');
-    try pipe.write(first);
-    const first_result = try pipe.receive(a, &.{});
-    try testing.expectEqualStrings("message", first_result.object.get("status").?.string);
-    try testing.expectEqualStrings(first, first_result.object.get("text").?.string);
-
-    try pipe.write(&second);
-    pipe.closeWriter();
-    const second_result = try pipe.receive(a, &.{});
-    try testing.expectEqualStrings("message", second_result.object.get("status").?.string);
-    try testing.expectEqualStrings(&second, second_result.object.get("text").?.string);
-    try expectReceiveStatus(try pipe.receive(a, &.{ "--wait", "4294967295" }), "closed");
-}
-
-test "receive returns empty, times out, and wakes on a packet or closure" {
+test "a channel matches one pending read and holds no message between receivers" {
     const io = testing.io;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var pipe = try MessagePipe.init();
-    defer pipe.deinit();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    var registry = try Registry.listen(testing.allocator, io, directory);
+    defer registry.deinit();
+    var task = try io.concurrent(Registry.run, .{&registry});
+    defer task.cancel(io) catch {};
 
-    try expectReceiveStatus(try pipe.receive(a, &.{}), "empty");
-    try expectReceiveStatus(try pipe.receive(a, &.{ "--wait", "0" }), "empty");
-    try expectReceiveStatus(try pipe.receive(a, &.{ "--wait", "10" }), "timeout");
+    const channels = registry.port();
+    const id = try contracts.Reference.create(a, "--工 作/path", 1);
+    const receiver = try Receiver.init(a, directory, id);
+    try channels.open(channels.context, receiver.id, "core-1");
+
+    try expectSendOutcome(channels, receiver.id, "before any receiver", .no_receiver);
+
+    const oversize: [contracts.Channels.max_bytes + 1]u8 = @splat('x');
+    const maximum = oversize[0..contracts.Channels.max_bytes];
+    try expectSendOutcome(channels, receiver.id, &oversize, .too_long);
     {
-        var child = try pipe.spawn(a, &.{ "--wait", "5000" });
-        defer child.kill(io);
-        try io.sleep(.fromMilliseconds(30), .awake);
-        try pipe.write("while waiting");
-        const result = try readJson(a, &child, true);
-        try testing.expectEqualStrings("message", result.object.get("status").?.string);
-        try testing.expectEqualStrings("while waiting", result.object.get("text").?.string);
+        var pending = try io.concurrent(Receiver.once, .{ &receiver, a, &.{} });
+        defer _ = pending.cancel(io) catch {};
+        try expectSendOutcome(channels, receiver.id, maximum, .accepted);
+        try expectSendOutcome(channels, receiver.id, "the same read cannot match twice", .no_receiver);
+        try expectMessage(try pending.await(io), maximum);
     }
-    var child = try pipe.spawn(a, &.{ "--wait", "5000" });
-    defer child.kill(io);
-    try io.sleep(.fromMilliseconds(30), .awake);
-    pipe.closeWriter();
-    try expectReceiveStatus(try readJson(a, &child, true), "closed");
+
+    try expectReceiveStatus(try receiver.once(a, &.{ "--wait", "10" }), "timeout");
+    try expectSendOutcome(channels, receiver.id, "after the wait expired", .no_receiver);
+    {
+        const canceled = try channel_ipc.connect(io, directory, receiver.id, null);
+        defer canceled.close(io);
+        try expectReceiveReply(canceled, .waiting);
+    }
+    try expectSendOutcome(channels, receiver.id, "after the waiting receiver disconnected", .no_receiver);
+
+    const second = "前半段\x00\n\"\\second half";
+    var replacement = try io.concurrent(Receiver.once, .{ &receiver, a, &.{ "--wait", "5000" } });
+    defer _ = replacement.cancel(io) catch {};
+    try expectSendOutcome(channels, receiver.id, second, .accepted);
+    try expectMessage(try replacement.await(io), second);
 }
 
-test "receive rejects a packet containing invalid UTF-8" {
+test "receive follow flushes successive matches and exits when its channel closes" {
     const io = testing.io;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var pipe = try MessagePipe.init();
-    defer pipe.deinit();
-    try pipe.write("\xff");
-    var child = try pipe.spawn(a, &.{});
-    defer child.kill(io);
-    var buffer: [128]u8 = undefined;
-    var output = child.stdout.?.readerStreaming(io, &buffer);
-    try testing.expectEqualStrings("", try output.interface.allocRemaining(a, .limited(128)));
-    var diagnostics = child.stderr.?.readerStreaming(io, &buffer);
-    const stderr = try diagnostics.interface.allocRemaining(a, .limited(128));
-    try testing.expect(std.mem.indexOf(u8, stderr, "UTF-8") != null);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, try child.wait(io));
-}
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    var registry = try Registry.listen(testing.allocator, io, directory);
+    defer registry.deinit();
+    var task = try io.concurrent(Registry.run, .{&registry});
+    defer task.cancel(io) catch {};
 
-test "receive follow flushes delayed messages and drains before closing" {
-    const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var pipe = try MessagePipe.init();
-    defer pipe.deinit();
-    var child = try pipe.spawn(a, &.{"--follow"});
+    const channels = registry.port();
+    const receiver = try Receiver.init(a, directory, "events-1");
+    try channels.open(channels.context, receiver.id, "activity-1");
+    var child = try receiver.spawn(&.{ executable, "receive", receiver.id, "--follow" });
     defer child.kill(io);
     var buffer: [256]u8 = undefined;
     var output = child.stdout.?.readerStreaming(io, &buffer);
 
-    try pipe.write("first message\ncontinued");
+    try expectSendOutcome(channels, receiver.id, "first message\ncontinued", .accepted);
     try expectFollowMessage(a, &output.interface, "first message\ncontinued");
-    try pipe.write("later 消息");
-    try expectFollowMessage(a, &output.interface, "later 消息");
-    try pipe.write("before closing");
-    pipe.closeWriter();
-    try expectFollowMessage(a, &output.interface, "before closing");
+    try expectSendOutcome(channels, receiver.id, "matched before closing", .accepted);
+    const waiting = try channel_ipc.connect(io, directory, receiver.id, null);
+    defer waiting.close(io);
+    try expectReceiveReply(waiting, .waiting);
+    try testing.expect(try channels.close(channels.context, receiver.id));
+    try expectReceiveReply(waiting, .closed);
+    try expectFollowMessage(a, &output.interface, "matched before closing");
     try testing.expectEqual(null, try readFollowLine(&output.interface));
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+
+    const unknown = try receiver.run(a, &.{});
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, unknown.term);
+    try testing.expectEqualStrings("", unknown.stdout);
+    try testing.expect(std.mem.indexOf(u8, unknown.stderr, "CHANNEL_ID") != null);
+    try expectSendOutcome(channels, receiver.id, "late", .unknown_channel);
 }
 
 test "receive follow exits when a shell pipeline takes one message" {
@@ -227,23 +227,29 @@ test "receive follow exits when a shell pipeline takes one message" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var pipe = try MessagePipe.init();
-    defer pipe.deinit();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    var registry = try Registry.listen(testing.allocator, io, directory);
+    defer registry.deinit();
+    var task = try io.concurrent(Registry.run, .{&registry});
+    defer task.cancel(io) catch {};
+
+    const channels = registry.port();
+    const receiver = try Receiver.init(a, directory, "events-1");
+    try channels.open(channels.context, receiver.id, "core-1");
     const script =
         \\{
-        \\    "$1" receive --follow || printf '%s\n' 'receive failed' >&2
+        \\    "$1" receive "$2" --follow || printf '%s\n' 'receive failed' >&2
         \\} | {
         \\    IFS= read -r message && printf '%s\n' "$message"
         \\}
     ;
-    var child = try pipe.spawnCommand(a, &.{ "/bin/sh", "-c", script, "receive-test", executable });
-    defer {
-        pipe.closeWriter();
-        child.kill(io);
-    }
+    var child = try receiver.spawn(&.{ "/bin/sh", "-c", script, "receive-test", executable, receiver.id });
+    defer child.kill(io);
     var buffer: [256]u8 = undefined;
     var output = child.stdout.?.readerStreaming(io, &buffer);
-    try pipe.write("接收\n第二行");
+    try expectSendOutcome(channels, receiver.id, "接收\n第二行", .accepted);
     try expectFollowMessage(a, &output.interface, "接收\n第二行");
 
     // The source stays open while the pipeline and its follower finish.
@@ -251,13 +257,38 @@ test "receive follow exits when a shell pipeline takes one message" {
     var diagnostics = child.stderr.?.readerStreaming(io, &buffer);
     try testing.expectEqual(null, try readFollowLine(&diagnostics.interface));
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+
+    try expectSendOutcome(channels, receiver.id, "after the follower exits", .no_receiver);
+}
+
+fn expectSendOutcome(channels: contracts.Channels, id: []const u8, message: []const u8, expected: contracts.Channels.Outcome) !void {
+    const io = testing.io;
+    const deadline = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
+    while (true) {
+        const outcome = try channels.submit(id, message);
+        const retrying = outcome == .busy or (outcome == .no_receiver and expected == .accepted);
+        if (!retrying or std.Io.Clock.awake.now(io).compare(.gte, deadline))
+            return testing.expectEqual(expected, outcome);
+        try io.sleep(.fromMilliseconds(2), .awake);
+    }
+}
+
+fn expectReceiveReply(connection: std.Io.net.Stream, expected: std.meta.Tag(channel_ipc.Response)) !void {
+    const io = testing.io;
+    var status: [1]u8 = undefined;
+    var buffers = [_][]u8{&status};
+    const response = try (try io.operateTimeout(.{ .net_read = .{
+        .socket_handle = connection.socket.handle,
+        .data = &buffers,
+    } }, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } })).net_read;
+    try testing.expectEqual(@as(usize, 1), response.data_len);
+    try testing.expectEqual(@backingInt(expected), status[0]);
 }
 
 fn expectFollowMessage(a: std.mem.Allocator, reader: *std.Io.Reader, expected: []const u8) !void {
     const line = (try readFollowLine(reader)) orelse return error.MissingMessage;
     const result = try std.json.parseFromSliceLeaky(std.json.Value, a, line, .{});
-    try testing.expectEqualStrings("message", result.object.get("status").?.string);
-    try testing.expectEqualStrings(expected, result.object.get("text").?.string);
+    try expectMessage(result, expected);
 }
 
 fn readFollowLine(reader: *std.Io.Reader) !?[]u8 {
@@ -284,59 +315,43 @@ fn expectReceiveStatus(result: std.json.Value, expected: []const u8) !void {
     try testing.expectEqualStrings(expected, result.object.get("status").?.string);
 }
 
-const MessagePipe = struct {
-    input: std.Io.File,
-    output: ?std.os.linux.fd_t,
+fn expectMessage(result: std.json.Value, message: []const u8) !void {
+    try expectReceiveStatus(result, "message");
+    try testing.expectEqualStrings(message, result.object.get("text").?.string);
+}
 
-    fn init() !MessagePipe {
-        const linux = std.os.linux;
-        var fds: [2]linux.fd_t = undefined;
-        const rc = linux.pipe2(&fds, .{ .DIRECT = true, .NONBLOCK = true, .CLOEXEC = true });
-        if (linux.errno(rc) != .SUCCESS) return error.PipeSetupFailed;
-        errdefer _ = linux.close(fds[0]);
-        errdefer _ = linux.close(fds[1]);
-        if (linux.fcntl(fds[1], linux.F.SETPIPE_SZ, std.heap.pageSize()) != std.heap.pageSize())
-            return error.PipeSetupFailed;
-        return .{
-            .input = .{ .handle = fds[0], .flags = .{ .nonblocking = true } },
-            .output = fds[1],
-        };
+const Receiver = struct {
+    env: std.process.Environ.Map,
+    id: []const u8,
+
+    fn init(a: std.mem.Allocator, directory: []const u8, id: []const u8) !Receiver {
+        var env = std.process.Environ.Map.init(a);
+        try env.put("DATA_DIR", directory);
+        return .{ .env = env, .id = id };
     }
 
-    fn deinit(self: *MessagePipe) void {
-        self.closeWriter();
-        self.input.close(testing.io);
-    }
-
-    fn closeWriter(self: *MessagePipe) void {
-        if (self.output) |fd| _ = std.os.linux.close(fd);
-        self.output = null;
-    }
-
-    fn write(self: MessagePipe, message: []const u8) !void {
-        const size = std.os.linux.write(self.output.?, message.ptr, message.len);
-        try testing.expectEqual(message.len, size);
-    }
-
-    fn spawn(self: MessagePipe, a: std.mem.Allocator, options: []const []const u8) !std.process.Child {
-        const argv = try std.mem.concat(a, []const u8, &.{ &.{ executable, "receive" }, options });
-        return self.spawnCommand(a, argv);
-    }
-
-    fn spawnCommand(self: MessagePipe, a: std.mem.Allocator, argv: []const []const u8) !std.process.Child {
-        const env = std.process.Environ.Map.init(a);
+    fn spawn(self: *const Receiver, argv: []const []const u8) !std.process.Child {
         return std.process.spawn(testing.io, .{
             .argv = argv,
-            .environ_map = &env,
-            .stdin = .{ .file = self.input },
+            .environ_map = &self.env,
+            .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
         });
     }
 
-    fn receive(self: MessagePipe, a: std.mem.Allocator, options: []const []const u8) !std.json.Value {
-        var child = try self.spawn(a, options);
-        defer child.kill(testing.io);
-        return readJson(a, &child, true);
+    fn run(self: *const Receiver, a: std.mem.Allocator, options: []const []const u8) !std.process.RunResult {
+        const argv = try std.mem.concat(a, []const u8, &.{ &.{ executable, "receive", self.id }, options });
+        return std.process.run(a, testing.io, .{
+            .argv = argv,
+            .environ_map = &self.env,
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } },
+        });
+    }
+
+    fn once(self: *const Receiver, a: std.mem.Allocator, options: []const []const u8) !std.json.Value {
+        const result = try self.run(a, options);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        return std.json.parseFromSliceLeaky(std.json.Value, a, result.stdout, .{});
     }
 };

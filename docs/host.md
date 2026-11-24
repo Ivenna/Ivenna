@@ -4,7 +4,7 @@ The [host tools](../packages/host/src/tools.json) let activity focuses run progr
 
 | Tool | Purpose |
 | --- | --- |
-| `inspect_host_shell` | Inspect shell defaults and find commands or their channels |
+| `inspect_host_shell` | Inspect shell defaults and find commands |
 | `run_host_shell` | Start a command and wait for completion up to a bounded duration |
 | `continue_host_shell` | Read output, supply input, send a signal, or resize a terminal |
 
@@ -29,7 +29,7 @@ The tool wait retains the current activation and context while the core and othe
 | `cwd` | Initial working directory. Defaults to the kernel's startup directory. Relative values resolve from that directory. |
 | `shell` | Shell executable accepting `-c`; defaults to `/bin/sh` |
 | `login` | Use `-lc` for the selected shell's login initialization; defaults to `false` |
-| `mode` | `batch` (default), `pipe`, `messages`, or `terminal`; see [input modes](#input-modes) |
+| `mode` | Selects an [input mode](#input-modes). Defaults to `batch`. |
 | `yield_ms` | This call's wait for completion in milliseconds, from `0` through `4294967295`; omit for `10000`, or use `0` to observe immediately |
 | `timeout_ms` | Optional positive execution deadline in milliseconds, up to `4294967295`; omitted means no execution deadline |
 | `max_output_bytes` | Combined encoded stdout/stderr preview budget in bytes. Defaults to `4096` and accepts `512` through `16384`. Result metadata and log references are additional. |
@@ -40,16 +40,15 @@ Each command starts a fresh shell. The `cwd` and `shell` arguments accept litera
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 
-Host commands receive the absolute path to the `ivenna` executable as `IVENNA` and the absolute path to the instance's data directory as `DATA_DIR`.
+Host commands receive the absolute path to the `ivenna` executable as `IVENNA` and the absolute path to the instance's data directory as `DATA_DIR`. Programs can use these to [receive channel messages](communication.md#receiving-from-a-channel) or [publish subscription observations](subscriptions.md#publish-an-observation).
 
 ## Input modes
 
 | Mode | Input and output |
 | --- | --- |
-| `batch` | No live stdin; stdout and stderr have separate logs |
-| `pipe` | Writable stdin until EOF is sent; stdout and stderr have separate logs |
-| `messages` | [Whole messages on stdin](#receiving-messages-in-a-command), with separate stdout and stderr logs |
-| `terminal` | A pseudo-terminal for programs that require a terminal; stdout and stderr are merged into the stdout log |
+| `batch` | No live stdin. Separate stdout and stderr logs. |
+| `pipe` | Writable stdin until EOF. Separate stdout and stderr logs. |
+| `terminal` | A pseudo-terminal for programs that require one. Stdout and stderr share the stdout log. |
 
 For example, start an interactive Python process in a terminal and return immediately:
 
@@ -59,34 +58,13 @@ For example, start an interactive Python process in a terminal and return immedi
 
 A terminal starts with 24 rows and 80 columns and can be resized. The tool returns its output stream without rendering a screen. Terminal processing can alter input and output bytes; use `batch` or `pipe` when bytes must be preserved. See the [runtime requirements](running.md#runtime-requirements) for terminal support.
 
-### Receiving messages in a command
-
-Start the command in `messages` mode and set `yield_ms` to `0` to get its `command_id` while it waits for input. Use the ID to [open a channel](communication.md#opening-a-channel). In this example, the receiver prints each message to the command's [stdout log](running.md#host-output-and-deployment-files).
-
-```json
-{"name":"worker","command":"exec \"$IVENNA\" receive --follow","mode":"messages","yield_ms":0}
-```
-
-Keep the command's inherited stdin when invoking `receive` from a script. For a single read, call `"$IVENNA" receive` to check immediately or `"$IVENNA" receive --wait MS` to wait up to `MS` milliseconds. A successful single read writes one JSON line to stdout and exits with code 0.
-
-| JSON on stdout | Meaning |
-| --- | --- |
-| `{"status":"message","text":"Process the next item."}` | One message was read. |
-| `{"status":"empty"}` | The immediate check found no message. |
-| `{"status":"timeout"}` | The wait ended before a message arrived. |
-| `{"status":"closed"}` | End of input after any pending message has been read. |
-
-For a stream, call `"$IVENNA" receive --follow` to wait for successive messages and flush each `message` object as a JSON line. A script can pipe stdout to a handler. The receiver exits with code 0 after draining closed input or when the output pipe closes. The stream contains only `message` records.
-
-Reading a message makes room for the next send, even if the script is still processing it. Run `"$IVENNA" receive --help` for option limits and exit codes. See [reporting from a command](subscriptions.md#reporting-from-a-command) to send observations back to a focus.
-
 ## Continuing and controlling a command
 
 Use the complete `command_id` returned by a yielded `run_host_shell` call or listed by `inspect_host_shell`. Commands are discoverable across activities, including while the starting activity is still waiting in `run_host_shell`.
 
-Call `inspect_host_shell` with `{}` to list commands. The first unfiltered page also gives the default `shell` and startup `cwd`. To inspect one command, pass its ID, for example `{"command_id":"build-17"}`. Each entry in `commands` includes the `command_id`, originating `focus_id`, a `command_preview`, `state`, `mode`, `stdin_open`, and `input_pending`. A command with an open channel also shows its `channel_id`.
+Call `inspect_host_shell` with `{}` to list commands. The first unfiltered page also gives the default `shell` and startup `cwd`. To inspect one command, pass its ID, for example `{"command_id":"build-17"}`. Each entry in `commands` includes the `command_id`, originating `focus_id`, a `command_preview`, `state`, `mode`, `stdin_open`, and `input_pending`.
 
-`input_pending` reports a write in flight to a pipe or terminal. For a channel, use the [result of `send`](communication.md#sending-to-a-channel) to see whether the runtime accepted a message.
+`input_pending` reports a write in flight to a pipe or terminal.
 
 The result includes the requested `offset` (zero by default) and the number of matching commands in `total_commands`. Pass `next_offset` as the next call's `offset` to read another page. A null `next_offset` marks the end. An offset beyond the list returns no commands. Pages reflect the current registry order, which can change as commands retire.
 
@@ -125,7 +103,7 @@ Command observations report the process state and any output available in this o
 | `state.finished` | `completed` with an OS termination status (for example, `{"completed":{"exited":7}}`), `timed_out`, or `not_started` with a reason |
 | `state.unavailable` | The host could not establish a complete outcome; `reason` describes the failure |
 | `elapsed_ms` | Monotonic elapsed time, fixed when Host observes the process outcome |
-| `mode` | The selected `batch`, `pipe`, `messages`, or `terminal` mode |
+| `mode` | The command's [input mode](#input-modes) |
 | `stdin` | Whether input is `open`, whether a byte-stream write is `pending`, and an optional write `error` |
 | `stdout`, `stderr` | A string when the whole log so far fits as text. Partial text and binary output carry the full log's `path` and current `byte_length`. A stream with no new bytes is omitted. |
 | `output_error` | Reason output collection failed. Each stream then supplies its log `path` alongside the observed process state. |
@@ -168,7 +146,7 @@ Command state, handle retention, and the registered observation have separate li
 
 `MAX_HOST_COMMANDS` limits live commands across all activities. Completion releases live capacity. A final result returned directly by `run_host_shell` retires its handle. Finished background handles remain available in a bounded cache for recent output collection; a continue call that drains one retires it, and older finished handles can be reclaimed for other commands. See [command lifecycle](architecture.md#command-lifecycle) for the cache limit. Full logs have a [separate retention lifecycle](running.md#host-output-and-deployment-files).
 
-Shutdown stops commands and waits for cleanup. Batch, pipe, and messages commands are managed by process group. Terminal cleanup covers its original OS session, including background jobs in separate job-control groups. Shell backgrounding with `&` remains within this managed lifetime. Work that creates another OS session has an independent lifetime. If it holds the original terminal open, final output draining ends after one second with an unavailable-result diagnostic. The [architecture guide](architecture.md#processes-and-terminals) describes process ownership and cleanup.
+Shutdown stops commands and waits for cleanup. Batch and pipe commands are managed by process group. Terminal cleanup covers its original OS session, including background jobs in separate job-control groups. Shell backgrounding with `&` remains within this managed lifetime. Work that creates another OS session has an independent lifetime. If it holds the original terminal open, final output draining ends after one second with an unavailable-result diagnostic. The [architecture guide](architecture.md#processes-and-terminals) describes process ownership and cleanup.
 
 Host processes and handles are not restored after restart, and commands are not replayed. A pending host completion is resolved with an observation of interruption and unknown effects if no result was already stored. A stored actual result takes precedence. A command ID in a restored observation identifies an execution in the earlier runtime, not a usable current handle. An interrupted call may also have produced effects without a saved outcome; inspect uncertain effects before repeating work. See [startup and interruption](architecture.md#startup-and-interruption).
 
@@ -184,7 +162,6 @@ Errors describe the failed operation without erasing effects already produced. D
 | `unknown_command` | The handle is unknown or was retired; full logs have a separate lifetime |
 | `command_finished` | An input or control action targeted a finished command; read its remaining output instead |
 | `stdin_closed` | The command has no writable input, including batch mode and a pipe after EOF |
-| `message_input_only` | To send input to a messages-mode command, open a channel and use `send` with its `channel_id` |
 | `input_busy` | A previous input write is still in flight |
 | `control_failed` | A signal or terminal resize failed, with its diagnostic |
 | `host_unavailable` | The host operation could not supply a complete result; effects may already have occurred |

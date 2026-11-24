@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send text to one correspondent, focus, or open channel. A correspondence `reference` confirms that the sending service accepted the message for delivery. A focus message becomes an observation and can wake the recipient. A channel send returns immediately. `accepted` confirms the message reached the command's input.",
+    "description": "Send text to one correspondent, focus, or open channel. A correspondence `reference` confirms that the sending service accepted the message for delivery. A focus message becomes an observation and can wake the recipient. A channel send attempts an immediate handoff to a waiting reader and reports `accepted` when it succeeds.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -53,24 +53,24 @@
   },
   {
     "name": "open_channel",
-    "description": "Open a channel to a running command. Use the returned `channel_id` with `send`. The channel closes when the command exits.",
+    "description": "Open a named channel for local programs. Give the receiver the returned `channel_id`. A replacement can use the same ID. In an activity, `\"$IVENNA\" receive --help` shows how to receive.",
     "parameters": {
       "type": "object",
       "properties": {
         "name": { "type": "string", "minLength": 1, "maxLength": 32 },
-        "command_id": {
+        "description": {
           "type": "string",
           "minLength": 1,
-          "description": "Complete ID of a command started in `messages` mode."
+          "description": "Describe the channel's purpose and what messages a receiver should expect."
         }
       },
-      "required": ["name", "command_id"],
+      "required": ["name", "description"],
       "additionalProperties": false
     }
   },
   {
     "name": "close_channel",
-    "description": "Close a channel to new messages. The command can read a pending message and keep running. `changed` is true if this call closed the channel.",
+    "description": "Close a channel and end waiting reads. `changed` is true if this call closed the channel.",
     "parameters": {
       "type": "object",
       "properties": {

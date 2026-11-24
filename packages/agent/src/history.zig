@@ -29,7 +29,7 @@ pub const History = struct {
     subscription_catalog: [32]u8,
     next_session_id: u64,
     next_callback_id: u64,
-    next_command_id: u64,
+    next_runtime_reference_id: u64,
     sessions: []const Session,
     wakeups: []const Wakeup,
     callbacks: []const CallbackRegistration,
@@ -51,7 +51,7 @@ pub const History = struct {
     };
 
     fn validate(self: History, a: Allocator) !void {
-        if (self.sessions.len == 0 or self.next_callback_id == 0 or self.next_command_id == 0) return error.InvalidHistory;
+        if (self.sessions.len == 0 or self.next_callback_id == 0 or self.next_runtime_reference_id == 0) return error.InvalidHistory;
         var identities: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer identities.deinit(a);
         var cores: usize = 0;
@@ -99,6 +99,7 @@ const Checkpoint = struct {
     subscription_catalog: [32]u8,
     next_session_id: u64,
     next_callback_id: u64,
+    /// The stored field name for the next command or channel reference.
     next_command_id: u64,
     sessions: []const Session,
     wakeups: []const History.Wakeup,
@@ -247,7 +248,7 @@ pub const Persistence = struct {
             .subscription_catalog = checkpoint.subscription_catalog,
             .next_session_id = checkpoint.next_session_id,
             .next_callback_id = checkpoint.next_callback_id,
-            .next_command_id = checkpoint.next_command_id,
+            .next_runtime_reference_id = checkpoint.next_command_id,
             .sessions = sessions,
             .wakeups = checkpoint.wakeups,
             .callbacks = checkpoint.callbacks,
@@ -377,7 +378,7 @@ pub const Persistence = struct {
             .subscription_catalog = history.subscription_catalog,
             .next_session_id = history.next_session_id,
             .next_callback_id = history.next_callback_id,
-            .next_command_id = history.next_command_id,
+            .next_command_id = history.next_runtime_reference_id,
             .sessions = sessions,
             .wakeups = history.wakeups,
             .callbacks = history.callbacks,
@@ -547,7 +548,7 @@ test "working history can append after a handover with a retired sampled field" 
         .subscription_catalog = @splat(0),
         .next_session_id = 2,
         .next_callback_id = 1,
-        .next_command_id = 1,
+        .next_command_id = 7,
         .sessions = &.{.{
             .session_id = 1,
             .focus_id = "core-1",
@@ -566,6 +567,7 @@ test "working history can append after a handover with a retired sampled field" 
     }));
 
     var history = (try persistence.load(a, 1)).?;
+    try t.expectEqual(7, history.next_runtime_reference_id);
     var core = history.sessions[0];
     const handover = core.entries.?[0].record.handover;
     try t.expectEqualStrings("Keep investigating.", handover.summary);

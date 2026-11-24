@@ -63,7 +63,7 @@ Correspondence reaches the core as observations of who said what and when the ru
 
 Ivenna chooses when to send, whom or what to reach, and what to say. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna acts and reports the outcome, so Ivenna can revise its understanding as circumstances change. Internal reasoning and activity completion stay within Ivenna. See [sending a message](communication.md#sending-a-message).
 
-A channel lets Ivenna send messages to a program while both continue their work. An activity starts a program that accepts messages. Any focus with the command reference can open a channel and share the channel ID. Each send immediately reports whether it made the message available to read. The program chooses when to read and how to act. It can keep working after Ivenna closes the channel. See [channels](communication.md#channels).
+Any focus can open a channel, describe its purpose, and give its ID to a local program or another focus. The program chooses when to wait for a message and how to act on it. Each send immediately reports whether it handed the message to a waiting program. The channel can stay open when a receiver leaves and serve a replacement. The program can keep working after Ivenna closes the channel. See [channels](communication.md#channels).
 
 ## Sessions and continued work
 
@@ -97,7 +97,7 @@ Even a short list of names uses context and can draw attention to unrelated work
 
 Compaction asks Ivenna to condense retained exchanges into a handover. The summary carries forward what Ivenna considers relevant to its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. See [bounded model context](architecture.md#bounded-model-context).
 
-The runtime supplies a dated state sample with the summary request and keeps it beside the accepted summary. Callbacks and subscriptions stay with the focus that arranged them. References to open channels can help a focus continue work with a running program. See [sampled state](input.md#sampled-state) for the fields each role receives.
+The runtime supplies a dated state sample with the summary request and keeps it beside the accepted summary. Callbacks and subscriptions stay with the focus that arranged them. References to open channels can help a focus continue communicating with programs. See [sampled state](input.md#sampled-state) for the fields each role receives.
 
 Delivery, wakeups, and resumption use the runtime's own records. The runtime keeps the original history until it can continue with the handover. It can carry complete exchanges forward to preserve exact wording and sources. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
 

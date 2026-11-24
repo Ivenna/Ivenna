@@ -92,7 +92,7 @@ pub const Registry = struct {
     check_sleeping_activities: bool = true,
     next_session_id: u64 = 2,
     next_callback_id: u64 = 1,
-    next_command_id: u64 = 1,
+    next_runtime_reference_id: u64 = 1,
     started_at_unix_ms: i64,
 
     pub fn init(
@@ -128,7 +128,7 @@ pub const Registry = struct {
             self.reports = reports;
             self.next_session_id = retained.next_session_id;
             self.next_callback_id = retained.next_callback_id;
-            self.next_command_id = retained.next_command_id;
+            self.next_runtime_reference_id = retained.next_runtime_reference_id;
             for (retained.sessions) |record| {
                 const session = try allocator.create(Session);
                 session.* = .{
@@ -493,7 +493,7 @@ pub const Registry = struct {
             .subscription_catalog = self.subscription_catalog,
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
-            .next_command_id = self.next_command_id,
+            .next_runtime_reference_id = self.next_runtime_reference_id,
             .wakeups = self.wakeups.items,
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
@@ -680,15 +680,15 @@ pub const Registry = struct {
         try self.saveLocked();
     }
 
-    pub fn issueHostReference(self: *Registry, a: Allocator, work: Work, name: []const u8) ![]const u8 {
+    pub fn issueRuntimeReference(self: *Registry, a: Allocator, work: Work, name: []const u8) ![]const u8 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        const id = self.next_command_id;
+        const id = self.next_runtime_reference_id;
         const next = try std.math.add(u64, id, 1);
         const reference = try contracts.Reference.create(a, name, id);
         errdefer a.free(reference);
-        self.next_command_id = next;
+        self.next_runtime_reference_id = next;
         try self.saveLocked();
         return reference;
     }

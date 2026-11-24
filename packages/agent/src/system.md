@@ -16,4 +16,4 @@ The core receives activity text grouped by source in `activity` observations. Us
 
 A response without tool calls returns control to the runtime. Queued observations can require another round before the activation completes. The core remains available between activations. An activity with a pending callback or an active subscription can sleep and resume when an observation arrives. When the activity ends, its working history is released. Shared memory and expressions already gathered for the core have their own lifetimes.
 
-Retained understanding continues across restart. Host processes and command handles belong to their original runtime. Interrupted actions can leave effects without saved results. Inspect uncertain effects before repeating the work.
+Retained understanding continues across restart. Host processes, command handles, and open channels belong to their original runtime. Interrupted actions can leave effects without saved results. Inspect uncertain effects before repeating the work.

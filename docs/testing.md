@@ -36,11 +36,11 @@ The [CI workflow](../.github/workflows/ci.yml) invokes these checks on Linux. Th
 
 ### Test boundaries
 
-- **Command line.** Tests run `ivenna` as a separate process to check help and argument errors before configuration, listener receipts, and message input. They exercise immediate and timed reads, streamed output before end of input, and exit after a downstream reader takes one message. [CLI process tests](../apps/ivenna/src/cli_test.zig)
+- **Command line.** Process tests check help and argument errors before configuration and verify subscription receipts while the kernel is stopped. [CLI process tests](../apps/ivenna/src/cli_test.zig)
 - **Instance state.** Two subscription connections exercise cursor conflicts, retries after acknowledgement, and whether queued reports retain their destination after withdrawal. [Subscription store](../packages/instance_state/src/subscriptions.zig)
 - **Focus execution.** Fixtures exercise startup with changed registrations, routing by destination kind, and tool exchanges and references carried through handovers. They also check that each report is admitted once after a checkpoint failure or lost confirmation. [Kernel tests](../packages/agent/src/kernel.zig) · [Context tests](../packages/agent/src/context.zig) · [Session registry tests](../packages/agent/src/sessions.zig)
 - **Working history.** The persistence test loads a handover with retired fields, appends a new entry, and reloads the saved history. [History tests](../packages/agent/src/history.zig)
-- **Host execution.** Channel tests exercise send outcomes when a message is too long, the previous message is unread, or the command has exited. They also check that closing a channel lets its command read the pending message and keep running. [Host tests](../packages/host/src/root.zig) · [Command input tests](../packages/host/src/command_input.zig)
+- **Channels.** Process tests exercise single and timed reads, streaming, and exit when a downstream pipe closes. They check that a send without a waiting reader leaves no message, a replacement reader can use the same ID, and closing the channel wakes waiting readers. [CLI process tests](../apps/ivenna/src/cli_test.zig)
 - **Mail.** A local JMAP server verifies recipient lookup before draft creation and the address stored on the draft. Connection failures exercise mailbox read recovery, uncertain submission, and confirmation of callback and history writes. [Email transport](../packages/email/src/email_transport.zig) · [Email tests](../packages/email/src/root.zig)
 - **Model transport and resources.** HTTP fixtures compare measured request sizes with encoded bodies, exercise file upload outcomes, and verify that two focuses can read one page snapshot from a single fetch. [Responses tests](../packages/responses/src/provider_test.zig) · [Web reader tests](../packages/resources/src/web_test.zig)
 
@@ -50,7 +50,7 @@ The email, Responses, and web reader tests check that canceling a stalled HTTP e
 
 Use the running application to validate process restart and communication through the configured services. To compare context behavior across runs, replay representative work with the same model and starting history. See the [local environment](../dev/README.md) and [validation across runtime boundaries](development.md#validation).
 
-Use the [command channel walkthrough](../dev/README.md#trying-a-command-channel) to verify that a message reaches the receiver and that closing the channel lets it finish.
+The [channel walkthrough](../dev/README.md#trying-a-channel) exercises send feedback and receiver replacement through the running application.
 
 ### Evaluating compaction
 

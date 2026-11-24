@@ -197,14 +197,19 @@ pub const Kernel = struct {
 
         fn issueCommandReference(context: *anyopaque, a: Allocator, name: []const u8) anyerror![]const u8 {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
-            return self.kernel.sessions.issueHostReference(a, self.work, name);
+            return self.kernel.sessions.issueRuntimeReference(a, self.work, name);
         }
 
         fn invoke(context: *anyopaque, a: Allocator, request: AgentTools.Request) anyerror!Content {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
             return switch (request) {
                 .send => |message| self.send(a, message.to, message.text),
-                .open_channel => |args| self.openChannel(a, args.name, args.command_id),
+                .open_channel => |args| blk: {
+                    const channels = self.kernel.channels;
+                    const channel_id = try self.kernel.sessions.issueRuntimeReference(a, self.work, args.name);
+                    try channels.open(channels.context, channel_id, self.work.session.focus_id);
+                    break :blk try runtimeResult(a, .{ .channel_id = channel_id });
+                },
                 .close_channel => |args| blk: {
                     const channels = self.kernel.channels;
                     const changed = try channels.close(channels.context, args.channel_id);
@@ -237,18 +242,6 @@ pub const Kernel = struct {
             };
         }
 
-        fn openChannel(self: *RuntimeRound, a: Allocator, name: []const u8, command_id: []const u8) !Content {
-            const channels = self.kernel.channels;
-            const channel_id = try self.kernel.sessions.issueHostReference(a, self.work, name);
-            return switch (try channels.open(channels.context, command_id, channel_id, self.work.session.focus_id)) {
-                .opened => runtimeResult(a, .{ .channel_id = channel_id }),
-                .unknown_command => runtimeError(a, "unknown_command", "No command in this runtime matches the ID."),
-                .not_enabled => runtimeError(a, "command_messages_disabled", "Start the command in messages mode to open a channel for its input."),
-                .closed => runtimeError(a, "command_input_closed", "The command can no longer receive messages."),
-                .already_open => runtimeError(a, "channel_already_open", "The command already has an open channel."),
-            };
-        }
-
         fn send(self: *RuntimeRound, a: Allocator, to: AgentTools.Destination, text: []const u8) !Content {
             return switch (to) {
                 .correspondent_id => |id| switch (try self.kernel.sender.send(a, .{ .recipient = id, .text = text })) {
@@ -259,9 +252,8 @@ pub const Kernel = struct {
                 },
                 .channel_id => |id| switch (try self.kernel.channels.submit(id, text)) {
                     .accepted => try runtimeResult(a, .{ .channel_id = id, .status = "accepted" }),
-                    .full => try runtimeError(a, "channel_full", "The previous message is still unread. Try again after the receiver reads it."),
-                    .closed => try runtimeError(a, "channel_closed", "This channel can no longer receive messages."),
-                    .unknown_channel => try runtimeError(a, "unknown_channel", "No channel in this runtime matches the ID."),
+                    .no_receiver => try runtimeError(a, "channel_no_receiver", "No waiting read matched this message. Start a receiver or retry when one is waiting."),
+                    .unknown_channel => try runtimeError(a, "unknown_channel", "No open channel in this runtime matches the ID."),
                     .too_long => try runtimeError(a, "channel_message_too_long", std.fmt.comptimePrint(
                         "Channel messages can contain up to {d} UTF-8 bytes.",
                         .{Channels.max_bytes},
@@ -540,7 +532,7 @@ const SubscriptionFixture = struct {
     correspondents: []const []const u8 = &.{},
     send_outcome: Channels.Outcome = .accepted,
     channel_message: ?struct { id: []const u8, text: []const u8 } = null,
-    channel: ?struct { command_id: []const u8, id: []const u8, focus_id: []const u8, closed: bool = false } = null,
+    channel: ?struct { id: []const u8, focus_id: []const u8 } = null,
 
     fn deinit(self: *SubscriptionFixture) void {
         self.storage.arena.deinit();
@@ -575,32 +567,26 @@ const SubscriptionFixture = struct {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
         const channel = self.channel orelse return .unknown_channel;
         if (!std.mem.eql(u8, channel.id, id)) return .unknown_channel;
-        if (channel.closed) return .closed;
-        self.channel_message = .{ .id = id, .text = text };
+        if (self.send_outcome == .accepted) self.channel_message = .{ .id = id, .text = text };
         return self.send_outcome;
     }
 
-    fn openChannel(context: *anyopaque, command_id: []const u8, channel_id: []const u8, focus_id: []const u8) !Channels.OpenOutcome {
+    fn openChannel(context: *anyopaque, channel_id: []const u8, focus_id: []const u8) !void {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        if (self.channel) |channel| return if (channel.closed) .closed else .already_open;
-        self.channel = .{ .command_id = command_id, .id = channel_id, .focus_id = focus_id };
-        return .opened;
+        self.channel = .{ .id = channel_id, .focus_id = focus_id };
     }
 
     fn closeChannel(context: *anyopaque, channel_id: []const u8) !bool {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        if (self.channel) |*channel| {
-            if (channel.closed or !std.mem.eql(u8, channel.id, channel_id)) return false;
-            channel.closed = true;
-            return true;
-        }
-        return false;
+        const channel = self.channel orelse return false;
+        if (!std.mem.eql(u8, channel.id, channel_id)) return false;
+        self.channel = null;
+        return true;
     }
 
     fn sampleChannels(context: *anyopaque, a: Allocator, focus_id: ?[]const u8) ![]const []const u8 {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
         const channel = self.channel orelse return &.{};
-        if (channel.closed) return &.{};
         if (focus_id) |id| if (!std.mem.eql(u8, channel.focus_id, id)) return &.{};
         return a.dupe([]const u8, &.{channel.id});
     }
@@ -707,9 +693,11 @@ test "continuations omit destination directories and focus and channel sends res
     var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer kernel.sessions.endWorker(activity.work.session);
 
-    const channel = try call(a, &activity, "open_channel", .{ .name = "core", .command_id = "consumer-9" });
-    const channel_id = channel.object.get("result").?.object.get("channel_id").?.string;
-    try testing.expectEqualStrings("consumer-9", fixture.channel.?.command_id);
+    const channel = (try call(a, &activity, "open_channel", .{
+        .name = "core",
+        .description = "Send findings for the local program to process.",
+    })).object.get("result").?.object;
+    const channel_id = channel.get("channel_id").?.string;
     try testing.expectEqualStrings(sender_id, fixture.channel.?.focus_id);
     for ([_]*Sessions.Session{ core.work.session, activity.work.session }) |session| {
         const sample = try kernel.compactionSnapshot(a, session);
@@ -745,13 +733,13 @@ test "continuations omit destination directories and focus and channel sends res
     try testing.expectEqualStrings(sender_id, message.from_focus);
     try testing.expectEqualStrings("Findings are ready.", message.text);
 
-    fixture.send_outcome = .full;
-    const full = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Process more findings." });
-    try testing.expectEqualStrings("channel_full", full.object.get("error").?.object.get("code").?.string);
+    fixture.send_outcome = .no_receiver;
+    const rejected = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Process more findings." });
+    try testing.expectEqualStrings("channel_no_receiver", rejected.object.get("error").?.object.get("code").?.string);
     const closed = try call(a, &core, "close_channel", .{ .channel_id = channel_id });
     try testing.expect(closed.object.get("result").?.object.get("changed").?.bool);
     const late = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Late findings." });
-    try testing.expectEqualStrings("channel_closed", late.object.get("error").?.object.get("code").?.string);
+    try testing.expectEqualStrings("unknown_channel", late.object.get("error").?.object.get("code").?.string);
     const sampled = try kernel.compactionSnapshot(a, core.work.session);
     try testing.expectEqual(0, sampled.state.channels.len);
 }

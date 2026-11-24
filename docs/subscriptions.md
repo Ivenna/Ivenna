@@ -57,8 +57,8 @@ Withdrawing a subscription releases its cursor and retry keys. A listener that t
 
 Subscribing again to the same source gives the listener a new ID with its own cursor and retry keys. A key used on the withdrawn subscription can be accepted again on the new one.
 
-## Reporting from a command
+## Reporting after a channel read
 
-A [command receiving channel messages](host.md#receiving-messages-in-a-command) can report results to a focus. Register the subscription in the receiving focus and pass its `subscription_id` to the command. The command uses [`subscription publish`](#publish-an-observation) for the observations it chooses to send back.
+A [program receiving channel messages](communication.md#receiving-from-a-channel) can use a subscription to report what it did with a message. [Register the subscription](attention.md#subscriptions) in the focus that should receive the reports and pass its `subscription_id` to the program. The program can then [publish an observation](#publish-an-observation) for that focus.
 
-A channel read consumes the message before a report is saved. The command can retain the report and its key to retry publication.
+Reading the message and publishing the report are separate operations. The program can keep the report and its key until publication is confirmed.
