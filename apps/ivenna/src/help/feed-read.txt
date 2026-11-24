@@ -1,6 +1,6 @@
 ivenna feed read FEED_ID [--after SEQUENCE] [--limit N]
 
-Pass the feed ID exactly as Ivenna provided it. Quote it in shell commands.
+Pass the exact feed ID Ivenna provided as one shell argument.
 
   ivenna feed read 'releases-1' --after 17
 
@@ -12,9 +12,9 @@ feed_id, description, closed, messages, next_after, and has_more. Messages
 are in ascending sequence order. Each message has sequence, focus_id, text,
 and published_at_unix_ms.
 
-After processing a page, save next_after and pass it as --after on the next
-read. An empty page keeps the supplied position. Read again when has_more
-is true. With has_more=false, poll later for an open feed or stop for a
-closed feed.
+After processing the whole page, save next_after and pass it as --after on
+the next read. An empty page keeps the supplied position. When has_more is
+true, read the next page. When has_more is false, poll later for an open
+feed or stop for a closed feed.
 
-An unknown feed returns "unknown_feed" with exit status 1.
+For an unknown feed, stdout contains "unknown_feed" and the exit status is 1.

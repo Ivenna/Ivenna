@@ -1,48 +1,52 @@
 # Attention
 
-The core and activities are focuses of one Ivenna. Each has its own working history and event queue. Its `focus_id` identifies it in observations and retained history. Its `channel_id` is the address used to send it a message. The core's focus ID is `core-1`. See [communication](communication.md).
-
-These [attention tools](../packages/agent/src/tools.json) let each focus decide what to attend to. The [role overview](design.md#core-and-concurrent-attention) covers the other actions available to each focus.
+The core and activities are focuses of one Ivenna. Each has its own working history and event queue and is identified by its `focus_id`. The core's ID is `core-1`. See the [role overview](design.md#core-and-concurrent-attention) for the other actions available to each focus.
 
 | Action | Tool | Available to |
 | --- | --- | --- |
-| Open another focus on some work | `open_focus` | Core |
-| Reach an existing focus | `send` with a focus channel address | Core and activities |
-| Return to something later | `schedule_attention` | Core |
-| Receive [recurring observations](#subscriptions) in this focus | `subscribe` | Core and activities |
-| Stop accepting reports for a subscription | `withdraw_subscription` | Core and activities |
+| [Open another focus on some work](#opening-a-focus) | `open_focus` | Core |
+| [Reach an existing focus](#reaching-an-existing-focus) | `send` | Core and activities |
+| [Return to something later](#returning-later) | `schedule_attention` | Core |
+| [Receive recurring observations in this focus](#subscriptions) | `subscribe` | Core and activities |
+| [Stop accepting reports for a subscription](#subscriptions) | `withdraw_subscription` | Core and activities |
 
-See [names and references](input.md#names-and-references) for the `name` argument to `open_focus`, `schedule_attention`, and `subscribe`.
+See [names and references](input.md#names-and-references) for the `name` argument and the [tool schema](../packages/agent/src/tools.json) for the declarations.
 
 ## Opening a focus
 
-The core calls `open_focus` with a short `name` and nonempty `task` describing what the activity should pursue. The result includes the new `focus_id` and its `channel_id`.
+The core calls `open_focus` with a short `name` and nonempty `task` describing what the activity should pursue.
 
 ```json
-{"result":{"focus_id":"practice-2","channel_id":"ivenna:/focus/practice-2"}}
+{"name":"practice","task":"Prepare a short French practice plan."}
 ```
 
-The activity inherits the core's retained history through the complete round that opened it, including that round's tool results and any existing handover. The task is its first new observation. The core continues its own work. Their histories then grow independently, and the core receives [what the activity says](#activity-expressions).
+The result gives the activity's `focus_id`. The activity can receive messages once the opening round completes.
 
-Inherited records keep their original [focus IDs](input.md#records-and-turns). Core and activity use the same system prompt. Subsequent inferences identify the activity as the current focus and supply the tools available to its role. Queued observations, callbacks, and subscription reports keep their original destinations. Historical tool calls are not replayed.
+```json
+{"result":{"focus_id":"practice-2"}}
+```
 
-Malformed arguments or an empty task return `invalid_arguments`. Exhausted focus capacity returns `focus_unavailable`; existing focuses remain addressable. See [configuration](running.md#configuration) for capacity limits.
+The activity inherits the core's retained history through the opening round, including its tool results and any existing handover. The task is its first new observation. Inherited records keep their original focus IDs. Queued observations, callbacks, and subscription reports keep their original destinations. See [records and turns](input.md#records-and-turns) and [how an activity starts](architecture.md#activity-forks).
+
+Subsequent inferences identify the activity as the current focus and supply its tools. The two histories grow independently, and the core receives [what the activity says](#activity-expressions).
+
+Opening an activity once the focus limit is reached returns `focus_unavailable`. See [session capacity](running.md#session-and-command-capacity).
 
 ## Reaching an existing focus
 
-Call `send` with the recipient's `channel_id` and the message text. Copy the address from an `open_focus` result or from `current.channels.focuses`. This list includes the calling focus, which can send to itself. See [the channel catalog](input.md#inference-turns).
+Call `send` with `to.focus_id` set to the recipient's ID and `text` set to the message. A focus can send to itself. See [where to find destination IDs](communication.md#sending-a-message).
 
 ```json
-{"channel_id":"ivenna:/focus/practice-2","text":"Include a short warm-up in your plan."}
+{"to":{"focus_id":"practice-2"},"text":"Include a short warm-up in your plan."}
 ```
 
-A successful call saves the message in the recipient's queue and returns its channel address.
+A successful call saves the message in the recipient's queue and returns its focus ID.
 
 ```json
-{"result":{"channel_id":"ivenna:/focus/practice-2"}}
+{"result":{"focus_id":"practice-2"}}
 ```
 
-The observation identifies the sending focus. When relaying someone else's words, include their attribution in the text. A message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds. Focus messages count toward the recipient's event queue limit. See [focus message fields](input.md#focus-messages-and-callbacks) and [session capacity](running.md#session-and-command-capacity).
+The observation identifies the sending focus. When relaying someone else's words, attribute them in the text. The message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds. Focus messages count toward the recipient's event queue limit. See [focus message fields](input.md#focus-messages-and-callbacks) and [session capacity](running.md#session-and-command-capacity).
 
 ## Returning later
 
@@ -52,17 +56,17 @@ Call `schedule_attention` with a short `name`, an `at` deadline in RFC 3339 form
 {"name":"revisit-practice","at":"2026-11-10T18:00:00Z","text":"Revisit the French practice plan."}
 ```
 
-The arrangement survives restart. Success returns its complete callback reference:
+The arrangement survives restart. Success returns its `callback_id`.
 
 ```json
 {"result":{"callback_id":"revisit-practice-5"}}
 ```
 
-The text later reaches the core as a callback observation with source `wakeup`. Past timestamps are due immediately; polling, queue capacity, and scheduling can delay inference. The core can sleep while waiting. Cancellation is unavailable.
+The text later reaches the core as a callback observation with source `wakeup`. Past timestamps are due immediately. Polling, queue capacity, and scheduling can delay inference. The core can sleep while waiting. Cancellation is unavailable.
 
 ### Callback observations
 
-Scheduled wakeups and [host commands](host.md#command-lifetimes) that outlive their initial call each arrange one callback. Its observation returns to the calling focus with the original reference and source, even after sleep or restart. A callback remains pending until the focus admits its observation. A host command can therefore be finished while its callback still appears in a handover. See the [observation fields](input.md#focus-messages-and-callbacks) and [sampled state](input.md#sampled-state).
+Scheduled wakeups and host commands that outlive their initial call each arrange one callback. Its observation returns to the calling focus with the original ID and source, even after sleep or restart. See [command lifetimes](host.md#command-lifetimes), [observation fields](input.md#focus-messages-and-callbacks), and [pending callbacks in sampled state](input.md#sampled-state).
 
 The focus admits each callback at most once. Repeated publication preserves the first identifiable stored result. See the [callback protocol](architecture.md#callback-delivery).
 
@@ -89,7 +93,7 @@ An accepted report makes a sleeping focus ready. A working focus can receive sev
 
 Subscriptions survive sleep and restart. The focus can find its active subscription IDs in the [state sampled for a handover](input.md#sampled-state).
 
-Any focus can call `withdraw_subscription` with the complete `subscription_id`. The result echoes the ID. The `changed` field is `true` when the call closes an active subscription and `false` for an unknown or previously withdrawn ID. Reports accepted before withdrawal still reach the subscribing focus. Stop the listener separately if needed.
+Any focus can call `withdraw_subscription` with the complete `subscription_id`. The result echoes the ID with `changed: true` if the call withdrew the subscription, or `changed: false` if it was already withdrawn or unknown. Reports accepted before withdrawal still reach the subscribing focus. Stop the listener separately if needed.
 
 ## Results and errors
 
@@ -100,7 +104,7 @@ These actions return a JSON text part containing either `result` or an operation
 | `invalid_arguments` | Arguments do not match the tool's declaration |
 | `unknown_tool` | The action is unavailable to the calling role or is not a current tool |
 | `focus_unavailable` | A new focus cannot fit the configured limit |
-| `unknown_channel` | The addressed focus is unknown or has ended |
+| `unknown_focus` | The selected focus is unknown or has ended |
 | `focus_queue_full` | The recipient cannot currently accept another event |
 
 See [runtime availability](design.md#runtime-availability) for failures that interrupt reasoning or stop the kernel.
@@ -111,11 +115,11 @@ Each ordinary activity inference that produces assistant text contributes one me
 
 The core can receive activity messages in its next ordinary input, including a continuation after tool use. Messages that wait for a later input keep their order. The core's history attributes each admitted report to its source activity.
 
-One input can carry reports from several activities alongside other observations. An ending can accompany new text or arrive later without repeating admitted messages. The [input contract](input.md#assignments-and-reports) defines grouping and the observation times preserved through waiting and restart.
+One input can carry reports from several activities alongside other observations. See [how activity reports group messages and endings](input.md#assignments-and-reports).
 
 ## Interrupted reasoning
 
-An activity can pause when its next request cannot fit, when the service rejects it, or when the response is unusable. The core receives a [`focus_interrupted` observation](input.md#activity-interruptions) with the reason. The activity keeps its working history, queued observations, and registrations. An explicit message to its channel, a command completion, or a new subscription report can resume it.
+An activity can pause when its next request cannot fit, when the service rejects it, or when the response is unusable. The core receives a [`focus_interrupted` observation](input.md#activity-interruptions) with the reason. The activity keeps its working history, queued observations, and registrations. An explicit message, a command completion, or a new subscription report can resume it.
 
 If waiting observations make a request too large, the runtime can continue a tool exchange with a fitting request while those observations stay queued. See [how the runtime continues after compaction](architecture.md#continuing-with-a-handover).
 
@@ -125,4 +129,4 @@ An activity with a pending callback or an active subscription can sleep with its
 
 Withdraw subscriptions when the activity finishes following their sources. When no work or registrations remain, the activity ends and frees its capacity slot. Its ending calls for the core's attention even if it produced no text.
 
-Completed focus references stay reserved, and messages to them return `unknown_channel`. The core can still receive the ended activity's [expressions and ending](input.md#assignments-and-reports) with the original focus ID.
+The core can still receive the ended activity's expressions and ending with its original focus ID. See [report fields](input.md#assignments-and-reports) and [sending errors](#results-and-errors).

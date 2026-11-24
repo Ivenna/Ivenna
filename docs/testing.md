@@ -42,15 +42,13 @@ The [web reader tests](../packages/resources/src/web_test.zig) check that two fo
 
 The agent tests cover inference retries with the original request, delivery retention across interruption, and the arrivals that wake a focus. The [kernel tests](../packages/agent/src/kernel.zig) also check that a complete tool exchange can reach the next request across a handover and that an observation stays pending when it cannot fit. The session registry tests inject a save failure after receiving a checkpoint to check that activity completion publishes once and a later maintenance pass republishes the same selection when confirmation was lost.
 
-The [CLI process tests](../apps/ivenna/src/cli_test.zig) invoke `ivenna` in an empty environment to verify that help works before configuration. For a mistyped command, they check the JSON result on stdout and the diagnostic on stderr.
+One CLI process test runs help and a mistyped command in an empty environment. It checks that help works before configuration and that argument errors produce JSON on stdout and a diagnostic on stderr. See the [CLI process tests](../apps/ivenna/src/cli_test.zig).
 
-### Channel delivery
+### Message delivery
 
-The agent tests exercise the catalog and delivery when a focus and a feed share an ID. They check that focus addresses follow session lifetime and that correspondence is presented with channel addresses while history preserves correspondent IDs. See the [kernel](../packages/agent/src/kernel.zig), [session registry](../packages/agent/src/sessions.zig), and [context](../packages/agent/src/context.zig) tests.
-
-The [email tests](../packages/email/src/email_transport.zig) check that a registered ID selects its configured recipient and an unregistered ID stops the send before draft creation.
-
-The [feed store tests](../packages/instance_state/src/feeds.zig) check persistence across reopen and publication racing with closure. The [feed CLI test](../apps/ivenna/src/cli_test.zig) reads a closed feed by ID with the kernel stopped. It checks pagination across sequence gaps, `next_after` at the end of the feed, and preservation of complete message text.
+- **Destination selection.** The decoder rejects a call that selects two destinations. The kernel delivers to the correct owner when a focus and a feed share an ID. The registry tests track which focus IDs are visible as sessions open and end. [Decoder](../packages/agent/src/tools.zig) · [Kernel](../packages/agent/src/kernel.zig) · [Registry](../packages/agent/src/sessions.zig)
+- **Correspondence.** A registered ID selects its configured recipient. An unregistered ID stops the call before draft creation. [Email transport](../packages/email/src/email_transport.zig)
+- **Feeds.** Closure survives reopening and prevents further publication. The CLI can read a closed feed with the kernel stopped, resume across sequence gaps, and preserve the full message text. [Feed store](../packages/instance_state/src/feeds.zig) · [CLI process tests](../apps/ivenna/src/cli_test.zig)
 
 ### Subscription delivery
 

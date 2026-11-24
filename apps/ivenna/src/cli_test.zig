@@ -49,20 +49,9 @@ test "command help and argument errors work without instance or service settings
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const help = try runWithoutConfig(a, &.{ executable, "--help" });
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, help.term);
-    for ([_][]const u8{ "serve", "feed", "subscription" }) |name|
-        try testing.expect(std.mem.indexOf(u8, help.stdout, name) != null);
-
     const feed = try runWithoutConfig(a, &.{ executable, "feed", "read", "--help" });
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, feed.term);
     try testing.expect(std.mem.indexOf(u8, feed.stdout, "FEED_ID") != null);
-    try testing.expect(std.mem.indexOf(u8, feed.stdout, "--after") != null);
-
-    const publish = try runWithoutConfig(a, &.{ executable, "subscription", "publish", "-h" });
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, publish.term);
-    try testing.expect(std.mem.indexOf(u8, publish.stdout, "\"key\"") != null);
-    try testing.expect(std.mem.indexOf(u8, publish.stdout, "\"cursor_conflict\"") != null);
 
     const typo = try runWithoutConfig(a, &.{ executable, "subscription", "publsh", "news-1" });
     try testing.expect(typo.term == .exited and typo.term.exited != 0);

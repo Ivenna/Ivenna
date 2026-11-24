@@ -1,27 +1,59 @@
 [
   {
     "name": "send",
-    "description": "Send text to one destination. For a correspondent, the returned reference confirms acceptance for delivery. A focus message enters its recipient's queue and can wake that focus. For a feed, the returned sequence identifies the stored message.",
+    "description": "Write to a correspondent, reach a focus, or publish to a feed. For correspondence, the reference confirms that the service accepted the message for delivery. Sending to a focus queues the message and can wake that focus. For a feed, the sequence identifies the stored message.",
     "parameters": {
       "type": "object",
       "properties": {
-        "channel_id": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Copy the complete address of a correspondent, focus, or feed from current.channels or a tool result."
+        "to": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "correspondent_id": {
+                  "type": "string",
+                  "description": "Use an ID from current.correspondents."
+                }
+              },
+              "required": ["correspondent_id"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "focus_id": {
+                  "type": "string",
+                  "description": "Use an ID from current.focuses or open_focus."
+                }
+              },
+              "required": ["focus_id"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "feed_id": {
+                  "type": "string",
+                  "description": "Use a feed ID from current.feeds or create_feed."
+                }
+              },
+              "required": ["feed_id"],
+              "additionalProperties": false
+            }
+          ]
         },
         "text": {
           "type": "string",
           "minLength": 1
         }
       },
-      "required": ["channel_id", "text"],
+      "required": ["to", "text"],
       "additionalProperties": false
     }
   },
   {
     "name": "create_feed",
-    "description": "Create a shared feed whose messages stay available to readers across restarts. Any focus can publish using the returned channel_id with send. Give the returned feed_id to a reader. An activity can run \"$IVENNA\" feed read --help for usage.",
+    "description": "Create a shared feed whose messages stay available across restarts. Give readers the returned feed_id. From an activity, run \"$IVENNA\" feed read --help for reading instructions.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -39,13 +71,13 @@
   },
   {
     "name": "close_feed",
-    "description": "Close a feed to new messages while keeping published messages available to readers. The result says whether this call closed the feed.",
+    "description": "Close a feed to new messages while keeping published messages available to readers. The result's changed field is true when this call closes the feed.",
     "parameters": {
       "type": "object",
       "properties": {
         "feed_id": {
           "type": "string",
-          "description": "Copy the complete feed ID from current.channels.feeds or the create_feed result."
+          "description": "Use a feed ID from current.feeds or create_feed."
         }
       },
       "required": ["feed_id"],
@@ -54,7 +86,7 @@
   },
   {
     "name": "open_focus",
-    "description": "Open an activity to pursue a task while the core continues. The activity can run host commands and report to the core. Use the returned channel_id to reach it with send.",
+    "description": "Open an activity to pursue a task while the core continues. The activity can run host commands and report to the core. The result gives its focus_id.",
     "parameters": {
       "type": "object",
       "properties": {

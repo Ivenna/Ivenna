@@ -1,7 +1,8 @@
 ivenna subscription publish SUBSCRIPTION_ID
 
-Queue an observation for the focus that subscribed. This example also saves
-source position "17" on a subscription with no saved cursor.
+Queue an observation for the focus that subscribed. You can save a new cursor
+in the same write. This example saves position "17" on a subscription with
+no saved cursor.
 
   printf '%s\n' '{
     "key": "release-v2.4.0",

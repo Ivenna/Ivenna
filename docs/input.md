@@ -23,7 +23,7 @@ Retained records identify the focus that admitted their events or produced their
 
 The `name` supplied when opening a focus, running a command, scheduling attention, subscribing, or creating a feed contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
 
-Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs remain usable as control handles within their originating runtime. To send to a focus or feed, use its complete channel address. See [sending a message](communication.md#sending-a-message).
+Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs remain usable as control handles within their originating runtime.
 
 ## Retained records
 
@@ -52,11 +52,11 @@ Correspondence enters the core as an `input` observation of who said what.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `from` | `Text[]` | Channel addresses of the senders |
+| `from` | `Text[]` | Correspondent IDs of the senders |
 | `text` | `Text` | Complete message text |
 | `observed_at` | `Time` | Time the runtime observed the message during intake |
 
-Use `from` for attribution and `current.channels.correspondents` when choosing a destination. See [correspondents and IDs](communication.md#correspondents-and-ids).
+Use `current.correspondents` when choosing a destination for a reply. See [correspondents and IDs](communication.md#correspondents-and-ids) and [how email text is presented](communication.md#incoming-email-text).
 
 #### Startup and restart
 
@@ -82,7 +82,7 @@ Each ordinary activity inference that returns assistant text produces one messag
 
 One ordinary core input, including a tool continuation, can contain events and reports from several activities. Newly admitted messages for the same focus are grouped once. Each group's position follows that focus's first appearance in the selected observations, and messages within it keep their original order. Use the observation times for messages and endings from different focuses. Those times survive waiting, persistence, and restart.
 
-The attention guide explains when the core reads these messages and what an ending means. See [activity expressions](attention.md#activity-expressions) and [activity completion](attention.md#activity-completion).
+See [activity expressions](attention.md#activity-expressions) for when the core reads these messages and [activity completion](attention.md#activity-completion) for what an ending means.
 
 #### Activity interruptions
 
@@ -98,7 +98,7 @@ The activity may have resumed or even ended by the time the core reads the event
 
 #### Focus messages and callbacks
 
-A `send` to a focus channel produces a `FocusMessage`.
+A successful `send` to a focus queues a `FocusMessage`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -149,23 +149,21 @@ A `handover` record contains:
 
 #### Sampled state
 
-A `State` can contain the following collections:
+A `State` can contain three collections. The renderer omits empty collections and omits `state` when all three are empty.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `activities` | `Text[]` | Focus IDs of the core's existing activities, including sleeping activities |
+| `activities` | `Text[]` | Existing activity focus IDs, including sleeping activities, supplied only to the core |
 | `callbacks` | `PendingCallback[]` | Observations arranged for the sampled focus and awaiting admission |
 | `subscriptions` | `Text[]` | IDs of the subscriptions active for this focus at the time of the sample, including those whose listeners have never reported |
 
-The activity list omits the core itself and is empty for an activity focus. Empty collections are omitted. When all collections are empty, the entire `state` field is omitted.
-
 A subscription withdrawn before the sample is absent from `subscriptions`. A report accepted before withdrawal can still arrive with that ID.
 
-Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after its result is published or queued. A pending host source identifies the execution being observed; it does not imply that its process is still running or its handle remains available. Observation text arrives separately as an event. The runtime routes and resumes registered observations without requiring the model to retain their IDs.
+Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after the result is published or queued. A pending host source can therefore identify a command that has already finished. Observation text arrives separately as an event. See [command lifetimes](host.md#command-lifetimes) for handle availability.
 
 The handover's `observed_at`, or the compaction turn's `current.observed_at`, dates this state sample. An activity can end before its ending report enters the core's history. Reports retain their source and original times.
 
-For example, the summary can explain the work while sampled state retains the references:
+The summary describes the work. The sampled state carries the runtime IDs.
 
 ```yaml
 handover:
@@ -189,58 +187,52 @@ Each inference ends its input with a turn.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `current` | `Current` | Focus identity, role, and observation time, with a channel catalog in ordinary turns |
+| `current` | `Current` | Identity, role, observation time, and ordinary-turn destinations |
 | `events` | `Event[]`, when nonempty | New events for an ordinary inference |
-| `summarize` | Summary instructions and optional state | Compaction request, replacing ordinary observations |
+| `summarize` | `instructions: Text` and optional `state: State` | Compaction request with any sampled state |
 
-`Current` contains `focus_id: Text`, `role: Role`, and `observed_at: Time`. Events and handovers retain their own times and sources.
+`current` always contains `focus_id`, `role`, and `observed_at`. Ordinary turns also include the three destination lists. `correspondents` and `feeds` can be empty.
 
-In ordinary turns, `current.channels: ChannelCatalog` presents the available destinations.
-
-| `ChannelCatalog` field | Type | Meaning |
+| Field in `current` | Type | Meaning |
 | --- | --- | --- |
-| `focuses` | `Text[]` | Channel addresses of existing focuses, including the current focus and sleeping focuses |
-| `correspondents` | `Text[]` | Channel addresses of correspondents registered to receive messages |
+| `focus_id` | `Text` | ID of the focus receiving the turn |
+| `role` | `Role` | `core` or `activity` |
+| `observed_at` | `Time` | Time the runtime sampled this turn |
+| `focuses` | `Text[]` | IDs of existing focuses, including the current focus and sleeping focuses |
+| `correspondents` | `Text[]` | IDs of correspondents registered to receive messages |
 | `feeds` | `Feed[]` | Open feeds in creation order |
 
-Each `Feed` has a `feed_id: Text` for closing and reading the feed, a `channel_id: Text` for `send`, and the `description: Text` supplied at creation.
-
-A destination can change between the sample and a tool call. `send` checks the destination when it runs. See [channel addresses](communication.md#sending-a-message).
+Each `Feed` has a `feed_id: Text` and the `description: Text` supplied at creation. See [sending a message](communication.md#sending-a-message) for how `send` checks the chosen ID.
 
 An ordinary turn with no new events contains only `current` and continues from the preceding history.
 
-`summarize` contains `instructions: Text` and, when nonempty, complete `state: State`. It asks for condensed understanding with current state available for recollection. Events waiting for admission remain outside this request.
-
-For example, the [scheduled wakeup](attention.md#returning-later) and the [release listener's report](subscriptions.md#publish-an-observation) can reach the core in the same turn.
+In this ordinary turn, a letter from `reviewer` and a release report reach the core together. `operator` is the registered correspondence destination. See [incoming messages](#incoming-messages) and [how a listener reports observations](subscriptions.md#publish-an-observation).
 
 ```yaml
 current:
   focus_id: core-1
   role: core
   observed_at: "2026-11-10T18:00:01.000Z"
-  channels:
-    focuses:
-      - ivenna:/focus/core-1
-    correspondents:
-      - ivenna:/correspondent/operator
-    feeds:
-      - feed_id: releases-1
-        channel_id: ivenna:/feed/releases-1
-        description: Release announcements and links to upgrade notes.
+  focuses:
+    - core-1
+  correspondents:
+    - operator
+  feeds:
+    - feed_id: releases-1
+      description: Release announcements and links to upgrade notes.
 events:
-  - callback:
-      callback_id: revisit-practice-5
-      source:
-        wakeup: {}
+  - input:
+      from:
+        - reviewer
       observed_at: "2026-11-10T18:00:00.500Z"
-      text: Revisit the French practice plan.
+      text: Please include changes to the example configuration in the release notes.
   - subscription:
       subscription_id: release-watch-1
       observed_at: "2026-11-10T17:59:59.200Z"
       text: Stable release v2.4.0 is available
 ```
 
-Each event carries the reference returned by the tool that arranged it. The release report shows only the local receipt time because the listener omitted the source time.
+The release report carries the listener's `subscription_id` and the local receipt time. The listener can also supply a separate source time.
 
 ## Handover generation and replacement
 

@@ -1,9 +1,9 @@
 Cursor changes and write receipts
 
-Set "to" to the new source position as a string. Copy the saved cursor from
-inspect to "from". For an unset cursor, omit "from" or send null. Copy a saved
-empty string as "from": "". The cursor changes only when "from" matches the
-saved position. JSON strings can be up to 4 MiB.
+Set "to" to the new source position as a string. Use the saved cursor from
+inspect as "from". When no cursor has been saved, omit "from" or send null.
+Use "from": "" for a saved empty string. A cursor change succeeds only when
+"from" matches the saved position. Input JSON strings have a 4 MiB limit.
 
 Read the JSON string on stdout and check the exit status.
 

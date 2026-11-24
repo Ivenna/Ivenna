@@ -3,6 +3,7 @@ const yaml = @import("yaml");
 const contracts = @import("agent_contracts");
 const Allocator = std.mem.Allocator;
 const IncomingMessage = contracts.Communication.IncomingMessage;
+const Feed = @import("instance_state").feeds.Feed;
 const Time = @import("time.zig");
 
 pub const Role = enum { core, activity };
@@ -129,27 +130,16 @@ pub const SubscriptionReport = struct {
     }
 };
 
-/// Destinations available at the time of an inference.
-pub const ChannelCatalog = struct {
-    pub const Feed = struct {
-        feed_id: []const u8,
-        channel_id: []const u8,
-        description: []const u8,
-    };
-
-    focuses: []const []const u8 = &.{},
-    correspondents: []const []const u8 = &.{},
-    feeds: []const Feed = &.{},
-};
-
-/// Identity, observation time, and live channel addresses accompanying one inference.
+/// Identity and observation time for an inference, with destinations for ordinary turns.
 pub const Current = struct {
     focus_id: []const u8,
     role: Role,
     observed_at_unix_ms: i64,
-    channels: ChannelCatalog = .{},
+    focuses: []const []const u8 = &.{},
+    correspondents: []const []const u8 = &.{},
+    feeds: []const Feed = &.{},
 
-    fn write(self: Current, writer: anytype, include_channels: bool) !void {
+    fn write(self: Current, writer: anytype, include_destinations: bool) !void {
         try writer.beginObject();
         try writer.objectField("focus_id");
         try writer.write(self.focus_id);
@@ -157,9 +147,13 @@ pub const Current = struct {
         try writer.write(self.role);
         try writer.objectField("observed_at");
         try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
-        if (include_channels) {
-            try writer.objectField("channels");
-            try writer.write(self.channels);
+        if (include_destinations) {
+            try writer.objectField("focuses");
+            try writer.write(self.focuses);
+            try writer.objectField("correspondents");
+            try writer.write(self.correspondents);
+            try writer.objectField("feeds");
+            try writer.write(self.feeds);
         }
         try writer.endObject();
     }
@@ -377,31 +371,11 @@ pub const Turn = struct {
 
 /// Render the model-facing record as YAML. Returned bytes belong to arena.
 pub fn renderRecord(arena: Allocator, record: Record) ![]const u8 {
-    var projected = record;
-    if (projected == .events) projected.events.items = try projectEvents(arena, projected.events.items);
-    return render(arena, projected);
+    return render(arena, record);
 }
 
 pub fn renderTurn(arena: Allocator, turn: Turn) ![]const u8 {
-    var projected = turn;
-    if (projected.purpose == .work) projected.purpose.work = try projectEvents(arena, projected.purpose.work);
-    return render(arena, projected);
-}
-
-/// Retain correspondent IDs in stored events and give the model reply addresses.
-fn projectEvents(arena: Allocator, events: []const Event) ![]const Event {
-    for (events) |event| {
-        if (event == .input) break;
-    } else return events;
-
-    const projected = try arena.dupe(Event, events);
-    for (projected) |*event| {
-        if (event.* != .input) continue;
-        const addresses = try arena.alloc([]const u8, event.input.from.len);
-        for (event.input.from, addresses) |id, *address| address.* = try contracts.ChannelAddress.format(arena, .correspondent, id);
-        event.input.from = addresses;
-    }
-    return projected;
+    return render(arena, turn);
 }
 
 fn render(arena: Allocator, value: anytype) ![]const u8 {

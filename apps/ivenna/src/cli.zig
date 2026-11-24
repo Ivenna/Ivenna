@@ -154,7 +154,7 @@ const subscription_help =
     \\
     \\  inspect      Read the registration and saved cursor.
     \\  publish      Queue an observation and optionally save a cursor.
-    \\  checkpoint   Save a cursor after skipping an item.
+    \\  checkpoint   Save a cursor without queuing an observation.
     \\
     \\Run ivenna subscription COMMAND --help for examples and command results.
     \\

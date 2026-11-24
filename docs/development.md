@@ -44,11 +44,9 @@ Keep configuration with the behavior it controls. Execution owns scheduling, con
 
 ### Types and protocols
 
-Decode external protocols in their owning components and supply typed contracts to execution. Rely on the guarantees established there; validate additional requirements at the boundary that owns them. Model coexisting fields together and mutually exclusive alternatives as variants with their own payloads.
+Decode external protocols in the components that own them and pass typed values to execution. Model coexisting fields together and mutually exclusive alternatives as variants with their own payloads. Let the component performing the action check the current state and report the outcome it can confirm. See [message delivery](architecture.md#message-delivery).
 
 Keep mail identifiers, headers, folders, and thread grouping out of scheduling and model observations. The email adapter produces typed [correspondence and callback envelopes](../packages/agent_contracts/src/inbox.zig); the agent owns callback registration, source attribution, routing, and admission.
-
-Keep [channel address syntax](../packages/agent_contracts/src/channel_address.zig) in the shared contract. The kernel resolves the address namespace and gives the decoded ID to the destination owner. That owner decides whether it can accept the message and reports the outcome it can confirm. See [channel delivery](architecture.md#channel-delivery).
 
 [Input](../packages/agent/src/input.zig) owns model-facing observation projection and runtime user-message rendering. Execution projects internal session and delivery state into this interface, exposing facts that help Ivenna choose its next action. Keep runtime state and exact references under program ownership through persistence and compaction. Supply complete references in operation results and observations, and return invalid selections as operation outcomes.
 
@@ -113,7 +111,7 @@ The [root build](../build.zig) and the [application build](../apps/ivenna/build.
 
 Each application owns its entry point. The [memory app](../apps/memory) has a Nushell entry point and a Containerfile. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
 
-The executable embeds its [model-facing resources](#model-facing-resources) and [command help](../apps/ivenna/src/help). Rebuild it after editing those files. The [running guide](running.md#starting-the-kernel) covers startup with the installed executable.
+The executable embeds its [model-facing resources](#model-facing-resources) and [command help](../apps/ivenna/src/help). Rebuild it after editing those files.
 
 ## Validation
 

@@ -292,15 +292,12 @@ test "candidate requests leave history intact and latest observations appear onc
     try std.testing.expectEqual(before.len, candidate.len);
     try std.testing.expectEqualDeep(before[0 .. before.len - 1], candidate[0 .. candidate.len - 1]);
     try std.testing.expectEqual(1, std.mem.count(u8, candidate[candidate.len - 1].message.text, events[0].input.text));
-    try std.testing.expect(std.mem.indexOf(u8, candidate[candidate.len - 1].message.text, "ivenna:/correspondent/operator") != null);
 
     try context.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = events } });
     const later = try context.request(a, current, &.{});
     try std.testing.expectEqual(1, std.mem.count(u8, later[later.len - 2].message.text, events[0].input.text));
-    try std.testing.expect(std.mem.indexOf(u8, later[later.len - 2].message.text, "ivenna:/correspondent/operator") != null);
     try std.testing.expectEqualDeep(before[before.len - 1], later[later.len - 1]);
     try std.testing.expectEqual(@as(usize, 2), context.records().len);
-    try std.testing.expectEqualStrings("operator", context.records()[1].record.events.items[0].input.from[0]);
 }
 
 test "encoded native exchanges restore independently of their source buffers" {

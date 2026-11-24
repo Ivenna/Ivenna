@@ -155,7 +155,7 @@ To set up an independent reader or listener, follow the [deployment guide](../do
 
 ### Trying a feed reader
 
-Ask Ivenna to create a feed, publish a test message, and send you its feed ID. Replace the example ID with the one it gives you.
+Write to Ivenna and ask it to create a feed, publish a test message to it, and reply with the feed ID. Replace the example ID with the one it gives you.
 
 ```sh
 feed_id='releases-1'

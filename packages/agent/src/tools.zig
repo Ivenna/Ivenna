@@ -4,10 +4,25 @@ const Input = @import("input.zig");
 const Time = @import("time.zig");
 const Allocator = std.mem.Allocator;
 
+pub const Destination = union(enum) {
+    correspondent_id: []const u8,
+    focus_id: []const u8,
+    feed_id: []const u8,
+
+    fn parse(value: std.json.Value) !Destination {
+        if (value != .object or value.object.count() != 1) return error.InvalidToolArguments;
+        const tag = std.meta.stringToEnum(std.meta.Tag(Destination), value.object.keys()[0]) orelse return error.InvalidToolArguments;
+        const id = try string(value.object.values()[0]);
+        return switch (tag) {
+            inline else => |active| @unionInit(Destination, @tagName(active), id),
+        };
+    }
+};
+
 /// Agent-owned actions share one definition for recognition, arguments, and role
 /// selection. Kernel owns their effects within the calling model/tool round.
 pub const Request = union(enum) {
-    send: struct { channel_id: []const u8, text: []const u8 },
+    send: struct { to: Destination, text: []const u8 },
     create_feed: struct { name: []const u8, description: []const u8 },
     close_feed: struct { feed_id: []const u8 },
     open_focus: struct { name: []const u8, task: []const u8 },
@@ -52,6 +67,7 @@ fn parseArguments(comptime T: type, value: std.json.Value) !T {
         const present = value.object.get(name) orelse return error.InvalidToolArguments;
         @field(result, name) = switch (Field) {
             []const u8 => try string(present),
+            Destination => try Destination.parse(present),
             Time.Instant => Time.parse(try string(present)) catch return error.InvalidToolArguments,
             else => @compileError("unsupported tool argument type: " ++ @typeName(Field)),
         };
@@ -82,5 +98,13 @@ test "a subscription reference must be supplied as a JSON string" {
     defer arena.deinit();
     try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "withdraw_subscription",
         \\{"subscription_id":[102,101,101,100,45,49]}
+    ));
+}
+
+test "send rejects a call that selects two destinations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "send",
+        \\{"to":{"focus_id":"core-1","feed_id":"core-1"},"text":"Hello"}
     ));
 }

@@ -34,7 +34,7 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | URL for [JMAP session discovery](#mail-service) | `http://127.0.0.1:8088/jmap/session` |
 | `MAIL_ADDRESS` | Kernel mailbox address and sending identity | Required |
-| `MAIL_CORRESPONDENTS` | Full mailbox addresses registered for the `send` tool, separated by commas | No registered recipients |
+| `MAIL_CORRESPONDENTS` | Comma-separated [mailbox addresses for outgoing correspondence](#outgoing-correspondents) | No registered recipients |
 | `MAIL_USERNAME` | Mail login | Required for username/password authentication |
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
@@ -77,7 +77,7 @@ For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKEN
 
 The [model request limits](content.md#model-request-checks) apply to the complete encoded request. The model service checks its own limits after processing the input.
 
-Ordinary inference requests include the ID, channel address, and description of each open feed. Set `MAX_OPEN_FEEDS` with the model's context window in mind. Lowering the limit leaves existing feeds open. To create another feed, the number of open feeds must fall below the limit. If the catalog alone exceeds the model's window, use a compatible model with enough context to close feeds before switching back. See [changing the model](#changing-the-model).
+Set `MAX_OPEN_FEEDS` with the model's context window in mind. Each open feed adds its ID and description to every [ordinary inference request](input.md#inference-turns). The limit applies when creating a feed. If you lower it below the current count, close enough feeds to make room before creating another. If the list of open feeds alone exceeds the model's window, use a compatible model with enough context to close feeds before switching back. See [changing the model](#changing-the-model).
 
 When compaction is optional and a usable handover cannot be prepared, the original request can proceed while it fits. If the kernel cannot assemble a request within the adapter's limits, the focus waits with its history and any unadmitted observations intact. See [handover outcomes](architecture.md#continuing-with-a-handover).
 
@@ -97,11 +97,7 @@ Stop the kernel, update `LLM_MODEL` and any changed service settings, then resta
 
 Use a dedicated account as programmatic storage for Ivenna's communication records, callback inbox, and working history, with JMAP Mail and Submission capabilities and a sending identity matching `MAIL_ADDRESS`. The account needs a Drafts folder and permission to create and move messages and update private keywords. Ivenna creates the top-level `Ivenna Callbacks` and `Ivenna History` folders and a mailbox with role `trash` when missing; the dedicated folders have no special mail role. The account must permit folder creation.
 
-Set `MAIL_SESSION_URL` to the URL of the JMAP session document. Discovery follows up to three redirects within the same scheme, host, and effective port. For a longer chain or a change of origin, configure the final session URL directly.
-
-Set `MAIL_ADDRESS` and authentication settings for the kernel account. Use `MAIL_CORRESPONDENTS` to register full mailbox addresses in the same domain, such as `operator@ivenna.test,reviewer@ivenna.test`. You can also register the kernel mailbox. Leaving the variable unset or empty registers zero recipients.
-
-The application trims spaces and tabs around each entry in a nonempty list. Startup reports `InvalidCorrespondentAddress` for an empty entry or an unsupported or cross-domain address. It reports `DuplicateCorrespondentId` if entries share the same case-sensitive local part. Restart the kernel to apply changes to the list. See [correspondent addressing](communication.md#current-email-addressing).
+Set `MAIL_ADDRESS` and authentication settings for the kernel account. Set `MAIL_SESSION_URL` to the URL of the JMAP session document. Discovery follows up to three redirects within the same scheme, host, and effective port. For a longer chain or a change of origin, configure the final session URL directly.
 
 For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks to attribute each message to its correspondent. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
@@ -110,6 +106,12 @@ Wakeup and host completion callbacks are created directly through JMAP in `Ivenn
 Configure automatic Trash expiry and cleanup of unreferenced storage in the mail service. These processes must continue independently of the kernel. Choose retention with the provider's full policy scope in mind: Trash and Junk policies can also remove ordinary mail. The [local Stalwart setup](../dev/README.md#configuring-mail) provides a concrete configuration.
 
 The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working history shares the account's storage capacity; [data and retention](#data-and-retention) explains its folder lifecycle and backup requirements.
+
+### Outgoing correspondents
+
+Set `MAIL_CORRESPONDENTS` to the full mailbox addresses Ivenna can write to, such as `operator@ivenna.test,reviewer@ivenna.test`. Use addresses in the same domain as `MAIL_ADDRESS`. To let Ivenna write to its own mailbox, include `MAIL_ADDRESS` in the list. An unset or empty list registers zero recipients. Incoming mail follows the [intake rules](#mail-intake).
+
+The application trims spaces and tabs around each entry in a nonempty list. Startup reports `InvalidCorrespondentAddress` for an empty entry or an unsupported or cross-domain address. It reports `DuplicateCorrespondentId` if entries share the same case-sensitive local part. Restart the kernel to apply changes to the list. See [correspondent IDs](communication.md#current-email-addressing).
 
 ### Mail intake
 
@@ -169,7 +171,7 @@ Startup reads and validates all selected session history, including sleeping ses
 
 ## Local programs
 
-Run feed readers and subscription listeners on the kernel host. For a program you launch independently, use the installed `ivenna` and set `DATA_DIR` to the instance's initialized data directory. The program can use these commands while the kernel is stopped. Programs Ivenna starts receive both paths from the [host shell](host.md#command-environment).
+Run feed readers and subscription listeners on the kernel host. For a program you launch independently, give it the installed `ivenna` executable and set `DATA_DIR` to the instance's initialized data directory. An absolute path selects the same directory from any working directory. Programs Ivenna starts inherit both paths in the [host shell](host.md#command-environment). The local commands work while the kernel is stopped.
 
 Grant filesystem access to programs you trust with both feed and subscription data. A relay on the kernel host can forward selected messages to other consumers.
 
@@ -206,7 +208,7 @@ An accepted letter can wait in the mailbox if a focus is busy or the kernel stop
 
 Look for `JMAP` on the kernel's standard error. A failed request logs its method, stage, and error. A warning ending in `Retrying on a fresh connection` means another attempt is underway. Check `/readyz` for the current reception state. See [JMAP requests](architecture.md#jmap-requests) for which operations can retry.
 
-Reception can stay open even if Ivenna loses confirmation while sending a reply. To see what Ivenna learned about submission, look for the reply's `send` result in [working history](#working-history). Trash can contain both submitted messages and abandoned drafts. See [sending outcomes](communication.md#sending-a-message).
+Reception can stay open even if Ivenna loses confirmation while sending a reply. Check the reply's `send` result in [working history](#working-history) to see whether Ivenna confirmed submission. Trash can contain both submitted messages and abandoned drafts. See [correspondence outcomes](communication.md#writing-to-a-correspondent).
 
 If the kernel cannot read or confirm required mailbox state, it closes reception and exits. For a `connect` failure, check whether the kernel can reach the mail endpoint. For HTTP 401, check the credentials configured for the [mail account](#mail-service).
 

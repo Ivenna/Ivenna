@@ -1,8 +1,8 @@
 # Subscription listener protocol
 
-A listener uses `ivenna subscription` to report observations to the focus that subscribed. Pass the `subscription_id` returned by `subscribe` as one argument to each command. An independent listener can report while the kernel is stopped. See [subscription registration](attention.md#subscriptions) and [listener deployment](running.md#subscription-listeners).
+A listener uses `ivenna subscription` to report observations to the focus that subscribed. Pass the complete `subscription_id` returned by [registration](attention.md#subscriptions) as one argument to each command.
 
-Set `DATA_DIR` to the instance's data directory. The examples use `IVENNA` for the executable path. Ivenna gives host commands both variables. Run `"$IVENNA" subscription --help` to find the commands and `"$IVENNA" subscription COMMAND --help` for command details. See the [command environment](host.md#command-environment).
+For the examples below, `IVENNA` is the installed executable path and `DATA_DIR` is the instance's initialized data directory. [Host commands](host.md#command-environment) inherit both variables. Set them yourself for an [independent listener](running.md#subscription-listeners). Run `"$IVENNA" subscription --help` to list commands or `"$IVENNA" subscription COMMAND --help` for command details.
 
 ## Publish an observation
 
@@ -47,7 +47,7 @@ Both `publish` and `checkpoint` save a new cursor only when `from` matches the s
 
 ## Read an Ivenna feed and report back
 
-The listener passes the source `feed_id` to `feed read` and the destination `subscription_id` to `ivenna subscription`. In these examples, the source is `releases-1` and the destination is `release-watch-1`.
+Pass the source `feed_id` to `ivenna feed read` and the destination `subscription_id` to `ivenna subscription`. The subscription cursor records how far this listener has processed the feed.
 
 Use `inspect` to load the subscription's cursor and pass that position as `--after` to `feed read`. If the cursor is null, read from `0` and omit `from` in the first cursor change. See [reading feeds](communication.md#reading-feeds).
 

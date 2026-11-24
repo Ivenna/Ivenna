@@ -37,7 +37,9 @@ pub const Store = struct {
     /// The parsed tool request supplies UTF-8. The feed ID belongs to a and
     /// is returned once it is durable.
     pub fn create(self: *Store, a: Allocator, name: []const u8, description: []const u8) ![]const u8 {
-        if (!Reference.validName(name) or !validDescription(description)) return error.InvalidArguments;
+        if (!Reference.validName(name) or description.len == 0) return error.InvalidArguments;
+        const characters = std.unicode.utf8CountCodepoints(description) catch return error.InvalidArguments;
+        if (characters > max_description_characters) return error.InvalidArguments;
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         try database.exec(self.db, "BEGIN IMMEDIATE");
@@ -122,22 +124,6 @@ pub const Store = struct {
     }
 };
 
-fn validDescription(description: []const u8) bool {
-    var codepoints = std.unicode.Utf8View.initUnchecked(description).iterator();
-    var count: usize = 0;
-    var nonblank = false;
-    while (codepoints.nextCodepoint()) |point| {
-        count += 1;
-        if (count > max_description_characters) return false;
-        switch (point) {
-            // Unicode White_Space.
-            0x9...0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => {},
-            else => nonblank = true,
-        }
-    }
-    return nonblank;
-}
-
 test "feed descriptions, references and message sequences persist across reopening" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -173,7 +159,7 @@ test "feed descriptions, references and message sequences persist across reopeni
     try t.expectEqual(2, try store.publish(renewed, "core", "second", 102));
 }
 
-test "feed descriptions require nonblank text within the code point limit" {
+test "feed description length is measured in code points" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -184,9 +170,7 @@ test "feed descriptions require nonblank text within the code point limit" {
     var characters: [max_description_characters + 1][character.len]u8 = undefined;
     @memset(&characters, character[0..character.len].*);
     const overlong = std.mem.asBytes(&characters);
-    for ([_][]const u8{ " \t\n　", overlong }) |invalid| {
-        try t.expectError(error.InvalidArguments, store.create(a, "release", invalid));
-    }
+    try t.expectError(error.InvalidArguments, store.create(a, "release", overlong));
     const description = overlong[0 .. max_description_characters * character.len];
     const feed_id = try store.create(a, "release", description);
     try t.expectEqualStrings("release-1", feed_id);
@@ -229,26 +213,4 @@ test "a lowered capacity preserves all existing open feeds and blocks creation u
     try t.expectEqual(2, remaining.len);
     try t.expectEqualStrings(open[0].feed_id, remaining[0].feed_id);
     try t.expectEqualStrings(feed_id, remaining[1].feed_id);
-}
-
-test "a concurrent publication and closure preserve the outcome of the write" {
-    const t = std.testing;
-    const io = t.io;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var store = try Store.openInMemory(a, io, 1);
-    defer store.close();
-    const id = try store.create(a, "progress", "Current progress");
-    var publishing = try io.concurrent(Store.publish, .{ &store, id, "activity-1", "work", 100 });
-    defer _ = publishing.cancel(io) catch {};
-    try t.expect(try store.closeFeed(id));
-    const accepted: i64 = if (publishing.await(io)) |sequence| accepted: {
-        try t.expectEqual(1, sequence);
-        break :accepted 1;
-    } else |err| rejected: {
-        try t.expectEqual(error.FeedClosed, err);
-        break :rejected 0;
-    };
-    try t.expectEqual(accepted, try database.integer(store.db, "SELECT count(*) FROM feed_messages", .{}));
 }

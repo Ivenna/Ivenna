@@ -61,9 +61,9 @@ An activity that ends calls for the core's attention even if it said nothing. Wh
 
 Correspondence reaches the core as observations of who said what and when the runtime observed it. Ivenna can consider a message addressed to it or a conversation someone relays. Retained exchanges connect these observations with what Ivenna chose to say and the effects that followed.
 
-Ivenna chooses when to send, whom or what to reach, and what to say. Each focus sees the available destinations, including live focuses, open feeds, and registered correspondents. Internal reasoning and activity completion stay within Ivenna. See [communication](communication.md) and [coordination among focuses](attention.md#reaching-an-existing-focus).
+Ivenna chooses when to send, whom or what to reach, and what to say. Each ordinary turn shows live focuses, open feeds, and registered correspondents. Ivenna chooses the kind of destination and uses its existing ID. Internal reasoning and activity completion stay within Ivenna. See [sending a message](communication.md#sending-a-message).
 
-A feed gives Ivenna a place to publish messages that people and programs can follow. It belongs to the instance and can outlive the focus that created it. Its description helps each focus recognize its purpose before publishing or giving its ID to a program Ivenna chooses or writes. Each reader can resume from its last processed message, including after the feed closes or the kernel stops. See [reading feeds](communication.md#reading-feeds).
+A feed gives Ivenna a place to publish messages that people and programs can follow. It belongs to the instance and can outlive the focus that created it. The description helps Ivenna recognize what belongs in the feed and tell readers what to expect. Each reader can resume from its last processed message, including after the feed closes or the kernel stops. See [reading feeds](communication.md#reading-feeds).
 
 ## Sessions and continued work
 

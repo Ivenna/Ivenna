@@ -1,6 +1,6 @@
 # Architecture
 
-This guide describes Ivenna's current implementation: package responsibilities, execution, and service and storage protocols. The kernel retains working histories across restarts and constructs fresh execution state on startup. The application assembles the runtime and exposes health and reception status.
+This guide covers package boundaries, execution, and the protocols Ivenna uses for services and storage. The application assembles the runtime and exposes health and reception status. The kernel restores working histories and builds execution state on startup.
 
 The [design intent](design.md) sets the behavioral goals and interface principles. The [input contract](input.md) defines runtime-generated user messages, [communication](communication.md) defines correspondence and explicit sending, and [attention](attention.md) defines focus coordination and observation lifetimes. The [usage guide](usage.md) explains correspondence with Ivenna.
 
@@ -10,7 +10,7 @@ The [design intent](design.md) sets the behavioral goals and interface principle
 | --- | --- |
 | [apps/ivenna](../apps/ivenna) | Provide the CLI, load configuration, assemble the runtime, serve HTTP status, and manage process startup and shutdown |
 | [apps/memory](../apps/memory) | Serve memory operations over SSH and own workspace files, capacity enforcement, and locking |
-| [packages/agent](../packages/agent/src/root.zig) | Coordinate focuses, sessions, activations, and retained history; own model-input rendering, execution policy, session prompts, and expression and attention actions |
+| [packages/agent](../packages/agent/src/root.zig) | Own sessions, scheduling, retained history, model input, prompts, and the communication and attention tools |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
 | [packages/responses](../packages/responses/src/root.zig) | Encode, measure, and decode model exchanges; own model HTTP transport, file uploads, and request content limits |
@@ -60,9 +60,7 @@ The agent exposes `Kernel`, `Engine`, and its `Input` message types and renderer
 
 ### Shared contracts
 
-At runtime, the application supplies concrete capability implementations through shared contracts. Kernel calls input, sending, and history storage operations and publishes scheduled wakeups. Engine calls the model and registered tools. Host owns command lifetimes, returns observations through tool calls, and publishes registered completion observations.
-
-Shared [communication types](../packages/agent_contracts/src/communication.zig) describe incoming observations and explicit outgoing messages. The shared capability contracts define calls and data exchanged within the process. The agent owns model-input rendering, handovers, history-record encoding, and the checkpoint selecting retained working histories; each adapter owns its service protocol encoding:
+The application supplies the agent and host with capability implementations through in-process contracts. The agent owns model input and the checkpoint selecting retained working histories. Each adapter owns its service protocol.
 
 | Contract | Operations | Implementation |
 | --- | --- | --- |
@@ -75,29 +73,11 @@ Shared [communication types](../packages/agent_contracts/src/communication.zig) 
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
 | [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host, Memory, and Resources |
 
-The sending adapter resolves one correspondent ID and reports what it knows about submission through `Communication.SendResult`. Kernel renders those [sending outcomes](communication.md#sending-a-message) as tool replies. Errors that prevent the adapter from providing a defined outcome propagate to runtime supervision.
-
 `Tools.Invocation` carries the internal calling session ID and its model-facing `focus_id`, together with a callback registrar and a command-reference issuer borrowed for that invocation. Host requests its durably allocated command reference through `command_reference` before launch.
 
 The callback registrar accepts a name and source and returns `Callback.Registration`: an internal numeric delivery ID and a complete reference allocated for the caller. A capability retains the numeric ID for publication through `Callback.Publisher` and presents the reference as `callback_id`; it does not retain the registrar or choose another receiving session.
 
 [Reference](../packages/agent_contracts/src/reference.zig) validates names and formats the references allocated by execution. The checkpoint retains the focus, callback, and command sequences. The subscription and feed stores each allocate their suffixes in SQLite. Resource lookup uses the complete reference. See [names and references](input.md#names-and-references).
-
-The email integration uses the configured mail account for correspondence, callbacks, and working history. It owns native addressing, folders, markers, and record lifecycles behind the shared contracts. The [email boundary](#email-boundary) describes its storage protocols and operation ownership.
-
-### Channel delivery
-
-The kernel routes `send` by address namespace. It passes the decoded ID to the configured sender, the session registry, or the feed store. The feed store receives the publishing focus ID and publication time with the text. See the [channel address codec](../packages/agent_contracts/src/channel_address.zig).
-
-For ordinary inference, the session registry samples live focus addresses under its lock. The feed store samples open feed IDs and descriptions under its own lock. The kernel formats those IDs and the registered correspondent IDs as addresses and assembles `current.channels`. The input renderer formats sender addresses when presenting correspondence. Retained observations store correspondent IDs. Catalog read errors reach kernel supervision. See the [input contract](input.md#inference-turns).
-
-### Instance database
-
-`ivenna serve` initializes `<DATA_DIR>/state.sqlite3` with the [instance schema](../packages/instance_state/src/schema.sql) and a [format marker](../packages/instance_state/src/database.zig). The kernel opens separate connections for feeds and subscriptions. Each CLI operation opens its own connection to the same file. Feed reads use read-only connections. In WAL mode, reads can proceed while SQLite serializes writes.
-
-The first mailbox checkpoint records the database identity before the kernel marks the database bound. On restart the saved identity must match. See [backups and transfers](running.md#backups-and-transfers).
-
-The [feed store](../packages/instance_state/src/feeds.zig) serializes publication and closure with a mutex and SQLite write transactions. Publication checks the open state in the transaction and returns the message sequence after commit. SQLite assigns those sequences across all feeds. Feed writes commit independently of working-history checkpoints. The [feed reader](../packages/instance_state/src/feed_reader.zig) joins feed metadata and messages in one query so the page comes from one SQLite snapshot. See the [reader interface](communication.md#reading-feeds).
 
 ## Service and reception
 
@@ -114,7 +94,7 @@ Each probe handler owns its connection, the kernel owns intake and session worke
 | Task | Work to be accomplished; it may continue across activations |
 | Core session | Persistent coordinating session with its own history and input queue |
 | Activity session | Session forked by the core with inherited context, an assignment, and its own subsequent history and queue |
-| `input` event | Correspondence observation presented with sender channel addresses, text, and observation time |
+| `input` event | Correspondence observation with sender IDs, text, and observation time |
 | Delivery | An owned observation retained through durable admission and any transport receipt acknowledgement |
 | Activation | One worker running a session through model and tool rounds until the activation completes or is interrupted |
 | Model round | One model response followed by all tools it invoked |
@@ -131,13 +111,13 @@ Separate [limits](running.md#configuration) bound registered sessions, ordinary 
 
 Sleeping activities retain their session slots. Completing an activity releases its slot. Forks and activity resumption are independent of space in the core's ordinary queue. Outstanding callback registrations and unread reports can grow with pending work.
 
-### Coordination
+### Message delivery
 
-Correspondence enters the core's FIFO queue independently of mail threads. Each focus can use the tools selected for its current role, including when its inherited history contains calls made by the core. See [model requests and tools](#model-requests-and-tools) for selection and [attention](attention.md) for the actions available to each focus.
+Incoming correspondence enters the core's FIFO queue independently of mail threads. During ordinary input, the core can receive activity expressions from their own outbox. Activity endings and interruptions request the core's attention. See [activity reports](#activity-reports) and [activation admission](#activation-admission).
 
-Explicit sends to a focus use the registry's durable session-message queue. The registry records the sender's complete focus reference as `from_focus`. Messages consume ordinary event capacity and can make a sleeping or interrupted recipient ready. Activity expressions remain in their own outbox and accompany the core's ordinary inputs without activating it.
+In an ordinary inference, the kernel includes the registered correspondent IDs in `current`. The session registry copies live focus IDs under its lock, and the feed store reads open feed IDs and descriptions under its own lock. Feed listing failures reach kernel supervision. See the [input contract](input.md#inference-turns).
 
-Unknown focus selections remain ordinary tool errors. Activity endings and interruptions request the core's attention. An ordinary tool reply can continue an already active core session.
+The [tool decoder](../packages/agent/src/tools.zig) parses `send.to` as a destination variant. The kernel passes the exact ID to the owner, which resolves it when the call runs. The [sender](../packages/agent_contracts/src/communication.zig) reports what it can confirm about mail submission. The session registry checks membership and queue capacity under its lock, then saves the focus message and its sender in the same checkpoint as other queued work. The feed store receives the publishing focus ID and publication time with the text. The kernel turns expected outcomes into [tool replies](communication.md#sending-a-message).
 
 ## Activation admission
 
@@ -192,7 +172,19 @@ A wakeup also stores `History.Wakeup { id, at_unix_ms, text }`. Agent argument p
 
 Intake resolves the numeric delivery ID through its registration, adds the saved callback reference and source to the model observation, and defers a full destination. The owned `Delivery` keeps the numeric ID separately for admission and acknowledgement; it is not part of the rendered observation. `queued_callbacks` blocks duplicate acceptance and acknowledgement until the accepted delivery is durably saved and any receipt acknowledged. Admission saves the observation and registration removal in one checkpoint. Later copies of a consumed positive ID below the saved next-ID counter are acknowledged without another observation. Other unknown IDs fail execution.
 
-## Subscription delivery
+## Instance database
+
+`ivenna serve` initializes `<DATA_DIR>/state.sqlite3` with the instance schema and format marker. The kernel opens separate connections for feeds and subscriptions. Each local command opens its own connection to the instance database. Feed readers open it read-only. In WAL mode, readers can proceed while SQLite serializes writers. See the [schema](../packages/instance_state/src/schema.sql) and [connection setup](../packages/instance_state/src/database.zig).
+
+The first mailbox checkpoint records the database identity before the kernel marks the database bound. When restoring a checkpoint, the kernel checks that its database identity matches the local database. See the [backup and transfer procedure](running.md#backups-and-transfers).
+
+### Feed storage
+
+The feed store serializes publication and closure through one mutex per store and SQLite write transactions. Publication checks that the feed is open in the same transaction as the insert. It returns the sequence after commit. SQLite assigns sequences across all feeds, and feed writes commit independently of working history. See the [feed store](../packages/instance_state/src/feeds.zig).
+
+The reader joins feed metadata and messages in one query, so the page and its closure state come from the same snapshot. See the [reader implementation](../packages/instance_state/src/feed_reader.zig) and [feed read interface](communication.md#reading-feeds).
+
+### Subscription delivery
 
 The [subscription store](../packages/instance_state/src/subscriptions.zig) serializes publication and withdrawal as SQLite writes. A publication checks the key within the subscription before applying any cursor change. A known key leaves the cursor and queue untouched. For a new key, one transaction saves the key, applies any cursor change, and queues the report with its subscription reference and receiving focus. A cursor conflict rolls back the whole write. Withdrawal deletes the registration and its cursor and keys. Queued reports keep their own copy of the destination. See the [listener protocol](subscriptions.md) for CLI requests and receipts.
 
