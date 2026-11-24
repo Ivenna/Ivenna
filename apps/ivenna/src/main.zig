@@ -28,7 +28,7 @@ fn localCommand(init: std.process.Init, command: cli.Command) !void {
         .feed => |query| {
             var reader = try state.feeds.Reader.open(a, path);
             defer reader.close();
-            try writeJson(init.io, try reader.read(a, query.feed_id, query.after, query.limit));
+            try writeJson(init.io, try readFeed(init.io, a, &reader, query));
         },
         .subscription => |request| {
             var store = try state.subscriptions.Store.open(a, path);
@@ -44,6 +44,34 @@ fn localCommand(init: std.process.Init, command: cli.Command) !void {
         },
         .serve, .help => unreachable,
     }
+}
+
+/// How long a waiting read sleeps between looks at the database.
+const feed_poll_ms: u32 = 25;
+
+/// Reads a page and, when it holds no message, keeps looking until one arrives,
+/// the feed closes, or the requested wait expires. The caller owns the page.
+fn readFeed(io: std.Io, a: std.mem.Allocator, reader: *state.feeds.Reader, query: cli.Feed) !state.feeds.Reader.Page {
+    var page = try reader.read(a, query.feed_id, query.after, query.limit);
+    var waited: u32 = 0;
+    while (page.messages.len == 0 and !page.closed and waited < query.wait_ms) {
+        freePage(a, page);
+        const step: u32 = @min(feed_poll_ms, query.wait_ms - waited);
+        try io.sleep(.fromMilliseconds(step), .awake);
+        waited += step;
+        page = try reader.read(a, query.feed_id, query.after, query.limit);
+    }
+    return page;
+}
+
+fn freePage(a: std.mem.Allocator, page: state.feeds.Reader.Page) void {
+    a.free(page.feed_id);
+    a.free(page.description);
+    for (page.messages) |message| {
+        a.free(message.focus_id);
+        a.free(message.text);
+    }
+    a.free(page.messages);
 }
 
 fn failure(io: std.Io, err: anyerror) !u8 {

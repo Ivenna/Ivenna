@@ -3,6 +3,8 @@ const std = @import("std");
 const default_feed_after: u63 = 0;
 const default_feed_limit = 100;
 const max_feed_limit = 1000;
+const default_feed_wait_ms = 0;
+const max_feed_wait_ms = 60000;
 
 pub const Command = union(enum) {
     serve,
@@ -11,10 +13,12 @@ pub const Command = union(enum) {
     help: []const u8,
 };
 
-const Feed = struct {
+pub const Feed = struct {
     feed_id: []const u8,
     after: u63,
     limit: u32,
+    /// Milliseconds to wait for a first message when the read finds none.
+    wait_ms: u32,
 };
 
 const Subscription = struct {
@@ -46,6 +50,7 @@ fn parseFeed(args: []const []const u8) !Command {
     if (isHelp(id)) return help(rest[1..], feed_help);
     var after: ?u63 = null;
     var limit: ?u32 = null;
+    var wait_ms: ?u32 = null;
     const options = rest[1..];
     var i: usize = 0;
     while (i < options.len) : (i += 2) {
@@ -57,12 +62,18 @@ fn parseFeed(args: []const []const u8) !Command {
             if (value == 0 or value > max_feed_limit)
                 return invalid("--limit must be between 1 and {d}", .{max_feed_limit});
             limit = value;
+        } else if (equal(option, "--wait") and wait_ms == null) {
+            const value = try decimal(u32, options[i..]);
+            if (value > max_feed_wait_ms)
+                return invalid("--wait must be at most {d}", .{max_feed_wait_ms});
+            wait_ms = value;
         } else return unexpected(option);
     }
     return .{ .feed = .{
         .feed_id = id,
         .after = after orelse default_feed_after,
         .limit = limit orelse default_feed_limit,
+        .wait_ms = wait_ms orelse default_feed_wait_ms,
     } };
 }
 
@@ -147,6 +158,8 @@ const feed_help = std.fmt.comptimePrint(@embedFile("help/feed-read.txt"), .{
     std.math.maxInt(@FieldType(Feed, "after")),
     default_feed_limit,
     max_feed_limit,
+    default_feed_wait_ms,
+    max_feed_wait_ms,
 }) ++ "\n" ++ environment;
 
 const inspect = @embedFile("help/inspect.txt");

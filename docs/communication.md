@@ -135,6 +135,6 @@ The command prints one JSON page on a single line. The description, closure stat
 }
 ```
 
-After processing the whole page, save `next_after` and pass it as `--after` on the next read. `has_more: false` means the reader has caught up with the feed at the time of the read. If the feed is open, poll later for new messages. A listener can save its position with each observation it reports. See [reading a feed and reporting back](subscriptions.md#read-an-ivenna-feed-and-report-back).
+After processing the whole page, save `next_after` and pass it as `--after` on the next read. `has_more: false` means the reader has caught up with the feed at the time of the read. If the feed is open, either poll later for new messages or pass `--wait MS` to hold the read open until one arrives, the feed closes, or the wait expires; the page then comes back empty with the same `next_after`. A listener can save its position with each observation it reports. See [reading a feed and reporting back](subscriptions.md#read-an-ivenna-feed-and-report-back).
 
 Run `ivenna feed read --help` for the options, page fields, and exit statuses.

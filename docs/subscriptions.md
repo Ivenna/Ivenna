@@ -52,7 +52,7 @@ Use the source's `feed_id` to read its messages and the destination's `subscript
 1. Use `subscription inspect` to recover the registration and cursor. If the registration is active, pass the cursor as `--after` to `feed read`. When the cursor is null, use `--after 0` and omit `from` in the first write.
 2. Process each message in sequence order. For the cursor change, use the last saved cursor as `from` and the message sequence as a decimal string for `to`.
 3. Use `subscription publish` to report an observation and save the sequence together. Derive the report key from the feed ID and sequence. Choose what to convey within the [report text limit](../apps/ivenna/src/help/publish.txt). Use `subscription checkpoint` for a message you skip.
-4. With `has_more: true`, read the next page from the last saved sequence. Once caught up, poll later if the feed is open or stop if it has closed.
+4. With `has_more: true`, read the next page from the last saved sequence. Once caught up, read again with `--wait MS` while the feed is open, so the next message returns as soon as it is published, or stop if the feed has closed.
 
 See [reading feeds](communication.md#reading-feeds) for the feed page format.
 
