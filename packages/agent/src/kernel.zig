@@ -190,8 +190,11 @@ pub const Kernel = struct {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
             return switch (request) {
                 .send_message => |message| blk: {
-                    const channel = self.kernel.channels.resolve(message.channel) orelse
-                        break :blk try runtimeError(a, "unknown_channel", "No configured channel carries that name. Omit the channel to use the default one.");
+                    const channel: Communication.Channel = switch (self.kernel.channels.resolve(message.channel)) {
+                        .channel => |channel| channel,
+                        .unknown_channel => break :blk try runtimeError(a, "unknown_channel", "No configured channel carries that name."),
+                        .no_default_channel => break :blk try runtimeError(a, "no_default_channel", "This message names no channel and the host declares no default channel."),
+                    };
                     break :blk switch (try channel.sender.send(a, .{ .recipients = message.recipients, .text = message.text })) {
                         .submitted => |submission| try runtimeResult(a, submission),
                         .invalid_recipient => try runtimeError(a, "invalid_recipient", "At least one recipient ID is unsupported. No message was submitted."),

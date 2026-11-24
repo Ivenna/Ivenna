@@ -1,7 +1,7 @@
 [
   {
     "name": "send_message",
-    "description": "Write to correspondents by ID. A reference means the sending service accepted your message for delivery. Omit channel to use the default one.",
+    "description": "Write to correspondents by ID. A reference means the sending service accepted your message for delivery. Omit channel to use the one the host declares as default; a host that declares none rejects that call.",
     "parameters": {
       "type": "object",
       "properties": {

@@ -101,7 +101,7 @@ pub fn main(init: std.process.Init) !u8 {
     var kernel = try agent.Kernel.init(init.gpa, io, .{
         .engine = &engine,
         .inbox = mail.inbox(),
-        .channels = .{ .channels = &outbound_channels },
+        .channels = .{ .channels = &outbound_channels, .default_name = "email" },
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),
         .subscriptions = &subscription_store,

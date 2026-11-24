@@ -47,39 +47,79 @@ pub const Channel = struct {
     sender: Sender,
 };
 
-/// The channels a kernel can deliver through, in preference order. The first
-/// channel is the default for a message that names none.
+/// The channels a kernel can deliver through. A message that names no channel
+/// is delivered through the channel `default_name` selects; the order of
+/// `channels` never chooses it.
 pub const Roster = struct {
     channels: []const Channel,
+    /// The name of the channel for a message that names none. A host declares
+    /// it; when it is absent, a message has to name its channel.
+    default_name: ?[]const u8 = null,
 
-    /// Returns the channel a name selects, or the default channel when name is
-    /// null. A name that no channel carries resolves to null, as does the
-    /// default channel of a roster without channels.
-    pub fn resolve(self: Roster, name: ?[]const u8) ?Channel {
-        if (name) |wanted| {
-            for (self.channels) |channel| {
-                if (std.mem.eql(u8, channel.name, wanted)) return channel;
-            }
-            return null;
+    /// What a channel name selects. A name that no channel carries and a
+    /// message that names none where the roster declares no default are
+    /// different failures, so a caller can tell one from the other.
+    pub const Resolution = union(enum) {
+        channel: Channel,
+        unknown_channel: void,
+        no_default_channel: void,
+    };
+
+    pub fn resolve(self: Roster, name: ?[]const u8) Resolution {
+        const wanted = name orelse self.default_name orelse return .no_default_channel;
+        for (self.channels) |channel| {
+            if (std.mem.eql(u8, channel.name, wanted)) return .{ .channel = channel };
         }
-        return if (self.channels.len == 0) null else self.channels[0];
+        return .unknown_channel;
     }
 };
 
-test "a roster resolves a channel name and otherwise selects the default" {
-    const Stub = struct {
-        fn submit(_: *anyopaque, _: std.mem.Allocator, _: Message) anyerror!SendResult {
-            return .{ .submitted = .{ .reference = "" } };
-        }
-    };
+const StubSubmitter = struct {
+    fn submit(_: *anyopaque, _: std.mem.Allocator, _: Message) anyerror!SendResult {
+        return .{ .submitted = .{ .reference = "" } };
+    }
+};
+
+const stub_sender: Sender = .{ .context = undefined, .submit = StubSubmitter.submit };
+
+test "a roster resolves a declared default only when the message names none" {
     const channels = [_]Channel{
-        .{ .name = "email", .sender = .{ .context = undefined, .submit = Stub.submit } },
-        .{ .name = "qq", .sender = .{ .context = undefined, .submit = Stub.submit } },
+        .{ .name = "email", .sender = stub_sender },
+        .{ .name = "qq", .sender = stub_sender },
+    };
+    const roster: Roster = .{ .channels = &channels, .default_name = "email" };
+    try std.testing.expectEqualStrings("email", roster.resolve(null).channel.name);
+    try std.testing.expectEqualStrings("email", roster.resolve("email").channel.name);
+    try std.testing.expectEqualStrings("qq", roster.resolve("qq").channel.name);
+    try std.testing.expectEqual(
+        Roster.Resolution.unknown_channel,
+        std.meta.activeTag(roster.resolve("fax")),
+    );
+}
+
+test "a roster without a declared default refuses a message that names none" {
+    const channels = [_]Channel{
+        .{ .name = "email", .sender = stub_sender },
+        .{ .name = "qq", .sender = stub_sender },
     };
     const roster: Roster = .{ .channels = &channels };
-    try std.testing.expectEqualStrings("email", roster.resolve(null).?.name);
-    try std.testing.expectEqualStrings("qq", roster.resolve("qq").?.name);
-    try std.testing.expect(roster.resolve("fax") == null);
+    try std.testing.expectEqual(
+        Roster.Resolution.no_default_channel,
+        std.meta.activeTag(roster.resolve(null)),
+    );
+    try std.testing.expectEqualStrings("qq", roster.resolve("qq").channel.name);
     const bare: Roster = .{ .channels = &.{} };
-    try std.testing.expect(bare.resolve(null) == null);
+    try std.testing.expectEqual(
+        Roster.Resolution.no_default_channel,
+        std.meta.activeTag(bare.resolve(null)),
+    );
+}
+
+test "the declared default does not follow the order of the channels" {
+    const reversed = [_]Channel{
+        .{ .name = "qq", .sender = stub_sender },
+        .{ .name = "email", .sender = stub_sender },
+    };
+    const roster: Roster = .{ .channels = &reversed, .default_name = "email" };
+    try std.testing.expectEqualStrings("email", roster.resolve(null).channel.name);
 }
