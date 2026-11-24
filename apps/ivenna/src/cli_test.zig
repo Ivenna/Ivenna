@@ -234,7 +234,7 @@ test "feed read returns a message published while it waits" {
     const bytes = try output.interface.allocRemaining(a, .unlimited);
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
     const page = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
-    const messages = page.get("messages").?.array.items;
+    const messages = page.object.get("messages").?.array.items;
     try testing.expectEqual(1, messages.len);
     try testing.expectEqualStrings("While you waited", messages[0].object.get("text").?.string);
 }
