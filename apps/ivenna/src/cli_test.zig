@@ -145,6 +145,7 @@ test "a channel matches one pending read and holds no message between receivers"
     const id = try contracts.Reference.create(a, "--工 作/path", 1);
     const receiver = try Receiver.init(a, configured, id);
     try channels.open(receiver.id);
+    try channels.activate(receiver.id);
 
     try expectSendOutcome(channels, receiver.id, "before any receiver", .would_block);
 
@@ -190,6 +191,7 @@ test "receive follow flushes successive matches and exits when its channel close
     const channels = registry.port();
     const receiver = try Receiver.init(a, directory, "events-1");
     try channels.open(receiver.id);
+    try channels.activate(receiver.id);
     const waiting = try channel_ipc.connect(io, directory, receiver.id, null);
     defer waiting.close(io);
     try expectReceiveReply(waiting, .waiting);
@@ -238,6 +240,7 @@ test "receive follow exits when a shell pipeline takes one message" {
     const channels = registry.port();
     const receiver = try Receiver.init(a, directory, "events-1");
     try channels.open(receiver.id);
+    try channels.activate(receiver.id);
     const script =
         \\{
         \\    "$1" receive "$2" --follow || printf '%s\n' 'receive failed' >&2
@@ -275,6 +278,7 @@ test "receive exits successfully when its output pipe closes during a matched wr
     const channels = registry.port();
     const receiver = try Receiver.init(arena.allocator(), directory, "events-1");
     try channels.open(receiver.id);
+    try channels.activate(receiver.id);
 
     var child = running: {
         // A one-page packet pipe holds only the first write, even on kernels
@@ -400,3 +404,39 @@ const Receiver = struct {
         return std.json.parseFromSliceLeaky(std.json.Value, a, result.stdout, .{});
     }
 };
+
+test "a restart keeps a channel addressable without replaying a matched message" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const id = try contracts.Reference.create(a, "events", 1);
+    const receiver = try Receiver.init(a, directory, id);
+    {
+        var registry = try Registry.listen(testing.allocator, io, directory);
+        defer registry.deinit();
+        var task = try io.concurrent(Registry.run, .{&registry});
+        defer task.cancel(io) catch {};
+        const channels = registry.port();
+        try channels.open(id);
+        try channels.activate(id);
+        var pending = try io.concurrent(Receiver.once, .{ &receiver, a, &.{} });
+        defer _ = pending.cancel(io) catch {};
+        try expectSendOutcome(channels, id, "before restart", .accepted);
+        try expectMessage(try pending.await(io), "before restart");
+    }
+
+    // A new runtime restores the saved registration and exposes it again.
+    var registry = try Registry.listen(testing.allocator, io, directory);
+    defer registry.deinit();
+    var task = try io.concurrent(Registry.run, .{&registry});
+    defer task.cancel(io) catch {};
+    const channels = registry.port();
+    try channels.open(id);
+    try channels.activate(id);
+    try expectSendOutcome(channels, id, "after restart", .would_block);
+    try expectReceiveStatus(try receiver.once(a, &.{ "--timeout", "10" }), "timeout");
+}

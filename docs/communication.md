@@ -70,7 +70,7 @@ Any focus can call `open_channel` with a name and a nonempty description of the 
 
 Pass the complete `channel_id` to the receiving program and use it to send or close the channel. The description gives the ID context in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
 
-If the new registration would make the saved checkpoint too large, `open_channel` returns `channel_capacity_exceeded` and leaves the channel unopened. Try a shorter description or close an unused channel that survives restart.
+The registration is saved together with the tool results of the round that reports it. If that checkpoint would exceed the store's request limit, the save is rejected, nothing is persisted, and the channel never becomes addressable. Close an unused channel that survives restart to free its share.
 
 ### Receiving from a channel
 
@@ -135,6 +135,6 @@ Closing the channel retires its ID and ends [outstanding reads](#receiving-from-
 
 ### Channel lifetimes
 
-A channel stays open when its readers exit or its opening focus ends. A channel whose opening activity has ended expires when the kernel stops.
+A channel stays open when its readers exit or its opening focus ends. Only `close_channel` or the end of the runtime retires it.
 
-When the kernel restarts, it reopens saved channels whose opening focuses are restored. Each keeps its ID and any saved description. A receiving program starts a new read with the same ID. The restored channel starts with no pending reads or messages, so a send can return `channel_would_block` until a receiver is waiting. See [receiver deployment](running.md#channel-receivers).
+When the kernel restarts, it reopens every saved channel, including one whose opening activity has ended. Each keeps its ID and any saved description. A receiving program starts a new read with the same ID. The restored channel starts with no pending reads or messages, so a send can return `channel_would_block` until a receiver is waiting. See [receiver deployment](running.md#channel-receivers).

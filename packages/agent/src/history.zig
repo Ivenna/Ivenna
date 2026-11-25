@@ -38,7 +38,7 @@ pub const History = struct {
     sessions: []const Session,
     wakeups: []const Wakeup,
     callbacks: []const CallbackRegistration,
-    /// Open channel registrations whose opening focuses are retained.
+    /// Open channel registrations. The opening focus may have ended.
     channels: []const Channel,
     activity_reports: ?Reports.Checkpoint,
 
@@ -110,8 +110,8 @@ pub const History = struct {
         for (self.channels) |channel| {
             const sequence = contracts.Reference.sequence(channel.id) orelse return error.InvalidHistory;
             const opener = contracts.Reference.sequence(channel.opened_by) orelse return error.InvalidHistory;
-            const owner = identities.get(opener) orelse return error.InvalidHistory;
-            if (sequence >= self.next_runtime_reference_id or !std.mem.eql(u8, owner, channel.opened_by)) return error.InvalidHistory;
+            // The opening focus can have ended; the registration outlives it.
+            if (sequence >= self.next_runtime_reference_id or opener >= self.next_session_id) return error.InvalidHistory;
             if ((try channel_ids.getOrPut(a, sequence)).found_existing) return error.InvalidHistory;
         }
     }

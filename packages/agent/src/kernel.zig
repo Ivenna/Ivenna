@@ -206,10 +206,7 @@ pub const Kernel = struct {
             return switch (request) {
                 .send => |message| self.send(a, message.to, message.text),
                 .open_channel => |args| blk: {
-                    const channel_id = self.kernel.sessions.openChannel(a, self.work, self.kernel.channels, args.name, args.description) catch |err| switch (err) {
-                        error.HistoryCheckpointTooLarge => break :blk try runtimeError(a, "channel_capacity_exceeded", "Opening the channel failed. Try a shorter description or close an unused channel that survives restart."),
-                        else => return err,
-                    };
+                    const channel_id = try self.kernel.sessions.openChannel(a, self.work, self.kernel.channels, args.name, args.description);
                     break :blk try runtimeResult(a, .{ .channel_id = channel_id });
                 },
                 .close_channel => |args| blk: {
@@ -553,6 +550,7 @@ const SubscriptionFixture = struct {
                 .vtable = &.{
                     .trySend = trySendToChannel,
                     .open = openChannel,
+                    .activate = activateChannel,
                     .close = closeChannel,
                 },
             },
@@ -567,7 +565,9 @@ const SubscriptionFixture = struct {
         return self.send_outcome;
     }
 
-    fn openChannel(context: *anyopaque, channel_id: []const u8) !void {
+    fn openChannel(_: *anyopaque, _: []const u8) !void {}
+
+    fn activateChannel(context: *anyopaque, channel_id: []const u8) !void {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
         self.open_channel_id = try self.storage.arena.allocator().dupe(u8, channel_id);
     }
@@ -1195,7 +1195,8 @@ test "restart preserves an open channel's ID and description and a close retires
     const description = "Send the path of each file to process.";
     const opened = try call(a, &core, "open_channel", .{ .name = "core", .description = description });
     const channel_id = opened.object.get("result").?.object.get("channel_id").?.string;
-    try SubscriptionFixture.finish(&kernel, core.work, &core_history);
+    try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks, null);
+    kernel.sessions.endWorker(core.work.session);
 
     // The live registry dies with the runtime; only the checkpoint carries the
     // ID forward.
@@ -1225,7 +1226,7 @@ test "restart preserves an open channel's ID and description and a close retires
     try testing.expect(fixture.open_channel_id == null);
 }
 
-test "a channel opened by an activity that ended is not restored" {
+test "a channel opened by an ended activity is restored" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
     var fixture: SubscriptionFixture = .{};
@@ -1246,50 +1247,42 @@ test "a channel opened by an activity that ended is not restored" {
     defer activity.deinit();
     var activity_history = try SubscriptionFixture.admit(&kernel, a, activity.work);
     defer activity_history.deinit();
-    const opened = try call(a, &activity, "open_channel", .{ .name = "findings", .description = "Send findings for the local program to process." });
+    const description = "Send findings for the local program to process.";
+    const opened = try call(a, &activity, "open_channel", .{ .name = "findings", .description = description });
     const channel_id = opened.object.get("result").?.object.get("channel_id").?.string;
     const activity_id = activity.work.session.session_id;
-    // No subscriptions or callbacks remain, so the response ends the activity.
-    try SubscriptionFixture.finish(&kernel, activity.work, &activity_history);
-    try testing.expect(!kernel.sessions.sessions.contains(activity_id));
+    try kernel.sessions.commitToolRound(activity.work, &activity_history, &activity.forks, null);
     try testing.expectEqualStrings(channel_id, fixture.open_channel_id.?);
+
+    // A response without tool calls ends the activity; its channel outlives it.
+    var closing = try kernel.sessions.snapshot(activity.work.session);
+    defer closing.deinit();
+    try testing.expect(try kernel.sessions.commitResponse(activity.work, &closing, SubscriptionFixture.empty_response));
+    kernel.sessions.endWorker(activity.work.session);
+    try testing.expect(!kernel.sessions.sessions.contains(activity_id));
 
     fixture.open_channel_id = null;
     const restarted = try fixture.kernel(&engine, &store);
     kernel.deinit();
     kernel = restarted;
+    try testing.expectEqualStrings(channel_id, fixture.open_channel_id.?);
+    const sample = try kernel.compactionSnapshot(a, kernel.sessions.core);
+    try testing.expectEqualDeep(@as([]const Input.SampledChannel, &.{.{
+        .channel_id = channel_id,
+        .description = description,
+    }}), sample.state.channel_registrations);
+
+    var restarted_core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer restarted_core.deinit();
+    var restarted_history = try SubscriptionFixture.admit(&kernel, a, restarted_core.work);
+    defer restarted_history.deinit();
+    const closed = try call(a, &restarted_core, "close_channel", .{ .channel_id = channel_id });
+    try testing.expect(closed.object.get("result").?.object.get("changed").?.bool);
     try testing.expect(fixture.open_channel_id == null);
+    try SubscriptionFixture.finish(&kernel, restarted_core.work, &restarted_history);
 }
 
-test "a checkpoint size rejection leaves channel registration available" {
-    const testing = std.testing;
-    const call = SubscriptionFixture.callTool;
-    var fixture: SubscriptionFixture = .{};
-    defer fixture.deinit();
-    const a = fixture.storage.arena.allocator();
-    var store = try Subscriptions.Store.openInMemory(a);
-    defer store.close();
-    var engine: Engine = undefined;
-    var kernel = try fixture.kernel(&engine, &store);
-    defer kernel.deinit();
-    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
-    defer kernel.sessions.endWorker(core.work.session);
-    defer core.deinit();
-    var history = try SubscriptionFixture.admit(&kernel, a, core.work);
-    defer history.deinit();
-
-    fixture.storage.fail_save = .checkpoint_too_large;
-    const rejected = try call(a, &core, "open_channel", .{ .name = "imports", .description = "Accept CSV paths." });
-    try testing.expectEqualStrings("channel_capacity_exceeded", rejected.object.get("error").?.object.get("code").?.string);
-    try testing.expect(fixture.open_channel_id == null);
-    try kernel.sessions.maintain();
-
-    fixture.storage.fail_save = .none;
-    const opened = try call(a, &core, "open_channel", .{ .name = "imports", .description = "CSV paths." });
-    try testing.expectEqualStrings(opened.object.get("result").?.object.get("channel_id").?.string, fixture.open_channel_id.?);
-}
-
-test "unconfirmed channel registration changes leave the live transport alone" {
+test "a rejected checkpoint persists no channel" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
     var fixture: SubscriptionFixture = .{};
@@ -1306,34 +1299,64 @@ test "unconfirmed channel registration changes leave the live transport alone" {
         defer core.deinit();
         var history = try SubscriptionFixture.admit(&kernel, a, core.work);
         defer history.deinit();
-        fixture.storage.fail_save = .after_commit;
-        try testing.expectError(error.UnconfirmedCheckpoint, call(a, &core, "open_channel", .{
-            .name = "imports",
-            .description = "Accept CSV paths.",
-        }));
+        const before = fixture.storage.checkpoint.?;
+
+        const opened = try call(a, &core, "open_channel", .{ .name = "imports", .description = "Accept CSV paths." });
+        const channel_id = opened.object.get("result").?.object.get("channel_id").?.string;
+        try testing.expect(channel_id.len != 0);
         try testing.expect(fixture.open_channel_id == null);
+
+        fixture.storage.fail_save = .checkpoint_too_large;
+        try testing.expectError(error.HistoryCheckpointTooLarge, kernel.sessions.commitToolRound(core.work, &history, &core.forks, null));
+        try testing.expect(fixture.open_channel_id == null);
+        try testing.expectEqualSlices(u8, before, fixture.storage.checkpoint.?);
         const sample = try kernel.compactionSnapshot(a, core.work.session);
         try testing.expectEqual(0, sample.state.channel_registrations.len);
+        fixture.storage.fail_save = .none;
     }
 
-    fixture.storage.fail_save = .none;
     const restarted = try fixture.kernel(&engine, &store);
     kernel.deinit();
     kernel = restarted;
-    const channel_id = fixture.open_channel_id.?;
+    try testing.expect(fixture.open_channel_id == null);
+    const sample = try kernel.compactionSnapshot(a, kernel.sessions.core);
+    try testing.expectEqual(0, sample.state.channel_registrations.len);
+}
+
+test "an unconfirmed checkpoint does not expose a channel" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
     {
         var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
         defer kernel.sessions.endWorker(core.work.session);
         defer core.deinit();
         var history = try SubscriptionFixture.admit(&kernel, a, core.work);
         defer history.deinit();
-        fixture.storage.fail_save = .before_commit;
-        try testing.expectError(error.UnconfirmedCheckpoint, call(a, &core, "close_channel", .{ .channel_id = channel_id }));
-        try testing.expectEqualStrings(channel_id, fixture.open_channel_id.?);
+        const opened = try call(a, &core, "open_channel", .{ .name = "imports", .description = "Accept CSV paths." });
+        const channel_id = opened.object.get("result").?.object.get("channel_id").?.string;
+        try testing.expect(channel_id.len != 0);
+
+        fixture.storage.fail_save = .after_commit;
+        try testing.expectError(error.UnconfirmedCheckpoint, kernel.sessions.commitToolRound(core.work, &history, &core.forks, null));
+        try testing.expect(fixture.open_channel_id == null);
         const sample = try kernel.compactionSnapshot(a, core.work.session);
-        try testing.expectEqualDeep(@as([]const Input.SampledChannel, &.{.{
-            .channel_id = channel_id,
-            .description = "Accept CSV paths.",
-        }}), sample.state.channel_registrations);
+        try testing.expectEqual(0, sample.state.channel_registrations.len);
+        fixture.storage.fail_save = .none;
     }
+
+    // The next confirmed checkpoint drops any registration the failed save
+    // may have published.
+    try kernel.sessions.maintain();
+    const restarted = try fixture.kernel(&engine, &store);
+    kernel.deinit();
+    kernel = restarted;
+    try testing.expect(fixture.open_channel_id == null);
 }

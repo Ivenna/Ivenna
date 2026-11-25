@@ -34,7 +34,7 @@ Start the updated kernel with the existing instance database and mailbox to resu
 
 ## From an earlier channel build
 
-Use `receive --timeout MS` for the bounded wait previously selected by `--wait MS`. Handle `channel_would_block` in place of `channel_not_ready`. After upgrading a kernel that ran without channel checkpoints, open channels for the streams you want to resume and give receivers the new IDs. See [send outcomes](communication.md#sending-to-a-channel) and [channel lifetimes](communication.md#channel-lifetimes).
+Use `receive --timeout MS` for the bounded wait previously selected by `--wait MS`. Handle `channel_would_block` in place of `channel_not_ready`. Every saved channel now survives a restart, including one whose opening activity has ended; close a channel you no longer need. After upgrading a kernel that ran without channel checkpoints, open channels for the streams you want to resume and give receivers the new IDs. See [send outcomes](communication.md#sending-to-a-channel) and [channel lifetimes](communication.md#channel-lifetimes).
 
 ## Reading tool results
 

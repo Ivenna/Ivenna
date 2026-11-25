@@ -16,7 +16,11 @@ pub const Channels = struct {
 
     pub const VTable = struct {
         trySend: *const fn (*anyopaque, []const u8, []const u8) anyerror!SendOutcome,
+        /// Reserve an entry for a channel ID without exposing it to sends or
+        /// reads.
         open: *const fn (context: *anyopaque, channel_id: []const u8) anyerror!void,
+        /// Expose a reserved entry once its registration is in the checkpoint.
+        activate: *const fn (context: *anyopaque, channel_id: []const u8) anyerror!void,
         close: *const fn (context: *anyopaque, channel_id: []const u8) bool,
     };
 
@@ -26,6 +30,10 @@ pub const Channels = struct {
 
     pub fn open(self: Channels, channel_id: []const u8) !void {
         return self.vtable.open(self.context, channel_id);
+    }
+
+    pub fn activate(self: Channels, channel_id: []const u8) !void {
+        return self.vtable.activate(self.context, channel_id);
     }
 
     pub fn close(self: Channels, channel_id: []const u8) bool {

@@ -14,8 +14,10 @@ pub const Registry = struct {
 
     // Bound the sockets and tasks serving local receivers.
     const max_connections = 128;
+    /// Reserved entries accept readers and sends only after activation.
     const Channel = struct {
         receivers: std.DoublyLinkedList = .{},
+        active: bool = false,
     };
     const Receiver = struct {
         connection: Stream,
@@ -116,6 +118,10 @@ pub const Registry = struct {
             ipc.reply(receiver.connection, .unknown_channel) catch {};
             return false;
         };
+        if (!channel.active) {
+            ipc.reply(receiver.connection, .unknown_channel) catch {};
+            return false;
+        }
         ipc.reply(receiver.connection, .waiting) catch return false;
         receiver.park(&channel.receivers);
         return true;
@@ -124,6 +130,7 @@ pub const Registry = struct {
     pub fn port(self: *Registry) Channels {
         return .{ .context = self, .vtable = &.{
             .open = open,
+            .activate = activate,
             .close = close,
             .trySend = trySend,
         } };
@@ -137,6 +144,14 @@ pub const Registry = struct {
         const owned_id = try self.allocator.dupe(u8, id);
         errdefer self.allocator.free(owned_id);
         try self.channels.putNoClobber(self.allocator, owned_id, .{});
+    }
+
+    fn activate(context: *anyopaque, id: []const u8) !void {
+        const self: *Registry = @ptrCast(@alignCast(context));
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        const channel = self.channels.getPtr(id) orelse return error.UnknownChannel;
+        channel.active = true;
     }
 
     fn close(context: *anyopaque, id: []const u8) bool {
@@ -163,6 +178,7 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
 
         const channel = self.channels.getPtr(id) orelse return .unknown_channel;
+        if (!channel.active) return .unknown_channel;
         var candidate = channel.receivers.first;
         while (candidate) |node| {
             candidate = node.next;

@@ -70,6 +70,11 @@ pub const Session = struct {
 pub const Work = struct { session: *Session, activation: *Activation };
 pub const ForkPlan = struct { session: *Session };
 
+const StagedChannel = struct {
+    record: History.Channel,
+    transport: contracts.Channels,
+};
+
 pub const Registry = struct {
     allocator: Allocator,
     io: std.Io,
@@ -85,8 +90,13 @@ pub const Registry = struct {
     noticed: std.StringHashMapUnmanaged(enum { scheduled, acknowledged }) = .empty,
     wakeups: std.AutoArrayHashMapUnmanaged(u64, History.Wakeup) = .empty,
     callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
-    /// Open channel registrations. The channel transport owns waiting readers.
+    /// Open channel registrations confirmed by a checkpoint. The channel
+    /// transport owns waiting readers.
     channels: std.ArrayList(History.Channel) = .empty,
+    /// Channels opened in a round whose checkpoint is not yet saved. The
+    /// transport entry stays reserved and the ID stays unpublished until the
+    /// round that reports it commits.
+    staged: std.ArrayList(StagedChannel) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
     // Only withdrawal can remove the last reason for an already sleeping
@@ -200,6 +210,8 @@ pub const Registry = struct {
         self.callbacks.deinit(self.allocator);
         for (self.channels.items) |channel| self.freeChannel(channel);
         self.channels.deinit(self.allocator);
+        for (self.staged.items) |staged| self.freeChannel(staged.record);
+        self.staged.deinit(self.allocator);
         self.queued_callbacks.deinit(self.allocator);
         self.reports.deinit();
         self.history.deinit();
@@ -430,13 +442,39 @@ pub const Registry = struct {
             plan.session.context = try Context.restore(self.allocator, .{ .session_id = plan.session.session_id, .epoch = 0 }, plan.session.focus_id, completed.records());
         }
         try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(plans.items.len));
+        // Save the channels this session opened with the results that report
+        // them. A rejected checkpoint persists neither.
+        var pending: std.ArrayList(History.Channel) = .empty;
+        defer pending.deinit(self.allocator);
+        for (self.staged.items) |staged| {
+            if (!std.mem.eql(u8, staged.record.opened_by, session.focus_id)) continue;
+            try pending.append(self.allocator, staged.record);
+        }
+        try self.channels.ensureUnusedCapacity(self.allocator, pending.items.len);
         std.mem.swap(Context, &session.context.?, completed);
         for (plans.items) |plan| {
             self.sessions.putAssumeCapacity(plan.session.session_id, plan.session);
             self.reserved_sessions -= 1;
         }
         plans.clearRetainingCapacity();
-        try self.saveLocked();
+        self.saveLockedWith(pending.items) catch |err| {
+            // Hand the unpublished round back to the caller together with its
+            // channels, so no later save reports a channel that was dropped.
+            std.mem.swap(Context, &session.context.?, completed);
+            self.dropStagedOwnedBy(session);
+            return err;
+        };
+        var index: usize = 0;
+        while (index < self.staged.items.len) {
+            const staged = self.staged.items[index];
+            if (!std.mem.eql(u8, staged.record.opened_by, session.focus_id)) {
+                index += 1;
+                continue;
+            }
+            try staged.transport.activate(staged.record.id);
+            _ = self.staged.swapRemove(index);
+            self.channels.appendAssumeCapacity(staged.record);
+        }
         session.last_input_tokens = input_tokens;
     }
 
@@ -469,6 +507,13 @@ pub const Registry = struct {
     }
 
     fn saveLocked(self: *Registry) !void {
+        return self.saveLockedWith(&.{});
+    }
+
+    /// Encode the checkpoint. `pending` adds the registrations that only the
+    /// committing round makes addressable, so a rejected checkpoint leaves no
+    /// channel that has no reported ID.
+    fn saveLockedWith(self: *Registry, pending: []const History.Channel) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -492,6 +537,9 @@ pub const Registry = struct {
                 .observations = observations.items,
             });
         }
+        var channels: std.ArrayList(History.Channel) = .empty;
+        try channels.appendSlice(a, self.channels.items);
+        try channels.appendSlice(a, pending);
         try self.history.save(a, .{
             .subscription_catalog = self.subscription_catalog,
             .next_session_id = self.next_session_id,
@@ -500,7 +548,7 @@ pub const Registry = struct {
             .wakeups = self.wakeups.values(),
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
-            .channels = try self.restartableChannelsLocked(a),
+            .channels = channels.items,
             .activity_reports = self.reports.checkpoint(),
         });
     }
@@ -536,6 +584,14 @@ pub const Registry = struct {
         };
         var channels: std.ArrayList(Input.SampledChannel) = .empty;
         for (self.channels.items) |channel| {
+            if (session != self.core and !std.mem.eql(u8, channel.opened_by, session.focus_id)) continue;
+            try channels.append(a, .{
+                .channel_id = try a.dupe(u8, channel.id),
+                .description = if (channel.description) |text| try a.dupe(u8, text) else null,
+            });
+        }
+        for (self.staged.items) |staged| {
+            const channel = staged.record;
             if (session != self.core and !std.mem.eql(u8, channel.opened_by, session.focus_id)) continue;
             try channels.append(a, .{
                 .channel_id = try a.dupe(u8, channel.id),
@@ -979,7 +1035,9 @@ pub const Registry = struct {
         self.allocator.destroy(session);
     }
 
-    /// Publish registration before making the channel addressable.
+    /// Reserve a transport entry now. The registration becomes addressable only
+    /// when the round that reports it commits its checkpoint, so an over-limit
+    /// checkpoint leaves no channel behind.
     pub fn openChannel(self: *Registry, a: Allocator, work: Work, transport: contracts.Channels, name: []const u8, description: []const u8) ![]const u8 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -988,19 +1046,19 @@ pub const Registry = struct {
         const next = try std.math.add(u64, reference, 1);
         const id = try contracts.Reference.create(a, name, reference);
         errdefer a.free(id);
-        try self.appendChannel(.{
-            .id = id,
-            .opened_by = work.session.focus_id,
-            .opened_at_unix_ms = self.now(),
-            .description = description,
+        try self.appendStaged(.{
+            .record = .{
+                .id = id,
+                .opened_by = work.session.focus_id,
+                .opened_at_unix_ms = self.now(),
+                .description = description,
+            },
+            .transport = transport,
         });
-        self.next_runtime_reference_id = next;
-        self.saveLocked() catch |err| {
-            self.freeChannel(self.channels.pop().?);
-            if (err == error.HistoryCheckpointTooLarge) self.next_runtime_reference_id = reference;
-            return err;
-        };
+        errdefer self.dropStaged(self.staged.items.len - 1);
+        errdefer _ = transport.close(id);
         try transport.open(id);
+        self.next_runtime_reference_id = next;
         return id;
     }
 
@@ -1008,6 +1066,12 @@ pub const Registry = struct {
     pub fn closeChannel(self: *Registry, transport: contracts.Channels, id: []const u8) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        for (self.staged.items, 0..) |staged, index| {
+            if (!std.mem.eql(u8, staged.record.id, id)) continue;
+            const open = transport.close(id);
+            self.dropStaged(index);
+            return open;
+        }
         for (self.channels.items, 0..) |channel, index| {
             if (!std.mem.eql(u8, channel.id, id)) continue;
             _ = self.channels.orderedRemove(index);
@@ -1020,20 +1084,12 @@ pub const Registry = struct {
     }
 
     /// Called during startup before the registry is shared with any worker.
+    /// Every saved channel is restored, even when its opening focus ended.
     pub fn restoreChannels(self: *const Registry, transport: contracts.Channels) !void {
         for (self.channels.items) |channel| {
             try transport.open(channel.id);
+            try transport.activate(channel.id);
         }
-    }
-
-    fn restartableChannelsLocked(self: *Registry, a: Allocator) ![]const History.Channel {
-        var restartable: std.ArrayList(History.Channel) = .empty;
-        for (self.channels.items) |channel| {
-            const owner = contracts.Reference.sequence(channel.opened_by).?;
-            if (!self.sessions.contains(owner)) continue;
-            try restartable.append(a, channel);
-        }
-        return restartable.items;
     }
 
     fn appendChannel(self: *Registry, channel: History.Channel) !void {
@@ -1045,6 +1101,34 @@ pub const Registry = struct {
         owned.description = if (channel.description) |text| try self.allocator.dupe(u8, text) else null;
         errdefer if (owned.description) |text| self.allocator.free(text);
         try self.channels.append(self.allocator, owned);
+    }
+
+    fn appendStaged(self: *Registry, staged: StagedChannel) !void {
+        var owned = staged;
+        owned.record.id = try self.allocator.dupe(u8, staged.record.id);
+        errdefer self.allocator.free(owned.record.id);
+        owned.record.opened_by = try self.allocator.dupe(u8, staged.record.opened_by);
+        errdefer self.allocator.free(owned.record.opened_by);
+        owned.record.description = if (staged.record.description) |text| try self.allocator.dupe(u8, text) else null;
+        errdefer if (owned.record.description) |text| self.allocator.free(text);
+        try self.staged.append(self.allocator, owned);
+    }
+
+    fn dropStagedOwnedBy(self: *Registry, session: *const Session) void {
+        var index: usize = 0;
+        while (index < self.staged.items.len) {
+            const staged = self.staged.items[index];
+            if (!std.mem.eql(u8, staged.record.opened_by, session.focus_id)) {
+                index += 1;
+                continue;
+            }
+            _ = staged.transport.close(staged.record.id);
+            self.dropStaged(index);
+        }
+    }
+
+    fn dropStaged(self: *Registry, index: usize) void {
+        self.freeChannel(self.staged.swapRemove(index).record);
     }
 
     fn freeChannel(self: *Registry, channel: History.Channel) void {
