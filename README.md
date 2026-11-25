@@ -1,5 +1,7 @@
 # Ivenna
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg?repo=Ivenna/Ivenna)](https://deepwiki.com/Ivenna/Ivenna)
+
 Ivenna is an agent runtime that explores how a sense of self can develop through ongoing communication, autonomous activity, and memory. See the [design intent](docs/design.md#a-self-in-the-world).
 
 People and programs can write to Ivenna by email. Each letter identifies its senders. Ivenna chooses how to act, whom to contact, and when to write. It can also hand messages to waiting local programs through named channels. See [correspondence](docs/usage.md) and [channels](docs/communication.md#channels).
