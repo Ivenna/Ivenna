@@ -12,7 +12,7 @@
         },
         "view": {
           "default": {},
-          "description": "When a preview suggests a media view, reopen result.uri with result.view.",
+          "description": "When a preview suggests a media view, use `result.uri` as `location` and `result.view` as `view`.",
           "anyOf": [
             {
               "type": "object",

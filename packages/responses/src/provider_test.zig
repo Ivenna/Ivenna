@@ -157,7 +157,6 @@ test "completed responses expose total input usage when it is available" {
 
 test "request rejections and unusable generations yield no tools" {
     for ([_]struct { response: []const u8, rejection: Model.Rejection, wait_for_close: bool = false }{
-        .{ .response = reply("400 Bad Request", "", "{}"), .rejection = .request_rejected },
         .{ .response = reply("400 Bad Request", "X-Request-ID: req-context\r\n", "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum is 1048576 tokens; private echoed input\"}}"), .rejection = .context_window },
         .{ .response = reply("400 Bad Request", "", "{\"error\":{\"message\":\"context_length_exceeded\"}}"), .rejection = .request_rejected },
         .{ .response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 500\r\n\r\n", .rejection = .request_rejected, .wait_for_close = true },

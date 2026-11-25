@@ -32,7 +32,7 @@ Absolute paths are literal, so `/srv/reports/Q4 #1%.pdf` opens the file with exa
 
 When web page access is enabled, use an HTTP(S) URL with the default view to fetch the page as Markdown. The URL must have a host and omit embedded usernames and passwords. The tool description names the service that receives the URL and indicates whether fetching the page may incur a charge. See [web page access](running.md#web-page-access).
 
-The initial result gives two references. Use `result.uri` to read the same snapshot in the core or an activity without another fetch. Use `result.source_uri`, the original URL, to fetch a fresh copy.
+Use `result.uri` as `location` to read the same snapshot in the core or an activity without another fetch. Use `result.source_uri`, the original URL, as `location` to fetch a fresh copy.
 
 For example, `{"location":"https://example.org/guide","view":{"limit":6}}` might return the heading of a page.
 

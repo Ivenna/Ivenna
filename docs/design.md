@@ -97,7 +97,7 @@ Even a short list of names uses context and can draw attention to unrelated work
 
 Compaction asks Ivenna to summarize retained exchanges. Ivenna chooses what to carry forward about its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. See [bounded model context](architecture.md#bounded-model-context).
 
-Compaction can condense the exchanges that established a reference. A dated sample accompanies Ivenna's summary so a focus can still connect a channel ID to its purpose or a subscription ID to what its listener watches and when it reports. A wakeup's scheduled time helps the focus understand when it meant to return to the work. See [sampled state](input.md#sampled-state).
+A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending wakeups to when the focus meant to return. See [sampled state](input.md#sampled-state).
 
 The runtime uses its own records to deliver observations and resume pending work. It keeps the original history until it can continue with the handover and can carry complete exchanges forward when exact wording or sources matter. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
 

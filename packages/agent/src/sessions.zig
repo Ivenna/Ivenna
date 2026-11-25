@@ -164,10 +164,7 @@ pub const Registry = struct {
                     try session.pending.append(allocator, delivery);
                 }
             }
-            for (retained.channels) |record| {
-                if (!self.hasFocusLocked(record.opened_by)) continue;
-                try self.appendChannel(record);
-            }
+            for (retained.channels) |record| try self.appendChannel(record);
         } else {
             if (try subscriptions.isBound()) return error.SubscriptionCatalogMismatch;
             const core = try allocator.create(Session);
@@ -537,12 +534,21 @@ pub const Registry = struct {
             .subscription_id = subscription.subscription_id,
             .listener = subscription.listener,
         };
+        var channels: std.ArrayList(Input.SampledChannel) = .empty;
+        for (self.channels.items) |channel| {
+            if (session != self.core and !std.mem.eql(u8, channel.opened_by, session.focus_id)) continue;
+            try channels.append(a, .{
+                .channel_id = try a.dupe(u8, channel.id),
+                .description = if (channel.description) |text| try a.dupe(u8, text) else null,
+            });
+        }
         return .{
             .current = try self.currentLocked(a, session),
             .state = .{
                 .activities = activities,
                 .callbacks = try own_callbacks.toOwnedSlice(a),
                 .subscription_registrations = registrations,
+                .channel_registrations = channels.items,
             },
         };
     }
@@ -978,8 +984,9 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        const next = try std.math.add(u64, self.next_runtime_reference_id, 1);
-        const id = try contracts.Reference.create(a, name, self.next_runtime_reference_id);
+        const reference = self.next_runtime_reference_id;
+        const next = try std.math.add(u64, reference, 1);
+        const id = try contracts.Reference.create(a, name, reference);
         errdefer a.free(id);
         try self.appendChannel(.{
             .id = id,
@@ -988,8 +995,12 @@ pub const Registry = struct {
             .description = description,
         });
         self.next_runtime_reference_id = next;
-        try self.saveLocked();
-        try transport.open(id, work.session.focus_id, description);
+        self.saveLocked() catch |err| {
+            self.freeChannel(self.channels.pop().?);
+            if (err == error.HistoryCheckpointTooLarge) self.next_runtime_reference_id = reference;
+            return err;
+        };
+        try transport.open(id);
         return id;
     }
 
@@ -999,8 +1010,10 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         for (self.channels.items, 0..) |channel, index| {
             if (!std.mem.eql(u8, channel.id, id)) continue;
-            self.freeChannel(self.channels.orderedRemove(index));
+            _ = self.channels.orderedRemove(index);
+            errdefer self.channels.insertAssumeCapacity(index, channel);
             try self.saveLocked();
+            self.freeChannel(channel);
             return transport.close(id);
         }
         return false;
@@ -1009,23 +1022,18 @@ pub const Registry = struct {
     /// Called during startup before the registry is shared with any worker.
     pub fn restoreChannels(self: *const Registry, transport: contracts.Channels) !void {
         for (self.channels.items) |channel| {
-            try transport.open(channel.id, channel.opened_by, channel.description);
+            try transport.open(channel.id);
         }
     }
 
     fn restartableChannelsLocked(self: *Registry, a: Allocator) ![]const History.Channel {
         var restartable: std.ArrayList(History.Channel) = .empty;
         for (self.channels.items) |channel| {
-            if (!self.hasFocusLocked(channel.opened_by)) continue;
+            const owner = contracts.Reference.sequence(channel.opened_by).?;
+            if (!self.sessions.contains(owner)) continue;
             try restartable.append(a, channel);
         }
         return restartable.items;
-    }
-
-    fn hasFocusLocked(self: *Registry, focus_id: []const u8) bool {
-        const id = contracts.Reference.sequence(focus_id) orelse return false;
-        const session = self.sessions.get(id) orelse return false;
-        return std.mem.eql(u8, session.focus_id, focus_id);
     }
 
     fn appendChannel(self: *Registry, channel: History.Channel) !void {

@@ -58,7 +58,7 @@ A channel hands each message to one waiting receive request from a local program
 
 ### Opening a channel
 
-Any focus can call `open_channel`. Give it a name and a description of the channel's purpose and the text the receiver expects. See [names and references](input.md#names-and-references).
+Any focus can call `open_channel` with a name and a nonempty description of the channel's purpose and what each message should contain. See [names and references](input.md#names-and-references).
 
 ```json
 {"name":"task-input","description":"Receives the absolute path of each CSV file ready for import."}
@@ -70,24 +70,26 @@ Any focus can call `open_channel`. Give it a name and a description of the chann
 
 Pass the complete `channel_id` to the receiving program and use it to send or close the channel. The description gives the ID context in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
 
+If the new registration would make the saved checkpoint too large, `open_channel` returns `channel_capacity_exceeded` and leaves the channel unopened. Try a shorter description or close an unused channel that survives restart.
+
 ### Receiving from a channel
 
-Run `ivenna receive CHANNEL_ID` to wait for one message. This example runs in an Ivenna host command. See the [command environment](host.md#command-environment) and [receiver setup](running.md#channel-receivers).
+Run `ivenna receive CHANNEL_ID` to wait for one message. In an Ivenna host command, use the executable path in `IVENNA`. For a receiver launched independently, see [receiver setup](running.md#channel-receivers).
 
 ```sh
 channel_id='task-input-18'
 "$IVENNA" receive "$channel_id"
 ```
 
-Add `--timeout MS` to limit the wait to a positive number of milliseconds. Each single-read outcome writes one JSON line to stdout and exits with status 0.
+Use `--timeout MS` to set a positive wait in milliseconds. A completed single read writes one JSON line to stdout and exits with status 0.
 
 | JSON on stdout | Meaning |
 | --- | --- |
 | `{"status":"message","text":"/work/ready.csv"}` | One message was read. |
 | `{"status":"timeout"}` | The wait ended before a message arrived. |
-| `{"status":"closed"}` | The channel closed while the read was waiting. |
+| `{"status":"closed"}` | The channel closed before the read matched a message or timed out. |
 
-Use `--follow` to write successive `message` records, one JSON line per message. The command exits with status 0 when it observes the channel close. See [closing a channel](#closing-a-channel).
+Use `--follow` to stream one `message` record per line. When the channel closes, the follower writes any message already handed off and ends the stream with status 0.
 
 ```sh
 "$IVENNA" receive "$channel_id" --follow | ./handle-messages
@@ -95,7 +97,7 @@ Use `--follow` to write successive `message` records, one JSON line per message.
 
 Here `handle-messages` reads JSON lines from stdin. The `receive` command flushes each line before requesting the next read. A full pipe delays that request. In that gap, a send can return `channel_would_block` if no other receiver is waiting.
 
-If the output pipe closes during a wait or write, either mode exits with status 0. An unknown ID on the initial request or an unavailable channel service produces a diagnostic on stderr and exit status 1. Run `ivenna receive --help` for syntax and limits.
+If the output pipe closes during a wait or write, either mode exits with status 0, possibly without a complete line for the current read. An unknown ID on the initial request or an unavailable channel service produces a diagnostic on stderr and exit status 1. Run `ivenna receive --help` for syntax and limits.
 
 ### Sending to a channel
 
@@ -129,7 +131,7 @@ Either role can call `close_channel` with a complete channel ID.
 {"result":{"channel_id":"task-input-18","changed":true}}
 ```
 
-Closing the channel retires its ID. A waiting single read reports `closed`, and a matched read can finish. A follower between reads observes the close on its next request. Closing a channel that is already absent returns `changed: false`.
+Closing the channel retires its ID and ends [outstanding reads](#receiving-from-a-channel). Closing an ID that is already absent returns `changed: false`.
 
 ### Channel lifetimes
 

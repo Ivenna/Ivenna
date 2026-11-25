@@ -147,13 +147,13 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 Send this request using the [mail example](#sending-a-message).
 
-> Open an activity and have it open a channel named `task-input` for the two messages `first` and `second`. Ask it to try sending `first` before starting a receiver.
+> Delegate this check to an activity. In that activity, open a channel named `task-input` and try sending `first` before starting a receiver.
 >
-> In the activity, use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" receive CHANNEL_ID --follow` with the complete channel ID. Send `first` and read the receiver's output with `continue_host_shell`. Then send `second` and read its output. If a send reports `channel_would_block`, check the command's state before retrying it.
+> Use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" receive CHANNEL_ID --follow` with the complete channel ID. Send `first` again and read the receiver's output with `continue_host_shell`. Repeat for `second`. If a send reports `channel_would_block`, check that the receiver is still running before retrying.
 >
 > After reading both messages, close the channel and collect the receiver's exit status. Report the send results, command output, and exit status.
 
-The first send should report `channel_would_block`. Once the receiver is waiting, each successful send returns `accepted` and the receiver writes one JSON `message` record. The receiver should exit with status 0 after the channel closes. See the [channel interface](../docs/communication.md#channels).
+Expect `channel_would_block` before the receiver starts, then two `accepted` results and two JSON `message` records in order. The receiver should exit with status 0 after the channel closes. See the [channel interface](../docs/communication.md#channels).
 
 ## Trying a subscription listener
 

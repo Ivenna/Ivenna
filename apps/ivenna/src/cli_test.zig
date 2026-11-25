@@ -144,7 +144,7 @@ test "a channel matches one pending read and holds no message between receivers"
     const channels = registry.port();
     const id = try contracts.Reference.create(a, "--工 作/path", 1);
     const receiver = try Receiver.init(a, configured, id);
-    try channels.open(receiver.id, "core-1", "Read one work item at a time.");
+    try channels.open(receiver.id);
 
     try expectSendOutcome(channels, receiver.id, "before any receiver", .would_block);
 
@@ -189,18 +189,11 @@ test "receive follow flushes successive matches and exits when its channel close
 
     const channels = registry.port();
     const receiver = try Receiver.init(a, directory, "events-1");
-    const purpose = "Stream notices to a local program.";
-    var description = purpose.*;
-    try channels.open(receiver.id, "activity-1", &description);
-    @memset(&description, 0);
-    const registrations = try channels.sample(a, "activity-1");
-    try testing.expectEqualDeep(@as([]const contracts.Channels.Registration, &.{.{ .channel_id = receiver.id, .description = purpose }}), registrations);
-    try testing.expectEqual(0, (try channels.sample(a, "activity-2")).len);
+    try channels.open(receiver.id);
     const waiting = try channel_ipc.connect(io, directory, receiver.id, null);
     defer waiting.close(io);
     try expectReceiveReply(waiting, .waiting);
-    try expectSendOutcome(channels, receiver.id, "first request", .accepted);
-    try expectReceiveReply(waiting, .{ .message = "first request" });
+    try expectSendOutcome(channels, receiver.id, "queued before close", .accepted);
     try expectSendOutcome(channels, receiver.id, "before the next request", .would_block);
 
     var child = try receiver.spawn(&.{ executable, "receive", receiver.id, "--follow" });
@@ -211,9 +204,12 @@ test "receive follow flushes successive matches and exits when its channel close
     try expectSendOutcome(channels, receiver.id, "first message\ncontinued", .accepted);
     try expectFollowMessage(a, &output.interface, "first message\ncontinued");
     try expectSendOutcome(channels, receiver.id, "matched before closing", .accepted);
-    try testing.expect(try channels.close(receiver.id));
-    try testing.expectEqualStrings(purpose, registrations[0].description.?);
+    try testing.expect(channels.close(receiver.id));
+    var descriptors = [_]std.posix.pollfd{.{ .fd = waiting.socket.handle, .events = 0, .revents = 0 }};
+    try testing.expect(try std.posix.poll(&descriptors, 5000) != 0);
+    try testing.expect(descriptors[0].revents & std.posix.POLL.HUP != 0);
     try channel_ipc.requestNext(waiting);
+    try expectReceiveReply(waiting, .{ .message = "queued before close" });
     try expectReceiveReply(waiting, .closed);
     try expectFollowMessage(a, &output.interface, "matched before closing");
     try testing.expectEqual(null, try readFollowLine(&output.interface));
@@ -241,7 +237,7 @@ test "receive follow exits when a shell pipeline takes one message" {
 
     const channels = registry.port();
     const receiver = try Receiver.init(a, directory, "events-1");
-    try channels.open(receiver.id, "core-1", "Pass JSON lines to the pipeline.");
+    try channels.open(receiver.id);
     const script =
         \\{
         \\    "$1" receive "$2" --follow || printf '%s\n' 'receive failed' >&2
@@ -278,7 +274,7 @@ test "receive exits successfully when its output pipe closes during a matched wr
 
     const channels = registry.port();
     const receiver = try Receiver.init(arena.allocator(), directory, "events-1");
-    try channels.open(receiver.id, "core-1", "Pass a single message.");
+    try channels.open(receiver.id);
 
     var child = running: {
         // A one-page packet pipe holds only the first write, even on kernels

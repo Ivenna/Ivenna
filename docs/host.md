@@ -58,7 +58,7 @@ A terminal starts with 24 rows and 80 columns and can be resized. The tool retur
 
 ## Continuing and controlling a command
 
-Use the complete `command_id` returned when `run_host_shell` hands off a command, or find it with `inspect_host_shell`. A command appears in the shared list while its starting activity is still waiting.
+Use the complete `command_id` returned when `run_host_shell` hands off a command, or find it with `inspect_host_shell`. The command can appear in the shared list before its initial call returns. It stays listed while the runtime retains its handle.
 
 Call `inspect_host_shell` with `{}` to list commands or pass `{"command_id":"build-17"}` to select one. Each entry gives the `command_id`, the `focus_id` that started it, its `state`, `mode`, `stdin_open`, and `input_pending`. A pending write is still in flight. The first unfiltered page also gives the default `shell` and startup `cwd`.
 

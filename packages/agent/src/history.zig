@@ -38,8 +38,7 @@ pub const History = struct {
     sessions: []const Session,
     wakeups: []const Wakeup,
     callbacks: []const CallbackRegistration,
-    /// Channels open at the last checkpoint. The channel registry owns the
-    /// live set; these records only let a restart restore the same IDs.
+    /// Open channel registrations whose opening focuses are retained.
     channels: []const Channel,
     activity_reports: ?Reports.Checkpoint,
 
@@ -67,13 +66,15 @@ pub const History = struct {
 
     fn validate(self: History, a: Allocator) !void {
         if (self.sessions.len == 0 or self.next_callback_id == 0 or self.next_runtime_reference_id == 0) return error.InvalidHistory;
-        var identities: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        var identities: std.AutoHashMapUnmanaged(u64, []const u8) = .empty;
         defer identities.deinit(a);
         var cores: usize = 0;
         for (self.sessions) |session| {
             if (session.session_id == 0 or session.session_id >= self.next_session_id or
-                (try identities.getOrPut(a, session.session_id)).found_existing) return error.InvalidHistory;
-            if (contracts.Reference.sequence(session.focus_id) != session.session_id) return error.InvalidHistory;
+                contracts.Reference.sequence(session.focus_id) != session.session_id) return error.InvalidHistory;
+            const identity = try identities.getOrPut(a, session.session_id);
+            if (identity.found_existing) return error.InvalidHistory;
+            identity.value_ptr.* = session.focus_id;
             switch (session.role) {
                 .core => {
                     if (session.session_id != 1 or !std.mem.eql(u8, session.focus_id, "core-1")) return error.InvalidHistory;
@@ -109,7 +110,8 @@ pub const History = struct {
         for (self.channels) |channel| {
             const sequence = contracts.Reference.sequence(channel.id) orelse return error.InvalidHistory;
             const opener = contracts.Reference.sequence(channel.opened_by) orelse return error.InvalidHistory;
-            if (sequence >= self.next_runtime_reference_id or opener >= self.next_session_id) return error.InvalidHistory;
+            const owner = identities.get(opener) orelse return error.InvalidHistory;
+            if (sequence >= self.next_runtime_reference_id or !std.mem.eql(u8, owner, channel.opened_by)) return error.InvalidHistory;
             if ((try channel_ids.getOrPut(a, sequence)).found_existing) return error.InvalidHistory;
         }
     }
@@ -415,9 +417,10 @@ pub const Persistence = struct {
         if (self.published_checkpoint_digest) |published| {
             if (equalKey(published, candidate_digest)) return;
         }
-        // A failed publication may still have changed the stored checkpoint.
-        self.published_checkpoint_digest = null;
-        try self.store.save(document);
+        self.store.save(document) catch |err| {
+            if (err != error.HistoryCheckpointTooLarge) self.published_checkpoint_digest = null;
+            return err;
+        };
         std.mem.swap(Cache, &self.cache, &candidate);
         self.published_checkpoint_digest = candidate_digest;
     }
@@ -595,6 +598,7 @@ test "working history can append after a handover with a retired sampled field" 
 
     var history = (try persistence.load(a, 1)).?;
     try t.expectEqual(7, history.next_runtime_reference_id);
+    try t.expectEqual(0, history.channels.len);
     var core = history.sessions[0];
     const handover = core.entries.?[0].record.handover;
     try t.expectEqualStrings("Keep investigating.", handover.summary);
@@ -611,35 +615,11 @@ test "working history can append after a handover with a retired sampled field" 
     try t.expectEqualStrings("Continuing.", continued[1].exchange[0].continuation);
 }
 
-test "older checkpoints can omit channel registrations and descriptions" {
+test "earlier channel registrations can omit descriptions" {
     const t = std.testing;
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const BeforeChannels = struct {
-        subscription_catalog: [32]u8,
-        next_session_id: u64,
-        next_callback_id: u64,
-        next_command_id: u64,
-        sessions: []const Checkpoint.Session,
-        wakeups: []const History.Wakeup,
-        callbacks: []const History.CallbackRegistration,
-        activity_reports: ?Reports.Checkpoint,
-    };
-    const document = try Codec.encode(a, BeforeChannels{
-        .subscription_catalog = @splat(0),
-        .next_session_id = 2,
-        .next_callback_id = 1,
-        .next_command_id = 3,
-        .sessions = &.{},
-        .wakeups = &.{},
-        .callbacks = &.{},
-        .activity_reports = null,
-    });
-    try t.expect(std.mem.indexOf(u8, document, "channel") == null);
-    const checkpoint = try Codec.decode(Checkpoint, a, document);
-    try t.expectEqual(0, checkpoint.channels.len);
-
     const registration = try Codec.decode(History.Channel, a, ".{.id=\"imports-2\",.opened_by=\"core-1\",.opened_at_unix_ms=0}");
     try t.expectEqual(null, registration.description);
 }

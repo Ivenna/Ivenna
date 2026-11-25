@@ -33,7 +33,7 @@ If the upload ends without a usable reference, a text part replaces the attachme
 | `file_upload_failed` | The upload stopped before sending the file, or the file service rejected it. The message distinguishes these outcomes and identifies a size or rate limit when reported. |
 | `file_upload_uncertain` | The adapter could not confirm whether the service stored the file. A new upload could create another copy. |
 
-The service status is available in the kernel log. See [upload handling](architecture.md#tool-results).
+For an HTTP rejection, check the `model file endpoint returned HTTP` entry in the kernel log. See [upload handling](architecture.md#tool-results).
 
 ## Image URL references
 

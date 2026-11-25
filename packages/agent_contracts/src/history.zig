@@ -80,7 +80,9 @@ pub const HistoryStore = struct {
         return self.vtable.create(self.context, a, records);
     }
 
-    /// Publish the complete checkpoint. An error can follow publication.
+    /// Publish the complete checkpoint. HistoryCheckpointTooLarge means the
+    /// store rejected its size before attempting publication. Other errors can
+    /// follow publication.
     pub fn save(self: HistoryStore, document: []const u8) !void {
         return self.vtable.save(self.context, document);
     }

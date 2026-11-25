@@ -129,7 +129,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Revisit a memory. Read text in pages, or open a complete image or file through the model service.",
+    "description": "Revisit a memory. Read text in pages. Opening an image or file supplies the complete entry to the model service.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -315,7 +315,7 @@
   },
   {
     "name": "forget_memory",
-    "description": "Let go of a memory or an empty room you no longer want to keep.",
+    "description": "Let go of a memory or room you no longer want to keep.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -326,7 +326,7 @@
         "recursive": {
           "type": "boolean",
           "default": false,
-          "description": "Set true to remove a room and all its contents."
+          "description": "By default, remove a memory or an empty room. Set true to remove a room and all its contents."
         }
       },
       "required": [

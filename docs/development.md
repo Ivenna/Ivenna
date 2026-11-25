@@ -6,7 +6,9 @@ The design guide sets Ivenna's goals and interface principles. The architecture 
 
 The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design.
 
-Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided. When a design changes, remove superseded behavior and state; do not retain compatibility paths or introduce migration frameworks.
+Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided.
+
+When a design changes, remove superseded runtime interfaces and state. Keep the decoding needed to read retained history at the storage boundary. Avoid migration frameworks.
 
 Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 

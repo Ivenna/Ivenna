@@ -189,7 +189,7 @@ An operation error contains `code` and `message`. Common codes include:
 | `not_found` | The addressed entry or room does not exist |
 | `already_exists` | The target is occupied for `remember` in create mode or for `move_memory` |
 | `invalid_address` | The address is outside the workspace, unsupported, reserved, or identifies the wrong kind of entry |
-| `source_unavailable` | Reading the host source failed before the request went to the memory service |
+| `source_unavailable` | Reading the host source file failed before the memory write was sent |
 | `unsupported_content` | The existing entry is not valid UTF-8 text or contains NUL bytes; no revision was written |
 | `invalid_range` | A read offset or page size is invalid |
 | `invalid_argument` | An argument such as empty revision text is invalid |

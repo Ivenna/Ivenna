@@ -168,11 +168,17 @@ Startup reads and validates all selected session history, including sleeping ses
 
 ## Channel receivers
 
-Use the same build of `ivenna` for the running kernel and the receiver. Run the receiver under the kernel's effective UID and in its network namespace, including when they run in separate containers. Both processes must resolve `DATA_DIR` to the same absolute path after following symbolic links.
+Use the same build of `ivenna` for the kernel and the receiver. Run both under the same effective user ID and in the same Linux network namespace. Both processes must resolve `DATA_DIR` to the same absolute path after following symbolic links. For a receiver in a separate container, share the kernel's network namespace and make the instance data directory available at the same absolute path.
 
-Ivenna's host commands inherit the resolved `DATA_DIR` and the executable path in `IVENNA`. Give the receiver the complete ID returned by `open_channel`. See the [host command environment](host.md#command-environment) and [receive command](communication.md#receiving-from-a-channel).
+For a receiver launched independently, set `DATA_DIR` to the instance data directory and pass the complete ID returned by `open_channel`.
 
-If `receive` reports an unavailable channel service with this setup, check that the kernel is running. A new receiver can also be refused while all connection slots are in use.
+```sh
+DATA_DIR=/path/to/instance/data /path/to/ivenna receive 'task-input-18' --follow
+```
+
+Ivenna's own host commands inherit the resolved `DATA_DIR` and the executable path in `IVENNA`. See the [host command environment](host.md#command-environment) and [receive options and results](communication.md#receiving-from-a-channel).
+
+If `receive` reports an unavailable channel service, check the kernel and the receiver settings above. The kernel can also refuse new receivers while all connection slots are in use.
 
 ## Subscription listeners
 
@@ -283,7 +289,7 @@ Keep original correspondence separately if you need it beyond the Trash retentio
 
 ### Working history
 
-A message with the subject `Ivenna history checkpoint` lists the state the kernel uses to resume its sessions. For each session, `head` points to the latest retained history record and `count` gives the number of records in that chain. Admitted observations and model/tool exchanges live in those separate records, so a whole new exchange can change just a few fields in the checkpoint. The checkpoint also tracks scheduled wakeups, callback registrations, unread activity reports, and which subscription reports each focus has admitted from the instance database.
+A message with the subject `Ivenna history checkpoint` lists the state the kernel uses to resume its sessions. For each session, `head` points to the latest retained history record and `count` gives the number of records in that chain. Admitted observations and model/tool exchanges live in those separate records, so a whole new exchange can change just a few fields in the checkpoint. The checkpoint also tracks saved channel registrations, scheduled wakeups, callback registrations, unread activity reports, and each focus's last admitted subscription report.
 
 Suppose the core receives a letter and the model returns text without calling tools. In an otherwise idle kernel, this normally produces two revisions. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response in the core's history. Sending a reply to the correspondent requires a `send` call.
 
@@ -296,7 +302,7 @@ Ivenna cleans up the history folder at startup and periodically while it runs. B
 
 Forks store independent copies of inherited history. Include these copies when sizing runtime memory and the mailbox. Compaction replaces older records with a handover and carries forward selected recent records. Previous records can then move to Trash while other sessions keep their own copies.
 
-Each complete model/tool round must fit the mail service's advertised `maxSizeRequest` when saved. Image bytes, file bytes, and encoding overhead count toward that history request, so a result within the [model request limits](content.md#model-request-checks) can still exceed the mailbox limit. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`. Any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See the [history storage protocol](architecture.md#history-storage) for the encoding and batching mechanism.
+The mail service's advertised `maxSizeRequest` applies to each complete model/tool round and to the checkpoint. Image bytes, file bytes, and encoding overhead count toward the history request, so a result within the [model request limits](content.md#model-request-checks) can still exceed the mailbox limit. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`. Any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See [channel registration](communication.md#opening-a-channel) for how `open_channel` reports a checkpoint size rejection and the [history storage protocol](architecture.md#history-storage) for encoding and batching.
 
 A sleeping activity retains its history even when its context is unloaded. When the activity ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. The activity's messages and ending remain available to the core until they enter the core's history. Shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
@@ -320,7 +326,7 @@ Back up the mailbox and instance database as a pair. Startup checks the database
 
 If taking the backups separately, stop the kernel before saving either store and leave it stopped until both backups finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners too and include any SQLite journal files with the database.
 
-To restore an instance, stop the kernel and listeners. Move the current database, journal, and shared-memory files aside. Restore the database and mailbox from the matched backup and keep the listener programs and their configuration. Before resuming a listener, check that its subscription ID and source position match the restored data.
+To restore an instance, stop the kernel and listeners. Move the current database, journal, and shared-memory files aside. Restore the database and mailbox from the matched backup. Keep the receiver and listener programs and their configuration. Before resuming a listener, check that its subscription ID and source position match the restored data. If the backup predates a receiver's channel registration, supply an ID for its intended channel in the restored instance before resuming it. See [channel lifetimes](communication.md#channel-lifetimes).
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 
@@ -338,7 +344,7 @@ Native `Email.id` values may change because restoration uses logical groups, rec
 
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 
-A mailbox backup preserves stored callbacks and wakeup arrangements, not running host processes or their output files. Preserve [host artifacts](#host-output-and-deployment-files) and memory data separately when continued work needs them.
+A mailbox backup carries saved channel registrations, stored callbacks, and wakeup arrangements. Preserve [host artifacts](#host-output-and-deployment-files) and memory data separately when continued work needs them. See [stopping and restarting](#stopping-and-restarting) for what requires a fresh command or receive request.
 
 ### Host output and deployment files
 

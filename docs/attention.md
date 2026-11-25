@@ -62,7 +62,7 @@ The wakeup survives restart. The result gives its `callback_id`.
 {"result":{"callback_id":"revisit-practice-5"}}
 ```
 
-A past `at` makes the wakeup due immediately. The core can keep working while it waits. The callback carries the supplied text and the original time in `scheduled_for`, even when it reaches the core later. Cancellation is unavailable. See [wakeup and callback fields](input.md#callback-observations).
+A past `at` makes the wakeup due immediately. The core can keep working until the callback arrives with the supplied text and the original time in `scheduled_for`. Cancellation is unavailable. See [wakeup and callback fields](input.md#callback-observations).
 
 ### Callback observations
 
@@ -129,4 +129,4 @@ An activity with a pending callback or an active subscription can sleep with its
 
 Withdraw subscriptions when the activity finishes following their sources. The activity ends and frees its capacity slot when it has no work, pending callbacks, or active subscriptions left. Its ending calls for the core's attention even if it produced no text.
 
-The core can still receive the ended activity's expressions and ending with its original focus ID. An activity can pass a channel ID in a report for the core to use after the activity ends. See [the channel's lifetime](communication.md#closing-a-channel) and [report fields](input.md#assignments-and-reports).
+The core can still receive the ended activity's expressions and ending with its original focus ID. An activity can pass a channel ID in a report for the core to use after the activity ends. See [channel lifetimes](communication.md#channel-lifetimes) and [report fields](input.md#assignments-and-reports).

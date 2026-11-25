@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send text to one correspondent, focus, or channel. A correspondence `reference` confirms submission for delivery. A focus message becomes an observation and can wake its recipient. A channel send attempts a handoff to a waiting receive request.",
+    "description": "Send text to one correspondent, focus, or channel. A correspondence `reference` confirms submission for delivery. A focus message becomes an observation and can wake its recipient. A channel send hands text directly to a waiting receiver.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -61,7 +61,7 @@
         "description": {
           "type": "string",
           "minLength": 1,
-          "description": "Describe the channel's purpose and what each message should contain."
+          "description": "Briefly describe the channel's purpose and what each message should contain."
         }
       },
       "required": ["name", "description"],
@@ -150,7 +150,7 @@
         "listener": {
           "type": "string",
           "minLength": 1,
-          "description": "Describe what the listener watches and when it should report."
+          "description": "Briefly describe what the listener watches and when it should report."
         }
       },
       "required": ["name", "listener"],

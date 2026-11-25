@@ -14,7 +14,7 @@
           "type": "integer",
           "minimum": 0,
           "default": 0,
-          "description": "Use the returned next_offset for the next page."
+          "description": "Use the returned `next_offset` for the next page."
         }
       },
       "required": [],
@@ -23,7 +23,7 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. Short text appears inline. Partial or binary output includes a log path. If the wait ends before execution and cleanup finish, the result gives a command_id and a callback_id for the completion observation to this focus.",
+    "description": "Run a command in a fresh shell. Short text appears inline. Partial or binary output includes a log path. If work continues after the initial wait, the result gives a `command_id` for further interaction and a `callback_id` for this focus's completion observation.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -92,7 +92,7 @@
   },
   {
     "name": "continue_host_shell",
-    "description": "Read output or interact with a command by its handle. Continuation reads advance a position shared across activities for each stream. Initial previews and callbacks read independently. Draining a finished command retires its handle.",
+    "description": "Read output or interact with a command by its handle. Each stream has a read position shared across activities. Continuation reads advance it. Initial previews and completion callbacks leave it in place. Draining a finished command retires its handle.",
     "parameters": {
       "type": "object",
       "properties": {

@@ -690,7 +690,7 @@ test "shell defaults appear only on the first unfiltered inspection" {
         try t.expectEqual(i == 0, fields.contains("cwd"));
         const commands = fields.get("commands").?.array.items;
         try t.expectEqual(@as(usize, 1) - args.offset, commands.len);
-        if (commands.len != 0) {
+        if (i == 0) {
             try t.expectEqualStrings(job.command_id, commands[0].object.get("command_id").?.string);
             try t.expect(!commands[0].object.contains("command_preview"));
         }

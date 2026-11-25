@@ -53,17 +53,18 @@ pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8, timeout_m
     try requireSameUser(connection);
     var header: [timeout_header_size]u8 = undefined;
     std.mem.writeInt(u32, &header, timeout_ms orelse 0, .little);
-    try writeRequest(connection, &header, id);
+    writePacket(connection, &header, id) catch |err| switch (err) {
+        error.PeerDisconnected, error.WouldBlock => return error.ChannelServiceUnavailable,
+        else => return err,
+    };
     return connection;
 }
 
 pub fn requestNext(connection: net.Stream) !void {
-    try writeRequest(connection, next_request, "");
-}
-
-fn writeRequest(connection: net.Stream, header: []const u8, text: []const u8) !void {
-    writePacket(connection, header, text) catch |err| switch (err) {
-        error.PeerDisconnected, error.WouldBlock => return error.ChannelServiceUnavailable,
+    writePacket(connection, next_request, "") catch |err| switch (err) {
+        // A closing server may already have queued the terminal reply.
+        error.PeerDisconnected => {},
+        error.WouldBlock => return error.ChannelServiceUnavailable,
         else => return err,
     };
 }
@@ -124,8 +125,11 @@ pub fn reply(connection: net.Stream, response: Response) WriteError!void {
 }
 
 pub fn readResponse(connection: net.Stream, buffer: *[response_buffer_size]u8) !Response {
-    const size = std.posix.read(connection.socket.handle, buffer) catch |err| switch (err) {
-        error.ConnectionResetByPeer => return error.ChannelServiceUnavailable,
+    const handle = connection.socket.handle;
+    const size = std.posix.read(handle, buffer) catch |err| switch (err) {
+        // A close racing an unread next request can signal a reset before
+        // the kernel returns the packets already queued by the server.
+        error.ConnectionResetByPeer => try std.posix.read(handle, buffer),
         else => return err,
     };
     if (size == 0) return error.ChannelServiceUnavailable;

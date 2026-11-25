@@ -125,7 +125,7 @@ Each `callback` carries a registered observation to the focus that arranged it.
 | `observed_at` | `Time` | Time the runtime observed the callback during intake |
 | `text` | `Text` | Supplied wakeup text or serialized host result or diagnostic |
 
-Intake can occur after the scheduled wakeup or after the command finishes. For a host callback, `source.host.command_id` identifies the command even if its control handle has expired. See [callback delivery](attention.md#callback-observations) and [command lifetimes](host.md#command-lifetimes).
+Compare a wakeup's `scheduled_for` and `observed_at` to see how much time passed before intake. For a host callback, `source.host.command_id` identifies the command even if its control handle has expired. See [callback delivery](attention.md#callback-observations) and [command lifetimes](host.md#command-lifetimes).
 
 #### Subscription observations
 
@@ -235,7 +235,7 @@ events:
 
 ## Handover generation and replacement
 
-A compaction request presents the history to summarize and a turn with `current` and `summarize` under the shared system prompt. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary. Observations awaiting admission stay queued and the request offers no tools. A tool result can substitute a short notice for an attachment while keeping its existing text and source description. On a revision request, `summarize.instructions` says what to correct.
+A compaction request presents the history to summarize and a turn with `current` and `summarize` under the shared system prompt. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary. Observations awaiting admission stay queued and the request offers no tools. The summary request may show a short omission notice in place of a tool attachment. The tool result's existing text and source description stay in the request. On a revision request, `summarize.instructions` says what to correct.
 
 After accepting a handover, the next ordinary request presents it first in the retained history. Any carried-forward observations and complete exchanges follow it. New observations appear in the current turn.
 
