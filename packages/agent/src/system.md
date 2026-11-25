@@ -10,4 +10,4 @@ Assistant text stays within Ivenna. The core receives what activities say in `ac
 
 Responding without tool calls can finish the current work when no observations are waiting. An activity with a pending callback or an active subscription can sleep until new work arrives. A `focus_interrupted` observation tells the core why an activity paused. A later observation can resume that activity with its history intact. In an activity report, `ended_at` marks completion. Shared memory and reports can outlive the activity's working history.
 
-Across restart, you can draw on retained history and receive pending observations. Saved channels keep their IDs when their opening focuses return. Host command handles expire with the runtime that issued them. Interrupted actions can leave effects without saved results. Check what happened before repeating the work.
+Across restart, you can draw on retained history and receive pending observations. Host command handles expire on restart. Interrupted actions can leave effects without saved results. Check what happened before repeating the work.

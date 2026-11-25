@@ -50,11 +50,11 @@ fn failure(io: std.Io, err: anyerror) !u8 {
         error.StateStoreFull => "storage_full",
         error.InvalidReceiveArguments, error.MissingDataDirectory, error.StateStorageFailed => return 1,
         error.UnknownChannel => {
-            std.log.err("no open channel matches CHANNEL_ID in this instance", .{});
+            std.log.err("no open channel matches CHANNEL_ID. Check the complete ID and DATA_DIR", .{});
             return 1;
         },
         error.ChannelServiceUnavailable => {
-            std.log.err("the channel service is unavailable. Check DATA_DIR and the running instance before retrying", .{});
+            std.log.err("the channel service is unavailable. Check that the kernel is running and DATA_DIR points to its data directory", .{});
             return 1;
         },
         error.InvalidChannelReply => {

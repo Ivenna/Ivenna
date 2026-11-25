@@ -160,14 +160,14 @@ The compaction turn carries the runtime sample in `summarize.state`. Its `curren
 | `activities` | `Text[]` | IDs of existing activities, including sleeping and interrupted ones | — |
 | `callbacks` | `PendingCallback[]` | Pending callbacks for the core | Pending callbacks for this activity |
 | `subscriptions` | `SampledSubscription[]` | Active subscriptions for the core | Active subscriptions for this activity |
-| `channels` | `SampledChannel[]` | All open channels | Open channels created by this activity |
+| `channels` | `SampledChannel[]` | All open channels, including those opened by activities that have ended | Open channels created by this activity |
 | `correspondents` | `Text[]` | Registered outgoing correspondent IDs | — |
 
 Core samples always include `correspondents`, even when empty. Other collections appear when nonempty. When every field is absent, the message omits `state`. See [startup and restart](#startup-and-restart) for how to interpret the correspondent list.
 
 A `SampledSubscription` has `subscription_id: Text` and the registered `listener` description of what to watch and when to report. A new subscription can appear before its first report. A report accepted before withdrawal can still reach the focus after the subscription leaves the sample. See [subscriptions](attention.md#subscriptions).
 
-A `SampledChannel` has `channel_id: Text` and the `description` supplied when the channel opened, when available. A retained handover describes what was open at the time of the sample. The send result tells the focus whether a handoff could take place this time. See [channel send outcomes](communication.md#sending-to-a-channel).
+A `SampledChannel` has `channel_id: Text` and the `description` supplied when the channel opened, when available. A channel enters the sample after the runtime confirms its registration. A retained handover records what was open at the time of the sample. The result of a new send tells the focus whether the message reached a waiting receiver. See [opening a channel](communication.md#opening-a-channel) and [channel send outcomes](communication.md#sending-to-a-channel).
 
 `listener` and `description` are `Text` or `null`. Older samples that stored only IDs use `null`. Some older checkpoints can also restore a channel without a saved description.
 
@@ -179,7 +179,7 @@ In this handover, the sampled state gives the core a time to revisit release ver
 handover:
   focus_id: core-1
   observed_at: "2026-11-06T12:00:01.000Z"
-  summary: The verification activity is checking the release CSVs. Revisit the results tomorrow.
+  summary: The verification activity is checking the release CSVs. Revisit the results when the review wakeup arrives.
   state:
     activities: [verify-release-2]
     callbacks:

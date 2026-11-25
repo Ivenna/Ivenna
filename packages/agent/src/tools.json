@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send text to one correspondent, focus, or channel. A correspondence `reference` confirms submission for delivery. A focus message becomes an observation and can wake its recipient. A channel send hands text directly to a waiting receiver.",
+    "description": "Send text to one correspondent, focus, or channel. A correspondence `reference` confirms submission for delivery. A focus message becomes an observation and can wake its recipient. A channel send attempts an immediate handoff to one waiting receiver. `accepted` confirms the handoff. Unsent text stays unqueued.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -53,7 +53,7 @@
   },
   {
     "name": "open_channel",
-    "description": "Open a named channel for local programs. Give its `channel_id` to the receiver. A replacement receiver can reuse the ID while the channel is open. In host commands, `\"$IVENNA\" receive --help` shows how to receive.",
+    "description": "Open a channel for local programs. Give its `channel_id` to the receiver. A receiver can reconnect with the same ID, even after this focus ends or Ivenna restarts. In a host command, `\"$IVENNA\" receive --help` shows how to receive.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -121,7 +121,7 @@
         "at": {
           "type": "string",
           "format": "date-time",
-          "description": "Past times are due immediately."
+          "description": "Use a date and time with `Z` or an explicit UTC offset. Past times are already due."
         },
         "text": {
           "type": "string",

@@ -11,8 +11,6 @@ pub const TestStore = struct {
     checkpoint: ?[]const u8 = null,
     saves: usize = 0,
     fail_save: SaveFailure = .none,
-    /// Largest checkpoint document the store accepts, in bytes.
-    fits_limit: ?usize = null,
 
     pub fn port(self: *TestStore) Store {
         return .{ .context = self, .vtable = &.{
@@ -22,7 +20,6 @@ pub const TestStore = struct {
             .read = read,
             .create = create,
             .save = save,
-            .fits = fits,
             .maintain = maintain,
         } };
     }
@@ -74,11 +71,6 @@ pub const TestStore = struct {
             owned.body = try a.dupe(u8, record.body);
             try self.records.append(a, owned);
         }
-    }
-
-    fn fits(context: *anyopaque, _: Allocator, body: []const u8) anyerror!bool {
-        const self: *TestStore = @ptrCast(@alignCast(context));
-        return if (self.fits_limit) |limit| body.len <= limit else true;
     }
 
     fn save(context: *anyopaque, body: []const u8) anyerror!void {

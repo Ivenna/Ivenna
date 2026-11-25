@@ -6,7 +6,7 @@ This setup runs the kernel from the source checkout, with mail and memory servic
 
 Install the Zig version in [`.zig-version`](../.zig-version), an OpenSSH client, and `curl`.
 
-Use [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html) for the middleware. The commands below use Podman. See the [development guide](../docs/development.md) for build conventions and the [testing guide](../docs/testing.md) for automated checks that run directly on the host.
+Use [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html) for the mail and memory services. The commands below use Podman. See the [development guide](../docs/development.md) for build conventions and the [testing guide](../docs/testing.md) for automated checks that run directly on the host.
 
 ## Configuration
 
@@ -147,11 +147,11 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 Send this request using the [mail example](#sending-a-message).
 
-> Delegate this check to an activity. In that activity, open a channel named `task-input` and try sending `first` before starting a receiver.
+> Delegate this check to an activity. Ask it to open a channel named `task-input` for short test messages, then send `first` before starting a receiver.
 >
-> Use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" receive CHANNEL_ID --follow` with the complete channel ID. Send `first` again and read the receiver's output with `continue_host_shell`. Repeat for `second`. If a send reports `channel_would_block`, check that the receiver is still running before retrying.
+> In that activity, use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" receive CHANNEL_ID --follow`, substituting the complete channel ID. Send `first` again and read the output with `continue_host_shell`. Then send and read `second`. If a send reports `channel_would_block`, check that the receiver is still running and give it time to request its next read before retrying.
 >
-> After reading both messages, close the channel and collect the receiver's exit status. Report the send results, command output, and exit status.
+> After reading both messages, have the activity close the channel and collect the receiver's exit status. Report the send results, command output, and exit status.
 
 Expect `channel_would_block` before the receiver starts, then two `accepted` results and two JSON `message` records in order. The receiver should exit with status 0 after the channel closes. See the [channel interface](../docs/communication.md#channels).
 
@@ -230,7 +230,9 @@ These settings configure the supplied local services in [dev/compose.yaml](compo
 | `MEMORY_IMAGE` | Memory image | `localhost/ivenna-memory:dev` |
 | `MEMORY_CAPACITY_BYTES` | Shared memory-room capacity | `1073741824` (1 GiB) |
 
-If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Account and server policy changes belong in the private provisioning plan; apply them through [local mail setup](#configuring-mail).
+If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Apply account and server policy changes from the private provisioning plan through [local mail setup](#configuring-mail).
+
+Stalwart's `Jmap.maxRequestSize` sets the advertised size limit that Ivenna uses when saving working history. See [recovering from a size rejection](../docs/running.md#working-history) and [Stalwart's request settings](https://stalw.art/docs/ref/object/jmap/#maxrequestsize).
 
 After changing service settings, reload `$DEV_INSTANCE_DIR/.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed. For mail transfers, follow the [history preservation requirements](../docs/running.md#backups-and-transfers).
 

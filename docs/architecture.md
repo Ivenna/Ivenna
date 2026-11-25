@@ -66,7 +66,7 @@ The application supplies the agent and host with capability implementations thro
 | [Callback.Registrar](../packages/agent_contracts/src/callback.zig) | Persist a future observation's source and bind its destination to the invoking session | Agent execution |
 | [Callback.Publisher](../packages/agent_contracts/src/callback.zig) | Store one observation under a registered callback ID, preserving the first stored result | Email integration |
 | [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Expose registered outgoing correspondent IDs and submit messages by ID | Email integration |
-| [Channels](../packages/agent_contracts/src/channels.zig) | Open and close local delivery endpoints and attempt handoffs by channel ID | Application |
+| [Channels](../packages/agent_contracts/src/channels.zig) | Reserve, activate, and close local delivery endpoints and attempt handoffs by channel ID | Application |
 | [HistoryStore](../packages/agent_contracts/src/history.zig) | Publish and load checkpoints, allocate storage groups, read and write records, and maintain retained history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure encoded requests, and prepare tool results for model input | Responses adapter |
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
@@ -118,7 +118,7 @@ The tool decoder reads the single field in `send.to` to select a destination var
 
 ### Local channels
 
-The session registry owns open channel IDs, their opening focuses, and descriptions. An open reserves its transport entry and publishes the registration in the checkpoint of the round that reports it, so a rejected checkpoint leaves neither. A close confirms the checkpoint before the transport ends waiting reads. Each checkpoint retains every registration that a close has not retired. See [opening a channel](communication.md#opening-a-channel) for how a rejected checkpoint behaves and [channel lifetimes](communication.md#channel-lifetimes) for what survives restart.
+The session registry owns channel IDs, their opening focuses, and descriptions. The opening round owns the transport reservation through tool execution. At commit, the registry holds its lock while it saves the registration with the round's tool replies. The transport exposes the channel after confirmation. If the round exits without confirmation, it releases its reservation. Closing a channel saves its retirement before the transport ends waiting reads. See [opening a channel](communication.md#opening-a-channel) for save outcomes and [channel lifetimes](communication.md#channel-lifetimes) for what survives restart.
 
 The local transport tracks connections by channel ID. A connection handler registers each request under the transport lock. A send tries to acquire that lock once, then tries nonblocking packet writes in request order until it hands off the message or exhausts the list. Each successful write consumes one request. Closing a channel queues the terminal reply after any matched message and ends its server-side connections, including followers between requests. See the [transport implementation](../apps/ivenna/src/channels.zig) and [send outcomes](communication.md#sending-to-a-channel).
 
@@ -249,7 +249,7 @@ The kernel normally carries forward the complete tool exchange awaiting continua
 
 ### Sampling state and preparing the request
 
-The session registry reads `current`, activity IDs, pending callbacks, open channels, and active subscription registrations under its lock. The kernel adds the core's outgoing correspondent IDs from the sender. The sample carries the observation time of its summary turn. See the [sampling implementation](../packages/agent/src/sessions.zig) and [fields supplied to each role](input.md#sampled-state).
+The session registry reads `current`, activity IDs, pending callbacks, confirmed open channels, and active subscription registrations under its lock. The kernel adds the core's outgoing correspondent IDs from the sender. The sample carries the observation time of its summary turn. See the [sampling implementation](../packages/agent/src/sessions.zig) and [fields supplied to each role](input.md#sampled-state).
 
 `Context.summaryRequest` combines the system prompt, selected history, sampled state, and compaction instructions. The summary request uses `high` reasoning without tools. Observations awaiting admission stay queued. See the [summary instructions](../packages/agent/src/compaction.md) and [handover contract](input.md#handover-generation-and-replacement).
 
@@ -286,11 +286,11 @@ Appending advances the head and count without adding a per-entry reference to th
 
 `HistoryStore` exposes checkpoint publication, grouped records, and retention maintenance. History persistence and the activity outbox own their record schemas, chain selection, validation, and retention references. The shared record codec supplies encoding, decoding, and content-key functions; adapters own native representation, locators, placement, and protocol limits.
 
-The registry holds its lock through checkpoint publication at [admission](#activation-admission) and [round completion](#activation-and-session-completion). A tool can also change what a restart must recover before the round finishes. For example, the registry saves a host command's callback registration before returning its reference.
+The registry holds its lock through checkpoint publication at [admission](#activation-admission) and [round completion](#activation-and-session-completion). A completed tool round publishes its new [activities](#activity-forks) and [channel registrations](#local-channels) with its tool replies. Effects can have earlier commit points. For example, the registry saves a host command's callback registration before returning its reference.
 
 Within an epoch, persistence carries forward the confirmed keys and encodes newly appended entries. It writes new records before publishing the checkpoint that selects them. If record creation stops partway through, the previous checkpoint still selects the history to restore. A checkpoint whose digest matches the last confirmed publication needs no new revision. A checkpoint rejected locally for size leaves the previous confirmation in place. After another publication error, the store may already have accepted the checkpoint. Persistence clears the cached digest so a later save must confirm its selection before maintenance can retire records.
 
-Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Owners of retained event and handover records must match the complete ID of the restoring focus or the core (`core-1`). Each saved channel's opener must be a complete focus ID allocated before the checkpoint; the opening focus itself can be gone. Matching physical duplicates can supply one logical occurrence. Missing or inconsistent records fail restoration. When loading older handovers, restoration converts channel and subscription ID lists to sampled records with `null` descriptions and drops retired feed IDs from the sample.
+Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Owners of retained event and handover records must match the complete ID of the restoring focus or the core (`core-1`). A saved channel's opening focus ID has a suffix below the next focus sequence. If the opening focus is still present in the checkpoint, its complete ID must match. Matching physical duplicates can supply one logical occurrence. Missing or inconsistent records fail restoration. When loading older handovers, restoration converts channel and subscription ID lists to sampled records with `null` descriptions and drops retired feed IDs from the sample.
 
 Startup reads and validates all selected session history. It rebuilds the outbox's unread metadata from its checkpoint and loads report bodies in admission windows. It materializes the core context and discards temporary activity entries; activity contexts are materialized when scheduled. Later cold restores read only that session's history. Delivery objects, receipts, worker ownership, and host process handles are not checkpointed. See [startup](#startup-and-interruption) for reconstruction.
 
@@ -314,7 +314,7 @@ Before dispatch, the kernel publishes an interruption observation for each resto
 
 Unacknowledged correspondence remains eligible and can appear again after a crash between persistence and acknowledgement; callback IDs instead retain durable admission deduplication. Fresh startup observations identify this runtime; earlier records remain evidence of their original observations and outcomes.
 
-Use one kernel per account. Host effects, memory writes, mail submission, subscription changes, acknowledgement, and history publication have separate commit points. Effects may precede their saved results, and repeating uncertain actions can duplicate them. An incomplete model/tool round is outside confirmed working history. The [availability contract](design.md#runtime-availability) determines when execution can continue.
+Use one kernel per account. Host effects, memory writes, mail submission, subscription changes, acknowledgement, and history publication have separate commit points. Effects may precede their saved results, and repeating uncertain actions can duplicate them. On restart, the selected checkpoint determines which complete rounds are retained. The [availability contract](design.md#runtime-availability) determines when execution can continue.
 
 ## Email boundary
 
@@ -362,7 +362,7 @@ During [restoration](#saving-and-restoration), the adapter queries the folder by
 
 Get and set batches contain at most 32 objects and obey the session's `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest`. Encoded bodies and protocol fields count toward the request size. Each complete model/tool round occupies one record, including its retained image and file bytes. If even one record exceeds the request limit on its own, saving fails with `HistoryRecordTooLarge` before checkpoint publication.
 
-The checkpoint itself occupies one `Email/set` create request. If that encoded request exceeds `maxSizeRequest`, the adapter returns `HistoryCheckpointTooLarge` before sending it and preserves the confirmed revision. See [opening a channel](communication.md#opening-a-channel) for what a rejected checkpoint does to a channel registration.
+The checkpoint itself occupies one `Email/set` create request. If that encoded request exceeds `maxSizeRequest`, the adapter returns `HistoryCheckpointTooLarge` before sending it and preserves the confirmed revision. See [working history limits](running.md#working-history) for recovery after a size rejection.
 
 ### Mail retention
 

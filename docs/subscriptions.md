@@ -61,4 +61,4 @@ Subscribing again to the same source gives the listener a new ID with its own cu
 
 A program can use a channel to receive work and a subscription to report its outcome. Give it the `channel_id` for reads and the `subscription_id` from the focus that should receive the reports. See [receiving a channel message](communication.md#receiving-from-a-channel) and [publishing an observation](#publish-an-observation).
 
-Keep the report and its `key` until publication is confirmed so the program can retry the report independently of the read.
+Keep the report and its `key` until `publish` returns `accepted` or `duplicate`. If the receipt is missing, retry publication with the same report and key. This lets the program confirm the report independently of the work it received. See [write receipts and recovery](../apps/ivenna/src/help/writes.txt).

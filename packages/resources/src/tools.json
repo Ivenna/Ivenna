@@ -8,7 +8,7 @@
         "location": {
           "type": "string",
           "minLength": 1,
-          "description": "Absolute host path, local file URI, or result.uri from an earlier read. Use an HTTP(S) image URL with the image view. Omit to list the startup directory."
+          "description": "Absolute host path, local file URI, or `result.uri` from an earlier read. Use an HTTP(S) image URL with the image view. Omit to list the startup directory."
         },
         "view": {
           "default": {},
@@ -22,7 +22,7 @@
                   "type": "integer",
                   "minimum": 0,
                   "default": 0,
-                  "description": "To continue, use result.next_offset."
+                  "description": "Use `result.next_offset` to continue reading from `result.uri`."
                 },
                 "limit": {
                   "type": "integer",
@@ -41,7 +41,7 @@
             {
               "type": "string",
               "enum": ["image", "file"],
-              "description": "The image view shares an image or image URL with the model service. A local file can hold the URL. The file view sends a whole local file to the model service for parsing."
+              "description": "The image view supplies an image or an image URL to the model service. A local file can hold the URL. The file view sends a whole local file to the model service for parsing."
             }
           ]
         }

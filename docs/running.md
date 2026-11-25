@@ -168,7 +168,7 @@ Startup reads and validates all selected session history, including sleeping ses
 
 ## Channel receivers
 
-Use the same build of `ivenna` for the kernel and the receiver. Run both under the same effective user ID and in the same Linux network namespace. Both processes must resolve `DATA_DIR` to the same absolute path after following symbolic links. For a receiver in a separate container, share the kernel's network namespace and make the instance data directory available at the same absolute path.
+Use the same build of `ivenna` for the kernel and the receiver. Run both in the same Linux network namespace under the same effective UID. Both processes must resolve `DATA_DIR` to the same absolute path after following symbolic links. When using separate containers, share the kernel's network namespace and mount the instance data directory at the same path. If the containers remap users, the effective UID must have the same number and map to the same Linux user on both sides.
 
 For a receiver launched independently, set `DATA_DIR` to the instance data directory and pass the complete ID returned by `open_channel`.
 
@@ -178,7 +178,7 @@ DATA_DIR=/path/to/instance/data /path/to/ivenna receive 'task-input-18' --follow
 
 Ivenna's own host commands inherit the resolved `DATA_DIR` and the executable path in `IVENNA`. See the [host command environment](host.md#command-environment) and [receive options and results](communication.md#receiving-from-a-channel).
 
-If `receive` reports an unavailable channel service, check the kernel and the receiver settings above. The kernel can also refuse new receivers while all connection slots are in use.
+If `receive` reports an unavailable channel service, check that the kernel is running and that the receiver uses the same directory, UID, and network namespace. The kernel can also refuse new receivers while all connection slots are in use.
 
 ## Subscription listeners
 
@@ -302,7 +302,9 @@ Ivenna cleans up the history folder at startup and periodically while it runs. B
 
 Forks store independent copies of inherited history. Include these copies when sizing runtime memory and the mailbox. Compaction replaces older records with a handover and carries forward selected recent records. Previous records can then move to Trash while other sessions keep their own copies.
 
-The mail service's advertised `maxSizeRequest` applies to each complete model/tool round and to the checkpoint. Image bytes, file bytes, and encoding overhead count toward the history request, so a result within the [model request limits](content.md#model-request-checks) can still exceed the mailbox limit. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`. Any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See [channel registration](communication.md#opening-a-channel) for how `open_channel` reports a checkpoint size rejection and the [history storage protocol](architecture.md#history-storage) for encoding and batching.
+The mail service's advertised `maxSizeRequest` applies to each complete model/tool round and to the checkpoint. Image bytes, file bytes, and encoding overhead count toward the history request, so a result within the [model request limits](content.md#model-request-checks) can still exceed the mailbox limit. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`. Any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See the [JMAP Session capabilities](https://www.rfc-editor.org/rfc/rfc8620.html#section-2) and the [history storage protocol](architecture.md#history-storage) for how requests are sized and batched.
+
+A checkpoint can exceed `maxSizeRequest` as focus and channel registrations or pending wakeups accumulate. A size rejection stops the kernel with `HistoryCheckpointTooLarge` and leaves the previous checkpoint selected. Restart to resume from that checkpoint. After restart, close unused channels to free space. If the checkpoint still exceeds the limit when starting or resuming work, raise the JMAP request size limit if your mail service allows it.
 
 A sleeping activity retains its history even when its context is unloaded. When the activity ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. The activity's messages and ending remain available to the core until they enter the core's history. Shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
@@ -326,7 +328,7 @@ Back up the mailbox and instance database as a pair. Startup checks the database
 
 If taking the backups separately, stop the kernel before saving either store and leave it stopped until both backups finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners too and include any SQLite journal files with the database.
 
-To restore an instance, stop the kernel and listeners. Move the current database, journal, and shared-memory files aside. Restore the database and mailbox from the matched backup. Keep the receiver and listener programs and their configuration. Before resuming a listener, check that its subscription ID and source position match the restored data. If the backup predates a receiver's channel registration, supply an ID for its intended channel in the restored instance before resuming it. See [channel lifetimes](communication.md#channel-lifetimes).
+To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database, journal, and shared-memory files aside, then restore the database and mailbox from the matched backup. Before resuming a listener, check its subscription ID and source position against the restored data. Before resuming a receiver, check that its channel ID still identifies the intended channel. If the backup predates that registration, open a replacement channel and give its ID to the receiver. See [channel lifetimes](communication.md#channel-lifetimes).
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
 

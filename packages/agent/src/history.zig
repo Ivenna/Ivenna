@@ -112,6 +112,9 @@ pub const History = struct {
             const opener = contracts.Reference.sequence(channel.opened_by) orelse return error.InvalidHistory;
             // The opening focus can have ended; the registration outlives it.
             if (sequence >= self.next_runtime_reference_id or opener >= self.next_session_id) return error.InvalidHistory;
+            if (identities.get(opener)) |owner| {
+                if (!std.mem.eql(u8, owner, channel.opened_by)) return error.InvalidHistory;
+            }
             if ((try channel_ids.getOrPut(a, sequence)).found_existing) return error.InvalidHistory;
         }
     }
@@ -351,46 +354,12 @@ pub const Persistence = struct {
         }
     }
 
-    /// The checkpoint a save would publish together with the cache that save
-    /// adopts. Drafting sends no record to the store.
-    const Draft = struct {
-        candidate: Cache,
-        document: []const u8,
-    };
-
     pub fn save(self: *Persistence, a: Allocator, history: History) !void {
-        var builder: Builder = .init(self);
-        defer builder.deinit();
-        var drafted = try self.draft(a, history, &builder);
-        defer drafted.candidate.deinit();
-        try builder.flush();
-        const candidate_digest = Codec.digest(drafted.document);
-        if (self.published_checkpoint_digest) |published| {
-            if (equalKey(published, candidate_digest)) return;
-        }
-        self.store.save(drafted.document) catch |err| {
-            if (err != error.HistoryCheckpointTooLarge) self.published_checkpoint_digest = null;
-            return err;
-        };
-        std.mem.swap(Cache, &self.cache, &drafted.candidate);
-        self.published_checkpoint_digest = candidate_digest;
-    }
-
-    /// Report whether the store would accept this checkpoint's size without
-    /// publishing it. The answer is advisory: a round that grows after the
-    /// check can still fail to save.
-    pub fn fits(self: *Persistence, a: Allocator, history: History) !bool {
-        var builder: Builder = .init(self);
-        defer builder.deinit();
-        var drafted = try self.draft(a, history, &builder);
-        defer drafted.candidate.deinit();
-        return self.store.fits(a, drafted.document);
-    }
-
-    fn draft(self: *Persistence, a: Allocator, history: History, builder: *Builder) !Draft {
         try history.validate(a);
         var candidate: Cache = .init(self.allocator);
-        errdefer candidate.deinit();
+        defer candidate.deinit();
+        var builder: Builder = .init(self);
+        defer builder.deinit();
         const ordered = try a.dupe(History.Session, history.sessions);
         std.mem.sort(History.Session, ordered, {}, struct {
             fn lessThan(_: void, lhs: History.Session, rhs: History.Session) bool {
@@ -435,6 +404,7 @@ pub const Persistence = struct {
             );
             cached.checkpoint = saved.*;
         }
+        try builder.flush();
         const document = try Codec.encode(a, Checkpoint{
             .subscription_catalog = history.subscription_catalog,
             .next_session_id = history.next_session_id,
@@ -446,7 +416,16 @@ pub const Persistence = struct {
             .channels = history.channels,
             .activity_reports = history.activity_reports,
         });
-        return .{ .candidate = candidate, .document = document };
+        const candidate_digest = Codec.digest(document);
+        if (self.published_checkpoint_digest) |published| {
+            if (equalKey(published, candidate_digest)) return;
+        }
+        self.store.save(document) catch |err| {
+            if (err != error.HistoryCheckpointTooLarge) self.published_checkpoint_digest = null;
+            return err;
+        };
+        std.mem.swap(Cache, &self.cache, &candidate);
+        self.published_checkpoint_digest = candidate_digest;
     }
 
     /// Retain confirmed session records together with the caller's unread reports.
@@ -646,4 +625,40 @@ test "earlier channel registrations can omit descriptions" {
     const a = arena.allocator();
     const registration = try Codec.decode(History.Channel, a, ".{.id=\"imports-2\",.opened_by=\"core-1\",.opened_at_unix_ms=0}");
     try t.expectEqual(null, registration.description);
+}
+
+test "channel opener validation allows ended focuses and checks retained identities" {
+    const t = std.testing;
+    var channels = [_]History.Channel{.{
+        .id = "imports-1",
+        .opened_by = "core-1",
+        .opened_at_unix_ms = 0,
+    }};
+    const history: History = .{
+        .subscription_catalog = @splat(0),
+        .next_session_id = 3,
+        .next_callback_id = 1,
+        .next_runtime_reference_id = 2,
+        .sessions = &.{.{
+            .session_id = 1,
+            .focus_id = "core-1",
+            .role = .core,
+            .was_running = false,
+            .subscription_through = 0,
+            .epoch = 0,
+            .entries = &.{},
+            .observations = &.{},
+        }},
+        .wakeups = &.{},
+        .callbacks = &.{},
+        .channels = &channels,
+        .activity_reports = null,
+    };
+    try history.validate(t.allocator);
+    channels[0].opened_by = "other-1";
+    try t.expectError(error.InvalidHistory, history.validate(t.allocator));
+    channels[0].opened_by = "finished-2";
+    try history.validate(t.allocator);
+    channels[0].opened_by = "unissued-3";
+    try t.expectError(error.InvalidHistory, history.validate(t.allocator));
 }

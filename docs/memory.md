@@ -83,15 +83,15 @@ The reply gives the page's text alongside the total size of the entry in bytes.
 
 Pass `next_offset` as the next call's `offset` to continue. A null `next_offset` marks the end. A page can be shorter than requested and can end within a line. It always preserves whole UTF-8 characters. An offset beyond the entry or inside a character returns `invalid_range`.
 
-When a read identifies an image or file, it returns the complete entry for the model service. The accompanying text gives its `address`, `byte_length`, and `kind` (`image` or `file`). An image also includes its `format`. A later text page can reveal binary data and return the whole file. See [automatic classification](content.md#automatic-classification).
+When a read identifies an image or file, it supplies the complete entry to the model service. The accompanying text gives its `address`, `byte_length`, and `kind` (`image` or `file`). An image also includes its `format`. A later text page can reveal binary data and return the whole file. See [automatic classification](content.md#automatic-classification).
 
-An entry containing an image URL is text by default. To view the image, read it from offset zero with `interpretation: "image_url"`. The result has `kind: "image_url"` and gives the size of the stored entry. The image part carries the URL. See [image URL references](content.md#image-url-references).
+An entry containing an image URL is text by default. To view the image, read it from offset zero with `interpretation: "image_url"`. The result has `kind: "image_url"` and gives the size of the stored entry. The model service receives the URL as an image reference. See [image URL references](content.md#image-url-references).
 
 ```json
 {"address":"references/chart","interpretation":"image_url"}
 ```
 
-If the entry exceeds the size limit for that image, file, or URL reference, `content.unavailable` gives the `byte_length` and `reason`. See [content limits](content.md#content-and-results).
+See [content limits](content.md#content-and-results) for the result when an image, file, or URL reference is too large.
 
 ## Recording
 

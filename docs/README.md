@@ -17,7 +17,8 @@
 
 | Task | Guide |
 | --- | --- |
-| Run Ivenna, diagnose stalled work, and manage services and retained data | [Running guide](running.md) |
+| Run Ivenna from source with the supplied mail and memory services | [Local development](../dev/README.md) |
+| Configure a deployment, diagnose stalled work, and manage retained data | [Running guide](running.md) |
 | Update an existing instance across an interface or storage change | [Upgrade guide](upgrading.md) |
 | Configure a host or container for a channel receiver | [Channel receiver deployment](running.md#channel-receivers) |
 | Run a subscription listener independently of the kernel | [Subscription listener deployment](running.md#subscription-listeners) |
@@ -32,5 +33,4 @@
 | Understand what the model receives when a tool returns text, an image, or a file | [Tool content](content.md) |
 | Understand component ownership and how execution fits together | [Architecture guide](architecture.md) |
 | Change implementation and documentation, build from source, and validate work | [Development guide](development.md) |
-| Prepare, run, and update the supplied local services | [Local development](../dev/README.md) |
 | Run automated checks and validate behavior with running services | [Testing guide](testing.md) |

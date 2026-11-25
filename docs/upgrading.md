@@ -9,17 +9,6 @@ Feed readers paged through stored messages. A channel hands each message to one 
 1. Stop the kernel and locate its current `state.sqlite3`. If `DATA_DIR` traverses a symbolic link before `..`, configure the updated executable with the absolute path of the directory holding that database. The updated kernel follows the link before traversing `..`.
 2. Make a matched backup of the instance database and mailbox. Keep the old executable with the backup. See [backups and transfers](running.md#backups-and-transfers).
 
-### Optional feed cleanup
-
-The updated kernel leaves old feed data in `feeds` and `feed_messages`. Inspect or export it from the backup if needed. To remove the old tables from the live database, verify the backup and keep the kernel stopped while running this transaction against the existing `state.sqlite3`.
-
-```sql
-BEGIN IMMEDIATE;
-DROP TABLE IF EXISTS feed_messages;
-DROP TABLE IF EXISTS feeds;
-COMMIT;
-```
-
 ### Update callers and receivers
 
 | Replace | With |
@@ -32,9 +21,22 @@ Replace page and sequence tracking with one JSON line per read result. Use `--ti
 
 Start the updated kernel with the existing instance database and mailbox to resume subscriptions and working history. Open a channel for each stream you want to continue. Give its ID to the receiving program and start the receiver before sending. See [channel receiver deployment](running.md#channel-receivers).
 
+### Optional feed cleanup
+
+The updated kernel leaves old feed data in `feeds` and `feed_messages`. Inspect or export it from the backup if needed. After validating the upgrade, you can remove these tables from the live database. Verify the backup, stop the kernel, and run this transaction against the existing `state.sqlite3`.
+
+```sql
+BEGIN IMMEDIATE;
+DROP TABLE IF EXISTS feed_messages;
+DROP TABLE IF EXISTS feeds;
+COMMIT;
+```
+
 ## From an earlier channel build
 
-Use `receive --timeout MS` for the bounded wait previously selected by `--wait MS`. Handle `channel_would_block` in place of `channel_not_ready`. Every saved channel now survives a restart, including one whose opening activity has ended; close a channel you no longer need. After upgrading a kernel that ran without channel checkpoints, open channels for the streams you want to resume and give receivers the new IDs. See [send outcomes](communication.md#sending-to-a-channel) and [channel lifetimes](communication.md#channel-lifetimes).
+Update the kernel and receiver executables together. Replace `receive --wait MS` with `receive --timeout MS`, and handle `channel_would_block` in place of `channel_not_ready`. See [receiver deployment](running.md#channel-receivers) and [send outcomes](communication.md#sending-to-a-channel).
+
+Reuse a channel ID if the checkpoint saved its registration. Open a replacement channel for any registration absent from the checkpoint and give the new ID to the receiver. Builds before channel checkpoints saved no registrations. Some later builds kept only registrations whose opening focus was still present. See [channel lifetimes](communication.md#channel-lifetimes).
 
 ## Reading tool results
 

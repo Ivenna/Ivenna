@@ -4,7 +4,7 @@ The core receives incoming correspondence. Both the core and activities can send
 
 ## Sending a message
 
-Call `send` with nonempty `text` and a `to` object containing exactly one destination field. Use a complete ID from an observation, a tool result, or a reference shared in a message.
+Call `send` with nonempty `text` and a `to` object containing exactly one destination field. Use a complete ID from an observation, a handover, a tool result, or a message.
 
 | Field in `to` | Destination | Successful result |
 | --- | --- | --- |
@@ -68,15 +68,9 @@ Any focus can call `open_channel` with a name and a nonempty description of the 
 {"result":{"channel_id":"task-input-18"}}
 ```
 
-Pass the complete `channel_id` to the receiving program and use it to send or close the channel. The description gives the ID context in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
+The runtime saves the registration with the tool result that supplies its ID. Once it confirms that checkpoint, the channel is available for reads and sends. Pass the complete `channel_id` to the receiving program and use it to send or close the channel. The description gives the ID context in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
 
-The registration is saved together with the tool results of the round that reports it. Before reserving anything, `open_channel` checks whether a checkpoint carrying the new registration fits the store's request limit, so an over-limit checkpoint is refused while the round can still report why.
-
-| Open error | Meaning |
-| --- | --- |
-| `channel_capacity_exceeded` | The checkpoint could not hold one more registration. No channel was opened, no ID was reserved, and nothing was persisted. |
-
-That check is advisory: a round that grows after it can still be rejected when the committing save runs. The rejected save persists nothing and leaves the channel unaddressable. Close an unused channel that survives restart to free its share.
+A checkpoint size rejection stops the runtime and leaves the previous checkpoint selected. If the runtime cannot confirm publication, it stops with the channel still inactive. On restart, the selected checkpoint determines whether the channel and its tool result are restored together. See [working history limits](running.md#working-history) for size recovery and [saving and restoration](architecture.md#saving-and-restoration) for how the runtime selects a checkpoint.
 
 ### Receiving from a channel
 
@@ -121,7 +115,7 @@ While a program is waiting to receive, call `send` with the complete ID in `to.c
 
 | Send error | Meaning |
 | --- | --- |
-| `channel_would_block` | The message is unsent and unqueued. The result can arrive before the runtime checks the ID. You can retry when a receiver is waiting. |
+| `channel_would_block` | The message remains unsent and unqueued. The registry was busy or no waiting request accepted the message. You can retry when a receiver is waiting. |
 | `unknown_channel` | The lookup found no open channel for the supplied ID. |
 | `channel_message_too_long` | The text exceeds the channel's message limit. |
 
@@ -137,10 +131,10 @@ Either role can call `close_channel` with a complete channel ID.
 {"result":{"channel_id":"task-input-18","changed":true}}
 ```
 
-Closing the channel retires its ID and ends [outstanding reads](#receiving-from-a-channel). Closing an ID that is already absent returns `changed: false`.
+The runtime confirms retirement before ending [outstanding reads](#receiving-from-a-channel). Closing an ID that is already absent returns `changed: false`.
 
 ### Channel lifetimes
 
-A channel stays open when its readers exit or its opening focus ends. Only `close_channel` or the end of the runtime retires it.
+A channel stays open when its readers exit or its opening focus ends. Use `close_channel` to retire its ID.
 
-When the kernel restarts, it reopens every saved channel, including one whose opening activity has ended. Each keeps its ID and any saved description. A receiving program starts a new read with the same ID. The restored channel starts with no pending reads or messages, so a send can return `channel_would_block` until a receiver is waiting. See [receiver deployment](running.md#channel-receivers).
+After restart, an open channel keeps its ID and any saved description. Start a fresh read with that ID once the kernel is running again. Each new read waits for a new send. With no receiver waiting, a send to the restored channel returns `channel_would_block`. See [receiver deployment](running.md#channel-receivers).

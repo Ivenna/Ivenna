@@ -23,7 +23,7 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. Short text appears inline. Partial or binary output includes a log path. If work continues after the initial wait, the result gives a `command_id` for further interaction and a `callback_id` for this focus's completion observation.",
+    "description": "Run a command in a fresh shell. Short text appears inline. Partial or binary output includes a log path. If the result is still pending after the initial wait, use `command_id` to continue and `callback_id` to identify the completion observation.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -50,7 +50,8 @@
         },
         "login": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "description": "Run the shell's login initialization."
         },
         "mode": {
           "type": "string",
@@ -60,20 +61,20 @@
             "terminal"
           ],
           "default": "batch",
-          "description": "`batch` has no live stdin. `pipe` accepts writes to stdin. `terminal` provides a pseudo-terminal, merges stdout and stderr, and can alter input and output bytes."
+          "description": "In `batch` mode stdin starts closed. `pipe` accepts writes to stdin. `terminal` runs the command in a terminal, combines stdout and stderr, and can change input and output bytes."
         },
         "timeout_ms": {
           "type": "integer",
           "minimum": 1,
           "maximum": 4294967295,
-          "description": "Omit for no execution deadline."
+          "description": "Stop the command after this duration in milliseconds. Omit for no time limit."
         },
         "max_output_bytes": {
           "type": "integer",
           "minimum": 512,
           "maximum": 16384,
           "default": 4096,
-          "description": "Combined byte budget for stdout and stderr previews after JSON escaping."
+          "description": "Combined byte budget for stdout and stderr previews."
         },
         "yield_ms": {
           "type": "integer",
@@ -220,7 +221,7 @@
           "minimum": 512,
           "maximum": 16384,
           "default": 4096,
-          "description": "Combined byte budget for stdout and stderr previews after JSON escaping."
+          "description": "Combined byte budget for stdout and stderr previews."
         }
       },
       "required": [

@@ -1,6 +1,6 @@
 # Tool content
 
-Tool results can carry text, images, or complete files into the calling focus's working history. This guide describes what the model receives when a tool returns media. See the [input contract](input.md#retained-records) for observations delivered as events.
+Tool results can carry text, images, or complete files into the calling focus's working history. See the [input contract](input.md#retained-records) for observations delivered as events.
 
 ## Automatic classification
 
@@ -14,7 +14,7 @@ Readers recognize JPEG, PNG, GIF, and WebP by signature and PDF by its header. O
 
 When a tool supplies media, an accompanying text part identifies its source. An image part carries the image bytes or an [image URL](#image-url-references). A file part carries the complete source for [upload](#complete-files).
 
-When the reader identifies an oversized source, `content.unavailable` gives its `byte_length` and the reason.
+When a resource or memory read identifies an oversized source, `result.content.unavailable` gives its `byte_length` and the reason.
 
 | Reason | Meaning |
 | --- | --- |

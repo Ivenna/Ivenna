@@ -2,25 +2,28 @@ ivenna receive CHANNEL_ID [--timeout MS]
 ivenna receive CHANNEL_ID --follow
 
 Pass the complete ID returned by open_channel. Set DATA_DIR to the instance
-data directory so both processes resolve it to the same absolute path. Run
-receive with the same ivenna build, effective user ID, and Linux network
-namespace as the kernel. Host commands inherit DATA_DIR and can call "$IVENNA".
+data directory. It must resolve to the same absolute path for the receiver and
+the kernel. Run both with the same ivenna build and effective user ID in the
+same Linux network namespace. Host commands inherit DATA_DIR and can call
+"$IVENNA" receive.
 
-Start receiving before sending. Without options, wait for one message.
-Use --timeout MS to limit that wait to 1 through {d} milliseconds.
+Start receiving before sending. By default, wait for one message or for the
+channel to close. Use --timeout MS to limit the wait for a message to 1 through
+{d} milliseconds.
 
-A completed single read writes one JSON line to stdout and exits with status 0.
-The status field gives the outcome.
+A completed single read writes one JSON line to stdout and exits with
+status 0. The status field gives the outcome.
 
   message    One message was read. The text field contains the message.
   timeout    The wait elapsed before a message arrived.
-  closed     The channel closed before the read matched a message or timed out.
+  closed     The channel closed while the read was waiting.
 
-Use --follow to stream message records, one JSON line per message. The command
-flushes each line before requesting the next read. It finishes writing any
-matched message and exits with status 0 when it observes the channel close.
+Use --follow to stream one JSON line per message. The command flushes each
+line before requesting the next read. On channel close it writes any matched
+message and exits with status 0.
+
 If the output pipe closes during a wait or write, either mode exits with
-status 0, possibly without a complete line for the current read.
+status 0. A write in progress may leave a partial line.
 
 An unknown ID on the initial request or an unavailable channel service
 produces a diagnostic on stderr and exit status 1.

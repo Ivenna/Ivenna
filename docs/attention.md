@@ -50,7 +50,7 @@ The observation identifies the sending focus. When relaying someone else's words
 
 ## Returning later
 
-The core calls `schedule_attention` with a short `name`, the wakeup time in `at`, and nonempty `text` describing what to return to. Pass `at` in RFC 3339 form with `Z` for UTC or an explicit offset such as `+08:00`.
+The core calls `schedule_attention` with a short `name`, an absolute wakeup time in `at`, and nonempty `text` describing what to return to. Pass `at` as an RFC 3339 date and time with `Z` for UTC or an explicit offset such as `+08:00`.
 
 ```json
 {"name":"revisit-practice","at":"2026-11-10T18:00:00Z","text":"Revisit the French practice plan."}
@@ -62,7 +62,7 @@ The wakeup survives restart. The result gives its `callback_id`.
 {"result":{"callback_id":"revisit-practice-5"}}
 ```
 
-A past `at` makes the wakeup due immediately. The core can keep working until the callback arrives with the supplied text and the original time in `scheduled_for`. Cancellation is unavailable. See [wakeup and callback fields](input.md#callback-observations).
+A past `at` makes the wakeup eligible at the next intake poll. The core can keep working until the callback arrives. The observation carries the supplied text and the scheduled instant in `scheduled_for`, rendered in UTC. Cancellation is unavailable. See [wakeup and callback fields](input.md#callback-observations).
 
 ### Callback observations
 
@@ -129,4 +129,4 @@ An activity with a pending callback or an active subscription can sleep with its
 
 Withdraw subscriptions when the activity finishes following their sources. The activity ends and frees its capacity slot when it has no work, pending callbacks, or active subscriptions left. Its ending calls for the core's attention even if it produced no text.
 
-The core can still receive the ended activity's expressions and ending with its original focus ID. An activity can pass a channel ID in a report for the core to use after the activity ends. See [channel lifetimes](communication.md#channel-lifetimes) and [report fields](input.md#assignments-and-reports).
+The core can still receive the ended activity's expressions and ending with its original focus ID. An activity can share an open channel's ID in a report so the core can keep using it after the activity ends. See [channel lifetimes](communication.md#channel-lifetimes) and [report fields](input.md#assignments-and-reports).

@@ -14,7 +14,7 @@ Starting exactly at the end of the text or listing returns an empty window. An o
 
 Pass a [command log's path](host.md#output-and-results) directly as `location`. The reader follows symbolic links when opening a path. Each read sees the current filesystem, so edits between reads can shift offsets.
 
-Opening a text file in the default view returns a passage in `result.content`, with `byte_length` when known. If the reader encounters a recognized image, a PDF, or binary data, the preview gives the file's `uri`, `byte_length`, and the `view` to use. To receive the media, pass that URI as `location` with the suggested view. An oversized source gives its size and reason in `content.unavailable`. See [source limits](content.md#content-and-results).
+Opening a text file in the default view returns a passage in `result.content`, with `byte_length` when known. For an image, PDF, or binary file within the size limit, the preview gives its `uri`, `byte_length`, and the `view` to use. To receive the media, pass that URI as `location` with the suggested view. See [source limits](content.md#content-and-results).
 
 You can also request the view directly. For example, this call attaches a complete local file for the model service to parse.
 
@@ -32,7 +32,7 @@ Absolute paths are literal, so `/srv/reports/Q4 #1%.pdf` opens the file with exa
 
 When web page access is enabled, use an HTTP(S) URL with the default view to fetch the page as Markdown. The URL must have a host and omit embedded usernames and passwords. The tool description names the service that receives the URL and indicates whether fetching the page may incur a charge. See [web page access](running.md#web-page-access).
 
-Use `result.uri` as `location` to read the same snapshot in the core or an activity without another fetch. Use `result.source_uri`, the original URL, as `location` to fetch a fresh copy.
+Continue with the snapshot's `result.uri` and `result.next_offset`. The core and activities can read the same snapshot without fetching the page again. Use `result.source_uri`, the original URL, to fetch a fresh copy.
 
 For example, `{"location":"https://example.org/guide","view":{"limit":6}}` might return the heading of a page.
 
@@ -51,7 +51,7 @@ For example, `{"location":"https://example.org/guide","view":{"limit":6}}` might
 }
 ```
 
-This window contains the first six bytes of a 37-byte snapshot. Continue from `next_offset` using the snapshot URI.
+The next call continues at byte six in the same snapshot.
 
 ```json
 {"location":"ivenna:fetch/7198a8e09ae74b1c","view":{"offset":6}}
@@ -86,4 +86,4 @@ A failed read returns an `error` with a `code` and a `message`.
 | `not_readable` | Check the message for the cause, such as a file exceeding the view's size limit during the read. |
 | `rate_limited`, `read_timeout` | The service is limiting requests or the read timed out. A later read may succeed. |
 | `page_too_large` | The page is too large to retrieve or retain. A smaller reading window still requires the whole page. |
-| `web_unavailable` | Check the message to see whether page retrieval is disabled or the page service could not complete the request. |
+| `web_unavailable` | Check the message for the cause, such as disabled retrieval, a connection failure, or a problem at the page service. |

@@ -48,7 +48,6 @@ pub const HistoryStore = struct {
         read: *const fn (*anyopaque, Allocator, []const Reference) anyerror![]const []const u8,
         create: *const fn (*anyopaque, Allocator, []const Record) anyerror!void,
         save: *const fn (*anyopaque, []const u8) anyerror!void,
-        fits: *const fn (*anyopaque, Allocator, []const u8) anyerror!bool,
         maintain: *const fn (*anyopaque, Allocator, Retention) anyerror!void,
     };
 
@@ -86,13 +85,6 @@ pub const HistoryStore = struct {
     /// follow publication.
     pub fn save(self: HistoryStore, document: []const u8) !void {
         return self.vtable.save(self.context, document);
-    }
-
-    /// Report whether save would accept this document's size, without
-    /// publishing it. The answer is advisory: a later, larger checkpoint can
-    /// still fail, and save remains the authority.
-    pub fn fits(self: HistoryStore, a: Allocator, document: []const u8) !bool {
-        return self.vtable.fits(self.context, a, document);
     }
 
     /// Reconcile storage against a confirmed checkpoint's complete selection.

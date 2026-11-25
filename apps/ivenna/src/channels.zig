@@ -129,14 +129,14 @@ pub const Registry = struct {
 
     pub fn port(self: *Registry) Channels {
         return .{ .context = self, .vtable = &.{
-            .open = open,
+            .reserve = reserve,
             .activate = activate,
             .close = close,
             .trySend = trySend,
         } };
     }
 
-    fn open(context: *anyopaque, id: []const u8) !void {
+    fn reserve(context: *anyopaque, id: []const u8) !void {
         const self: *Registry = @ptrCast(@alignCast(context));
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -146,19 +146,20 @@ pub const Registry = struct {
         try self.channels.putNoClobber(self.allocator, owned_id, .{});
     }
 
-    fn activate(context: *anyopaque, id: []const u8) !void {
-        const self: *Registry = @ptrCast(@alignCast(context));
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        const channel = self.channels.getPtr(id) orelse return error.UnknownChannel;
-        channel.active = true;
-    }
-
-    fn close(context: *anyopaque, id: []const u8) bool {
+    fn activate(context: *anyopaque, id: []const u8) void {
         const self: *Registry = @ptrCast(@alignCast(context));
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const removed = self.channels.fetchRemove(id) orelse return false;
+        const channel = self.channels.getPtr(id).?;
+        std.debug.assert(!channel.active);
+        channel.active = true;
+    }
+
+    fn close(context: *anyopaque, id: []const u8) void {
+        const self: *Registry = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const removed = self.channels.fetchRemove(id).?;
         var channel = removed.value;
         while (channel.receivers.first) |node| {
             const receiver: *Receiver = @alignCast(@fieldParentPtr("node", node));
@@ -166,7 +167,6 @@ pub const Registry = struct {
             receiver.finish(&channel.receivers);
         }
         self.allocator.free(removed.key);
-        return true;
     }
 
     fn trySend(context: *anyopaque, id: []const u8, message: []const u8) !Channels.SendOutcome {

@@ -16,9 +16,7 @@ This `run_host_shell` call runs `make` in a project directory.
 {"name":"build","command":"make -j4","cwd":"/path/to/project"}
 ```
 
-`yield_ms` limits the initial wait. Set `timeout_ms` to limit how long the command can run.
-
-If execution and cleanup finish within the wait, the call returns the outcome and an output preview. If the wait ends first, the result includes a `command_id` for further interaction and a `callback_id` for the completion observation. Both IDs use the supplied name with independently assigned suffixes. The calling activity receives the observation even if the command finishes during the handoff.
+If execution and cleanup finish during the initial wait, the call returns the outcome and an output preview. If the wait ends first, the result includes a `command_id` for further interaction and a `callback_id` for the completion observation. Both IDs use the supplied name with independently assigned suffixes. The calling activity receives the observation even if the command finishes during the handoff.
 
 | Argument | Meaning |
 | --- | --- |
@@ -29,8 +27,8 @@ If execution and cleanup finish within the wait, the call returns the outcome an
 | `login` | Use `-lc` for the selected shell's login initialization. Defaults to `false`. |
 | `mode` | Selects an [input mode](#input-modes). Defaults to `batch`. |
 | `yield_ms` | Initial wait for completion in milliseconds. Defaults to `10000`. Use `0` to skip the wait. |
-| `timeout_ms` | Optional execution limit in milliseconds. Use a positive duration. |
-| `max_output_bytes` | Budget for the combined stdout and stderr previews after JSON escaping. Defaults to `4096` and accepts `512` through `16384`. Result metadata and log references are additional. |
+| `timeout_ms` | Optional execution timeout in milliseconds. The runtime begins stopping the command when this duration elapses. |
+| `max_output_bytes` | Combined budget for the JSON-encoded stdout and stderr previews. Defaults to `4096` and accepts `512` through `16384`. Result metadata and log references are additional. |
 
 Each command starts a fresh shell. The `cwd` and `shell` arguments accept literal paths or local `file://` URIs. Inside `command`, the shell expands expressions and resolves relative paths from its current directory. A shell running in an interactive [input mode](#input-modes) can retain directory and environment changes across calls.
 
@@ -77,11 +75,11 @@ Select exactly one operation when supplying `action`.
 | Action | Example | Effect |
 | --- | --- | --- |
 | Read | `{"read":{}}` | Observe output and status without supplying input |
-| Write | `{"write":{"text":"print(1 + 1)\n"}}` | Supply text to a pipe or terminal. Optional `eof` follows the mode's rules below. |
+| Write | `{"write":{"text":"print(1 + 1)\n"}}` | Supply text to a pipe or terminal. Use `eof: true` to end pipe input or send Ctrl-D to a terminal. |
 | Signal | `{"signal":{"name":"interrupt"}}` | Send `interrupt` (SIGINT), `terminate` (SIGTERM), or `kill` (SIGKILL) |
 | Resize | `{"resize":{"rows":40,"cols":120}}` | Change dimensions in terminal mode |
 
-`eof: true` in `action.write` closes pipe stdin for the rest of the command after writing the supplied text. In terminal mode it sends Ctrl-D and leaves the terminal writable.
+The runtime writes the supplied text before applying `eof`. Pipe stdin stays closed for the rest of the command. A terminal can accept later writes if the program keeps running.
 
 Each write accepts at most 4096 Unicode code points and proceeds independently of the observation call. `stdin.pending` identifies a write still in flight. Another write returns `input_busy` until it finishes. An optional `stdin.error` describes a failed or interrupted write. Some input may already have reached the program. Check its response before repeating that input.
 
@@ -159,6 +157,6 @@ Errors describe the failed operation and indicate what effects may already have 
 | `control_failed` | A signal or terminal resize failed. The message gives the available reason. |
 | `host_unavailable` | The host could not prepare the command's logs or collect its output. The response indicates whether the command could have produced effects. |
 
-If the initial preview fails after registration, `host_unavailable` comes with the observed state, log paths, `output_error`, and both IDs. Use the `command_id` to observe the command again. The `callback_id` identifies the completion observation still due to the activity.
+When output collection fails, the reply can contain both `error` and `result`. Check `error.effects` and use the state and log paths in `result` to assess what the command did. If the initial preview fails after a handoff, the `command_id` can still be used to observe the command and the `callback_id` identifies the completion observation due to the activity.
 
 These defined errors remain tool observations. Failures of task scheduling or runtime supervision follow the [runtime availability](design.md#runtime-availability) contract and end the runtime.

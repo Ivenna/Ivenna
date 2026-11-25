@@ -63,7 +63,7 @@ Correspondence reaches the core as observations of who said what and when the ru
 
 Ivenna chooses when to send, whom or what to reach, and what to say. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna acts and reports the outcome, so Ivenna can revise its understanding as circumstances change. Internal reasoning and activity completion stay within Ivenna. See [sending a message](communication.md#sending-a-message).
 
-Any focus can open a channel with a description of its purpose and share its ID with a local program or another focus. The program chooses when to receive a message and how to act on it. A send immediately tells Ivenna whether the runtime handed the message to a waiting receiver. The same ID can serve a replacement receiver and let programs reconnect after a restart that restores the opening focus. The program can continue working after Ivenna closes the channel. See [channels](communication.md#channels).
+Any focus can open a channel with a description of its purpose and share its ID with a local program or another focus. The program chooses when to receive a message and how to act on it. A send immediately tells Ivenna whether the runtime handed the message to a waiting receiver. The channel can outlive its opening focus, and the same ID lets a replacement receiver connect or an existing receiver reconnect after restart. The program can continue its work after Ivenna closes the channel. See [channels](communication.md#channels).
 
 ## Sessions and continued work
 
@@ -97,7 +97,7 @@ Even a short list of names uses context and can draw attention to unrelated work
 
 Compaction asks Ivenna to summarize retained exchanges. Ivenna chooses what to carry forward about its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. See [bounded model context](architecture.md#bounded-model-context).
 
-A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending wakeups to when the focus meant to return. See [sampled state](input.md#sampled-state).
+A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending wakeups to the absolute times the focus chose for returning. See [sampled state](input.md#sampled-state).
 
 The runtime uses its own records to deliver observations and resume pending work. It keeps the original history until it can continue with the handover and can carry complete exchanges forward when exact wording or sources matter. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
 

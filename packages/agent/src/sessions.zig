@@ -68,7 +68,12 @@ pub const Session = struct {
 };
 
 pub const Work = struct { session: *Session, activation: *Activation };
-pub const ForkPlan = struct { session: *Session };
+
+/// Changes that become visible with the tool round that reports them.
+pub const RoundChanges = struct {
+    forks: std.ArrayList(*Session) = .empty,
+    channels: std.ArrayList(StagedChannel) = .empty,
+};
 
 const StagedChannel = struct {
     record: History.Channel,
@@ -93,10 +98,6 @@ pub const Registry = struct {
     /// Open channel registrations confirmed by a checkpoint. The channel
     /// transport owns waiting readers.
     channels: std.ArrayList(History.Channel) = .empty,
-    /// Channels opened in a round whose checkpoint is not yet saved. The
-    /// transport entry stays reserved and the ID stays unpublished until the
-    /// round that reports it commits.
-    staged: std.ArrayList(StagedChannel) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
     // Only withdrawal can remove the last reason for an already sleeping
@@ -210,8 +211,6 @@ pub const Registry = struct {
         self.callbacks.deinit(self.allocator);
         for (self.channels.items) |channel| self.freeChannel(channel);
         self.channels.deinit(self.allocator);
-        for (self.staged.items) |staged| self.freeChannel(staged.record);
-        self.staged.deinit(self.allocator);
         self.queued_callbacks.deinit(self.allocator);
         self.reports.deinit();
         self.history.deinit();
@@ -404,11 +403,12 @@ pub const Registry = struct {
         if (session.subscription_through != previous_through) try self.subscriptions.acknowledge(session.focus_id, session.subscription_through);
     }
 
-    pub fn prepareFork(self: *Registry, work: Work, name: []const u8, task: []const u8) !ForkPlan {
+    pub fn prepareFork(self: *Registry, work: Work, changes: *RoundChanges, name: []const u8, task: []const u8) ![]const u8 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
         if (self.sessions.count() + self.reserved_sessions >= self.max_sessions) return error.SessionCapacityUnavailable;
+        try changes.forks.ensureUnusedCapacity(self.allocator, 1);
         const session = try self.allocator.create(Session);
         session.* = .{
             .session_id = self.next_session_id,
@@ -421,60 +421,59 @@ pub const Registry = struct {
         try session.pending.append(self.allocator, assignment);
         self.next_session_id += 1;
         self.reserved_sessions += 1;
-        return .{ .session = session };
+        changes.forks.appendAssumeCapacity(session);
+        return session.focus_id;
     }
 
-    pub fn abandonFork(self: *Registry, plan: ForkPlan) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        self.reserved_sessions -= 1;
-        self.destroySession(plan.session);
+    /// Release reservations that did not become part of a confirmed round.
+    pub fn discardRound(self: *Registry, changes: *RoundChanges) void {
+        if (changes.forks.items.len != 0) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.reserved_sessions -= changes.forks.items.len;
+            for (changes.forks.items) |fork| self.destroySession(fork);
+        }
+        for (changes.channels.items) |channel| {
+            channel.transport.close(channel.record.id);
+            self.freeChannel(channel.record);
+        }
+        changes.forks.deinit(self.allocator);
+        changes.channels.deinit(self.allocator);
     }
 
-    /// Publish the completed context and its forks together. On every return
-    /// the caller owns the context left in `completed` and any remaining plans.
-    pub fn commitToolRound(self: *Registry, work: Work, completed: *Context, plans: *std.ArrayList(ForkPlan), input_tokens: ?u64) !void {
+    /// Publish the completed context, forks and channel registrations together.
+    /// The caller owns the context left in completed and releases any remaining
+    /// reservations when the round exits.
+    pub fn commitToolRound(self: *Registry, work: Work, completed: *Context, changes: *RoundChanges, input_tokens: ?u64) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const session = work.session;
-        for (plans.items) |plan| {
-            plan.session.context = try Context.restore(self.allocator, .{ .session_id = plan.session.session_id, .epoch = 0 }, plan.session.focus_id, completed.records());
-        }
-        try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(plans.items.len));
-        // Save the channels this session opened with the results that report
-        // them. A rejected checkpoint persists neither.
-        var pending: std.ArrayList(History.Channel) = .empty;
-        defer pending.deinit(self.allocator);
-        for (self.staged.items) |staged| {
-            if (!std.mem.eql(u8, staged.record.opened_by, session.focus_id)) continue;
-            try pending.append(self.allocator, staged.record);
-        }
-        try self.channels.ensureUnusedCapacity(self.allocator, pending.items.len);
-        std.mem.swap(Context, &session.context.?, completed);
-        for (plans.items) |plan| {
-            self.sessions.putAssumeCapacity(plan.session.session_id, plan.session);
-            self.reserved_sessions -= 1;
-        }
-        plans.clearRetainingCapacity();
-        self.saveLockedWith(pending.items) catch |err| {
-            // Hand the unpublished round back to the caller together with its
-            // channels, so no later save reports a channel that was dropped.
-            std.mem.swap(Context, &session.context.?, completed);
-            self.dropStagedOwnedBy(session);
-            return err;
+        errdefer for (changes.forks.items) |fork| {
+            if (fork.context) |*context| context.deinit();
+            fork.context = null;
         };
-        var index: usize = 0;
-        while (index < self.staged.items.len) {
-            const staged = self.staged.items[index];
-            if (!std.mem.eql(u8, staged.record.opened_by, session.focus_id)) {
-                index += 1;
-                continue;
-            }
-            try staged.transport.activate(staged.record.id);
-            _ = self.staged.swapRemove(index);
-            self.channels.appendAssumeCapacity(staged.record);
+        for (changes.forks.items) |fork| {
+            fork.context = try Context.restore(self.allocator, .{ .session_id = fork.session_id, .epoch = 0 }, fork.focus_id, completed.records());
         }
+        try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(changes.forks.items.len));
+        try self.channels.ensureUnusedCapacity(self.allocator, changes.channels.items.len);
+
+        std.mem.swap(Context, &session.context.?, completed);
+        errdefer std.mem.swap(Context, &session.context.?, completed);
+        for (changes.forks.items) |fork| self.sessions.putAssumeCapacity(fork.session_id, fork);
+        errdefer for (changes.forks.items) |fork| {
+            _ = self.sessions.remove(fork.session_id);
+        };
+        const confirmed_channels = self.channels.items.len;
+        for (changes.channels.items) |channel| self.channels.appendAssumeCapacity(channel.record);
+        errdefer self.channels.shrinkRetainingCapacity(confirmed_channels);
+        try self.saveLocked();
+
+        self.reserved_sessions -= changes.forks.items.len;
+        changes.forks.clearRetainingCapacity();
+        for (changes.channels.items) |channel| channel.transport.activate(channel.record.id);
+        changes.channels.clearRetainingCapacity();
         session.last_input_tokens = input_tokens;
     }
 
@@ -507,24 +506,9 @@ pub const Registry = struct {
     }
 
     fn saveLocked(self: *Registry) !void {
-        return self.saveLockedWith(&.{});
-    }
-
-    /// Encode the checkpoint. `pending` adds the registrations that only the
-    /// committing round makes addressable, so a rejected checkpoint leaves no
-    /// channel that has no reported ID.
-    fn saveLockedWith(self: *Registry, pending: []const History.Channel) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        return self.history.save(a, try self.snapshotLocked(a, pending, self.next_runtime_reference_id));
-    }
-
-    /// Build the checkpoint this round would publish. Nothing reaches the store
-    /// until saveLockedWith encodes and publishes the same checkpoint.
-    /// `next_reference_id` is the counter the commit will publish, which is
-    /// ahead of the staged registration still waiting for its own commit.
-    fn snapshotLocked(self: *Registry, a: Allocator, pending: []const History.Channel, next_reference_id: u64) !History {
         var retained: std.ArrayList(History.Session) = .empty;
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
@@ -545,20 +529,17 @@ pub const Registry = struct {
                 .observations = observations.items,
             });
         }
-        var channels: std.ArrayList(History.Channel) = .empty;
-        try channels.appendSlice(a, self.channels.items);
-        try channels.appendSlice(a, pending);
-        return .{
+        try self.history.save(a, .{
             .subscription_catalog = self.subscription_catalog,
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
-            .next_runtime_reference_id = next_reference_id,
+            .next_runtime_reference_id = self.next_runtime_reference_id,
             .wakeups = self.wakeups.values(),
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
-            .channels = channels.items,
+            .channels = self.channels.items,
             .activity_reports = self.reports.checkpoint(),
-        };
+        });
     }
 
     pub fn current(self: *Registry, a: Allocator, session: *Session) !Input.Current {
@@ -592,14 +573,6 @@ pub const Registry = struct {
         };
         var channels: std.ArrayList(Input.SampledChannel) = .empty;
         for (self.channels.items) |channel| {
-            if (session != self.core and !std.mem.eql(u8, channel.opened_by, session.focus_id)) continue;
-            try channels.append(a, .{
-                .channel_id = try a.dupe(u8, channel.id),
-                .description = if (channel.description) |text| try a.dupe(u8, text) else null,
-            });
-        }
-        for (self.staged.items) |staged| {
-            const channel = staged.record;
             if (session != self.core and !std.mem.eql(u8, channel.opened_by, session.focus_id)) continue;
             try channels.append(a, .{
                 .channel_id = try a.dupe(u8, channel.id),
@@ -1043,10 +1016,9 @@ pub const Registry = struct {
         self.allocator.destroy(session);
     }
 
-    /// Reserve a transport entry now. The registration becomes addressable only
-    /// when the round that reports it commits its checkpoint, so an over-limit
-    /// checkpoint leaves no channel behind.
-    pub fn openChannel(self: *Registry, a: Allocator, work: Work, transport: contracts.Channels, name: []const u8, description: []const u8) ![]const u8 {
+    /// Reserve an entry for the tool round.
+    /// The reservation is addressable only after the round commits.
+    pub fn openChannel(self: *Registry, a: Allocator, work: Work, changes: *RoundChanges, transport: contracts.Channels, name: []const u8, description: []const u8) ![]const u8 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
@@ -1054,55 +1026,32 @@ pub const Registry = struct {
         const next = try std.math.add(u64, reference, 1);
         const id = try contracts.Reference.create(a, name, reference);
         errdefer a.free(id);
-        const record: History.Channel = .{
+        const record = try self.copyChannel(.{
             .id = id,
             .opened_by = work.session.focus_id,
             .opened_at_unix_ms = self.now(),
             .description = description,
-        };
-        // Answer an over-limit checkpoint here, while the round still has a
-        // tool result to carry the reason and nothing is reserved.
-        try self.precheckChannelLocked(a, work, record, next);
-        try self.appendStaged(.{ .record = record, .transport = transport });
-        errdefer self.dropStaged(self.staged.items.len - 1);
-        errdefer _ = transport.close(id);
-        try transport.open(id);
+        });
+        errdefer self.freeChannel(record);
+        try changes.channels.ensureUnusedCapacity(self.allocator, 1);
+        try transport.reserve(id);
+        changes.channels.appendAssumeCapacity(.{ .record = record, .transport = transport });
         self.next_runtime_reference_id = next;
         return id;
-    }
-
-    /// Report whether the checkpoint this round would publish can still hold
-    /// one more registration. Advisory: a round that grows after the check can
-    /// still outgrow the store, and the committing save stays authoritative.
-    fn precheckChannelLocked(self: *Registry, a: Allocator, work: Work, candidate: History.Channel, next_reference_id: u64) !void {
-        var pending: std.ArrayList(History.Channel) = .empty;
-        defer pending.deinit(a);
-        for (self.staged.items) |staged| {
-            if (!std.mem.eql(u8, staged.record.opened_by, work.session.focus_id)) continue;
-            try pending.append(a, staged.record);
-        }
-        try pending.append(a, candidate);
-        if (try self.history.fits(a, try self.snapshotLocked(a, pending.items, next_reference_id))) return;
-        return error.HistoryCheckpointTooLarge;
     }
 
     /// Confirm retirement before the transport ends waiting reads.
     pub fn closeChannel(self: *Registry, transport: contracts.Channels, id: []const u8) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        for (self.staged.items, 0..) |staged, index| {
-            if (!std.mem.eql(u8, staged.record.id, id)) continue;
-            const open = transport.close(id);
-            self.dropStaged(index);
-            return open;
-        }
         for (self.channels.items, 0..) |channel, index| {
             if (!std.mem.eql(u8, channel.id, id)) continue;
             _ = self.channels.orderedRemove(index);
             errdefer self.channels.insertAssumeCapacity(index, channel);
             try self.saveLocked();
+            transport.close(id);
             self.freeChannel(channel);
-            return transport.close(id);
+            return true;
         }
         return false;
     }
@@ -1111,48 +1060,25 @@ pub const Registry = struct {
     /// Every saved channel is restored, even when its opening focus ended.
     pub fn restoreChannels(self: *const Registry, transport: contracts.Channels) !void {
         for (self.channels.items) |channel| {
-            try transport.open(channel.id);
-            try transport.activate(channel.id);
+            try transport.reserve(channel.id);
+            transport.activate(channel.id);
         }
     }
 
     fn appendChannel(self: *Registry, channel: History.Channel) !void {
+        const owned = try self.copyChannel(channel);
+        errdefer self.freeChannel(owned);
+        try self.channels.append(self.allocator, owned);
+    }
+
+    fn copyChannel(self: *Registry, channel: History.Channel) !History.Channel {
         var owned = channel;
         owned.id = try self.allocator.dupe(u8, channel.id);
         errdefer self.allocator.free(owned.id);
         owned.opened_by = try self.allocator.dupe(u8, channel.opened_by);
         errdefer self.allocator.free(owned.opened_by);
         owned.description = if (channel.description) |text| try self.allocator.dupe(u8, text) else null;
-        errdefer if (owned.description) |text| self.allocator.free(text);
-        try self.channels.append(self.allocator, owned);
-    }
-
-    fn appendStaged(self: *Registry, staged: StagedChannel) !void {
-        var owned = staged;
-        owned.record.id = try self.allocator.dupe(u8, staged.record.id);
-        errdefer self.allocator.free(owned.record.id);
-        owned.record.opened_by = try self.allocator.dupe(u8, staged.record.opened_by);
-        errdefer self.allocator.free(owned.record.opened_by);
-        owned.record.description = if (staged.record.description) |text| try self.allocator.dupe(u8, text) else null;
-        errdefer if (owned.record.description) |text| self.allocator.free(text);
-        try self.staged.append(self.allocator, owned);
-    }
-
-    fn dropStagedOwnedBy(self: *Registry, session: *const Session) void {
-        var index: usize = 0;
-        while (index < self.staged.items.len) {
-            const staged = self.staged.items[index];
-            if (!std.mem.eql(u8, staged.record.opened_by, session.focus_id)) {
-                index += 1;
-                continue;
-            }
-            _ = staged.transport.close(staged.record.id);
-            self.dropStaged(index);
-        }
-    }
-
-    fn dropStaged(self: *Registry, index: usize) void {
-        self.freeChannel(self.staged.swapRemove(index).record);
+        return owned;
     }
 
     fn freeChannel(self: *Registry, channel: History.Channel) void {
@@ -1333,9 +1259,10 @@ test "compaction samples the active subscriptions addressed to this focus" {
     defer core.history.deinit();
     defer registry.endWorker(core.work.session);
     const core_watch = try registry.subscribe(a, core.work, "releases", "Release feed");
-    var plans: std.ArrayList(ForkPlan) = .empty;
-    try plans.append(a, try registry.prepareFork(core.work, "research", "Follow revisions."));
-    try registry.commitToolRound(core.work, &core.history, &plans, null);
+    var changes: RoundChanges = .{};
+    defer registry.discardRound(&changes);
+    _ = try registry.prepareFork(core.work, &changes, "research", "Follow revisions.");
+    try registry.commitToolRound(core.work, &core.history, &changes, null);
     var activity = try admitTestInput(&registry, a);
     defer activity.history.deinit();
     defer registry.endWorker(activity.work.session);
@@ -1369,12 +1296,13 @@ test "activity completion publishes once and maintenance republishes the same ch
         var core = try admitTestInput(&registry, a);
         defer core.history.deinit();
         defer registry.endWorker(core.work.session);
-        var plans: std.ArrayList(ForkPlan) = .empty;
-        try plans.append(a, try registry.prepareFork(core.work, "research", "Read the notes."));
+        var changes: RoundChanges = .{};
+        defer registry.discardRound(&changes);
+        _ = try registry.prepareFork(core.work, &changes, "research", "Read the notes.");
         try core.history.appendBatch(&.{.{ .continuation = "open_focus" }}, &.{.{
             .tool_result = .{ .call_id = "open", .content = .{ .parts = &.{} } },
         }});
-        try registry.commitToolRound(core.work, &core.history, &plans, null);
+        try registry.commitToolRound(core.work, &core.history, &changes, null);
         var activity = try admitTestInput(&registry, a);
         defer activity.history.deinit();
         const response: Model.Response = .{ .output = &.{.{ .continuation = "final response" }}, .calls = &.{}, .text = "Read the notes." };
