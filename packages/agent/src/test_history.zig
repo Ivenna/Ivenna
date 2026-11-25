@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 
 /// In-memory history store with configurable checkpoint outcomes.
 pub const TestStore = struct {
-    pub const SaveFailure = enum { none, checkpoint_too_large, before_commit, after_commit };
+    pub const SaveFailure = enum { none, before_commit, after_commit };
     arena: std.heap.ArenaAllocator = .init(std.testing.allocator),
     groups: usize = 0,
     records: std.ArrayList(Store.Record) = .empty,
@@ -76,7 +76,6 @@ pub const TestStore = struct {
     fn save(context: *anyopaque, body: []const u8) anyerror!void {
         const self: *TestStore = @ptrCast(@alignCast(context));
         self.saves += 1;
-        if (self.fail_save == .checkpoint_too_large) return error.HistoryCheckpointTooLarge;
         if (self.fail_save == .before_commit) return error.MailMutationUnconfirmed;
         self.checkpoint = try self.arena.allocator().dupe(u8, body);
         if (self.fail_save == .after_commit) return error.MailMutationUnconfirmed;

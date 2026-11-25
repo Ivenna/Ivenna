@@ -46,10 +46,8 @@ pub const History = struct {
 
     /// Admission order and inference usage saved with the session's history.
     pub const Progress = struct {
-        /// Input token count reported by the latest committed round in this
-        /// epoch, whether it completed without tools or through a tool round.
-        /// A round that reports no count clears it, so the next request is
-        /// measured in bytes instead.
+        /// Input token count from the last committed ordinary round in this
+        /// epoch, including a round with tool calls. A missing count clears it.
         last_input_tokens: ?u64 = null,
         /// Starting stream for the next admission batch, after any startup observation.
         first_stream: Stream = .ordinary,
@@ -303,7 +301,9 @@ pub const Persistence = struct {
         };
         try history.validate(a);
         std.mem.swap(Cache, &self.cache, &candidate);
-        self.published_checkpoint_digest = Codec.digest(document);
+        // Startup must publish the restored checkpoint even if the document is
+        // unchanged. A delayed retirement can still target the restored copy.
+        self.published_checkpoint_digest = null;
         return history;
     }
 

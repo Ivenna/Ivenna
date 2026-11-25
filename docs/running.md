@@ -68,7 +68,7 @@ Choose an ordinary reasoning effort for each role from the values supported by y
 
 ### Context budgets
 
-`CONTEXT_COMPACT_AT_TOKENS` sets the soft compaction threshold. The kernel uses the input tokens reported for the focus's last saved ordinary round, including rounds with tool calls. The count includes cached input. The kernel reuses it after restart when the configured model and service endpoint match. When no count is available, `CONTEXT_COMPACT_AT_BYTES` sets the threshold for an encoded request built from the older history eligible for compaction. See [what compaction measures](architecture.md#when-compaction-runs).
+`CONTEXT_COMPACT_AT_TOKENS` sets the soft compaction threshold. The kernel uses the input token count, including cached input, from the focus's last committed ordinary model round, with or without tool calls. The kernel reuses the saved count after restart when the configured model and service endpoint match. When the count is unavailable, `CONTEXT_COMPACT_AT_BYTES` sets the threshold for an encoded request built from the retained history eligible for compaction. See [what compaction measures](architecture.md#when-compaction-runs).
 
 `CONTEXT_OBSERVATION_BATCH_BYTES` sets the target for encoded bytes added by a batch of new observations. The first observation can exceed that target if the full request fits the adapter's limits. See [how observations are admitted](architecture.md#activation-admission).
 
@@ -237,9 +237,9 @@ A subscription report that cannot fit stays in the instance database. Withdrawin
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work (including model recovery waits) and host commands, and wait for the runtime's tasks to end. Failure of a required service such as history storage, or an unrecoverable execution error, also stops the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
-After a checkpoint save error, restart can select a checkpoint the mail service accepted even if the kernel could not confirm the write. See [checkpoint saving and restoration](architecture.md#saving-and-restoration).
-
 Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mailbox and instance database belong to the same instance. When restoring data, use [matched backups](#backups-and-transfers).
+
+A checkpoint whose publication was unconfirmed can still be selected on restart. Startup confirms a fresh checkpoint for the restored state before reception opens. See [startup recovery](architecture.md#startup-and-interruption).
 
 At restart the core sees the current outgoing correspondent IDs, including changes to [`MAIL_CORRESPONDENTS`](#outgoing-correspondents). An activity with unfinished work can also resume on startup. See the [startup observation contract](input.md#startup-and-restart) for delivery timing. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
@@ -291,22 +291,22 @@ Keep original correspondence separately if you need it beyond the Trash retentio
 
 ### Working history
 
-A message with the subject `Ivenna history checkpoint` records the state the kernel uses to resume its sessions. In each session's entry, `head` identifies the latest retained history record and `count` gives the number of records in that chain. See the [recovery state inventory](architecture.md#recovery-state) for the other saved state and where it lives.
+`Ivenna History` stores working-history records and messages with the subject `Ivenna history checkpoint`. The selected checkpoint identifies the histories and pending work the kernel restores. See the [recovery state inventory](architecture.md#recovery-state).
 
-Suppose the core receives a letter and the model returns text without calling tools. In an otherwise idle kernel, this normally produces two revisions. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response in the core's history. Sending a reply to the correspondent requires a `send` call.
+An idle kernel typically publishes two revisions when the core receives a letter and the model responds without tool calls. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response.
 
-Ivenna cleans up the history folder at startup and periodically while it runs. Several checkpoint messages can remain in `Ivenna History` between passes. To identify the current checkpoint or diagnose `AmbiguousHistoryRevision`, see [mailbox checkpoint selection](architecture.md#history-storage).
+Ivenna cleans up the history folder at startup and periodically while it runs. Unpublished preparations and superseded checkpoints can remain in `Ivenna History` between passes. To identify the checkpoint selected on restart or diagnose `AmbiguousHistoryRevision`, see [mailbox checkpoint selection](architecture.md#history-storage).
 
-| Location | Contents after maintenance |
+| Location | Objects kept or moved during maintenance |
 | --- | --- |
-| `Ivenna History` | Latest checkpoint, selected session histories, and unread activity-report records |
-| Trash | Records not selected by the latest checkpoint, and older checkpoints |
+| `Ivenna History` | Selected published checkpoint, session histories it selects, and unread activity-report records |
+| Trash | Unselected checkpoints and history records |
 
 Forks store independent copies of inherited history. Include these copies when sizing runtime memory and the mailbox. Compaction replaces older records with a handover and carries forward selected recent records. Previous records can then move to Trash while other sessions keep their own copies.
 
-The mail service's advertised `maxSizeRequest` applies to each complete model/tool round and to the checkpoint. Image bytes, file bytes, and encoding overhead count toward the history request, so a result within the [model request limits](content.md#model-request-checks) can still exceed the mailbox limit. A round that cannot fit stops the runtime with `HistoryRecordTooLarge`. Any uploads already completed for that round retain their [remote-file lifecycle](#uploaded-model-files). See the [JMAP Session capabilities](https://www.rfc-editor.org/rfc/rfc8620.html#section-2) and the [history storage protocol](architecture.md#history-storage) for how requests are sized and batched.
+The mail service's advertised `maxSizeRequest` applies to requests that store history records or prepare a checkpoint. Image bytes, file bytes, and encoding overhead count toward the history request, so a result within the [model request limits](content.md#model-request-checks) can still exceed the mailbox limit. If a single history record exceeds the limit, the kernel stops with `HistoryRecordTooLarge`. Files already uploaded for the round follow the service's [remote-file lifecycle](#uploaded-model-files). See the [JMAP Session capabilities](https://www.rfc-editor.org/rfc/rfc8620.html#section-2) and the [history storage protocol](architecture.md#history-storage) for request sizing and batching.
 
-A checkpoint can exceed `maxSizeRequest` as focus and channel registrations or pending wakeups accumulate. A size rejection stops the kernel with `HistoryCheckpointTooLarge` and leaves the previous checkpoint selected. Restart to resume from that checkpoint. After restart, close unused channels to free space. If the checkpoint still exceeds the limit when starting or resuming work, raise the JMAP request size limit if your mail service allows it.
+A checkpoint can exceed `maxSizeRequest` as focus and channel registrations or pending wakeups accumulate. The kernel stops with `HistoryCheckpointTooLarge` and leaves the previous checkpoint selected. Restart with the same mailbox to resume from that checkpoint. If startup reports the same error, raise the JMAP request size limit before retrying if your mail service allows it. Once reception opens, you can ask Ivenna to close unused channels if their registrations contribute to checkpoint size.
 
 A sleeping activity retains its history even when its context is unloaded. When the activity ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. The activity's messages and ending remain available to the core until they enter the core's history. Shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
@@ -332,19 +332,19 @@ If taking the backups separately, stop the kernel before saving either store and
 
 To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup. Before resuming a listener, check its subscription ID and source position against the restored data. Before resuming a receiver, check that its channel ID still identifies the intended channel. If the backup predates that registration, open a replacement channel and give its ID to the receiver. See [channel lifetimes](communication.md#channel-lifetimes).
 
-History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the latest checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`:
+History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the selected checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`.
 
 | Applies to | Preserve |
 | --- | --- |
 | History bodies | Exact plain-text ZON content |
 | All selected history objects | Original membership in `Ivenna History`, From and To addresses matching `MAIL_ADDRESS`, `ivenna-state`, and `X-Ivenna-History-Kind` (`record` or `checkpoint`) |
 | Records | `ivenna-history-<token>`, `X-Ivenna-History-Key`, and `X-Ivenna-History-Previous` when present |
-| Current checkpoint candidates | Membership in `Ivenna History`, `ivenna-current`, and `X-Ivenna-History-Revision` |
+| Selected checkpoint | `ivenna-current`, `ivenna-prepared` when present, and `X-Ivenna-History-Revision` |
 | Pending callback mail | Complete text, From and To matching `MAIL_ADDRESS`, membership in `Ivenna Callbacks`, `ivenna-callback`, exact `ivenna-callback-<id>` keyword, and matching `X-Ivenna-Callback-Id` header |
 
 The callback keyword and header contain the internal numeric delivery ID; the checkpoint registration preserves its complete named reference.
 
-Native `Email.id` values may change because restoration uses logical groups, record keys, and callback IDs. See [mailbox checkpoint selection](architecture.md#history-storage) to identify the current checkpoint and [updating the executable](#updating-the-executable) for storage-format compatibility.
+Native `Email.id` values may change because restoration uses checkpoint markers and revisions, logical groups and record keys, and callback IDs. See [mailbox checkpoint selection](architecture.md#history-storage) to identify the selected checkpoint and [updating the executable](#updating-the-executable) for storage-format compatibility.
 
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 

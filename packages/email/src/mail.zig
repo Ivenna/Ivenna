@@ -35,15 +35,19 @@ pub const Outgoing = struct {
     body: []const u8,
 };
 
-pub const StateRecord = struct {
+pub const Checkpoint = struct {
+    pub const State = enum { legacy, prepared, published };
+
     id: []const u8,
     revision: u64,
+    state: State,
 };
 
 const handled_keyword = "ivenna-handled";
 const outbound_keyword = "ivenna-outbound";
 const state_keyword = "ivenna-state";
 const current_keyword = "ivenna-current";
+const prepared_keyword = "ivenna-prepared";
 const callback_keyword = "ivenna-callback";
 const callback_keyword_prefix = "ivenna-callback-";
 const group_keyword_prefix = "ivenna-history-";
@@ -70,7 +74,7 @@ const correspondence_properties: []const []const u8 = &.{ "id", "mailboxIds", "f
 const HistoryKind = enum { record, checkpoint };
 const Retirement = struct {
     id: []const u8,
-    marker: enum { none, handled, clear_current } = .none,
+    marker: enum { none, clear_draft, handled } = .none,
 };
 
 /// JMAP access for communication records, submissions, and working history.
@@ -335,7 +339,7 @@ pub const Mailbox = struct {
                     const from = try addresses(temporary, record, "from");
                     if (from.len != 1 or !self.addressing.isSelf(from[0].email)) continue;
                 }
-                try retired.append(temporary, .{ .id = try textField(record, "id") });
+                try retired.append(temporary, .{ .id = try textField(record, "id"), .marker = .clear_draft });
             }
             try self.retireEmails(temporary, retired.items);
             position += ids.len - retired.items.len;
@@ -347,47 +351,64 @@ pub const Mailbox = struct {
         try folders.put(a, self.trash_id, .{ .bool = true });
         var patch: std.json.ObjectMap = .empty;
         try patch.put(a, "mailboxIds", .{ .object = folders });
-        try patch.put(a, "keywords/$draft", .null);
+        if (retirement.marker != .none) try patch.put(a, "keywords/$draft", .null);
         switch (retirement.marker) {
-            .none => {},
+            .none, .clear_draft => {},
             .handled => try patch.put(a, "keywords/" ++ handled_keyword, .{ .bool = true }),
-            .clear_current => try patch.put(a, "keywords/" ++ current_keyword, .null),
         }
         return .{ .object = patch };
     }
 
-    /// Discover checkpoint candidates carrying the current marker. The history
-    /// adapter selects the highest revision; record discovery uses groups.
-    pub fn historyHeads(self: Mailbox, a: Allocator) ![]const StateRecord {
+    /// A prepared checkpoint keeps its marker after publication, so a delayed
+    /// publication does not change which messages this query finds.
+    pub fn historyCheckpoints(self: Mailbox, a: Allocator) ![]const Checkpoint {
         const filter = try value(a, .{
             .operator = "AND",
             .conditions = .{
-                .{ .inMailbox = self.history_id },
-                .{ .hasKeyword = state_keyword },
-                .{ .hasKeyword = current_keyword },
+                try self.historyFolderFilter(a),
+                try value(a, .{ .hasKeyword = state_keyword }),
+                try value(a, .{
+                    .operator = "OR",
+                    .conditions = .{ .{ .hasKeyword = prepared_keyword }, .{ .hasKeyword = current_keyword } },
+                }),
             },
         });
-        var records: std.ArrayList(StateRecord) = .empty;
-        var position: usize = 0;
+        var records: std.ArrayList(Checkpoint) = .empty;
+        var anchor: ?[]const u8 = null;
+        defer if (anchor) |id| a.free(id);
         while (true) {
             var scratch: std.heap.ArenaAllocator = .init(self.jmap.allocator());
             defer scratch.deinit();
             const temporary = scratch.allocator();
-            const ids = try self.historyQueryIds(temporary, filter, position);
+            // A late Trash move can shift positions without changing the order
+            // of the remaining candidates. Continue after the last ID seen.
+            const result = try self.jmap.call(temporary, .@"Email/query", .{
+                .accountId = self.account_id,
+                .filter = filter,
+                .anchor = anchor,
+                .anchorOffset = 1,
+                .limit = history_query_limit,
+            });
+            const ids = try strings(temporary, try field(result, "ids"));
             if (ids.len == 0) break;
             var offset: usize = 0;
             while (offset < ids.len) {
                 const count = try self.historyGetCount(ids[offset..], false);
                 for (try self.getHistoryRecords(temporary, ids[offset..][0..count], false)) |record| {
                     if (!try self.validateHistoryRecord(temporary, record, .checkpoint)) continue;
+                    const keywords = try field(record, "keywords");
+                    if (!boolean(keywords, prepared_keyword) and !boolean(keywords, current_keyword)) continue;
                     try records.append(a, .{
                         .id = try a.dupe(u8, try textField(record, "id")),
-                        .revision = try historyRevision(record),
+                        .revision = try checkpointRevision(record),
+                        .state = checkpointState(keywords),
                     });
                 }
                 offset += count;
             }
-            position += ids.len;
+            const next = try a.dupe(u8, ids[ids.len - 1]);
+            if (anchor) |id| a.free(id);
+            anchor = next;
         }
         return records.toOwnedSlice(a);
     }
@@ -395,11 +416,19 @@ pub const Mailbox = struct {
     pub fn historyCheckpoint(self: Mailbox, a: Allocator, id: []const u8) ![]const u8 {
         var scratch: std.heap.ArenaAllocator = .init(self.jmap.allocator());
         defer scratch.deinit();
-        const temporary = scratch.allocator();
-        const record = (try self.getHistoryRecords(temporary, &.{id}, true))[0];
-        if (!try self.validateHistoryRecord(temporary, record, .checkpoint)) return error.InvalidHistory;
-        _ = try historyRevision(record);
+        const record = (try self.checkpointMessage(scratch.allocator(), id, true)) orelse return error.InvalidHistory;
+        if (!boolean(try field(record, "keywords"), current_keyword)) return error.InvalidHistory;
         return a.dupe(u8, try historyBody(record));
+    }
+
+    fn checkpointMessage(self: Mailbox, a: Allocator, id: []const u8, body: bool) !?Value {
+        const response = try self.jmap.call(a, .@"Email/get", self.historyGet(&.{id}, body));
+        const records = try arrayField(response, "list");
+        if (records.len == 0) return null;
+        if (records.len != 1 or !std.mem.eql(u8, try textField(records[0], "id"), id)) return error.InvalidMailReply;
+        const record = records[0];
+        if (!try self.validateHistoryRecord(a, record, .checkpoint)) return null;
+        return record;
     }
 
     pub fn allocateHistoryGroup(self: Mailbox, a: Allocator) ![]const u8 {
@@ -494,48 +523,41 @@ pub const Mailbox = struct {
 
     const HistoryInventoryItem = struct {
         id: []const u8,
-        contents: union(HistoryKind) { record: HistoryStore.RecordId, checkpoint: u64 },
-        current: bool,
+        contents: union(HistoryKind) { record: HistoryStore.RecordId, checkpoint: Checkpoint.State },
     };
 
     /// Inventory owned objects in History and check that the complete
     /// retention selection is present before moving any objects. The mail service
     /// owns expiry after unselected material enters Trash.
-    pub fn maintainHistory(self: Mailbox, a: Allocator, retention: HistoryStore.Retention, revision: u64) !void {
+    pub fn maintainHistory(self: Mailbox, a: Allocator, retention: HistoryStore.Retention, confirmed_id: []const u8) !void {
         var retained: std.StringHashMapUnmanaged(bool) = .empty;
         defer retained.deinit(a);
-        for (retention.records) |record| {
-            _ = try historyGroupKeyword(a, record.group);
+        for (retention.records) |record|
             try retained.put(a, try historyRecordIdentity(a, record), false);
-        }
         const inventory = try self.historyInventory(a);
-        var current_count: usize = 0;
+        var confirmed = false;
+        var updates: std.ArrayList(Retirement) = .empty;
         for (inventory) |item| switch (item.contents) {
             .record => |record| {
                 if (retained.getPtr(try historyRecordIdentity(a, record))) |found| {
                     found.* = true;
+                } else {
+                    try updates.append(a, .{ .id = item.id });
                 }
             },
-            .checkpoint => |stored_revision| if (item.current) {
-                if (stored_revision > revision) return error.InvalidHistory;
-                if (stored_revision == revision) {
-                    current_count += 1;
+            .checkpoint => |state| {
+                if (std.mem.eql(u8, item.id, confirmed_id)) {
+                    if (state != .published) return error.InvalidHistory;
+                    confirmed = true;
+                } else {
+                    try updates.append(a, .{ .id = item.id });
                 }
             },
         };
-        if (current_count != 1) return error.InvalidHistory;
+        if (!confirmed) return error.InvalidHistory;
         var found_records = retained.valueIterator();
         while (found_records.next()) |found| if (!found.*) return error.InvalidHistory;
 
-        var updates: std.ArrayList(Retirement) = .empty;
-        for (inventory) |item| {
-            const keep = switch (item.contents) {
-                .record => |record| retained.contains(try historyRecordIdentity(a, record)),
-                .checkpoint => |stored_revision| item.current and stored_revision == revision,
-            };
-            if (keep) continue;
-            try updates.append(a, .{ .id = item.id, .marker = if (item.current) .clear_current else .none });
-        }
         try self.retireEmails(a, updates.items);
     }
 
@@ -564,26 +586,19 @@ pub const Mailbox = struct {
                     const folders = try field(record, "mailboxIds");
                     if (folders.object.count() != 1) return error.InvalidHistory;
                     const keywords = try field(record, "keywords");
-                    const current = boolean(keywords, current_keyword);
                     const kind = std.meta.stringToEnum(HistoryKind, optionalText(record, kind_property) orelse return error.InvalidHistory) orelse return error.InvalidHistory;
                     const contents: @FieldType(HistoryInventoryItem, "contents") = switch (kind) {
                         .record => blk: {
-                            if (current or optionalField(record, revision_property) != null) return error.InvalidHistory;
+                            if (boolean(keywords, current_keyword) or boolean(keywords, prepared_keyword) or
+                                optionalField(record, revision_property) != null) return error.InvalidHistory;
                             const reference = try historyRecordReference(a, record);
                             break :blk .{ .record = .{ .group = reference.group, .key = reference.key } };
                         },
-                        .checkpoint => blk: {
-                            for (keywords.object.keys()) |keyword|
-                                if (std.mem.startsWith(u8, keyword, group_keyword_prefix)) return error.InvalidHistory;
-                            if (optionalField(record, key_property) != null or optionalField(record, previous_property) != null)
-                                return error.InvalidHistory;
-                            break :blk .{ .checkpoint = try historyRevision(record) };
-                        },
+                        .checkpoint => .{ .checkpoint = checkpointState(keywords) },
                     };
                     try inventory.append(a, .{
                         .id = id,
                         .contents = contents,
-                        .current = current,
                     });
                 }
                 offset += count;
@@ -608,10 +623,7 @@ pub const Mailbox = struct {
                 count += 1;
             }
             if (count == 0) return error.MailRequestTooLarge;
-            const reply = try self.jmap.call(a, .assign_email_properties, .{ .accountId = self.account_id, .update = Value{ .object = batch } });
-            const updated = optionalField(reply, "updated") orelse return error.MailMutationUnconfirmed;
-            if (updated != .object) return error.MailMutationUnconfirmed;
-            for (batch.keys()) |id| if (!updated.object.contains(id)) return error.MailMutationUnconfirmed;
+            try self.updateEmails(a, batch);
             offset += count;
         }
     }
@@ -647,13 +659,35 @@ pub const Mailbox = struct {
         }
     }
 
-    pub fn createCheckpoint(self: Mailbox, a: Allocator, body: []const u8, revision: u64) !void {
+    pub fn prepareCheckpoint(self: Mailbox, a: Allocator, body: []const u8, revision: u64) ![]const u8 {
         var creates: std.json.ObjectMap = .empty;
         try creates.put(a, "checkpoint", try self.historyMessage(a, .{ .checkpoint = .{ .body = body, .revision = revision } }));
-        self.createHistoryBatch(a, creates) catch |err| switch (err) {
+        const response = self.jmap.call(a, .@"Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } }) catch |err| switch (err) {
             error.MailRequestTooLarge => return error.HistoryCheckpointTooLarge,
             else => return err,
         };
+        return createdId(response, "checkpoint");
+    }
+
+    /// Patch only the publication keyword. Even a delayed request targeting a
+    /// retired candidate cannot put it back into History.
+    pub fn publishCheckpoint(self: Mailbox, a: Allocator, id: []const u8) !void {
+        var patch: std.json.ObjectMap = .empty;
+        try patch.put(a, "keywords/" ++ current_keyword, .{ .bool = true });
+        var update: std.json.ObjectMap = .empty;
+        try update.put(a, id, .{ .object = patch });
+        self.updateEmails(a, update) catch |err| {
+            if (err != error.MailMutationUnconfirmed) return err;
+            const record = (try self.checkpointMessage(a, id, false)) orelse return err;
+            if (checkpointState(try field(record, "keywords")) != .published) return err;
+        };
+    }
+
+    fn updateEmails(self: Mailbox, a: Allocator, updates: std.json.ObjectMap) !void {
+        const reply = try self.jmap.call(a, .assign_email_properties, .{ .accountId = self.account_id, .update = Value{ .object = updates } });
+        const updated = optionalField(reply, "updated") orelse return error.MailMutationUnconfirmed;
+        if (updated != .object) return error.MailMutationUnconfirmed;
+        for (updates.keys()) |id| if (!updated.object.contains(id)) return error.MailMutationUnconfirmed;
     }
 
     fn createHistoryBatch(self: Mailbox, a: Allocator, creates: std.json.ObjectMap) !void {
@@ -686,7 +720,7 @@ pub const Mailbox = struct {
         try keywords.put(a, state_keyword, .{ .bool = true });
         switch (write) {
             .record => |record| try keywords.put(a, try historyGroupKeyword(a, record.group), .{ .bool = true }),
-            .checkpoint => try keywords.put(a, current_keyword, .{ .bool = true }),
+            .checkpoint => try keywords.put(a, prepared_keyword, .{ .bool = true }),
         }
         const body = switch (write) {
             .record => |record| record.body,
@@ -827,12 +861,10 @@ pub const Mailbox = struct {
         return ordered;
     }
 
-    /// Ignore records outside our ownership or current selection, but require
-    /// owned candidates to carry the expected native history discriminator.
+    /// Ignore records outside our ownership and require owned candidates to
+    /// carry the expected native history discriminator.
     fn validateHistoryRecord(self: Mailbox, a: Allocator, record: Value, kind: HistoryKind) !bool {
         if (!try self.ownsHistoryRecord(a, record)) return false;
-        const keywords = try field(record, "keywords");
-        if (kind == .checkpoint and !boolean(keywords, current_keyword)) return false;
         const kind_name = optionalText(record, kind_property) orelse return error.InvalidHistory;
         if (!std.mem.eql(u8, kind_name, @tagName(kind))) return error.InvalidHistory;
         return true;
@@ -1046,11 +1078,21 @@ fn objectLimit(record: Value, name: []const u8) !usize {
     return std.math.cast(usize, item.integer) orelse error.InvalidMailReply;
 }
 
-fn historyRevision(record: Value) !u64 {
+fn checkpointRevision(record: Value) !u64 {
+    const keywords = try field(record, "keywords");
+    for (keywords.object.keys()) |keyword|
+        if (std.mem.startsWith(u8, keyword, group_keyword_prefix)) return error.InvalidHistory;
+    if (optionalField(record, key_property) != null or optionalField(record, previous_property) != null)
+        return error.InvalidHistory;
     const text = optionalText(record, revision_property) orelse return error.InvalidHistory;
     const revision = std.fmt.parseInt(u64, text, 10) catch return error.InvalidHistory;
     if (revision == 0) return error.InvalidHistory;
     return revision;
+}
+
+fn checkpointState(keywords: Value) Checkpoint.State {
+    if (boolean(keywords, prepared_keyword)) return if (boolean(keywords, current_keyword)) .published else .prepared;
+    return .legacy;
 }
 
 fn isLowerHex(text: []const u8) bool {
@@ -1254,5 +1296,39 @@ test "callback publication finds the stored callback in Trash after a lost respo
     defer fixture.deinit();
     const mailbox = try fixture.start();
     try mailbox.publishCallback(fixture.arena.allocator(), .{ .id = 7, .text = "command completed" });
+    try fixture.finish();
+}
+
+test "history maintenance retires only unselected checkpoints and records" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    const group = "11111111111111111111111111111111";
+    const kept_key = "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e";
+    const discarded_key = "16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4";
+    const owner =
+        \\"mailboxIds":{"history":true},"from":[{"email":"ivenna@example.com"}],"to":[{"email":"ivenna@example.com"}],
+    ;
+    const checkpoint = owner ++ "\"header:X-Ivenna-History-Kind:asText\":\"checkpoint\",\"header:X-Ivenna-History-Revision:asText\":";
+    const record = owner ++ "\"keywords\":{\"ivenna-state\":true,\"ivenna-history-" ++ group ++ "\":true}," ++
+        "\"header:X-Ivenna-History-Kind:asText\":\"record\",\"header:X-Ivenna-History-Key:asText\":";
+    const reply = "{\"list\":[" ++
+        "{\"id\":\"confirmed\",\"keywords\":{\"ivenna-state\":true,\"ivenna-prepared\":true,\"ivenna-current\":true}," ++ checkpoint ++ "\"3\"}," ++
+        "{\"id\":\"late\",\"keywords\":{\"ivenna-state\":true,\"ivenna-prepared\":true}," ++ checkpoint ++ "\"2\"}," ++
+        "{\"id\":\"legacy\",\"keywords\":{\"ivenna-state\":true,\"ivenna-current\":true}," ++ checkpoint ++ "\"99\"}," ++
+        "{\"id\":\"discarded\"," ++ record ++ "\"" ++ discarded_key ++ "\"}," ++
+        "{\"id\":\"kept\"," ++ record ++ "\"" ++ kept_key ++ "\"}]}";
+    var fixture = try Fixture.init(&.{
+        .{ .method = "Email/query", .result = "{\"ids\":[\"confirmed\",\"late\",\"legacy\",\"discarded\",\"kept\"]}" },
+        .{ .method = "Email/get", .result = reply },
+        .{ .method = "Email/query", .result = "{\"ids\":[]}" },
+        .{
+            .method = "Email/set",
+            .result = "{\"updated\":{\"late\":null,\"legacy\":null,\"discarded\":null}}",
+            .properties = &.{.{ .path = &.{"update"}, .json = "{\"late\":{\"mailboxIds\":{\"trash\":true}},\"legacy\":{\"mailboxIds\":{\"trash\":true}},\"discarded\":{\"mailboxIds\":{\"trash\":true}}}" }},
+        },
+    });
+    defer fixture.deinit();
+    const mailbox = try fixture.start();
+    const retention: HistoryStore.Retention = .{ .records = &.{.{ .group = group, .key = kept_key.* }} };
+    try mailbox.maintainHistory(fixture.arena.allocator(), retention, "confirmed");
     try fixture.finish();
 }

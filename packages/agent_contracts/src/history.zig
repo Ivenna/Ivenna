@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 /// retention selection.
 /// Storage owns opaque group IDs and native record locators. Returned data
 /// belongs to the allocator supplied to each operation. The caller serializes
-/// writes and loads the current checkpoint before publication or maintenance.
+/// writes and publishes a fresh selection after loading, before maintenance.
 pub const HistoryStore = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -51,7 +51,7 @@ pub const HistoryStore = struct {
         maintain: *const fn (*anyopaque, Allocator, Retention) anyerror!void,
     };
 
-    /// Load the checkpoint selected by storage. Null means the store has no checkpoint.
+    /// Load the checkpoint selected by storage, or null if none is selected.
     pub fn load(self: HistoryStore, a: Allocator) !?[]const u8 {
         return self.vtable.load(self.context, a);
     }
@@ -81,10 +81,10 @@ pub const HistoryStore = struct {
         return self.vtable.create(self.context, a, records);
     }
 
-    /// Publish a complete checkpoint. Its selected records must already be confirmed.
-    /// HistoryCheckpointTooLarge means the store rejected it before attempting
-    /// publication. Other errors can follow publication. After a save error,
-    /// the caller discards this store and loads the selected checkpoint on restart.
+    /// Publish a complete checkpoint after confirming its selected records.
+    /// HistoryCheckpointTooLarge means the store rejected it before a write
+    /// attempt. Other errors can follow publication. After a save error, the
+    /// caller discards this store and loads the selected checkpoint on restart.
     pub fn save(self: HistoryStore, document: []const u8) !void {
         return self.vtable.save(self.context, document);
     }

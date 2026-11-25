@@ -80,7 +80,7 @@ The callback registrar accepts a name and source and binds the observation to th
 
 ## Service and reception
 
-`ivenna serve` binds `SERVICE_ADDRESS` and the local channel socket before opening the instance database or accessing the mail account. Once the runtime is assembled, the application serves probes and channel readers concurrently with the kernel and host supervisor. The kernel reconciles restored host registrations and completes initial history maintenance before opening reception. It then dispatches ready focuses. See [startup and interruption](#startup-and-interruption).
+`ivenna serve` binds `SERVICE_ADDRESS` and the local channel socket before opening the instance database or accessing the mail account. Once the runtime is assembled, the application serves probes and channel readers concurrently with the kernel and host supervisor. The kernel completes startup recovery before opening reception and dispatching ready focuses. See [startup and interruption](#startup-and-interruption).
 
 The HTTP listener handles probes independently of intake and model work. A health probe observes the listener. A readiness probe reads the kernel's reception state, which stays open while an individual focus waits for inference. The deployment's mail service uses readiness to decide whether to accept correspondence. Shutdown can follow a successful check, leaving accepted mail in the account. See the [reception contract](running.md#service-status-and-reception) and [local SMTP example](../dev/README.md#configuring-mail).
 
@@ -191,7 +191,7 @@ The [subscription store](../packages/instance_state/src/subscriptions.zig) seria
 
 The listener's cursor records its position in the source. SQLite assigns report sequence numbers across all subscriptions. The kernel records the last sequence admitted to each focus's history as `subscription_through`. At startup, on each intake pass, and when a worker finishes, the dispatcher checks for work. An idle focus with a report beyond its saved sequence is ready to run. Each batch reads that focus's reports in order up to the latest sequence sampled for the batch. Later arrivals wait for the next input. See [activation admission](#activation-admission).
 
-After matching the [instance database](#instance-database) to the mailbox checkpoint on restart, the registry deletes each focus's reports through the sequence confirmed in its history. This completes any acknowledgement interrupted by shutdown.
+After the [startup checkpoint](#startup-and-interruption) is published, the registry deletes each focus's reports through the sequence saved in that checkpoint. This completes any acknowledgement interrupted by shutdown.
 
 ## Working history and user messages
 
@@ -239,7 +239,7 @@ At round commit, Context copies the prepared parts into its retained arena. Hist
 
 ### When compaction runs
 
-When the next ordinary request fits the adapter's limits, the kernel can still compact older history. For soft compaction it compares the token threshold with the input token count of the last committed ordinary round, including rounds with tool calls. The checkpoint saves the reported count with the round. A fork or replacement handover starts without a count. See [context settings](running.md#context-budgets).
+When the next ordinary request fits the adapter's limits, the kernel can still compact older history. For soft compaction it compares the token threshold with the input token count of the last committed ordinary round, including rounds with tool calls. The checkpoint saves the count with that round and clears any previous count if the model reports none. A fork or replacement handover starts without a count. See [context settings](running.md#context-budgets).
 
 On restart, the registry restores the saved count only if the checkpoint and the current model port both supply the same usage scope. The Responses adapter reads `usage.input_tokens`, which includes cached input. It derives the scope from the configured model name and base URL, trimming trailing slashes from the URL. See the [model port](../packages/agent_contracts/src/model.zig), [Responses adapter](../packages/responses/src/provider.zig), and [DeepSeek Responses usage](https://api-docs.deepseek.com/guides/responses_api/#response-fields).
 
@@ -292,13 +292,13 @@ Appending advances the head and count without adding a per-entry reference to th
 
 The registry holds its lock through checkpoint publication at [admission](#activation-admission) and [round completion](#activation-and-session-completion). A completed tool round publishes its new [activities](#activity-forks) and [channel registrations](#local-channels) with its tool replies. Effects can have earlier commit points. For example, the registry saves a host command's callback registration before returning its reference.
 
-Within an epoch, persistence carries forward the confirmed keys and encodes newly appended entries. It writes new records before publishing the checkpoint that selects them. A checkpoint whose digest matches the last confirmed publication needs no new revision. If record creation fails or the adapter rejects the checkpoint for size before sending it, the previous checkpoint still selects the history to restore. A new checkpoint can reach the mailbox even if publication returns an error.
+Within an epoch, persistence carries forward the confirmed keys and encodes newly appended entries. It confirms the new records before publishing the checkpoint that selects them. Once startup has published its checkpoint, subsequent saves skip publication when the document's digest matches the confirmed one.
 
-During execution, the registry records a checkpoint save error before releasing its lock and propagates it to the kernel for shutdown. It refuses further registry work and retention, protecting any checkpoint the mail service may have accepted and the records it selects. A checkpoint is one document for the whole registry, so records from any single session can push it past the adapter's size limit: that failure stops every session's work, not just the one that grew, and the failure stays recorded until restart. On restart, the registry restores the checkpoint the adapter selects. See [history storage](#history-storage) for the selection and confirmation rules.
+The registry records a checkpoint save error before releasing its lock and propagates it to the kernel for shutdown. The error stops further registry work and retention for all sessions, preserving the records of any checkpoint the mail service may have published. On restart, the registry restores the checkpoint the adapter selects. See [working history limits](running.md#working-history) and [history storage](#history-storage).
 
 Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Owners of retained event and handover records must match the complete ID of the restoring focus or the core (`core-1`). A saved channel's opening focus ID has a suffix below the next focus sequence. If the opening focus is still present in the checkpoint, its complete ID must match. Matching physical duplicates can supply one logical occurrence. Missing or inconsistent records fail restoration. When loading older handovers, restoration converts channel and subscription ID lists to sampled records with `null` descriptions and drops retired feed IDs from the sample.
 
-Startup reads and validates all selected session history. It rebuilds the outbox's unread metadata from its checkpoint and loads report bodies in admission windows. It materializes the core context and discards temporary activity entries. Activity contexts are materialized when scheduled. Later cold restores read only that session's history. Delivery objects, receipts, worker ownership, and host process handles are not checkpointed. See [startup](#startup-and-interruption) for reconstruction.
+Restoration rebuilds the outbox's unread metadata and materializes the core context. Report bodies are loaded during admission. When an activity is scheduled, the registry materializes its context by reading only that session's history. Delivery objects, receipts, worker ownership, and host process handles are not checkpointed. See [startup](#startup-and-interruption) for reconstruction.
 
 ### History retention
 
@@ -310,13 +310,13 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 ## Startup and interruption
 
-During assembly, the application opens the instance database, discovers the mail account, and checks memory with `inspect_memory_space`. The session registry restores the selected mailbox checkpoint or creates the core on first launch. See the [durable sources used at startup](#recovery-state).
+During assembly, the application opens the instance database, discovers the mail account, and checks memory with `inspect_memory_space`. The session registry validates the selected mailbox checkpoint against the instance database and restores its sessions. On first launch it creates the core. See the [durable sources used at startup](#recovery-state).
 
 On each launch the registry queues `startup` for the core with a copy of the sender's registered IDs. Admission retains that list as part of the dated observation. An activity's `was_running` flag records whether it had a running or interrupted activation or a startup observation waiting in its queue. The registry queues startup during restoration for activities with that flag or unread internal observations. Other restored activities get startup when dispatched for new work. Newly opened activities begin with their assignment. See the [startup fields](input.md#startup-and-restart).
 
-During assembly, the kernel rebuilds the live channel registry from every saved registration. The application starts serving only after restoration succeeds. Pending receive requests are tied to connections from the earlier runtime, so programs request fresh reads. See [local channels](#local-channels).
+The registry publishes a fresh checkpoint before acknowledging restored subscription reports. The kernel rebuilds the live channel registry from every saved registration during assembly. Pending receive requests are tied to connections from the earlier runtime, so programs request fresh reads. See [checkpoint publication](#history-storage) and [local channels](#local-channels).
 
-Before dispatch, the kernel publishes an interruption observation for each restored host registration. The callback publisher preserves any identifiable result already stored for that ID. Unpublished wakeups become eligible when due. Earlier command IDs survive as observation sources. See [callback publication](#callback-delivery) and [command lifetimes](host.md#command-lifetimes).
+After startup maintenance, the kernel publishes an interruption observation for each restored host registration before opening reception and dispatching work. The callback publisher preserves any identifiable result already stored for that ID. Unpublished wakeups become eligible when due. Earlier command IDs survive as observation sources. See [callback publication](#callback-delivery) and [command lifetimes](host.md#command-lifetimes).
 
 Unacknowledged correspondence remains eligible and can appear again after a crash between persistence and acknowledgement; callback IDs instead retain durable admission deduplication. Fresh startup observations identify this runtime; earlier records remain evidence of their original observations and outcomes.
 
@@ -333,7 +333,7 @@ Host effects, memory writes, mail submission, subscription changes, acknowledgem
 | Input token count and its model scope | Mailbox checkpoint | [When compaction runs](#when-compaction-runs) |
 | Unread activity messages and endings | Outbox records selected by the mailbox checkpoint | [Activity reports](#activity-reports) |
 | Reference sequences, open channels, callback registrations, and pending wakeups | Mailbox checkpoint | [Reference allocation](#shared-contracts) · [Local channels](#local-channels) · [Callback admission](#event-sources-and-callback-admission) |
-| Checkpoint revision | Mailbox checkpoint metadata | [History storage](#history-storage) |
+| Checkpoint revision and publication markers | Mailbox checkpoint metadata | [History storage](#history-storage) |
 | Published callback results | Callback mail | [Callback delivery](#callback-delivery) |
 | Unadmitted correspondence | Eligible incoming mail | [Mail intake and acknowledgement](#mail-intake-and-acknowledgement) |
 | Subscription registrations, listener cursors, accepted keys, and pending reports | Instance SQLite database | [Instance database](#instance-database) |
@@ -374,17 +374,23 @@ After durable admission, acknowledgement sets `ivenna-handled` and moves the cop
 
 ### History storage
 
-The adapter stores immutable records and checkpoints as self-addressed JMAP `Email` objects in `Ivenna History`. Each carries the `ivenna-state` keyword, an `X-Ivenna-History-Kind` header (`record` or `checkpoint`), and the agent's plain-text ZON body.
+The adapter stores immutable records and checkpoints as self-addressed JMAP `Email` objects. Each has a plain-text ZON body, the `ivenna-state` keyword, and an `X-Ivenna-History-Kind` header with value `record` or `checkpoint`. Ivenna uses the mailbox's message IDs, keywords, and folder membership to identify records and determine which checkpoints in `Ivenna History` are eligible for restoration. The selected checkpoint's body determines which records to restore.
 
 Each record carries its storage group's `ivenna-history-<token>` keyword, its content key in `X-Ivenna-History-Key`, and its predecessor's key, if any, in `X-Ivenna-History-Previous`. A single `Email/set` creates the metadata and body together. If the response to a batch create is lost, the adapter queries the affected groups. It can confirm the batch from metadata alone when every requested record is present with its expected key and predecessor. An incomplete batch leaves the previous checkpoint in effect.
 
-A checkpoint carries `ivenna-current` and a numeric `X-Ivenna-History-Revision`. Several checkpoints can retain that keyword until maintenance. The email adapter selects the checkpoint with the highest revision and uses the next revision for publication. Invalid kind or revision metadata on an owned candidate fails loading. If distinct candidates share the highest revision, selection fails with `AmbiguousHistoryRevision`. A write delayed across a restart can cause this tie. After a lost write acknowledgement, the adapter confirms the write only if the selected checkpoint has the attempted revision and document. See the [email history adapter](../packages/email/src/history.zig) and [mail account requirements](running.md#mail-service).
+A checkpoint is prepared as an immutable message with `ivenna-prepared` and a numeric `X-Ivenna-History-Revision`. After the server confirms its `Email.id`, the adapter publishes it by setting `ivenna-current` on that ID with a keyword-only update. A lost preparation acknowledgement stops the save before publication. After an unconfirmed publication, the adapter reads the keywords and folder membership of that message to determine whether it became eligible for recovery. See the [email history adapter](../packages/email/src/history.zig) and [JMAP patch semantics](https://www.rfc-editor.org/rfc/rfc8620.html#section-5.3).
+
+For restoration, published messages carrying both `ivenna-prepared` and `ivenna-current` take precedence over legacy checkpoint messages carrying `ivenna-current` alone. Startup selects the highest revision in the applicable format. Distinct messages tied at that revision cause `AmbiguousHistoryRevision`.
+
+Each subsequent page of checkpoint candidates uses the preceding page's last `Email.id` as its anchor. A delayed move of a message before the anchor leaves the next page's starting point intact. If the anchor itself leaves the results, the query fails and startup stops. See [JMAP query anchors](https://www.rfc-editor.org/rfc/rfc8620.html#section-5.5).
+
+The fresh startup publication gets a new `Email.id` and a revision above the prepared-format candidates found by the scan. An earlier process could request publication only for a message whose ID it already obtained. If that message is still eligible when the update arrives, its revision ranks below the new checkpoint. Delayed Trash moves can only address earlier message IDs.
 
 During [restoration](#saving-and-restoration), the adapter queries the folder by state and group keywords in pages of up to 512 IDs. It validates ownership and group membership and returns record metadata and transient `Email.id` locators. The agent selects the committed chains, then asks for their bodies. Bulk `Email/get` rechecks ownership, group, key, and predecessor and returns complete text. The agent verifies the hashes and decodes the records.
 
 Get and set batches contain at most 32 objects and obey the session's `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest`. Encoded bodies and protocol fields count toward the request size. Each complete model/tool round occupies one record, including its retained image and file bytes. If even one record exceeds the request limit on its own, saving fails with `HistoryRecordTooLarge` before checkpoint publication.
 
-The checkpoint itself occupies one `Email/set` create request. If that encoded request exceeds `maxSizeRequest`, the adapter returns `HistoryCheckpointTooLarge` before sending it and preserves the confirmed revision. See [working history limits](running.md#working-history) for recovery after a size rejection.
+Preparing the checkpoint takes one `Email/set` create request. If that encoded request exceeds `maxSizeRequest`, the adapter returns `HistoryCheckpointTooLarge` before sending it and preserves the confirmed selection. See [working history limits](running.md#working-history) for recovery after a size rejection.
 
 ### Mail retention
 
@@ -398,7 +404,7 @@ During initialization and before each poll, the adapter moves acknowledged input
 
 The adapter inventories its state objects in `Ivenna History` against the agent's [retention selection](#history-retention). It checks the confirmed checkpoint and every selected `(group, key)` before moving anything. A missing selection or invalid metadata on an owned object fails maintenance. Trash is outside both inventory and restoration.
 
-The folder keeps the confirmed checkpoint and every physical copy of a selected record. The adapter clears `ivenna-current` from older checkpoints and moves them and all unselected records to Trash. These include records from replaced epochs, obsolete observation arrays, and writes that never became part of a committed chain.
+The folder keeps the confirmed checkpoint and every physical copy of a selected record. Maintenance moves superseded checkpoints and unselected records to Trash. A delayed publication can still set a keyword on an earlier checkpoint, which remains superseded. Retired records include those from replaced epochs, obsolete observation arrays, and writes that never became part of a committed chain.
 
 ## Autonomous memory
 

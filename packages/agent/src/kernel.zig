@@ -116,8 +116,8 @@ pub const Kernel = struct {
     }
 
     fn receiveLoop(self: *Kernel, tasks: *Tasks) !void {
-        try self.restoreHostCallbacks();
         try self.sessions.maintain();
+        try self.restoreHostCallbacks();
         if (self.reception.cmpxchgStrong(.starting, .open, .release, .monotonic) != null) return;
         try self.dispatch(tasks);
         var maintained_at = std.Io.Clock.awake.now(self.io).toMilliseconds();
@@ -798,24 +798,6 @@ test "an activity can withdraw another focus's subscription by reference" {
     try testing.expect(!repeated.get("changed").?.bool);
 }
 
-test "startup requires the subscription catalog and working history to belong together" {
-    const testing = std.testing;
-    const Store = Subscriptions.Store;
-    var fixture: SubscriptionFixture = .{};
-    defer fixture.deinit();
-    var catalog = try Store.openInMemory(testing.allocator);
-    defer catalog.close();
-    var engine: Engine = undefined;
-    var initial = try fixture.kernel(&engine, &catalog);
-    initial.deinit();
-
-    var other = try Store.openInMemory(testing.allocator);
-    defer other.close();
-    try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &other));
-    fixture.storage.checkpoint = null;
-    try testing.expectError(error.SubscriptionCatalogMismatch, fixture.kernel(&engine, &catalog));
-}
-
 test "subscription admission and database acknowledgement survive either outcome of an unconfirmed checkpoint" {
     const testing = std.testing;
     for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
@@ -1375,11 +1357,7 @@ test "restart restores a channel after its activity ends until the channel is cl
 test "restart selects a tool round, its tokens, channel and fork together after a failed save" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
-    const cases = [_]struct { failure: TestStore.SaveFailure, err: anyerror, published: bool }{
-        .{ .failure = .checkpoint_too_large, .err = error.HistoryCheckpointTooLarge, .published = false },
-        .{ .failure = .after_commit, .err = error.MailMutationUnconfirmed, .published = true },
-    };
-    for (cases) |case| {
+    for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
         var fixture: SubscriptionFixture = .{ .usage_scope = @splat(1) };
         defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
@@ -1410,14 +1388,14 @@ test "restart selects a tool round, its tokens, channel and fork together after 
                 .{ .tool_result = .{ .call_id = "open-focus", .content = try Content.fromText(a, focus_reply) } },
             });
 
-            fixture.storage.fail_save = case.failure;
-            try testing.expectError(case.err, core.commit(&history, 123));
+            fixture.storage.fail_save = failure;
+            try testing.expectError(error.MailMutationUnconfirmed, core.commit(&history, 123));
             try testing.expect(fixture.open_channel_id == null);
 
             const saves = fixture.storage.saves;
             fixture.storage.fail_save = .none;
-            try testing.expectError(case.err, kernel.sessions.sendFocusMessage(core.work, "core-1", "A later message."));
-            try testing.expectError(case.err, kernel.sessions.maintain());
+            try testing.expectError(error.MailMutationUnconfirmed, kernel.sessions.sendFocusMessage(core.work, "core-1", "A later message."));
+            try testing.expectError(error.MailMutationUnconfirmed, kernel.sessions.maintain());
             try testing.expectEqual(saves, fixture.storage.saves);
         }
 
@@ -1428,7 +1406,7 @@ test "restart selects a tool round, its tokens, channel and fork together after 
         defer retained.deinit();
         const records = retained.records();
         const sample = try kernel.compactionSnapshot(a, kernel.sessions.core);
-        if (case.published) {
+        if (failure == .after_commit) {
             try testing.expectEqual(@as(?u64, 123), kernel.sessions.core.progress.last_input_tokens);
             try testing.expectEqualStrings(channel_id, fixture.open_channel_id.?);
             try testing.expectEqualDeep(@as([]const []const u8, &.{focus_id}), sample.state.activities);

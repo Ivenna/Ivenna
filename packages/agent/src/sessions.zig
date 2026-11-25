@@ -69,10 +69,7 @@ pub const Registry = struct {
     history: Persistence,
     reports: Reports.Outbox,
     mutex: std.Io.Mutex = .init,
-    /// Set when a checkpoint save fails. Once set it is never cleared: every
-    /// later lock returns this same error, including calls unrelated to the
-    /// failed save. The kernel propagates it to shutdown, so a caller that
-    /// caught it and kept serving would keep seeing a stale failure.
+    /// The first save error stops further work in this registry.
     checkpoint_failure: ?anyerror = null,
     core: *Session,
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
@@ -1136,6 +1133,36 @@ fn freeSource(a: Allocator, source: contracts.Callback.Source) void {
 }
 
 const TestStore = @import("test_history.zig").TestStore;
+
+test "startup republishes an unchanged checkpoint only for its paired subscription catalog" {
+    const testing = std.testing;
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
+    defer subscriptions.close();
+    {
+        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+        registry.deinit();
+    }
+    const saved = storage.checkpoint.?;
+    const saves = storage.saves;
+
+    var other_subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
+    defer other_subscriptions.close();
+    try testing.expectError(error.SubscriptionCatalogMismatch, Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &other_subscriptions, .{}));
+    try testing.expectEqual(saves, storage.saves);
+
+    {
+        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+        defer registry.deinit();
+        try testing.expectEqual(saves + 1, storage.saves);
+        try testing.expectEqualStrings(saved, storage.checkpoint.?);
+    }
+
+    storage.checkpoint = null;
+    try testing.expectError(error.SubscriptionCatalogMismatch, Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{}));
+    try testing.expectEqual(saves + 1, storage.saves);
+}
 
 test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
     var storage: TestStore = .{};
