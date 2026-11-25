@@ -621,15 +621,20 @@ pub const Registry = struct {
             std.mem.swap(Context, &session.context.?, history);
             session.progress.last_input_tokens = response.input_tokens;
         }
-        errdefer if (!completed_activity) {
-            std.mem.swap(Context, &session.context.?, history);
-            session.progress.last_input_tokens = previous_tokens;
-        };
         if (finished) {
             session.state = .idle;
             work.activation.destroy(self.allocator);
         }
-        try self.saveLocked();
+        // An unconfirmed save may already be on disk, so the context and the
+        // token count stay as committed and a later checkpoint republishes
+        // them. Any other failure certainly left the checkpoint untouched.
+        self.saveLocked() catch |err| {
+            if (!completed_activity and err != error.UnconfirmedCheckpoint) {
+                std.mem.swap(Context, &session.context.?, history);
+                session.progress.last_input_tokens = previous_tokens;
+            }
+            return err;
+        };
         if (finished and !completed_activity) unloadActivityContext(session);
         return finished;
     }
