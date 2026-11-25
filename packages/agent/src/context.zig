@@ -91,8 +91,11 @@ pub const Context = struct {
         return self.latestToolRound() != null;
     }
 
+    /// True when the scope leaves history a summary can replace. A handover
+    /// inherited without any history of its own is not: summarizing it would
+    /// describe nothing and replace the handover the focus started with.
     pub fn hasHistoryForCompaction(self: *const Context, compaction_scope: CompactionScope) bool {
-        return self.summaryEntryCount(compaction_scope) != 0;
+        return self.canCompact(compaction_scope);
     }
 
     pub fn canCompact(self: *const Context, compaction_scope: CompactionScope) bool {
@@ -345,6 +348,22 @@ test "encoded native exchanges restore independently of their source buffers" {
     const file = reply.content.parts[2].file;
     try std.testing.expectEqualSlices(u8, &.{ '%', 'P', 'D', 'F', 0, 255 }, file.bytes);
     try std.testing.expectEqualSlices(u8, &.{ 0, 255, '"', '\\', '\n' }, file.reference.?);
+}
+
+test "a lone handover is not history a summary can replace" {
+    var context = try Context.restore(std.testing.allocator, .{ .session_id = 1, .epoch = 0 }, "activity-1", &.{
+        .{ .record = .{ .handover = .{
+            .focus_id = "core-1",
+            .observed_at_unix_ms = 900,
+            .summary = "The core's earlier work.",
+            .state = .{ .activities = &.{}, .callbacks = &.{} },
+        } } },
+    });
+    defer context.deinit();
+    for ([_]Context.CompactionScope{ .keep_latest_tool_round, .keep_recent_rounds, .all_history }) |scope| {
+        try std.testing.expect(!context.canCompact(scope));
+        try std.testing.expect(!context.hasHistoryForCompaction(scope));
+    }
 }
 
 test "candidate handover retains sampled references and leaves earlier history available" {

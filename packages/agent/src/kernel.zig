@@ -467,6 +467,16 @@ pub const Kernel = struct {
     }
 
     fn compactRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, current: Input.Current, scope: Context.CompactionScope, trigger: CompactionTrigger) !FocusResult([]const Model.Item) {
+        // Nothing in this scope can be summarized. Asking anyway spends an
+        // inference and, when only an inherited handover is present, replaces
+        // it with a summary of nothing.
+        if (!history.hasHistoryForCompaction(scope)) return .{
+            .interrupted = switch (trigger) {
+                .threshold => "No retained history is eligible for a summary.",
+                // The hard-limit caller reports the measured limit before this call.
+                .limit => "The context was too large to continue.",
+            },
+        };
         var rejection: ?Compaction.Rejection = null;
         const retry: Engine.Retry = if (trigger == .limit) .wait_for_service else .single_attempt;
         const summary_attempts: usize = if (trigger == .limit) 2 else 1;
@@ -1270,6 +1280,61 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         try testing.expectEqual(if (case.compacted) null else case.observed_tokens, work.session.progress.last_input_tokens);
         if (!case.delivered) try testing.expect(!work.activation.admitted);
     }
+}
+
+test "a handover without retained history is not summarized again" {
+    const testing = std.testing;
+    const Stub = struct {
+        bytes: u64 = 0,
+        limit: ?u64 = null,
+        summaries: usize = 0,
+
+        fn measure(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            // Only the ordinary turn is over the limit; a summary request fits.
+            const turn = request.history[request.history.len - 1].message.text;
+            const bytes: u64 = if (std.mem.indexOf(u8, turn, "\nsummarize:") != null) 8 else self.bytes;
+            const violation: ?Model.Limit = if (self.limit) |maximum|
+                (if (bytes > maximum) .{ .kind = .request_bytes, .actual = bytes, .maximum = maximum } else null)
+            else
+                null;
+            return .{ .bytes = bytes, .violation = violation };
+        }
+
+        fn next(context: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.summaries += 1;
+            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "A summary of nothing." } };
+        }
+    };
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var stub: Stub = .{};
+    engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolReplies = undefined } };
+
+    const startup = try SubscriptionFixture.takeWork(&kernel, a);
+    var core = try SubscriptionFixture.admit(&kernel, a, startup);
+    defer core.deinit();
+    const handover: Input.Handover = .{
+        .focus_id = "core-1",
+        .observed_at_unix_ms = 900,
+        .summary = "The core's earlier work.",
+        .state = .{ .activities = &.{}, .callbacks = &.{} },
+    };
+    var candidate = try core.withHandover(a, handover, .all_history);
+    defer candidate.deinit();
+    stub.bytes = 64;
+    stub.limit = 32;
+    var soft_compaction = true;
+    try testing.expect((try kernel.prepareRequest(a, startup, &candidate, &soft_compaction)) == .interrupted);
+    try testing.expectEqual(@as(usize, 0), stub.summaries);
+    try testing.expectEqualDeep(handover, candidate.records()[0].record.handover);
 }
 
 test "the round that carries an assignment does not compact inherited history" {
