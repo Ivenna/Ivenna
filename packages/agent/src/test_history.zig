@@ -77,9 +77,9 @@ pub const TestStore = struct {
         const self: *TestStore = @ptrCast(@alignCast(context));
         self.saves += 1;
         if (self.fail_save == .checkpoint_too_large) return error.HistoryCheckpointTooLarge;
-        if (self.fail_save == .before_commit) return error.UnconfirmedCheckpoint;
+        if (self.fail_save == .before_commit) return error.MailMutationUnconfirmed;
         self.checkpoint = try self.arena.allocator().dupe(u8, body);
-        if (self.fail_save == .after_commit) return error.UnconfirmedCheckpoint;
+        if (self.fail_save == .after_commit) return error.MailMutationUnconfirmed;
     }
 
     fn maintain(_: *anyopaque, _: Allocator, _: Store.Retention) anyerror!void {}

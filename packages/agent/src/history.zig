@@ -46,8 +46,7 @@ pub const History = struct {
 
     /// Admission order and inference usage saved with the session's history.
     pub const Progress = struct {
-        /// Input tokens reported for the last response committed in this epoch,
-        /// whether it completed without tools or through a tool round.
+        /// Input token count reported by the latest committed ordinary round in this epoch.
         last_input_tokens: ?u64 = null,
         /// Starting stream for the next admission batch, after any startup observation.
         first_stream: Stream = .ordinary,
@@ -370,6 +369,7 @@ pub const Persistence = struct {
         }
     }
 
+    /// Write new records before publishing the checkpoint that selects them.
     pub fn save(self: *Persistence, a: Allocator, history: History) !void {
         try history.validate(a);
         var candidate: Cache = .init(self.allocator);
@@ -438,17 +438,13 @@ pub const Persistence = struct {
         if (self.published_checkpoint_digest) |published| {
             if (equalKey(published, candidate_digest)) return;
         }
-        self.store.save(document) catch |err| {
-            if (err != error.HistoryCheckpointTooLarge) self.published_checkpoint_digest = null;
-            return err;
-        };
+        try self.store.save(document);
         std.mem.swap(Cache, &self.cache, &candidate);
         self.published_checkpoint_digest = candidate_digest;
     }
 
     /// Retain confirmed session records together with the caller's unread reports.
     pub fn maintain(self: *Persistence, a: Allocator, extra: []const Store.RecordId) !void {
-        std.debug.assert(self.published_checkpoint_digest != null);
         var records: std.ArrayList(Store.RecordId) = .empty;
         defer records.deinit(a);
         var sessions = self.cache.sessions.valueIterator();

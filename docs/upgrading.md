@@ -2,11 +2,12 @@
 
 ## Upgrading to saved session progress
 
-Stop the kernel, keep the previous executable, and make a matched backup of the mailbox and instance database. See [backups and transfers](running.md#backups-and-transfers).
+The updated executable reads earlier history checkpoints and can write the new checkpoint format during startup, before the first model request.
 
-Start the updated executable with the existing mailbox and its paired `state.sqlite3`. The updated executable reads earlier checkpoints and can write the new format during startup, before the first model request. A focus restored without a saved input token count uses the byte threshold until it commits a round that reports usage. See [context budgets](running.md#context-budgets).
+1. Stop the kernel. Keep the previous executable and make a matched backup of the mailbox and instance database. See [backups and transfers](running.md#backups-and-transfers).
+2. Start the updated executable with the existing mailbox and its paired `state.sqlite3`.
 
-To roll back after the updated executable writes a checkpoint in the new format, restore the pre-upgrade backup and start the previous executable.
+After the updated executable writes a checkpoint in the new format, the previous executable requires the pre-upgrade backup. To roll back, stop the kernel, restore both stores from that backup, and start the previous executable.
 
 ## From feeds to channels
 

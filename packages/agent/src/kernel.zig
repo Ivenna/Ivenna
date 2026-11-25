@@ -836,7 +836,7 @@ test "subscription admission and database acknowledgement survive either outcome
             try testing.expect(!try kernel.sessions.commitResponse(core, &history, SubscriptionFixture.empty_response));
             try kernel.sessions.collectPending(core);
             fixture.storage.fail_save = failure;
-            try testing.expectError(error.UnconfirmedCheckpoint, SubscriptionFixture.admit(&kernel, a, core));
+            try testing.expectError(error.MailMutationUnconfirmed, SubscriptionFixture.admit(&kernel, a, core));
         }
         fixture.storage.fail_save = .none;
         var kernel = try fixture.kernel(&engine, &store);
@@ -1058,8 +1058,13 @@ test "restart uses saved input-token counts only for a matching model scope" {
             return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "Retained summary." } };
         }
     };
-    for ([_]bool{ false, true }) |changed_model| {
-        var fixture: SubscriptionFixture = .{ .usage_scope = @splat(1) };
+    const cases = [_]struct { before: ?[32]u8, after: ?[32]u8, compacts: bool }{
+        .{ .before = @splat(1), .after = @splat(1), .compacts = false },
+        .{ .before = @splat(1), .after = @splat(2), .compacts = true },
+        .{ .before = null, .after = null, .compacts = true },
+    };
+    for (cases) |case| {
+        var fixture: SubscriptionFixture = .{ .usage_scope = case.before };
         defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
         var store = try Subscriptions.Store.openInMemory(a);
@@ -1080,7 +1085,7 @@ test "restart uses saved input-token counts only for a matching model scope" {
             }));
         }
 
-        if (changed_model) fixture.usage_scope = @splat(2);
+        fixture.usage_scope = case.after;
         var kernel = try fixture.kernel(&engine, &store);
         defer kernel.deinit();
         engine.model.vtable = &.{ .next = Budget.next, .measure = Budget.measure, .prepareToolReplies = undefined };
@@ -1090,7 +1095,7 @@ test "restart uses saved input-token counts only for a matching model scope" {
         defer kernel.sessions.endWorker(startup.session);
         var history = try SubscriptionFixture.admit(&kernel, a, startup);
         defer history.deinit();
-        try testing.expectEqual(@intFromBool(changed_model), history.scope.epoch);
+        try testing.expectEqual(@intFromBool(case.compacts), history.scope.epoch);
     }
 }
 
@@ -1367,54 +1372,15 @@ test "restart restores a channel after its activity ends until the channel is cl
     try testing.expect(fixture.open_channel_id == null);
 }
 
-test "a rejected tool round publishes neither its channel nor its fork" {
+test "restart selects a tool round, its tokens, channel and fork together after a failed save" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
-    var fixture: SubscriptionFixture = .{};
-    defer fixture.deinit();
-    const a = fixture.storage.arena.allocator();
-    var store = try Subscriptions.Store.openInMemory(a);
-    defer store.close();
-    var engine: Engine = undefined;
-    var kernel = try fixture.kernel(&engine, &store);
-    defer kernel.deinit();
-    {
-        var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
-        defer kernel.sessions.endWorker(core.work.session);
-        defer core.deinit();
-        var history = try SubscriptionFixture.admit(&kernel, a, core.work);
-        defer history.deinit();
-
-        const opened = try call(a, &core, "open_channel", .{ .name = "imports", .description = "Accept CSV paths." });
-        _ = try call(a, &core, "open_focus", .{ .name = "research", .task = "Collect findings." });
-        const previous_count = history.records().len;
-        try SubscriptionFixture.appendChannelReply(a, &history, opened);
-        fixture.storage.fail_save = .checkpoint_too_large;
-        try testing.expectError(error.HistoryCheckpointTooLarge, core.commit(&history, null));
-        try testing.expect(fixture.open_channel_id == null);
-        var retained = try kernel.sessions.snapshot(core.work.session);
-        defer retained.deinit();
-        try testing.expectEqual(previous_count, retained.records().len);
-        fixture.storage.fail_save = .none;
-    }
-    try testing.expect(fixture.reserved_channel_id == null);
-    try testing.expectEqual(0, kernel.sessions.reserved_sessions);
-    try kernel.sessions.maintain();
-
-    const restarted = try fixture.kernel(&engine, &store);
-    kernel.deinit();
-    kernel = restarted;
-    try testing.expect(fixture.open_channel_id == null);
-    const sample = try kernel.compactionSnapshot(a, kernel.sessions.core);
-    try testing.expectEqual(0, sample.state.channel_registrations.len);
-    try testing.expectEqual(1, kernel.sessions.sessions.count());
-}
-
-test "restart selects a tool round, its token count, and its channel together" {
-    const testing = std.testing;
-    const call = SubscriptionFixture.callTool;
-    for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
-        var fixture: SubscriptionFixture = .{};
+    const cases = [_]struct { failure: TestStore.SaveFailure, err: anyerror, published: bool }{
+        .{ .failure = .checkpoint_too_large, .err = error.HistoryCheckpointTooLarge, .published = false },
+        .{ .failure = .after_commit, .err = error.MailMutationUnconfirmed, .published = true },
+    };
+    for (cases) |case| {
+        var fixture: SubscriptionFixture = .{ .usage_scope = @splat(1) };
         defer fixture.deinit();
         const a = fixture.storage.arena.allocator();
         var store = try Subscriptions.Store.openInMemory(a);
@@ -1425,6 +1391,7 @@ test "restart selects a tool round, its token count, and its channel together" {
 
         var previous_count: usize = undefined;
         var channel_id: []const u8 = undefined;
+        var focus_id: []const u8 = undefined;
         {
             var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
             defer kernel.sessions.endWorker(core.work.session);
@@ -1434,34 +1401,47 @@ test "restart selects a tool round, its token count, and its channel together" {
             previous_count = history.records().len;
             const opened = try call(a, &core, "open_channel", .{ .name = "imports", .description = "Accept CSV paths." });
             channel_id = opened.object.get("result").?.object.get("channel_id").?.string;
-            try SubscriptionFixture.appendChannelReply(a, &history, opened);
+            const forked = try call(a, &core, "open_focus", .{ .name = "research", .task = "Collect findings." });
+            focus_id = forked.object.get("result").?.object.get("focus_id").?.string;
+            const channel_reply = try std.json.Stringify.valueAlloc(a, opened, .{});
+            const focus_reply = try std.json.Stringify.valueAlloc(a, forked, .{});
+            try history.appendBatch(&.{.{ .continuation = "Call open_channel and open_focus" }}, &.{
+                .{ .tool_result = .{ .call_id = "open-channel", .content = try Content.fromText(a, channel_reply) } },
+                .{ .tool_result = .{ .call_id = "open-focus", .content = try Content.fromText(a, focus_reply) } },
+            });
 
-            fixture.storage.fail_save = failure;
-            try testing.expectError(error.UnconfirmedCheckpoint, core.commit(&history, 123));
+            fixture.storage.fail_save = case.failure;
+            try testing.expectError(case.err, core.commit(&history, 123));
             try testing.expect(fixture.open_channel_id == null);
-            try testing.expectEqual(null, core.work.session.progress.last_input_tokens);
-            const sample = try kernel.compactionSnapshot(a, core.work.session);
-            try testing.expectEqual(0, sample.state.channel_registrations.len);
-        }
-        try testing.expect(fixture.reserved_channel_id == null);
 
-        fixture.storage.fail_save = .none;
+            const saves = fixture.storage.saves;
+            fixture.storage.fail_save = .none;
+            try testing.expectError(case.err, kernel.sessions.sendFocusMessage(core.work, "core-1", "A later message."));
+            try testing.expectError(case.err, kernel.sessions.maintain());
+            try testing.expectEqual(saves, fixture.storage.saves);
+        }
+
         const restarted = try fixture.kernel(&engine, &store);
         kernel.deinit();
         kernel = restarted;
         var retained = try kernel.sessions.snapshot(kernel.sessions.core);
         defer retained.deinit();
         const records = retained.records();
-        if (failure == .after_commit) {
+        const sample = try kernel.compactionSnapshot(a, kernel.sessions.core);
+        if (case.published) {
             try testing.expectEqual(@as(?u64, 123), kernel.sessions.core.progress.last_input_tokens);
             try testing.expectEqualStrings(channel_id, fixture.open_channel_id.?);
+            try testing.expectEqualDeep(@as([]const []const u8, &.{focus_id}), sample.state.activities);
             try testing.expectEqual(previous_count + 1, records.len);
-            const reply = records[records.len - 1].exchange[1].tool_result.content.parts[0].text;
-            const decoded = try std.json.parseFromSliceLeaky(std.json.Value, a, reply, .{});
-            try testing.expectEqualStrings(channel_id, decoded.object.get("result").?.object.get("channel_id").?.string);
+            const exchange = records[records.len - 1].exchange;
+            const channel_reply = try std.json.parseFromSliceLeaky(std.json.Value, a, exchange[1].tool_result.content.parts[0].text, .{});
+            const focus_reply = try std.json.parseFromSliceLeaky(std.json.Value, a, exchange[2].tool_result.content.parts[0].text, .{});
+            try testing.expectEqualStrings(channel_id, channel_reply.object.get("result").?.object.get("channel_id").?.string);
+            try testing.expectEqualStrings(focus_id, focus_reply.object.get("result").?.object.get("focus_id").?.string);
         } else {
             try testing.expectEqual(null, kernel.sessions.core.progress.last_input_tokens);
             try testing.expect(fixture.open_channel_id == null);
+            try testing.expectEqual(0, sample.state.activities.len);
             try testing.expectEqual(previous_count, records.len);
         }
     }
