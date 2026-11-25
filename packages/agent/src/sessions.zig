@@ -1493,7 +1493,8 @@ test "a fork inherits the core's retained history, not only this round" {
 
     var fork: ?*Session = null;
     var iterator = registry.sessions.valueIterator();
-    while (iterator.next()) |session| {
+    while (iterator.next()) |entry| {
+        const session = entry.*;
         if (session.role == .activity) fork = session;
     }
     try testing.expect(fork != null);
