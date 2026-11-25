@@ -247,7 +247,14 @@ pub const Registry = struct {
                 } } };
             },
         };
-        if (incoming.receipt) |key| if (self.noticed.contains(key)) return .deferred;
+        // A scheduled receipt still belongs to an unfinished batch. An
+        // acknowledged one has already been admitted, so hearing it again means
+        // the transport did not observe that acknowledgement; repeat it rather
+        // than deferring the same letter forever.
+        if (incoming.receipt) |key| if (self.noticed.get(key)) |state| switch (state) {
+            .scheduled => return .deferred,
+            .acknowledged => return .duplicate,
+        };
         if (!self.hasCapacity(session)) return .deferred;
         const delivery = try Delivery.create(self.allocator, event, incoming.receipt);
         errdefer delivery.destroy(self.allocator);
@@ -1206,6 +1213,55 @@ test "an interrupted activation retains its receipts and only fresh arrivals wak
     const retry = (try registry.takeReadyBatch(a))[0];
     try std.testing.expectEqual(4, retry.activation.deliveries.items.len);
     registry.endWorker(retry.session);
+}
+
+test "an acknowledged receipt that arrives again is reported as a duplicate" {
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
+    defer subscriptions.close();
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    defer registry.deinit();
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const letter: Incoming = .{
+        .receipt = "mail-1",
+        .content = .{ .message = .{ .from = &.{"visitor"}, .text = "Hello", .observed_at_unix_ms = 10 } },
+    };
+    try std.testing.expectEqual(Registry.Intake.accepted, try registry.accept(letter));
+    const first = (try registry.takeReadyBatch(a))[0];
+    defer registry.endWorker(first.session);
+    // The batch still owns the transport copy.
+    try std.testing.expectEqual(Registry.Intake.deferred, try registry.accept(letter));
+    try registry.acknowledged("mail-1");
+    // The letter is admitted and its acknowledgement is recorded, so a third
+    // sighting asks for that acknowledgement again instead of waiting.
+    try std.testing.expectEqual(Registry.Intake.duplicate, try registry.accept(letter));
+}
+
+test "reconcile retains an acknowledged receipt the transport still offers" {
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
+    defer subscriptions.close();
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    defer registry.deinit();
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const letter: Incoming = .{
+        .receipt = "mail-1",
+        .content = .{ .message = .{ .from = &.{"visitor"}, .text = "Hello", .observed_at_unix_ms = 10 } },
+    };
+    try std.testing.expectEqual(Registry.Intake.accepted, try registry.accept(letter));
+    const first = (try registry.takeReadyBatch(a))[0];
+    defer registry.endWorker(first.session);
+    try registry.acknowledged("mail-1");
+    // Forgetting the key while the transport can still offer the receipt would
+    // admit the same letter twice, because intake may hold an older poll.
+    try registry.reconcile(&.{letter});
+    try std.testing.expectEqual(Registry.Intake.duplicate, try registry.accept(letter));
 }
 
 /// Start the next ready focus and admit its single startup or assignment.

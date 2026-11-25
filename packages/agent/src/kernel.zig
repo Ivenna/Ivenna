@@ -134,7 +134,11 @@ pub const Kernel = struct {
             try self.sessions.reconcile(waiting);
             for (waiting) |incoming| switch (try self.sessions.accept(incoming)) {
                 .accepted, .deferred => {},
-                .duplicate => if (incoming.receipt) |receipt| try self.inbox.acknowledge(a, receipt),
+                // The letter is already in working history, so a failed repeat
+                // acknowledgement loses nothing; stopping intake over it would
+                // end the runtime for every other stream.
+                .duplicate => if (incoming.receipt) |receipt| self.inbox.acknowledge(a, receipt) catch |err|
+                    std.log.warn("repeating an acknowledgement for a duplicate receipt failed: {s}", .{@errorName(err)}),
             };
             try self.dispatch(tasks);
             const now = std.Io.Clock.awake.now(self.io).toMilliseconds();
