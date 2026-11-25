@@ -434,7 +434,9 @@ pub const Kernel = struct {
     /// its first answer, can only be judged by what it would send. Estimate the
     /// tokens from that request so the token threshold applies, and keep the
     /// byte ceiling as its own trigger for a request whose text is huge but
-    /// whose token count is not.
+    /// whose token count is not. The measurement covers the history the focus
+    /// already carries; this round's observations arrive only after admission,
+    /// so they never decide whether to compact.
     fn reachedCompactionThreshold(self: *Kernel, history: *const Context, current: Input.Current, last_input_tokens: ?u64) !bool {
         if (last_input_tokens) |tokens| return tokens >= self.limits.compact_at_tokens;
         var scratch: std.heap.ArenaAllocator = .init(self.allocator);
@@ -467,6 +469,13 @@ pub const Kernel = struct {
     }
 
     fn compactRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, current: Input.Current, scope: Context.CompactionScope, trigger: CompactionTrigger) !FocusResult([]const Model.Item) {
+        var measurement_arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer measurement_arena.deinit();
+        const retained_bytes = blk: {
+            const retained = try history.retainedRequest(measurement_arena.allocator(), current, &.{});
+            break :blk (try self.engine.measure(measurement_arena.allocator(), retained, current.role)).bytes;
+        };
+        const retained_tokens = work.session.progress.last_input_tokens orelse retained_bytes / bytes_per_token;
         // Nothing in this scope can be summarized. Asking anyway spends an
         // inference and, when only an inherited handover is present, replaces
         // it with a summary of nothing.
@@ -496,6 +505,9 @@ pub const Kernel = struct {
                         .ready => |prepared| {
                             const items = try self.admit(a, work, &candidate, prepared, true);
                             std.mem.swap(Context, history, &candidate);
+                            std.log.debug("compacted {s}: {s} trigger, {d} bytes and {d} tokens retained", .{
+                                work.session.focus_id, @tagName(trigger), retained_bytes, retained_tokens,
+                            });
                             return .{ .ready = items };
                         },
                         .over_limit => |limit| rejection = .{ .too_large = limit },
@@ -1279,6 +1291,63 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         try testing.expectEqual(@as(u64, @intFromBool(case.compacted)), history.scope.epoch);
         try testing.expectEqual(if (case.compacted) null else case.observed_tokens, work.session.progress.last_input_tokens);
         if (!case.delivered) try testing.expect(!work.activation.admitted);
+    }
+}
+
+test "the byte ruler reads retained history, not the pending observation" {
+    const testing = std.testing;
+    const Counting = struct {
+        summaries: usize = 0,
+
+        fn measure(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
+            var bytes: u64 = 0;
+            for (request.history) |item| switch (item) {
+                .message => |message| bytes += std.mem.count(u8, message.text, "budget-marker"),
+                else => {},
+            };
+            return .{ .bytes = bytes };
+        }
+
+        fn next(context: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.summaries += 1;
+            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "A useful handover." } };
+        }
+    };
+    // The observation alone is over the byte threshold. Only history decides.
+    for ([_]bool{ false, true }) |inherited_over_threshold| {
+        var fixture: SubscriptionFixture = .{};
+        defer fixture.deinit();
+        const a = fixture.storage.arena.allocator();
+        var store = try Subscriptions.Store.openInMemory(a);
+        defer store.close();
+        var engine: Engine = undefined;
+        var kernel = try fixture.kernel(&engine, &store);
+        defer kernel.deinit();
+        var counting: Counting = .{};
+        engine.model = .{ .context = &counting, .vtable = &.{ .next = Counting.next, .measure = Counting.measure, .prepareToolReplies = undefined } };
+        kernel.limits.compact_at_tokens = 1_000_000;
+        kernel.limits.compact_at_bytes = 1;
+
+        try testing.expectEqual(.accepted, try kernel.sessions.accept(.{ .content = .{ .message = .{
+            .from = &.{"operator"},
+            .text = "budget-marker",
+            .observed_at_unix_ms = 100,
+        } } }));
+        const work = try SubscriptionFixture.takeWork(&kernel, a);
+        defer kernel.sessions.endWorker(work.session);
+        var history = try kernel.sessions.snapshot(work.session);
+        defer history.deinit();
+        try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = &.{.{ .input = .{
+            .from = &.{"operator"},
+            .text = if (inherited_over_threshold) "budget-marker" else "older context",
+            .observed_at_unix_ms = 90,
+        } }} } });
+        var soft_compaction = true;
+        const input = (try kernel.prepareRequest(a, work, &history, &soft_compaction)).ready;
+        try testing.expectEqual(@as(usize, @intFromBool(inherited_over_threshold)), counting.summaries);
+        // The observation still reaches the model once, whatever the ruler said.
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, input[input.len - 1].message.text, "budget-marker"));
     }
 }
 
