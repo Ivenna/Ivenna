@@ -1410,3 +1410,37 @@ test "restart restores activity reports together with completion or sleeping his
         if (!sleeping) try testing.expect(reports[1].content == .ended);
     }
 }
+
+test "a fork inherits the core's retained history, not only this round" {
+    const testing = std.testing;
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
+    defer subscriptions.close();
+    var registry = try Registry.init(testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    defer registry.deinit();
+    var core = try admitTestInput(&registry, a);
+    defer core.history.deinit();
+    defer registry.endWorker(core.work.session);
+
+    try core.history.appendBatch(&.{.{ .continuation = "An earlier response" }}, &.{});
+    const retained = core.history.records().len;
+    try testing.expectEqual(@as(usize, 2), retained);
+
+    var changes: RoundChanges = .{};
+    defer registry.discardRound(&changes);
+    _ = try registry.prepareFork(core.work, &changes, "research", "Read the plan.");
+    try registry.commitToolRound(core.work, &core.history, &changes, null);
+
+    var fork: ?*Session = null;
+    var iterator = registry.sessions.valueIterator();
+    while (iterator.next()) |session| {
+        if (session.role == .activity) fork = session;
+    }
+    try testing.expect(fork != null);
+    const context = fork.?.context orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(retained, context.records().len);
+}
