@@ -24,7 +24,7 @@ pub const History = struct {
     }
 
     pub fn port(self: *History) contracts.HistoryStore {
-        return .{ .context = self, .vtable = &.{ .load = load, .allocateGroup = allocateGroup, .query = query, .read = read, .create = create, .save = save, .maintain = maintain } };
+        return .{ .context = self, .vtable = &.{ .load = load, .allocateGroup = allocateGroup, .query = query, .read = read, .create = create, .save = save, .fits = fits, .maintain = maintain } };
     }
 
     fn load(context: *anyopaque, a: Allocator) !?[]const u8 {
@@ -78,6 +78,15 @@ pub const History = struct {
     fn maintain(context: *anyopaque, a: Allocator, retention: contracts.HistoryStore.Retention) !void {
         const self: *History = @ptrCast(@alignCast(context));
         return self.mailbox.maintainHistory(a, retention, self.confirmed_revision orelse return error.HistoryNotLoaded);
+    }
+
+    /// Answer for the revision save would publish next. Nothing is sent, so
+    /// the answer only describes the size the server would accept right now.
+    fn fits(context: *anyopaque, a: Allocator, checkpoint: []const u8) !bool {
+        const self: *History = @ptrCast(@alignCast(context));
+        if (self.highest_revision == null) _ = try load(context, a);
+        const revision = std.math.add(u64, self.highest_revision.?, 1) catch return error.HistoryRevisionExhausted;
+        return self.mailbox.checkpointFits(a, checkpoint, revision);
     }
 
     fn save(context: *anyopaque, checkpoint: []const u8) !void {
@@ -162,8 +171,12 @@ test "a checkpoint rejected before sending leaves the confirmed revision intact"
     var mailbox = try fixture.start();
     var history = History.init(std.testing.allocator, &mailbox);
     try history.port().save("first");
+    var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer scratch.deinit();
+    try std.testing.expect(try history.port().fits(scratch.allocator(), "accepted"));
     const limit = fixture.jmap.max_request;
     fixture.jmap.max_request = 1;
+    try std.testing.expect(!try history.port().fits(scratch.allocator(), "rejected"));
     try std.testing.expectError(error.HistoryCheckpointTooLarge, history.port().save("rejected"));
     try std.testing.expectEqual(@as(?u64, 1), history.confirmed_revision);
     fixture.jmap.max_request = limit;

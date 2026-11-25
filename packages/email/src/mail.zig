@@ -648,12 +648,25 @@ pub const Mailbox = struct {
     }
 
     pub fn createCheckpoint(self: Mailbox, a: Allocator, body: []const u8, revision: u64) !void {
+        if (try self.checkpointRequestSize(a, body, revision) > self.jmap.max_request) return error.HistoryCheckpointTooLarge;
         var creates: std.json.ObjectMap = .empty;
         try creates.put(a, "checkpoint", try self.historyMessage(a, .{ .checkpoint = .{ .body = body, .revision = revision } }));
         self.createHistoryBatch(a, creates) catch |err| switch (err) {
             error.MailRequestTooLarge => return error.HistoryCheckpointTooLarge,
             else => return err,
         };
+    }
+
+    /// Report whether one checkpoint fits the server's request limit. This
+    /// shares its encoding with createCheckpoint, so the two agree on the rule.
+    pub fn checkpointFits(self: Mailbox, a: Allocator, body: []const u8, revision: u64) !bool {
+        return try self.checkpointRequestSize(a, body, revision) <= self.jmap.max_request;
+    }
+
+    fn checkpointRequestSize(self: Mailbox, a: Allocator, body: []const u8, revision: u64) !u64 {
+        var creates: std.json.ObjectMap = .empty;
+        try creates.put(a, "checkpoint", try self.historyMessage(a, .{ .checkpoint = .{ .body = body, .revision = revision } }));
+        return try Jmap.requestSize(.@"Email/set", .{ .accountId = self.account_id, .create = Value{ .object = creates } });
     }
 
     fn createHistoryBatch(self: Mailbox, a: Allocator, creates: std.json.ObjectMap) !void {

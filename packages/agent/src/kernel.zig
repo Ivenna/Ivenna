@@ -206,7 +206,10 @@ pub const Kernel = struct {
             return switch (request) {
                 .send => |message| self.send(a, message.to, message.text),
                 .open_channel => |args| blk: {
-                    const channel_id = try self.kernel.sessions.openChannel(a, self.work, self.kernel.channels, args.name, args.description);
+                    const channel_id = self.kernel.sessions.openChannel(a, self.work, self.kernel.channels, args.name, args.description) catch |err| return switch (err) {
+                        error.HistoryCheckpointTooLarge => runtimeError(a, "channel_capacity_exceeded", "The checkpoint that would save this channel has no room left. No channel was opened and nothing was registered."),
+                        else => err,
+                    };
                     break :blk try runtimeResult(a, .{ .channel_id = channel_id });
                 },
                 .close_channel => |args| blk: {
@@ -1313,6 +1316,50 @@ test "a rejected checkpoint persists no channel" {
         const sample = try kernel.compactionSnapshot(a, core.work.session);
         try testing.expectEqual(0, sample.state.channel_registrations.len);
         fixture.storage.fail_save = .none;
+    }
+
+    const restarted = try fixture.kernel(&engine, &store);
+    kernel.deinit();
+    kernel = restarted;
+    try testing.expect(fixture.open_channel_id == null);
+    const sample = try kernel.compactionSnapshot(a, kernel.sessions.core);
+    try testing.expectEqual(0, sample.state.channel_registrations.len);
+}
+
+test "a checkpoint without room refuses an open channel before reserving it" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    {
+        var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+        defer kernel.sessions.endWorker(core.work.session);
+        defer core.deinit();
+        var history = try SubscriptionFixture.admit(&kernel, a, core.work);
+        defer history.deinit();
+        const before = fixture.storage.checkpoint.?;
+
+        // The admitted checkpoint fills the store, so one more registration
+        // cannot fit.
+        fixture.storage.fits_limit = before.len;
+        const refused = try call(a, &core, "open_channel", .{ .name = "imports", .description = "Accept CSV paths." });
+        try testing.expectEqualStrings("channel_capacity_exceeded", refused.object.get("error").?.object.get("code").?.string);
+        try testing.expect(fixture.open_channel_id == null);
+        const sample = try kernel.compactionSnapshot(a, core.work.session);
+        try testing.expectEqual(0, sample.state.channel_registrations.len);
+
+        // The round carries only the refusal, so it saves the same checkpoint
+        // and leaves no registration behind.
+        try kernel.sessions.commitToolRound(core.work, &history, &core.forks, null);
+        try testing.expect(fixture.open_channel_id == null);
+        try testing.expectEqualSlices(u8, before, fixture.storage.checkpoint.?);
+        fixture.storage.fits_limit = null;
     }
 
     const restarted = try fixture.kernel(&engine, &store);

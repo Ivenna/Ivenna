@@ -70,7 +70,13 @@ Any focus can call `open_channel` with a name and a nonempty description of the 
 
 Pass the complete `channel_id` to the receiving program and use it to send or close the channel. The description gives the ID context in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
 
-The registration is saved together with the tool results of the round that reports it. If that checkpoint would exceed the store's request limit, the save is rejected, nothing is persisted, and the channel never becomes addressable. Close an unused channel that survives restart to free its share.
+The registration is saved together with the tool results of the round that reports it. Before reserving anything, `open_channel` checks whether a checkpoint carrying the new registration fits the store's request limit, so an over-limit checkpoint is refused while the round can still report why.
+
+| Open error | Meaning |
+| --- | --- |
+| `channel_capacity_exceeded` | The checkpoint could not hold one more registration. No channel was opened, no ID was reserved, and nothing was persisted. |
+
+That check is advisory: a round that grows after it can still be rejected when the committing save runs. The rejected save persists nothing and leaves the channel unaddressable. Close an unused channel that survives restart to free its share.
 
 ### Receiving from a channel
 

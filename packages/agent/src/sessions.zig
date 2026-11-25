@@ -517,6 +517,14 @@ pub const Registry = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
+        return self.history.save(a, try self.snapshotLocked(a, pending, self.next_runtime_reference_id));
+    }
+
+    /// Build the checkpoint this round would publish. Nothing reaches the store
+    /// until saveLockedWith encodes and publishes the same checkpoint.
+    /// `next_reference_id` is the counter the commit will publish, which is
+    /// ahead of the staged registration still waiting for its own commit.
+    fn snapshotLocked(self: *Registry, a: Allocator, pending: []const History.Channel, next_reference_id: u64) !History {
         var retained: std.ArrayList(History.Session) = .empty;
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |entry| {
@@ -540,17 +548,17 @@ pub const Registry = struct {
         var channels: std.ArrayList(History.Channel) = .empty;
         try channels.appendSlice(a, self.channels.items);
         try channels.appendSlice(a, pending);
-        try self.history.save(a, .{
+        return .{
             .subscription_catalog = self.subscription_catalog,
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
-            .next_runtime_reference_id = self.next_runtime_reference_id,
+            .next_runtime_reference_id = next_reference_id,
             .wakeups = self.wakeups.values(),
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
             .channels = channels.items,
             .activity_reports = self.reports.checkpoint(),
-        });
+        };
     }
 
     pub fn current(self: *Registry, a: Allocator, session: *Session) !Input.Current {
@@ -1046,20 +1054,36 @@ pub const Registry = struct {
         const next = try std.math.add(u64, reference, 1);
         const id = try contracts.Reference.create(a, name, reference);
         errdefer a.free(id);
-        try self.appendStaged(.{
-            .record = .{
-                .id = id,
-                .opened_by = work.session.focus_id,
-                .opened_at_unix_ms = self.now(),
-                .description = description,
-            },
-            .transport = transport,
-        });
+        const record: History.Channel = .{
+            .id = id,
+            .opened_by = work.session.focus_id,
+            .opened_at_unix_ms = self.now(),
+            .description = description,
+        };
+        // Answer an over-limit checkpoint here, while the round still has a
+        // tool result to carry the reason and nothing is reserved.
+        try self.precheckChannelLocked(a, work, record, next);
+        try self.appendStaged(.{ .record = record, .transport = transport });
         errdefer self.dropStaged(self.staged.items.len - 1);
         errdefer _ = transport.close(id);
         try transport.open(id);
         self.next_runtime_reference_id = next;
         return id;
+    }
+
+    /// Report whether the checkpoint this round would publish can still hold
+    /// one more registration. Advisory: a round that grows after the check can
+    /// still outgrow the store, and the committing save stays authoritative.
+    fn precheckChannelLocked(self: *Registry, a: Allocator, work: Work, candidate: History.Channel, next_reference_id: u64) !void {
+        var pending: std.ArrayList(History.Channel) = .empty;
+        defer pending.deinit(a);
+        for (self.staged.items) |staged| {
+            if (!std.mem.eql(u8, staged.record.opened_by, work.session.focus_id)) continue;
+            try pending.append(a, staged.record);
+        }
+        try pending.append(a, candidate);
+        if (try self.history.fits(a, try self.snapshotLocked(a, pending.items, next_reference_id))) return;
+        return error.HistoryCheckpointTooLarge;
     }
 
     /// Confirm retirement before the transport ends waiting reads.

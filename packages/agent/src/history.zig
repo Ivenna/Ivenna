@@ -351,12 +351,46 @@ pub const Persistence = struct {
         }
     }
 
+    /// The checkpoint a save would publish together with the cache that save
+    /// adopts. Drafting sends no record to the store.
+    const Draft = struct {
+        candidate: Cache,
+        document: []const u8,
+    };
+
     pub fn save(self: *Persistence, a: Allocator, history: History) !void {
-        try history.validate(a);
-        var candidate: Cache = .init(self.allocator);
-        defer candidate.deinit();
         var builder: Builder = .init(self);
         defer builder.deinit();
+        var drafted = try self.draft(a, history, &builder);
+        defer drafted.candidate.deinit();
+        try builder.flush();
+        const candidate_digest = Codec.digest(drafted.document);
+        if (self.published_checkpoint_digest) |published| {
+            if (equalKey(published, candidate_digest)) return;
+        }
+        self.store.save(drafted.document) catch |err| {
+            if (err != error.HistoryCheckpointTooLarge) self.published_checkpoint_digest = null;
+            return err;
+        };
+        std.mem.swap(Cache, &self.cache, &drafted.candidate);
+        self.published_checkpoint_digest = candidate_digest;
+    }
+
+    /// Report whether the store would accept this checkpoint's size without
+    /// publishing it. The answer is advisory: a round that grows after the
+    /// check can still fail to save.
+    pub fn fits(self: *Persistence, a: Allocator, history: History) !bool {
+        var builder: Builder = .init(self);
+        defer builder.deinit();
+        var drafted = try self.draft(a, history, &builder);
+        defer drafted.candidate.deinit();
+        return self.store.fits(a, drafted.document);
+    }
+
+    fn draft(self: *Persistence, a: Allocator, history: History, builder: *Builder) !Draft {
+        try history.validate(a);
+        var candidate: Cache = .init(self.allocator);
+        errdefer candidate.deinit();
         const ordered = try a.dupe(History.Session, history.sessions);
         std.mem.sort(History.Session, ordered, {}, struct {
             fn lessThan(_: void, lhs: History.Session, rhs: History.Session) bool {
@@ -401,7 +435,6 @@ pub const Persistence = struct {
             );
             cached.checkpoint = saved.*;
         }
-        try builder.flush();
         const document = try Codec.encode(a, Checkpoint{
             .subscription_catalog = history.subscription_catalog,
             .next_session_id = history.next_session_id,
@@ -413,16 +446,7 @@ pub const Persistence = struct {
             .channels = history.channels,
             .activity_reports = history.activity_reports,
         });
-        const candidate_digest = Codec.digest(document);
-        if (self.published_checkpoint_digest) |published| {
-            if (equalKey(published, candidate_digest)) return;
-        }
-        self.store.save(document) catch |err| {
-            if (err != error.HistoryCheckpointTooLarge) self.published_checkpoint_digest = null;
-            return err;
-        };
-        std.mem.swap(Cache, &self.cache, &candidate);
-        self.published_checkpoint_digest = candidate_digest;
+        return .{ .candidate = candidate, .document = document };
     }
 
     /// Retain confirmed session records together with the caller's unread reports.
