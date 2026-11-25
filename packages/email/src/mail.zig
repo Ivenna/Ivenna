@@ -651,7 +651,7 @@ pub const Mailbox = struct {
         var creates: std.json.ObjectMap = .empty;
         try creates.put(a, "checkpoint", try self.historyMessage(a, .{ .checkpoint = .{ .body = body, .revision = revision } }));
         self.createHistoryBatch(a, creates) catch |err| switch (err) {
-            error.MailRequestTooLarge => return error.HistoryRecordTooLarge,
+            error.MailRequestTooLarge => return error.HistoryCheckpointTooLarge,
             else => return err,
         };
     }

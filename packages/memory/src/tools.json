@@ -129,7 +129,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Revisit a memory. Read text in pages or receive a complete image or file.",
+    "description": "Revisit a memory. Read text in pages or supply a complete image or file to the model service.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -142,7 +142,7 @@
           "enum": [
             "image_url"
           ],
-          "description": "Open the URL stored in the entry as an image. Read from offset 0."
+          "description": "Pass the URL stored in the entry to the model service as an image reference. Read from offset 0."
         },
         "offset": {
           "type": "integer",
@@ -167,7 +167,7 @@
   },
   {
     "name": "remember",
-    "description": "Keep something you want to carry beyond the present context. Missing parent rooms are created. Each transfer and the resulting memory are limited to 32 MiB; failed preparation leaves any previous memory intact.",
+    "description": "Keep something you want to carry beyond the present context. This can create missing parent rooms. A write and its resulting memory can each contain up to 32 MiB. The previous memory stays intact until the update is ready.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -199,7 +199,7 @@
                     "path": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Path to a regular host file, or its local file URI. Relative paths resolve from the startup directory."
+                      "description": "Copy a regular host file into shared memory. Use a path or local file URI. Relative paths resolve from the startup directory."
                     }
                   },
                   "required": [
@@ -325,7 +325,8 @@
         },
         "recursive": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "description": "By default, remove a memory or an empty room. Set true to remove a room and all its contents."
         }
       },
       "required": [

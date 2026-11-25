@@ -87,19 +87,19 @@ pub const History = struct {
         const a = arena.allocator();
         if (self.highest_revision == null) _ = try load(context, a);
         const revision = std.math.add(u64, self.highest_revision.?, 1) catch return error.HistoryRevisionExhausted;
-        self.highest_revision = revision;
-        self.confirmed_revision = null;
-        self.mailbox.createCheckpoint(a, checkpoint, revision) catch |err| switch (err) {
-            error.MailMutationUnconfirmed => {
-                // A matching revision alone cannot confirm the selection.
-                // Use the same unique current head and full body as restart.
-                const stored = (try self.currentCheckpoint(a)) orelse return err;
-                self.highest_revision = @max(revision, stored.revision);
-                if (stored.revision < revision) return err;
-                if (stored.revision != revision or !std.mem.eql(u8, stored.document, checkpoint)) return error.InvalidHistory;
-            },
-            else => return err,
+        self.mailbox.createCheckpoint(a, checkpoint, revision) catch |err| {
+            if (err == error.HistoryCheckpointTooLarge) return err;
+            self.highest_revision = revision;
+            self.confirmed_revision = null;
+            if (err != error.MailMutationUnconfirmed) return err;
+            // A matching revision alone cannot confirm the selection.
+            // Use the same unique current head and full body as restart.
+            const stored = (try self.currentCheckpoint(a)) orelse return err;
+            self.highest_revision = @max(revision, stored.revision);
+            if (stored.revision < revision) return err;
+            if (stored.revision != revision or !std.mem.eql(u8, stored.document, checkpoint)) return error.InvalidHistory;
         };
+        self.highest_revision = revision;
         self.confirmed_revision = revision;
     }
 };
@@ -147,6 +147,26 @@ test "a later save advances past a checkpoint whose create could still complete"
     var mailbox = try fixture.start();
     var history = History.init(std.testing.allocator, &mailbox);
     try std.testing.expectError(error.MailMutationUnconfirmed, history.port().save("first"));
+    try history.port().save("second");
+    try fixture.finish();
+}
+
+test "a checkpoint rejected before sending leaves the confirmed revision intact" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    var fixture = try Fixture.init(&.{
+        .{ .method = "Email/query", .result = "{\"ids\":[]}" },
+        .{ .method = "Email/set", .result = "{\"created\":{\"checkpoint\":{\"id\":\"first\"}}}", .properties = &.{.{ .path = &.{ "create", "checkpoint", "header:X-Ivenna-History-Revision:asText" }, .json = "\"1\"" }} },
+        .{ .method = "Email/set", .result = "{\"created\":{\"checkpoint\":{\"id\":\"second\"}}}", .properties = &.{.{ .path = &.{ "create", "checkpoint", "header:X-Ivenna-History-Revision:asText" }, .json = "\"2\"" }} },
+    });
+    defer fixture.deinit();
+    var mailbox = try fixture.start();
+    var history = History.init(std.testing.allocator, &mailbox);
+    try history.port().save("first");
+    const limit = fixture.jmap.max_request;
+    fixture.jmap.max_request = 1;
+    try std.testing.expectError(error.HistoryCheckpointTooLarge, history.port().save("rejected"));
+    try std.testing.expectEqual(@as(?u64, 1), history.confirmed_revision);
+    fixture.jmap.max_request = limit;
     try history.port().save("second");
     try fixture.finish();
 }

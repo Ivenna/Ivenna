@@ -8,6 +8,7 @@ const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
 /// A focus can retain its work when reasoning cannot proceed with this input.
+/// Interruption reasons have static storage so they can outlive the request.
 /// Shared-service and runtime errors propagate through the error union.
 pub fn FocusResult(comptime T: type) type {
     return union(enum) { ready: T, interrupted: []const u8 };
@@ -54,14 +55,14 @@ pub const Engine = struct {
 
     pub fn beginRound(self: *Engine, a: Allocator, focus_id: []const u8, history: []const Model.Item, role: Input.Role) !FocusResult(Round) {
         const request = try self.modelRequest(a, history, role);
-        return switch (try self.infer(a, focus_id, request, .wait_for_service)) {
+        return switch (try self.infer(focus_id, request, .wait_for_service)) {
             .ready => |inference| .{ .ready = .{ .role = role, .inference = inference } },
             .interrupted => |reason| .{ .interrupted = reason },
         };
     }
 
     /// Run inference. Retries reuse the original input and sampling time.
-    pub fn infer(self: *Engine, a: Allocator, focus_id: []const u8, request: Model.Request, retry: Retry) !FocusResult(Inference) {
+    pub fn infer(self: *Engine, focus_id: []const u8, request: Model.Request, retry: Retry) !FocusResult(Inference) {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
         const initial_ms = 500;
@@ -76,11 +77,9 @@ pub const Engine = struct {
                 },
                 .rejected => |rejection| {
                     const reason = switch (rejection) {
-                        .limit => |limit| try describeRequestLimit(a, "The model request", limit),
-                        .request_rejected => |detail| if (detail.context_length)
-                            try a.print("The model service rejected the request for exceeding the context window (HTTP {d}).", .{detail.status})
-                        else
-                            try a.print("The model service rejected the inference request (HTTP {d}).", .{detail.status}),
+                        .limit => |limit| reportRequestLimit(focus_id, "model request", limit),
+                        .context_window => "The request exceeded the model's context window.",
+                        .request_rejected => "The model service declined the request.",
                         .invalid_response => "The runtime could not read a usable model response.",
                         .incomplete_response => "The model service did not report a completed inference.",
                     };
@@ -103,15 +102,16 @@ pub const Engine = struct {
         }
     }
 
-    pub fn describeRequestLimit(a: Allocator, request_description: []const u8, limit: Model.Limit) ![]const u8 {
-        const units = switch (limit.kind) {
-            .request_bytes => "encoded bytes",
-            .images => "images",
-            .files => "file references",
+    pub fn reportRequestLimit(focus_id: []const u8, request_description: []const u8, limit: Model.Limit) []const u8 {
+        const detail: struct { units: []const u8, reason: []const u8 } = switch (limit.kind) {
+            .request_bytes => .{ .units = "encoded bytes", .reason = "The context was too large to continue." },
+            .images => .{ .units = "images", .reason = "The context held too many images to continue." },
+            .files => .{ .units = "file references", .reason = "The context held too many file attachments to continue." },
         };
-        return a.print("{s} has {d} {s}, which exceeds the adapter's limit of {d} by {d}.", .{
-            request_description, limit.actual, units, limit.maximum, limit.actual -| limit.maximum,
+        std.log.warn("{s} for {s} exceeds the adapter limit ({d} {s}, maximum {d})", .{
+            request_description, focus_id, limit.actual, detail.units, limit.maximum,
         });
+        return detail.reason;
     }
 
     /// Execute and prepare the decoded batch in order. Replies belong to a.
@@ -137,7 +137,10 @@ pub const Engine = struct {
     fn invoke(self: *Engine, a: Allocator, invocation: Tools.Invocation, name: []const u8, arguments: []const u8, runtime_tools: ?RuntimeTools, role: Input.Role) !Content {
         if (try AgentTools.Request.parse(a, role, name, arguments)) |request| {
             const runtime = runtime_tools orelse return error.UnknownTool;
-            return runtime.invoke(runtime.context, a, request);
+            return runtime.invoke(runtime.context, a, request) catch |err| switch (err) {
+                error.InvalidReference => error.InvalidToolArguments,
+                else => err,
+            };
         }
         for (self.capabilities(role)) |group| {
             for (group) |tools| {

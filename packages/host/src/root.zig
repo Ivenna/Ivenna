@@ -75,11 +75,13 @@ pub const Host = struct {
         }
     };
 
-    const State = union(enum) { running, finished: process.Outcome, failed: anyerror };
+    const State = union(enum) { running, finished: process.Outcome, unavailable: struct { reason: []const u8 } };
     const Job = struct {
         arena: std.heap.ArenaAllocator,
         invocation: Shell.Invocation,
-        args: Shell.Command,
+        mode: Shell.Mode,
+        timeout_ms: ?u32 = null,
+        max_output_bytes: u32,
         focus_id: []const u8,
         command_id: []const u8,
         retained: bool,
@@ -94,7 +96,7 @@ pub const Host = struct {
         completed_sequence: u64 = 0,
         cursors: [2]u64 = .{ 0, 0 }, // Protected by operations, not the registry lock.
         input_pending: bool = false,
-        input_error: ?anyerror = null,
+        input_error: ?[]const u8 = null,
         input_open: bool,
         input_tasks: std.Io.Group = .init,
 
@@ -104,10 +106,9 @@ pub const Host = struct {
             allocator.destroy(self);
         }
     };
-    const PublicState = union(enum) { running, finished: process.Outcome, unavailable: struct { reason: []const u8 } };
     const InputStatus = struct { open: bool, pending: bool, @"error": ?[]const u8 };
-    const Snapshot = struct { state: PublicState, elapsed_ms: u64, stdin: InputStatus };
-    const Create = union(enum) { capacity, unavailable: anyerror, job: *Job };
+    const Snapshot = struct { state: State, elapsed_ms: u64, stdin: InputStatus };
+    const Create = union(enum) { capacity, unavailable, job: *Job };
     const Collection = union(enum) { complete, initial, incremental: u32 };
     const ToolError = struct { code: []const u8, message: []const u8, effects: []const u8 };
     const unreadable_output: ToolError = .{
@@ -177,9 +178,11 @@ pub const Host = struct {
     }
 
     fn execute(self: *Host, a: Allocator, context: Context, args: Shell.Command) !Content {
-        const job = switch (try self.createJob(context, args)) {
+        const registrar = context.callback orelse return error.MissingCallbackRegistrar;
+        const issuer = context.command_reference orelse return error.MissingCommandReferenceIssuer;
+        const job = switch (try self.createJob(context.session_id, context.focus_id, issuer, args)) {
             .capacity => return toolError(a, "commands_unavailable", "The live host command limit has been reached. The command was not started."),
-            .unavailable => |err| return toolError(a, "host_unavailable", try std.fmt.allocPrint(a, "Could not prepare the command: {s}. The command was not started.", .{@errorName(err)})),
+            .unavailable => return toolError(a, "host_unavailable", "Could not prepare the command logs. The command was not started."),
             .job => |job| job,
         };
         defer self.release(job);
@@ -193,10 +196,6 @@ pub const Host = struct {
         const needs_handoff = !job.settled;
         self.mutex.unlock(self.shell.io);
         if (needs_handoff) {
-            const registrar = context.callback orelse {
-                self.stopAndWait(job);
-                return self.handoffFailure(a, job, "This call has no receiving focus for command completion.");
-            };
             const registration = try registrar.open(a, args.name.bytes, .{ .host = .{ .command_id = job.command_id } });
             try self.mutex.lock(self.shell.io);
             job.callback_id = registration.id;
@@ -219,7 +218,7 @@ pub const Host = struct {
         return observation.render(a);
     }
 
-    fn createJob(self: *Host, context: Context, args: Shell.Command) !Create {
+    fn createJob(self: *Host, session_id: u64, focus: []const u8, issuer: Reference.Issuer, args: Shell.Command) !Create {
         try self.mutex.lock(self.shell.io);
         if (self.stopping) {
             self.mutex.unlock(self.shell.io);
@@ -249,22 +248,28 @@ pub const Host = struct {
             self.allocator.destroy(job);
         };
         const owned = arena.allocator();
-        var command = args;
-        command.name.bytes = try owned.dupe(u8, args.name.bytes);
-        command.command.bytes = try owned.dupe(u8, args.command.bytes);
-        command.cwd = if (args.cwd) |cwd| .{ .bytes = try owned.dupe(u8, cwd.bytes) } else null;
-        command.shell = if (args.shell) |shell| .{ .bytes = try owned.dupe(u8, shell.bytes) } else null;
-        const issuer = context.command_reference orelse return error.MissingCommandReferenceIssuer;
         const reference = try issuer.create(owned, args.name.bytes);
-        const focus_id = try owned.dupe(u8, context.focus_id);
-        const invocation = switch (try self.shell.start(owned, context.session_id, command)) {
+        const focus_id = try owned.dupe(u8, focus);
+        const invocation = switch (try self.shell.start(owned, session_id, args)) {
             .ready => |invocation| invocation,
-            .unavailable => |err| return .{ .unavailable = err },
+            .unavailable => return .unavailable,
         };
-        job.* = .{ .arena = arena, .invocation = invocation, .args = command, .focus_id = focus_id, .command_id = reference, .retained = false, .state = switch (invocation.backend) {
-            .process => .running,
-            .not_started => |reason| .{ .finished = .{ .not_started = .{ .reason = reason } } },
-        }, .settled = invocation.backend == .not_started, .input_open = args.mode != .batch and invocation.backend == .process };
+        job.* = .{
+            .arena = arena,
+            .invocation = invocation,
+            .mode = args.mode,
+            .timeout_ms = args.timeout_ms,
+            .max_output_bytes = args.max_output_bytes,
+            .focus_id = focus_id,
+            .command_id = reference,
+            .retained = false,
+            .state = switch (invocation.backend) {
+                .process => .running,
+                .not_started => |reason| .{ .finished = .{ .not_started = .{ .reason = reason } } },
+            },
+            .settled = invocation.backend == .not_started,
+            .input_open = args.mode != .batch and invocation.backend == .process,
+        };
         initialized = true;
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
@@ -341,11 +346,24 @@ pub const Host = struct {
             else => self.mutex.unlock(self.shell.io),
         }
         switch (action) {
-            .signal => |signal| job.invocation.backend.process.signal(self.shell.io, signal.name) catch |err| switch (err) {
-                error.Canceled => return err,
-                else => return try toolError(a, "control_failed", try std.fmt.allocPrint(a, "Could not signal the command: {s}.", .{@errorName(err)})),
+            .signal => |signal| job.invocation.backend.process.signal(self.shell.io, signal.name) catch |err| {
+                if (err == error.Canceled) return err;
+                std.log.debug("could not send {s} to host command {s}: {s}", .{ @tagName(signal.name), job.command_id, @errorName(err) });
+                const message = switch (err) {
+                    error.ProcessNotFound => "The process is no longer available. Read the command state and remaining output.",
+                    error.AccessDenied, error.PermissionDenied => "The host lacks permission to signal one or more processes.",
+                    else => "Could not confirm that the signal reached the command. Read its state before trying again.",
+                };
+                return try toolError(a, "control_failed", message);
             },
-            .resize => |size| job.invocation.backend.process.resize(size.rows, size.cols) catch |err| return try toolError(a, "control_failed", try std.fmt.allocPrint(a, "Could not resize the command terminal: {s}.", .{@errorName(err)})),
+            .resize => |size| job.invocation.backend.process.resize(size.rows, size.cols) catch |err| {
+                std.log.debug("could not resize terminal for host command {s}: {s}", .{ job.command_id, @errorName(err) });
+                return try toolError(a, "control_failed", switch (err) {
+                    error.NotATerminal => "This command has no resizable terminal.",
+                    error.AccessDenied => "The host lacks permission to resize the command terminal.",
+                    else => "Could not resize the command terminal.",
+                });
+            },
             else => unreachable,
         }
         return null;
@@ -361,18 +379,32 @@ pub const Host = struct {
         };
         self.mutex.lockUncancelable(self.shell.io);
         job.input_pending = false;
-        job.input_error = failure;
-        if (eof and job.args.mode == .pipe and failure == null) job.input_open = false;
+        job.input_error = if (failure) |err| switch (err) {
+            error.InputClosed, error.BrokenPipe => "The input stream closed during the write.",
+            error.ProcessNotFound => "The command exited before the input operation completed.",
+            error.Canceled => "Writing input was interrupted.",
+            else => "Could not complete the input write.",
+        } else null;
+        if (eof and job.mode == .pipe and failure == null) job.input_open = false;
         self.changed.broadcast(self.shell.io);
         self.mutex.unlock(self.shell.io);
-        if (failure) |err| if (err == error.Canceled) return error.Canceled;
+        if (failure) |err| {
+            if (err == error.Canceled) return error.Canceled;
+            std.log.debug("could not write input to host command {s}: {s}", .{ job.command_id, @errorName(err) });
+        }
     }
 
     fn supervise(self: *Host, job: *Job) std.Io.Cancelable!void {
         defer self.release(job);
-        const result: State = if (job.invocation.backend.process.wait(self.shell.io, job.args.timeout_ms)) |outcome| .{ .finished = outcome } else |err| .{ .failed = err };
+        const result = job.invocation.backend.process.wait(self.shell.io, job.timeout_ms);
+        const failure: ?anyerror = if (result) |_| null else |err| err;
         self.mutex.lockUncancelable(self.shell.io);
-        job.state = result;
+        job.state = if (result) |outcome| .{ .finished = outcome } else |err| .{ .unavailable = .{
+            .reason = switch (err) {
+                error.TerminalDrainTimedOut => "The command started but collection of its terminal output timed out. Check its output and effects before repeating the command.",
+                else => "The command started but its final outcome is unavailable. Check its output and effects before repeating the command.",
+            },
+        } };
         job.elapsed_ms = job.invocation.elapsed();
         self.mutex.unlock(self.shell.io);
         // Prevent new input, then cancel an outstanding write even when an
@@ -383,11 +415,14 @@ pub const Host = struct {
         job.settled = true;
         self.completed_sequence += 1;
         job.completed_sequence = self.completed_sequence;
-        if (result == .failed and result.failed == error.OutOfMemory) self.failLocked(error.OutOfMemory);
+        if (failure) |err| if (err == error.OutOfMemory) self.failLocked(err);
         self.changed.broadcast(self.shell.io);
         self.pruneFinishedLocked();
         self.mutex.unlock(self.shell.io);
-        if (result == .failed and result.failed == error.Canceled) return error.Canceled;
+        if (failure) |err| {
+            if (err == error.Canceled) return error.Canceled;
+            std.log.debug("could not observe final outcome for host command {s}: {s}", .{ job.command_id, @errorName(err) });
+        }
         self.publishCompletion(job) catch |err| {
             if (err == error.Canceled) return error.Canceled;
             self.mutex.lockUncancelable(self.shell.io);
@@ -416,7 +451,7 @@ pub const Host = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const observation = self.collect(a, job, .complete, job.args.max_output_bytes) catch |err| {
+        const observation = self.collect(a, job, .complete, job.max_output_bytes) catch |err| {
             const failure = try self.outputFailureText(a, job, null, null, err, unreadable_output);
             return self.publisher.send(a, .{ .id = id, .text = failure });
         };
@@ -429,7 +464,7 @@ pub const Host = struct {
         return .{
             .command_id = if (kind == .complete) null else job.command_id,
             .snapshot = current,
-            .mode = job.args.mode,
+            .mode = job.mode,
             .streams = switch (kind) {
                 .complete => try job.invocation.complete(a, budget),
                 .initial => blk: {
@@ -446,11 +481,15 @@ pub const Host = struct {
     fn snapshot(self: *Host, job: *Job) !Snapshot {
         try self.mutex.lock(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
-        return .{ .state = switch (job.state) {
-            .running => .running,
-            .finished => |outcome| .{ .finished = outcome },
-            .failed => |err| .{ .unavailable = .{ .reason = @errorName(err) } },
-        }, .elapsed_ms = if (job.state == .running) job.invocation.elapsed() else job.elapsed_ms, .stdin = .{ .open = job.input_open and job.state == .running, .pending = job.input_pending, .@"error" = if (job.input_error) |err| @errorName(err) else null } };
+        return .{
+            .state = job.state,
+            .elapsed_ms = if (job.state == .running) job.invocation.elapsed() else job.elapsed_ms,
+            .stdin = .{
+                .open = job.input_open and job.state == .running,
+                .pending = job.input_pending,
+                .@"error" = job.input_error,
+            },
+        };
     }
 
     fn waitForCompletion(self: *Host, job: *Job, milliseconds: u32) !void {
@@ -482,7 +521,7 @@ pub const Host = struct {
     }
 
     fn describe(self: *Host, a: Allocator, args: Inspect) !Content {
-        const Entry = struct { command_id: []const u8, focus_id: []const u8, command_preview: []const u8, state: PublicState, mode: Shell.Mode, stdin_open: bool, input_pending: bool };
+        const Entry = struct { command_id: []const u8, focus_id: []const u8, state: State, mode: Shell.Mode, stdin_open: bool, input_pending: bool };
         const Page = struct {
             shell: ?[]const u8 = null,
             cwd: ?[]const u8 = null,
@@ -518,13 +557,14 @@ pub const Host = struct {
                 position += 1;
                 continue;
             }
-            var preview_end = @min(job.args.command.bytes.len, 160);
-            while (preview_end > 0 and preview_end < job.args.command.bytes.len and job.args.command.bytes[preview_end] & 0xc0 == 0x80) preview_end -= 1;
-            try entries.append(a, .{ .command_id = id, .focus_id = job.focus_id, .command_preview = job.args.command.bytes[0..preview_end], .state = switch (job.state) {
-                .running => .running,
-                .finished => |outcome| .{ .finished = outcome },
-                .failed => |err| .{ .unavailable = .{ .reason = @errorName(err) } },
-            }, .mode = job.args.mode, .stdin_open = job.input_open and job.state == .running, .input_pending = job.input_pending });
+            try entries.append(a, .{
+                .command_id = id,
+                .focus_id = job.focus_id,
+                .state = job.state,
+                .mode = job.mode,
+                .stdin_open = job.input_open and job.state == .running,
+                .input_pending = job.input_pending,
+            });
             page.setEntries(entries.items);
             if (std.fmt.count("{f}", .{std.json.fmt(.{ .result = page }, options)}) > 32768) {
                 _ = entries.pop();
@@ -535,32 +575,22 @@ pub const Host = struct {
         return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = page }, options));
     }
 
-    fn handoffFailure(self: *Host, a: Allocator, job: *Job, reason: []const u8) !Content {
-        const failure: ToolError = .{
-            .code = "handoff_unavailable",
-            .message = reason,
-            .effects = "The command started, but no completion callback was registered. It has now finished or been stopped and reaped; effects already produced remain.",
-        };
-        const observation = self.collect(a, job, .complete, job.args.max_output_bytes) catch |err|
-            return Content.fromText(a, try self.outputFailureText(a, job, null, null, err, failure));
-        return Content.fromText(a, try observation.renderText(a, failure));
-    }
-
     fn outputFailureText(self: *Host, a: Allocator, job: *Job, command_id: ?[]const u8, callback_id: ?[]const u8, err: anyerror, failure: ToolError) ![]const u8 {
         switch (err) {
             error.Canceled, error.OutOfMemory => return err,
             else => {},
         }
+        std.log.debug("could not collect output for host command {s}: {s}", .{ job.command_id, @errorName(err) });
         const observation: Observation = .{
             .command_id = command_id,
             .callback_id = callback_id,
             .snapshot = try self.snapshot(job),
-            .mode = job.args.mode,
+            .mode = job.mode,
             .streams = .{
                 .stdout = .{ .log = .{ .path = job.invocation.stdout_reference } },
                 .stderr = .{ .log = .{ .path = job.invocation.stderr_reference } },
             },
-            .output_error = @errorName(err),
+            .output_error = "Could not read the retained command output.",
         };
         return observation.renderText(a, failure);
     }
@@ -581,11 +611,6 @@ pub const Host = struct {
         self.mutex.unlock(self.shell.io);
         if (destroy) job.destroy(self.allocator);
     }
-    fn retire(self: *Host, job: *Job) void {
-        self.mutex.lockUncancelable(self.shell.io);
-        defer self.mutex.unlock(self.shell.io);
-        self.retireLocked(job);
-    }
     fn retireLocked(self: *Host, job: *Job) void {
         for (self.jobs.items, 0..) |entry, index| if (entry == job) {
             _ = self.jobs.swapRemove(index);
@@ -595,16 +620,13 @@ pub const Host = struct {
         };
     }
     fn retireAndStop(self: *Host, job: *Job) void {
-        self.stopAndWait(job);
-        self.retire(job);
-    }
-    fn stopAndWait(self: *Host, job: *Job) void {
         self.mutex.lockUncancelable(self.shell.io);
         defer self.mutex.unlock(self.shell.io);
         if (job.state == .running) {
             job.invocation.backend.process.cancel(self.shell.io);
         }
         while (!job.settled) self.changed.waitUncancelable(self.shell.io, &self.mutex);
+        self.retireLocked(job);
     }
     fn pruneFinishedLocked(self: *Host) void {
         while (true) {
@@ -651,7 +673,8 @@ test "shell defaults appear only on the first unfiltered inspection" {
     var job: Host.Job = .{
         .arena = undefined,
         .invocation = undefined,
-        .args = .{ .name = .{ .bytes = "build" }, .command = .{ .bytes = "make" } },
+        .mode = .batch,
+        .max_output_bytes = 4096,
         .command_id = "build-1",
         .focus_id = "activity-1",
         .retained = true,
@@ -665,7 +688,12 @@ test "shell defaults appear only on the first unfiltered inspection" {
         const fields = value.object.get("result").?.object;
         try t.expectEqual(i == 0, fields.contains("shell"));
         try t.expectEqual(i == 0, fields.contains("cwd"));
-        try t.expectEqual(@as(usize, 1) - args.offset, fields.get("commands").?.array.items.len);
+        const commands = fields.get("commands").?.array.items;
+        try t.expectEqual(@as(usize, 1) - args.offset, commands.len);
+        if (i == 0) {
+            try t.expectEqualStrings(job.command_id, commands[0].object.get("command_id").?.string);
+            try t.expect(!commands[0].object.contains("command_preview"));
+        }
         try t.expect(fields.get("next_offset").? == .null);
     }
 }

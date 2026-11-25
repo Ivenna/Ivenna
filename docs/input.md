@@ -1,10 +1,8 @@
 # Runtime user messages
 
-The agent renders observations, handovers, and inference turns as YAML messages with the `user` role. The turn identifies the focus making the current inference. Retained records preserve their source and observation times. See [message assembly](architecture.md#working-history-and-user-messages).
+Observations, handovers, and the current inference turn appear as YAML messages with the `user` role. The turn identifies the focus receiving it. Retained records keep their original focus IDs and observation times. See the [input definitions and renderers](../packages/agent/src/input.zig).
 
-Tools return their own text, images, and files. When the Responses adapter uses a user-role message to present an uploaded file, it identifies the tool call that supplied it. See [tool content](content.md) and [how tool results are encoded](architecture.md#tool-results).
-
-All focuses use the same system prompt. The focus's current identity, observations, and available tools describe its own circumstances and possible actions. See the [input definitions and renderers](../packages/agent/src/input.zig) and the [system prompt](../packages/agent/src/system.md).
+The message order and role-specific tool selection are described in [message assembly](architecture.md#working-history-and-user-messages). Tool results have a separate [content contract](content.md). The Responses adapter associates uploaded files carried in user messages with the tool calls that supplied them. See [tool result encoding](architecture.md#tool-results).
 
 ## Records and turns
 
@@ -21,9 +19,9 @@ Retained records identify the focus that admitted their events or produced their
 
 ## Names and references
 
-The `name` supplied when opening a focus, running a command, scheduling attention, subscribing, or creating a feed contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
+The `name` supplied when opening a focus or channel, running a command, scheduling attention, or subscribing contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
 
-Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs remain usable as control handles within their originating runtime.
+Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control host commands in their originating runtime. Channel IDs can address a restored channel after restart. See [channel lifetimes](communication.md#channel-lifetimes).
 
 ## Retained records
 
@@ -99,7 +97,7 @@ The runtime sends the core a `focus_interrupted` event when an activity has to p
 | --- | --- | --- |
 | `focus_id` | `Text` | Activity whose reasoning was interrupted |
 | `observed_at` | `Time` | Time the runtime recorded the interruption |
-| `reason` | `Text` | Runtime explanation of why the activity could not continue |
+| `reason` | `Text` | What prevented the activity from continuing, such as context size or a model-service refusal |
 
 The activity may have resumed or even ended by the time the core reads the event. See [interrupted reasoning](attention.md#interrupted-reasoning) for how an activity resumes.
 
@@ -121,16 +119,13 @@ Each `callback` carries a registered observation to the focus that arranged it.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `callback_id` | `Text` | Complete reference returned when the observation was arranged |
-| `source` | `Source` | `wakeup` or `host` with the originating `command_id` |
-| `observed_at` | `Time` | Time the runtime observed the callback |
+| `callback_id` | `Text` | Complete ID returned by `schedule_attention` or a `run_host_shell` handoff |
+| `source` | `Source` | `{wakeup: {}}` or `{host: {command_id: "build-17"}}` |
+| `scheduled_for` | `Time`, when known for a wakeup | Originally scheduled time from `schedule_attention.at` |
+| `observed_at` | `Time` | Time the runtime observed the callback during intake |
 | `text` | `Text` | Supplied wakeup text or serialized host result or diagnostic |
 
-A callback's observation time dates its intake. The wakeup deadline or command completion can be earlier.
-
-The ID matches the `callback_id` returned by `schedule_attention` or a `run_host_shell` handoff. A source of `wakeup: {}` identifies a scheduled wakeup. A source of `host: {command_id: "build-17"}` identifies a host execution. A host completion's callback reference uses the command's name with its own numeric suffix. The runtime supplies the command ID in `source.host.command_id`. See [callback delivery](attention.md#callback-observations) and [host results](host.md#output-and-results).
-
-A restored host source can identify an execution in an earlier runtime. The command ID serves as a control handle within the originating runtime. See [command lifetimes](host.md#command-lifetimes) for stored results and interruption observations after restart.
+Compare a wakeup's `scheduled_for` and `observed_at` to see how much time passed before intake. For a host callback, `source.host.command_id` identifies the command even if its control handle has expired. See [callback delivery](attention.md#callback-observations) and [command lifetimes](host.md#command-lifetimes).
 
 #### Subscription observations
 
@@ -158,39 +153,46 @@ A `handover` record contains these fields.
 
 #### Sampled state
 
-`current.observed_at` dates the state supplied in `summarize.state`. In an accepted handover, `observed_at` keeps that time and `state` keeps the supplied sample alongside the summary. Inherited handovers keep their original focus ID, time, and sample.
+The compaction turn carries the runtime sample in `summarize.state`. Its `current.observed_at` dates the turn. The accepted handover keeps the sample and time alongside the summary. Inherited handovers keep their original focus ID, time, and sample.
 
 | Field | Type | Core sample | Activity sample |
 | --- | --- | --- | --- |
 | `activities` | `Text[]` | IDs of existing activities, including sleeping and interrupted ones | — |
-| `callbacks` | `PendingCallback[]` | Core's pending callbacks | This activity's pending callbacks |
-| `subscriptions` | `Text[]` | Core's active subscription IDs | This activity's active subscription IDs |
-| `feeds` | `Text[]` | IDs of open feeds created by the core or by activities that have ended | IDs of open feeds created by this activity |
+| `callbacks` | `PendingCallback[]` | Pending callbacks for the core | Pending callbacks for this activity |
+| `subscriptions` | `SampledSubscription[]` | Active subscriptions for the core | Active subscriptions for this activity |
+| `channels` | `SampledChannel[]` | All open channels, including those opened by activities that have ended | Open channels created by this activity |
 | `correspondents` | `Text[]` | Registered outgoing correspondent IDs | — |
 
-The core's `correspondents` list is present even when empty. The renderer omits other empty collections and omits `state` when it has no fields to render. See [startup and restart](#startup-and-restart) for how to interpret the list.
+Core samples always include `correspondents`, even when empty. Other collections appear when nonempty. When every field is absent, the message omits `state`. See [startup and restart](#startup-and-restart) for how to interpret the correspondent list.
 
-A core sample may already reflect an activity's completion and include its open feeds while the ending observation is still queued. Readers can still access closed feeds by ID. See [activity completion](attention.md#activity-completion) and [reading feeds](communication.md#reading-feeds).
+A `SampledSubscription` has `subscription_id: Text` and the registered `listener` description of what to watch and when to report. A new subscription can appear before its first report. A report accepted before withdrawal can still reach the focus after the subscription leaves the sample. See [subscriptions](attention.md#subscriptions).
 
-Active subscriptions include listeners that have yet to report. A report accepted before withdrawal can arrive after the ID has dropped out of a new sample.
+A `SampledChannel` has `channel_id: Text` and the `description` supplied when the channel opened, when available. A channel enters the sample after the runtime confirms its registration. A retained handover records what was open at the time of the sample. The result of a new send tells the focus whether the message reached a waiting receiver. See [opening a channel](communication.md#opening-a-channel) and [channel send outcomes](communication.md#sending-to-a-channel).
 
-Each `PendingCallback` contains `callback_id: Text` and `source: Source`. A callback remains pending until its observation enters the history of the focus that arranged it, including after the result is published or queued. A pending host source can identify a command that has already finished. Observation text arrives separately as an event. See [command lifetimes](host.md#command-lifetimes) for handle availability.
+`listener` and `description` are `Text` or `null`. Older samples that stored only IDs use `null`. Some older checkpoints can also restore a channel without a saved description.
 
-In this handover, the summary carries the practice plan forward. `state` keeps the wakeup reference alongside the other sampled IDs.
+Each `PendingCallback` contains `callback_id: Text` and `source: Source`, with `scheduled_for: Time` when the original scheduled time of a wakeup is known. A callback remains pending until its observation enters the history of the focus that arranged it. A pending host callback can refer to a command that has already finished. See [callback observations](#callback-observations) and [command lifetimes](host.md#command-lifetimes).
+
+In this handover, the sampled state gives the core a time to revisit release verification and a channel for CSV files ready to import.
 
 ```yaml
 handover:
   focus_id: core-1
   observed_at: "2026-11-06T12:00:01.000Z"
-  summary: A 20-minute practice outline is being prepared. Revisit the plan tomorrow.
+  summary: The verification activity is checking the release CSVs. Revisit the results when the review wakeup arrives.
   state:
-    activities: [practice-2]
+    activities: [verify-release-2]
     callbacks:
-      - callback_id: revisit-practice-5
+      - callback_id: review-release-5
         source:
           wakeup: {}
-    subscriptions: [release-watch-1]
-    feeds: [practice-updates-1]
+        scheduled_for: "2026-11-07T18:00:00.000Z"
+    subscriptions:
+      - subscription_id: release-watch-1
+        listener: Report each stable release in the project changelog.
+    channels:
+      - channel_id: task-input-18
+        description: Receives the absolute path of each CSV file ready for import.
     correspondents: [operator]
 ```
 
@@ -233,7 +235,7 @@ events:
 
 ## Handover generation and replacement
 
-A compaction request contains the common system prompt, the history to summarize, and a turn with `current` and `summarize`. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary. Tools are disabled, and observations awaiting admission stay queued. A tool result in this request can contain a short omission notice in place of an attachment. The result keeps its existing text, including any source description. If the runtime requests a revised summary, `summarize.instructions` includes the reason for revision.
+A compaction request presents the history to summarize and a turn with `current` and `summarize` under the shared system prompt. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary. Observations awaiting admission stay queued and the request offers no tools. The summary request may show a short omission notice in place of a tool attachment. The tool result's existing text and source description stay in the request. On a revision request, `summarize.instructions` says what to correct.
 
 After accepting a handover, the next ordinary request presents it first in the retained history. Any carried-forward observations and complete exchanges follow it. New observations appear in the current turn.
 

@@ -10,11 +10,19 @@ pub const Rejection = union(enum) {
     unexpected_tool_call,
     too_large: Model.Limit,
 
-    pub fn description(self: Rejection, a: Allocator) ![]const u8 {
+    fn retryInstruction(self: Rejection) []const u8 {
+        return switch (self) {
+            .empty_summary => "The previous summary was empty. Include what this focus needs to continue.",
+            .unexpected_tool_call => "The previous reply tried to call a tool. Return the handover as plain text.",
+            .too_large => "The proposed handover left too little room to continue. Write a shorter summary.",
+        };
+    }
+
+    pub fn interruption(self: Rejection, focus_id: []const u8) []const u8 {
         return switch (self) {
             .empty_summary => "The handover summary was empty.",
-            .unexpected_tool_call => "The summary response included tool calls.",
-            .too_large => |limit| Engine.describeRequestLimit(a, "The next request with the proposed handover", limit),
+            .unexpected_tool_call => "The handover response tried to call a tool.",
+            .too_large => |limit| Engine.reportRequestLimit(focus_id, "request with the proposed handover", limit),
         };
     }
 };
@@ -29,7 +37,7 @@ pub const Result = union(enum) {
 /// continuation and decides whether to request a replacement summary.
 pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, snapshot: Input.Snapshot, scope: Context.CompactionScope, previous: ?Rejection, retry: Engine.Retry) !Result {
     const instructions = if (previous) |reason|
-        try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ @embedFile("compaction.md"), try reason.description(arena) })
+        try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ @embedFile("compaction.md"), reason.retryInstruction() })
     else
         @embedFile("compaction.md");
     const history = try context.summaryRequest(arena, snapshot, instructions, scope);
@@ -38,15 +46,13 @@ pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, sna
         .tools = &.{},
         .reasoning_effort = .high,
     };
-    if ((try engine.model.measure(arena, request)).violation) |original_limit| {
-        const remaining_limit: ?Model.Limit = if (try Context.replaceSummaryMedia(arena, history))
-            (try engine.model.measure(arena, request)).violation
-        else
-            original_limit;
-        if (remaining_limit) |limit|
-            return .{ .interrupted = try Engine.describeRequestLimit(arena, "The summary request", limit) };
+    var violation = (try engine.model.measure(arena, request)).violation;
+    if (violation != null and try Context.replaceSummaryMedia(arena, history)) {
+        violation = (try engine.model.measure(arena, request)).violation;
     }
-    var inference = switch (try engine.infer(arena, context.focus_id, request, retry)) {
+    if (violation) |limit|
+        return .{ .interrupted = Engine.reportRequestLimit(context.focus_id, "summary request", limit) };
+    var inference = switch (try engine.infer(context.focus_id, request, retry)) {
         .ready => |result| result,
         .interrupted => |reason| return .{ .interrupted = reason },
     };

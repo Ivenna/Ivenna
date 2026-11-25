@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send text to one correspondent, focus, or feed. A correspondence `reference` confirms that the sending service accepted the message for delivery. A focus message enters the recipient's queue and can wake it. A feed `sequence` identifies the stored message.",
+    "description": "Send text to one correspondent, focus, or channel. A correspondence `reference` confirms submission for delivery. A focus message becomes an observation and can wake its recipient. A channel send attempts an immediate handoff to one waiting receiver. `accepted` confirms the handoff. Unsent text stays unqueued.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -32,12 +32,12 @@
             {
               "type": "object",
               "properties": {
-                "feed_id": {
+                "channel_id": {
                   "type": "string",
-                  "description": "Complete ID of an open feed."
+                  "description": "Complete ID of an open channel."
                 }
               },
-              "required": ["feed_id"],
+              "required": ["channel_id"],
               "additionalProperties": false
             }
           ]
@@ -52,8 +52,8 @@
     }
   },
   {
-    "name": "create_feed",
-    "description": "Create a feed to publish updates people and programs can read. The feed survives restart and the end of this focus. Use the returned `feed_id` to publish, and pass it to readers who want to follow the feed. In an activity, `\"$IVENNA\" feed read --help` explains how to read it.",
+    "name": "open_channel",
+    "description": "Open a channel for local programs. Give its `channel_id` to the receiver. A receiver can reconnect with the same ID, even after this focus ends or Ivenna restarts. In a host command, `\"$IVENNA\" receive --help` shows how to receive.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -61,7 +61,7 @@
         "description": {
           "type": "string",
           "minLength": 1,
-          "description": "Briefly describe what readers can expect to find in the feed."
+          "description": "Briefly describe the channel's purpose and what each message should contain."
         }
       },
       "required": ["name", "description"],
@@ -69,17 +69,18 @@
     }
   },
   {
-    "name": "close_feed",
-    "description": "Close a feed to new messages. Published messages remain readable. `changed` is false when the feed was already closed.",
+    "name": "close_channel",
+    "description": "Close a channel and end waiting reads. `changed` tells you whether this call closed the channel.",
     "parameters": {
       "type": "object",
       "properties": {
-        "feed_id": {
+        "channel_id": {
           "type": "string",
-          "description": "Complete feed ID."
+          "minLength": 1,
+          "description": "Complete channel ID."
         }
       },
-      "required": ["feed_id"],
+      "required": ["channel_id"],
       "additionalProperties": false
     }
   },
@@ -120,7 +121,7 @@
         "at": {
           "type": "string",
           "format": "date-time",
-          "description": "Past times are due immediately."
+          "description": "Use a date and time with `Z` or an explicit UTC offset. Past times are already due."
         },
         "text": {
           "type": "string",
@@ -137,7 +138,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Subscribe this focus to reports from a listener you set up. Give the listener the returned `subscription_id`. Its reports can wake this focus. In an activity, `\"$IVENNA\" subscription --help` lists the listener commands.",
+    "description": "Register this focus to receive observations from a listener you set up. Give the listener the returned `subscription_id`. Its reports can wake this focus. In host commands, `\"$IVENNA\" subscription --help` lists the listener commands.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -149,7 +150,7 @@
         "listener": {
           "type": "string",
           "minLength": 1,
-          "description": "Describe what the listener watches and when it reports."
+          "description": "Briefly describe what the listener watches and when it should report."
         }
       },
       "required": ["name", "listener"],
@@ -158,7 +159,7 @@
   },
   {
     "name": "withdraw_subscription",
-    "description": "Withdraw any subscription by ID. Accepted reports stay with the subscribing focus. Stop the listener separately if needed.",
+    "description": "Withdraw a subscription by ID to stop accepting new reports. Accepted reports can still reach the subscribing focus. Stop the listener separately if needed.",
     "parameters": {
       "type": "object",
       "properties": {

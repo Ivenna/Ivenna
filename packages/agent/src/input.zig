@@ -102,6 +102,13 @@ pub const FocusInterrupted = struct {
 pub const PendingCallback = struct {
     callback_id: []const u8,
     source: contracts.Callback.Source,
+    scheduled_for_unix_ms: ?i64 = null,
+
+    pub fn jsonStringify(self: PendingCallback, writer: anytype) !void {
+        try writer.beginObject();
+        try writeCallbackFields(writer, self.callback_id, self.source, self.scheduled_for_unix_ms);
+        try writer.endObject();
+    }
 };
 
 pub const Callback = struct {
@@ -109,11 +116,29 @@ pub const Callback = struct {
     source: contracts.Callback.Source,
     observed_at_unix_ms: i64,
     text: []const u8,
+    scheduled_for_unix_ms: ?i64 = null,
 
     pub fn jsonStringify(self: Callback, writer: anytype) !void {
-        try writer.write(.{ .callback_id = self.callback_id, .source = self.source, .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms }, .text = self.text });
+        try writer.beginObject();
+        try writeCallbackFields(writer, self.callback_id, self.source, self.scheduled_for_unix_ms);
+        try writer.objectField("observed_at");
+        try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
+        try writer.objectField("text");
+        try writer.write(self.text);
+        try writer.endObject();
     }
 };
+
+fn writeCallbackFields(writer: anytype, id: []const u8, source: contracts.Callback.Source, scheduled_for: ?i64) !void {
+    try writer.objectField("callback_id");
+    try writer.write(id);
+    try writer.objectField("source");
+    try writer.write(source);
+    if (scheduled_for) |time| {
+        try writer.objectField("scheduled_for");
+        try writer.write(Time.Instant{ .unix_ms = time });
+    }
+}
 
 pub const SubscriptionReport = struct {
     subscription_id: []const u8,
@@ -158,17 +183,48 @@ pub const Snapshot = struct {
     state: State,
 };
 
+pub const SampledChannel = struct {
+    channel_id: []const u8,
+    description: ?[]const u8 = null,
+};
+
+pub const SampledSubscription = struct {
+    subscription_id: []const u8,
+    listener: ?[]const u8 = null,
+};
+
 /// Facts sampled for compaction and carried alongside the model's summary.
 pub const State = struct {
     activities: []const []const u8,
     callbacks: []const PendingCallback,
-    subscriptions: []const []const u8,
-    feeds: []const []const u8 = &.{},
+    subscription_registrations: []const SampledSubscription = &.{},
+    channel_registrations: []const SampledChannel = &.{},
     correspondents: ?[]const []const u8 = null,
+    // Historic ZON handovers keep ID-only lists under these field names.
+    // History normalizes them at load time, before rendering or copying State.
+    subscriptions: []const []const u8 = &.{},
+    channels: []const []const u8 = &.{},
+    feeds: []const []const u8 = &.{},
 
     pub fn isEmpty(self: State) bool {
-        return self.activities.len == 0 and self.callbacks.len == 0 and self.subscriptions.len == 0 and
-            self.feeds.len == 0 and self.correspondents == null;
+        return self.activities.len == 0 and self.callbacks.len == 0 and self.subscription_registrations.len == 0 and
+            self.channel_registrations.len == 0 and self.correspondents == null;
+    }
+
+    pub fn restoreLegacyFields(self: *State, a: Allocator) !void {
+        if (self.subscription_registrations.len == 0 and self.subscriptions.len != 0) {
+            const registrations = try a.alloc(SampledSubscription, self.subscriptions.len);
+            for (self.subscriptions, registrations) |id, *registration| registration.* = .{ .subscription_id = id };
+            self.subscription_registrations = registrations;
+        }
+        if (self.channel_registrations.len == 0 and self.channels.len != 0) {
+            const registrations = try a.alloc(SampledChannel, self.channels.len);
+            for (self.channels, registrations) |id, *registration| registration.* = .{ .channel_id = id };
+            self.channel_registrations = registrations;
+        }
+        self.subscriptions = &.{};
+        self.channels = &.{};
+        self.feeds = &.{};
     }
 
     pub fn jsonStringify(self: State, writer: anytype) !void {
@@ -181,13 +237,13 @@ pub const State = struct {
             try writer.objectField("callbacks");
             try writer.write(self.callbacks);
         }
-        if (self.subscriptions.len != 0) {
+        if (self.subscription_registrations.len != 0) {
             try writer.objectField("subscriptions");
-            try writer.write(self.subscriptions);
+            try writer.write(self.subscription_registrations);
         }
-        if (self.feeds.len != 0) {
-            try writer.objectField("feeds");
-            try writer.write(self.feeds);
+        if (self.channel_registrations.len != 0) {
+            try writer.objectField("channels");
+            try writer.write(self.channel_registrations);
         }
         if (self.correspondents) |ids| {
             try writer.objectField("correspondents");
@@ -198,11 +254,21 @@ pub const State = struct {
 };
 
 pub fn cloneState(a: Allocator, state: State) !State {
+    const subscriptions = try a.alloc(SampledSubscription, state.subscription_registrations.len);
+    for (state.subscription_registrations, subscriptions) |source, *item| item.* = .{
+        .subscription_id = try a.dupe(u8, source.subscription_id),
+        .listener = if (source.listener) |text| try a.dupe(u8, text) else null,
+    };
+    const channels = try a.alloc(SampledChannel, state.channel_registrations.len);
+    for (state.channel_registrations, channels) |source, *item| item.* = .{
+        .channel_id = try a.dupe(u8, source.channel_id),
+        .description = if (source.description) |text| try a.dupe(u8, text) else null,
+    };
     return .{
         .activities = try cloneIds(a, state.activities),
         .callbacks = try cloneCallbacks(a, state.callbacks),
-        .subscriptions = try cloneIds(a, state.subscriptions),
-        .feeds = try cloneIds(a, state.feeds),
+        .subscription_registrations = subscriptions,
+        .channel_registrations = channels,
         .correspondents = if (state.correspondents) |ids| try cloneIds(a, ids) else null,
     };
 }
@@ -290,6 +356,7 @@ pub fn cloneEvent(a: Allocator, event: Event) !Event {
             },
             .observed_at_unix_ms = callback.observed_at_unix_ms,
             .text = try a.dupe(u8, callback.text),
+            .scheduled_for_unix_ms = callback.scheduled_for_unix_ms,
         } },
     };
 }

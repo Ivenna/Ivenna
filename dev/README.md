@@ -6,7 +6,7 @@ This setup runs the kernel from the source checkout, with mail and memory servic
 
 Install the Zig version in [`.zig-version`](../.zig-version), an OpenSSH client, and `curl`.
 
-Use [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html) for the middleware. The commands below use Podman. See the [development guide](../docs/development.md) for build conventions and the [testing guide](../docs/testing.md) for automated checks that run directly on the host.
+Use [Docker Compose](https://docs.docker.com/compose/) or [Podman Compose](https://docs.podman.io/en/latest/markdown/podman-compose.1.html) for the mail and memory services. The commands below use Podman. See the [development guide](../docs/development.md) for build conventions and the [testing guide](../docs/testing.md) for automated checks that run directly on the host.
 
 ## Configuration
 
@@ -143,7 +143,19 @@ With the supplied readiness policy installed, this command receives a `550` reje
 
 Read messages from Ivenna through a JMAP-capable client or mail API using the operator account and the service's JMAP session URL. Ivenna chooses whether and when to reply. See the [usage guide](../docs/usage.md) for continuing correspondence and interpreting responses.
 
-## Trying local programs
+## Trying a channel
+
+Send this request using the [mail example](#sending-a-message).
+
+> Delegate this check to an activity. Ask it to open a channel named `task-input` for short test messages, then send `first` before starting a receiver.
+>
+> In that activity, use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" receive CHANNEL_ID --follow`, substituting the complete channel ID. Send `first` again and read the output with `continue_host_shell`. Then send and read `second`. If a send reports `channel_would_block`, check that the receiver is still running and give it time to request its next read before retrying.
+>
+> After reading both messages, have the activity close the channel and collect the receiver's exit status. Report the send results, command output, and exit status.
+
+Expect `channel_would_block` before the receiver starts, then two `accepted` results and two JSON `message` records in order. The receiver should exit with status 0 after the channel closes. See the [channel interface](../docs/communication.md#channels).
+
+## Trying a subscription listener
 
 In a second terminal at the repository root, [load the same instance environment](#configuration) to set `DATA_DIR`, then point `IVENNA` at the executable built at startup.
 
@@ -151,20 +163,7 @@ In a second terminal at the repository root, [load the same instance environment
 export IVENNA="$PWD/zig-out/bin/ivenna"
 ```
 
-To set up an independent reader or listener, follow the [deployment guide](../docs/running.md#local-programs).
-
-### Trying a feed reader
-
-Ask Ivenna by email to create a feed, publish a message, and reply with the feed ID. Substitute the returned ID when reading the message.
-
-```sh
-feed_id='releases-1'
-"$IVENNA" feed read "$feed_id"
-```
-
-Run the same command after stopping the kernel to check offline access. See [reading feeds](../docs/communication.md#reading-feeds).
-
-### Trying a subscription listener
+To run the listener independently, follow the [deployment guide](../docs/running.md#subscription-listeners).
 
 Ask Ivenna to [register a subscription](../docs/attention.md#subscriptions) and give you its complete ID. Use that ID in place of the example.
 
@@ -189,13 +188,13 @@ The external volumes and private instance files remain in place. Use the [startu
 
 ## Updating the kernel and middleware
 
-For compatible updates, keep the same instance directory and [load its configuration](#configuration). Preparation preserves private copies of the examples. Incorporate relevant changes from [.env.example](../.env.example) into the instance's `.env` and reload it.
+For compatible updates, keep the same instance directory. Incorporate relevant changes from `.env.example` into the instance's `.env` and reload it. See the [configuration steps](#configuration) and [example environment](../.env.example).
 
 ### Kernel
 
-For a change in storage format, see [updating an existing instance](../docs/running.md#updating-the-executable). For a fresh development instance, choose a new `DEV_INSTANCE_DIR`. With the supplied Stalwart account plan, configure a new `MAIL_VOLUME_NAME` in that instance and provision it as described in [mail setup](#configuring-mail).
+For changes that require instance or caller updates, follow the [upgrade guide](../docs/upgrading.md).
 
-After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent readers and listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
+After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent channel receivers and subscription listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
 
 ### Memory
 
@@ -231,7 +230,9 @@ These settings configure the supplied local services in [dev/compose.yaml](compo
 | `MEMORY_IMAGE` | Memory image | `localhost/ivenna-memory:dev` |
 | `MEMORY_CAPACITY_BYTES` | Shared memory-room capacity | `1073741824` (1 GiB) |
 
-If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Account and server policy changes belong in the private provisioning plan; apply them through [local mail setup](#configuring-mail).
+If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Apply account and server policy changes from the private provisioning plan through [local mail setup](#configuring-mail).
+
+Stalwart's `Jmap.maxRequestSize` sets the advertised size limit that Ivenna uses when saving working history. See [recovering from a size rejection](../docs/running.md#working-history) and [Stalwart's request settings](https://stalw.art/docs/ref/object/jmap/#maxrequestsize).
 
 After changing service settings, reload `$DEV_INSTANCE_DIR/.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed. For mail transfers, follow the [history preservation requirements](../docs/running.md#backups-and-transfers).
 

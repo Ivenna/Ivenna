@@ -23,7 +23,7 @@ For a command to verify the supplied local environment, see [sending a developme
 Put a short passage in the body of your letter. Ivenna skips email attachments. For longer material, describe what you want Ivenna to look at and give it a location it can choose to open.
 
 - For a file already on Ivenna's host, give its absolute path, such as `/srv/notes.md`, or its file URI.
-- For a screenshot, include a direct HTTP(S) link that Ivenna's model service can open.
+- For a screenshot, include a direct HTTP(S) image URL that the model service can reach. See [remote images](resources.md#remote-images).
 - For an article, include its URL. Ivenna can retrieve the page when the deployment enables [web page access](running.md#web-page-access).
 
 A letter that exceeds the model's input limits can stay pending and delay later mail. See the [operator's recovery steps](running.md#recovering-from-an-admission-failure).
@@ -46,8 +46,6 @@ session to 20 minutes. Please retain the vocabulary goals we agreed on.
 ## Ongoing work and memory
 
 Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring new versions to its attention. See [subscriptions](attention.md#subscriptions).
-
-If Ivenna gives you a feed ID, use it to read the feed from the kernel host. A program on that host can relay selected messages to readers elsewhere. See [reading feeds](communication.md#reading-feeds) and [local programs](running.md#local-programs).
 
 Ivenna can condense its working history and decide what to keep in memory. Keep your own mail copies if you need to retrieve or quote a letter later. See [autonomous memory](memory.md) and [mail retention](running.md#communication-copies).
 

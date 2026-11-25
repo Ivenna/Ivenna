@@ -4,15 +4,15 @@ The core receives incoming correspondence. Both the core and activities can send
 
 ## Sending a message
 
-Call `send` with nonempty `text` and a `to` object containing exactly one destination field. Use a complete ID from an observation, a tool result, or a reference shared in a message.
+Call `send` with nonempty `text` and a `to` object containing exactly one destination field. Use a complete ID from an observation, a handover, a tool result, or a message.
 
 | Field in `to` | Destination | Successful result |
 | --- | --- | --- |
 | `correspondent_id` | A [registered correspondent](#writing-to-a-correspondent) | `correspondent_id` and submission `reference` |
 | `focus_id` | An [existing focus](attention.md#reaching-an-existing-focus) | `focus_id` |
-| `feed_id` | An [open feed](#publishing-to-a-feed) | `feed_id` and message `sequence` |
+| `channel_id` | An [open channel](#sending-to-a-channel) | `channel_id` and status `accepted` |
 
-Pass IDs as case-sensitive JSON strings, preserving spaces, punctuation, and non-ASCII characters. Each ID has meaning within its instance and destination kind. For example, `to.focus_id` and `to.feed_id` can refer to different destinations with the same ID.
+Pass IDs as case-sensitive JSON strings, preserving spaces, punctuation, and non-ASCII characters. Each ID has meaning within its instance and destination kind. For example, `to.focus_id` and `to.channel_id` can refer to different destinations with the same ID.
 
 Tool replies contain a JSON `result` or an `error` with `code` and `message`. Malformed arguments return `invalid_arguments`. The runtime resolves the selected destination when `send` runs.
 
@@ -52,89 +52,89 @@ Registered mailboxes and incoming From addresses use ASCII dot-atom local parts 
 
 The observation's `text` contains the subject and body separated by a blank line. With an empty subject, it contains only the body. The adapter selects plain-text parts when available and uses HTML source when the message lists only HTML body parts. It joins selected parts with newlines. To share a file, send an accessible link or include the relevant text in the body. See [sharing material](usage.md#sharing-material-to-read) and [mail intake](running.md#mail-intake).
 
-## Feeds
+## Channels
 
-A feed is an instance-owned sequence of messages. An open feed stays available for publication after its creating focus ends. Use its `feed_id` to publish, read, or close it, including after a restart. See [which feed IDs each focus receives at compaction](input.md#sampled-state).
+A channel hands each message to one waiting receive request from a local program. The channel holds no queue between reads. Ivenna can open a channel before the program starts and give the same ID to a replacement receiver.
 
-### Creating feeds
+### Opening a channel
 
-Any focus can call `create_feed` with a short `name` and a nonempty `description` of what readers can expect. Readers see the description on every page. See [names and references](input.md#names-and-references).
+Any focus can call `open_channel` with a name and a nonempty description of the channel's purpose and what each message should contain. See [names and references](input.md#names-and-references).
 
 ```json
-{"name":"releases","description":"Release announcements and links to upgrade notes."}
+{"name":"task-input","description":"Receives the absolute path of each CSV file ready for import."}
 ```
 
 ```json
-{"result":{"feed_id":"releases-1"}}
+{"result":{"channel_id":"task-input-18"}}
 ```
 
-### Publishing to a feed
+The runtime saves the registration with the tool result that supplies its ID. Once it confirms that checkpoint, the channel is available for reads and sends. Pass the complete `channel_id` to the receiving program and use it to send or close the channel. The description gives the ID context in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
 
-Call `send` with the feed's `feed_id` in `to`.
+A checkpoint size rejection stops the runtime and leaves the previous checkpoint selected. If the runtime cannot confirm publication, it stops with the channel still inactive. On restart, the selected checkpoint determines whether the channel and its tool result are restored together. See [working history limits](running.md#working-history) for size recovery and [saving and restoration](architecture.md#saving-and-restoration) for how the runtime selects a checkpoint.
 
-```json
-{"to":{"feed_id":"releases-1"},"text":"The release is ready for review."}
-```
+### Receiving from a channel
 
-```json
-{"result":{"feed_id":"releases-1","sequence":1}}
-```
-
-The sequence identifies the message stored for readers. An interruption can occur after publication but before the tool result reaches working history. Repeating `send` in that case can publish the same text again. See [restart behavior](architecture.md#startup-and-interruption).
-
-### Closing feeds
-
-Use `close_feed` with the `feed_id` to stop new publications. The feed's description and messages remain readable.
-
-```json
-{"feed_id":"releases-1"}
-```
-
-```json
-{"result":{"feed_id":"releases-1","changed":true}}
-```
-
-Closing an already closed feed returns `changed: false`.
-
-### Feed tool errors
-
-| Feed error | Meaning |
-| --- | --- |
-| `unknown_feed` | No feed matches the supplied ID. |
-| `feed_closed` | The feed was closed when Ivenna tried to publish. |
-| `feed_storage_busy` | The feed store is busy. |
-| `feed_storage_full` | The feed store ran out of space. |
-
-Loss of required access to instance state follows the [runtime availability policy](design.md#runtime-availability).
-
-### Reading feeds
-
-On the kernel host, set `DATA_DIR` to the instance's data directory and pass the complete `feed_id` as one quoted argument. The command also works while the kernel is stopped. For filesystem access requirements, see [feed reader deployment](running.md#feed-readers).
+Run `ivenna receive CHANNEL_ID` to wait for one message. In an Ivenna host command, use the executable path in `IVENNA`. For a receiver launched independently, see [receiver setup](running.md#channel-receivers).
 
 ```sh
-ivenna feed read 'releases-1'
+channel_id='task-input-18'
+"$IVENNA" receive "$channel_id"
 ```
 
-The command prints one JSON page on a single line. The description, closure status, and messages come from the same read. Messages appear in ascending sequence order, with possible gaps.
+Use `--timeout MS` to set a positive wait in milliseconds. A completed single read writes one JSON line to stdout and exits with status 0.
+
+| JSON on stdout | Meaning |
+| --- | --- |
+| `{"status":"message","text":"/work/ready.csv"}` | One message was read. |
+| `{"status":"timeout"}` | The wait ended before a message arrived. |
+| `{"status":"closed"}` | The channel closed before the read matched a message or timed out. |
+
+Use `--follow` to stream one `message` record per line. When the channel closes, the follower writes any message already handed off and ends the stream with status 0.
+
+```sh
+"$IVENNA" receive "$channel_id" --follow | ./handle-messages
+```
+
+Here `handle-messages` reads JSON lines from stdin. The `receive` command flushes each line before requesting the next read. A full pipe delays that request. In that gap, a send can return `channel_would_block` if no other receiver is waiting.
+
+If the output pipe closes during a wait or write, either mode exits with status 0, possibly without a complete line for the current read. An unknown ID on the initial request or an unavailable channel service produces a diagnostic on stderr and exit status 1. Run `ivenna receive --help` for syntax and limits.
+
+### Sending to a channel
+
+While a program is waiting to receive, call `send` with the complete ID in `to.channel_id` and up to 4,096 UTF-8 bytes of text.
 
 ```json
-{
-  "feed_id": "releases-1",
-  "description": "Release announcements and links to upgrade notes.",
-  "closed": false,
-  "messages": [
-    {
-      "sequence": 1,
-      "focus_id": "core-1",
-      "text": "The release is ready for review.",
-      "published_at_unix_ms": 1795478400000
-    }
-  ],
-  "next_after": 1,
-  "has_more": false
-}
+{"to":{"channel_id":"task-input-18"},"text":"/work/ready.csv"}
 ```
 
-After processing the whole page, save `next_after` and pass it as `--after` on the next read. `has_more: false` means the reader has caught up with the feed at the time of the read. If the feed is open, poll later for new messages. A listener can save its position with each observation it reports. See [reading a feed and reporting back](subscriptions.md#read-an-ivenna-feed-and-report-back).
+`send` returns without waiting for a receiver. The `accepted` status confirms that the runtime handed the message to a waiting receive request. A subscription report can tell a focus how the program handled it. See [reporting after a channel read](subscriptions.md#reporting-after-a-channel-read).
 
-Run `ivenna feed read --help` for the options, page fields, and exit statuses.
+```json
+{"result":{"channel_id":"task-input-18","status":"accepted"}}
+```
+
+| Send error | Meaning |
+| --- | --- |
+| `channel_would_block` | The message remains unsent and unqueued. The registry was busy or no waiting request accepted the message. You can retry when a receiver is waiting. |
+| `unknown_channel` | The lookup found no open channel for the supplied ID. |
+| `channel_message_too_long` | The text exceeds the channel's message limit. |
+
+### Closing a channel
+
+Either role can call `close_channel` with a complete channel ID.
+
+```json
+{"channel_id":"task-input-18"}
+```
+
+```json
+{"result":{"channel_id":"task-input-18","changed":true}}
+```
+
+The runtime confirms retirement before ending [outstanding reads](#receiving-from-a-channel). Closing an ID that is already absent returns `changed: false`.
+
+### Channel lifetimes
+
+A channel stays open when its readers exit or its opening focus ends. Use `close_channel` to retire its ID.
+
+After restart, an open channel keeps its ID and any saved description. Start a fresh read with that ID once the kernel is running again. Each new read waits for a new send. With no receiver waiting, a send to the restored channel returns `channel_would_block`. See [receiver deployment](running.md#channel-receivers).

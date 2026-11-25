@@ -1,28 +1,28 @@
 [
   {
     "name": "read_resource",
-    "description": "Read a local file, list a directory, or view an image.",
+    "description": "Read local text, list a directory, view an image, or attach a complete file.",
     "parameters": {
       "type": "object",
       "properties": {
         "location": {
           "type": "string",
           "minLength": 1,
-          "description": "Absolute host path, local file URI, HTTP(S) URL, or result.uri from an earlier read. Omit to list the startup directory."
+          "description": "Absolute host path, local file URI, or `result.uri` from an earlier read. Use an HTTP(S) image URL with the image view. Omit to list the startup directory."
         },
         "view": {
           "default": {},
-          "description": "To open media identified by a preview, use result.view.",
+          "description": "When a preview suggests a media view, use `result.uri` as `location` and `result.view` as `view`.",
           "anyOf": [
             {
               "type": "object",
-              "description": "Preview a page. Offsets and sizes count UTF-8 bytes in text or entries in a directory.",
+              "description": "Read a window. Offsets and limits count UTF-8 bytes for text and entries for directory listings.",
               "properties": {
                 "offset": {
                   "type": "integer",
                   "minimum": 0,
                   "default": 0,
-                  "description": "To continue, use result.next_offset."
+                  "description": "Use `result.next_offset` to continue reading from `result.uri`."
                 },
                 "limit": {
                   "type": "integer",
@@ -41,7 +41,7 @@
             {
               "type": "string",
               "enum": ["image", "file"],
-              "description": "The image view sends local image content or an image URL to the model service. A local file can hold the URL. The file view attaches a whole local file for parsing."
+              "description": "The image view supplies an image or an image URL to the model service. A local file can hold the URL. The file view sends a whole local file to the model service for parsing."
             }
           ]
         }

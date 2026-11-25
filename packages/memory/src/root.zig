@@ -184,10 +184,18 @@ pub const Memory = struct {
                 }) catch |err| switch (err) {
                     error.Canceled, error.OutOfMemory => return err,
                     error.StreamTooLong => return .{ .@"error" = .{ .code = "entry_too_large", .message = "A memory write can transfer at most 33554432 bytes (32 MiB). No write was sent." } },
-                    else => return .{ .@"error" = .{
-                        .code = "source_unavailable",
-                        .message = try scratch.print("Could not read the host file ({s}). No memory write was sent.", .{@errorName(err)}),
-                    } },
+                    else => {
+                        std.log.debug("could not read a memory write source: {s}", .{@errorName(err)});
+                        return .{ .@"error" = .{
+                            .code = "source_unavailable",
+                            .message = switch (err) {
+                                error.FileNotFound, error.NotDir => "The source file could not be found. No memory write was sent.",
+                                error.AccessDenied, error.PermissionDenied => "Permission to read the source file was denied. No memory write was sent.",
+                                error.NotRegularFile => "Use a regular file as the source. No memory write was sent.",
+                                else => "The source file could not be read. No memory write was sent.",
+                            },
+                        } };
+                    },
                 };
                 const encoder = std.base64.standard.Encoder;
                 const data = try scratch.alloc(u8, encoder.calcSize(bytes.len));

@@ -157,12 +157,10 @@ test "completed responses expose total input usage when it is available" {
 
 test "request rejections and unusable generations yield no tools" {
     for ([_]struct { response: []const u8, rejection: Model.Rejection, wait_for_close: bool = false }{
-        .{ .response = reply("400 Bad Request", "", "{}"), .rejection = .{ .request_rejected = .{ .status = 400 } } },
-        .{ .response = reply("400 Bad Request", "X-Request-ID: req-context\r\n", "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum is 1048576 tokens; private echoed input\"}}"), .rejection = .{ .request_rejected = .{ .status = 400, .context_length = true } } },
-        .{ .response = reply("400 Bad Request", "", "{\"error\":{\"message\":\"context_length_exceeded\"}}"), .rejection = .{ .request_rejected = .{ .status = 400 } } },
-        .{ .response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 500\r\n\r\n", .rejection = .{ .request_rejected = .{ .status = 403 } }, .wait_for_close = true },
-        .{ .response = reply("404 Not Found", "", "{}"), .rejection = .{ .request_rejected = .{ .status = 404 } } },
-        .{ .response = reply("503 Service Unavailable", "X-Should-Retry: false\r\n", "{}"), .rejection = .{ .request_rejected = .{ .status = 503 } } },
+        .{ .response = reply("400 Bad Request", "X-Request-ID: req-context\r\n", "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum is 1048576 tokens; private echoed input\"}}"), .rejection = .context_window },
+        .{ .response = reply("400 Bad Request", "", "{\"error\":{\"message\":\"context_length_exceeded\"}}"), .rejection = .request_rejected },
+        .{ .response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 500\r\n\r\n", .rejection = .request_rejected, .wait_for_close = true },
+        .{ .response = reply("503 Service Unavailable", "X-Should-Retry: false\r\n", "{}"), .rejection = .request_rejected },
         .{ .response = reply("206 Partial Content", "", completed), .rejection = .invalid_response },
         .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: malformed\r\n\r\n", .rejection = .invalid_response },
         .{ .response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx!!", .rejection = .invalid_response },
@@ -246,7 +244,7 @@ test "a stalled response head or body meets the attempt deadline" {
     }
 }
 
-test "rate-limit diagnostic timeout preserves the status and retry directive" {
+test "rate-limit diagnostic timeout preserves the retry decision" {
     for ([_]bool{ false, true }) |no_retry| {
         const status = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 500\r\nRetry-After: 3600\r\n";
         var fixture = try Fixture.init(&.{.{ .response = if (no_retry)
@@ -258,7 +256,7 @@ test "rate-limit diagnostic timeout preserves the status and retry directive" {
         provider.request_timeout_ms = 100;
         const outcome = try provider.port().next(fixture.arena.allocator(), input);
         if (no_retry) {
-            try std.testing.expectEqualDeep(Model.Rejection{ .request_rejected = .{ .status = 429 } }, outcome.rejected);
+            try std.testing.expectEqualDeep(@as(Model.Rejection, .request_rejected), outcome.rejected);
         } else {
             try std.testing.expectEqual(@as(?i64, 3_600_000), outcome.unavailable.retry_after_ms);
         }
@@ -277,7 +275,7 @@ test "a stalled client-error diagnostic preserves the known rejection" {
     var provider = try fixture.start();
     provider.request_timeout_ms = 100;
     const outcome = try provider.port().next(fixture.arena.allocator(), input);
-    try std.testing.expectEqualDeep(Model.Rejection{ .request_rejected = .{ .status = 400 } }, outcome.rejected);
+    try std.testing.expectEqualDeep(@as(Model.Rejection, .request_rejected), outcome.rejected);
     try fixture.finish();
 }
 
@@ -532,6 +530,7 @@ test "a denied file upload leaves the other observations available for inference
     try fixture.finish();
     const payload = fixture.server.payload.?;
     try std.testing.expect(std.mem.indexOf(u8, payload, "file_upload_failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "http_status") == null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "Sibling observation") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "input_file") == null);
 }

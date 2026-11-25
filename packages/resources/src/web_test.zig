@@ -80,7 +80,6 @@ test "fetch reads a bounded Markdown response and leaves provider redirects unfo
     const moved = try a.print("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{f}/other\r\n\r\n", .{destination.socket.address});
     const redirect = try fetchReply(fetcher, &arena, &listener, moved);
     try testing.expectEqual(.web_unavailable, redirect.failure.code);
-    try testing.expect(std.mem.indexOf(u8, redirect.failure.message, "307") != null);
     try testing.expectError(error.Canceled, watching.cancel(io));
     const article = try fetchReply(fetcher, &arena, &listener, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"title\":\"Article\",\"content\":\"# Notes\\n今天\"}");
     try testing.expectEqualStrings("Article", article.page.title);

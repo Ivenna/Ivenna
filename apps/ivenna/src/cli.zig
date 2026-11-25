@@ -1,20 +1,15 @@
 const std = @import("std");
 
-const default_feed_after: u63 = 0;
-const default_feed_limit = 100;
-const max_feed_limit = 1000;
-
 pub const Command = union(enum) {
     serve,
-    feed: Feed,
+    receive: Receive,
     subscription: Subscription,
     help: []const u8,
 };
 
-const Feed = struct {
-    feed_id: []const u8,
-    after: u63,
-    limit: u32,
+pub const Receive = struct {
+    id: []const u8,
+    mode: union(enum) { once: ?u32, follow },
 };
 
 const Subscription = struct {
@@ -30,40 +25,34 @@ pub fn parse(args: []const []const u8) !Command {
         if (isHelp(args[1])) return help(args[2..], serve_help);
         return unexpected(args[1]);
     }
-    if (equal(args[0], "feed")) return parseFeed(args[1..]);
+    if (equal(args[0], "receive")) return parseReceive(args[1..]) catch return error.InvalidReceiveArguments;
     if (equal(args[0], "subscription")) return parseSubscription(args[1..]);
     return invalid("unknown command \"{f}\". See 'ivenna --help'.", .{std.zig.fmtString(args[0])});
 }
 
-fn parseFeed(args: []const []const u8) !Command {
-    if (args.len == 0) return .{ .help = feed_help };
-    if (isHelp(args[0])) return help(args[1..], feed_help);
-    const rest = args[1..];
-    if (!equal(args[0], "read"))
-        return invalid("unknown feed command \"{f}\". See 'ivenna feed --help'.", .{std.zig.fmtString(args[0])});
-    if (rest.len == 0) return invalid("missing FEED_ID. See 'ivenna feed read --help'.", .{});
-    const id = rest[0];
-    if (isHelp(id)) return help(rest[1..], feed_help);
-    var after: ?u63 = null;
-    var limit: ?u32 = null;
-    const options = rest[1..];
-    var i: usize = 0;
-    while (i < options.len) : (i += 2) {
-        const option = options[i];
-        if (equal(option, "--after") and after == null) {
-            after = try decimal(u63, options[i..]);
-        } else if (equal(option, "--limit") and limit == null) {
-            const value = try decimal(u32, options[i..]);
-            if (value == 0 or value > max_feed_limit)
-                return invalid("--limit must be between 1 and {d}", .{max_feed_limit});
-            limit = value;
-        } else return unexpected(option);
+fn parseReceive(args: []const []const u8) error{InvalidArguments}!Command {
+    if (args.len == 0 or args[0].len == 0)
+        return invalid("missing CHANNEL_ID. See 'ivenna receive --help'.", .{});
+    if (isHelp(args[0])) return help(args[1..], receive_help);
+    const id = args[0];
+    const options = args[1..];
+    if (options.len == 0) return .{ .receive = .{ .id = id, .mode = .{ .once = null } } };
+    if (equal(options[0], "--follow")) {
+        if (options.len > 1) return unexpected(options[1]);
+        return .{ .receive = .{ .id = id, .mode = .follow } };
     }
-    return .{ .feed = .{
-        .feed_id = id,
-        .after = after orelse default_feed_after,
-        .limit = limit orelse default_feed_limit,
-    } };
+    if (!equal(options[0], "--timeout")) return unexpected(options[0]);
+    const timeout_ms = try decimal(u32, options);
+    if (timeout_ms == 0) return invalid("--timeout requires a positive duration in milliseconds", .{});
+    if (options.len > 2) return unexpected(options[2]);
+    return .{ .receive = .{ .id = id, .mode = .{ .once = timeout_ms } } };
+}
+
+pub fn writeJson(io: std.Io, value: anytype) !void {
+    var buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
+    stdout.interface.print("{f}\n", .{std.json.fmt(value, .{})}) catch |err| return stdout.err orelse err;
+    stdout.interface.flush() catch |err| return stdout.err orelse err;
 }
 
 fn parseSubscription(args: []const []const u8) !Command {
@@ -82,7 +71,7 @@ fn parseSubscription(args: []const []const u8) !Command {
     return .{ .subscription = .{ .action = action, .id = args[1] } };
 }
 
-fn decimal(comptime Int: type, args: []const []const u8) !Int {
+fn decimal(comptime Int: type, args: []const []const u8) error{InvalidArguments}!Int {
     if (args.len < 2) return invalid("missing value for {s}", .{args[0]});
     const value = args[1];
     for (value) |byte| {
@@ -92,7 +81,7 @@ fn decimal(comptime Int: type, args: []const []const u8) !Int {
         return invalid("decimal integer out of range for {s}", .{args[0]});
 }
 
-fn help(args: []const []const u8, usage: []const u8) !Command {
+fn help(args: []const []const u8, usage: []const u8) error{InvalidArguments}!Command {
     if (args.len != 0) return unexpected(args[0]);
     return .{ .help = usage };
 }
@@ -118,7 +107,7 @@ const overview =
     \\ivenna COMMAND [ARGUMENTS]
     \\
     \\  serve          Run the kernel.
-    \\  feed           Read a feed by ID.
+    \\  receive        Read messages from an open channel.
     \\  subscription   Report observations and save source positions.
     \\
     \\Run ivenna COMMAND --help for command usage.
@@ -142,12 +131,7 @@ const environment =
     \\
 ;
 
-const feed_help = std.fmt.comptimePrint(@embedFile("help/feed-read.txt"), .{
-    default_feed_after,
-    std.math.maxInt(@FieldType(Feed, "after")),
-    default_feed_limit,
-    max_feed_limit,
-}) ++ "\n" ++ environment;
+const receive_help = std.fmt.comptimePrint(@embedFile("help/receive.txt"), .{std.math.maxInt(u32)});
 
 const inspect = @embedFile("help/inspect.txt");
 const publish = @embedFile("help/publish.txt");

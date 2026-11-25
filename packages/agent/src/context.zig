@@ -357,7 +357,9 @@ test "candidate handover retains sampled references and leaves earlier history a
     var activity_id = "practice-2".*;
     var command_id = "inspect-7".*;
     var subscription_id = "releases-4".*;
-    var feed_id = "public-3".*;
+    var listener = "Report stable releases.".*;
+    var channel_id = "consumer-8".*;
+    var description = "Accept CSV paths.".*;
     var correspondent_id = "reviewer+notes".*;
     const handover: Input.Handover = .{
         .focus_id = "core-1",
@@ -366,8 +368,8 @@ test "candidate handover retains sampled references and leaves earlier history a
         .state = .{
             .activities = &.{&activity_id},
             .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = &command_id } } }},
-            .subscriptions = &.{&subscription_id},
-            .feeds = &.{&feed_id},
+            .subscription_registrations = &.{.{ .subscription_id = &subscription_id, .listener = &listener }},
+            .channel_registrations = &.{.{ .channel_id = &channel_id, .description = &description }},
             .correspondents = &.{&correspondent_id},
         },
     };
@@ -378,7 +380,9 @@ test "candidate handover retains sampled references and leaves earlier history a
     @memset(&activity_id, 0);
     @memset(&command_id, 0);
     @memset(&subscription_id, 0);
-    @memset(&feed_id, 0);
+    @memset(&listener, 0);
+    @memset(&channel_id, 0);
+    @memset(&description, 0);
     @memset(&correspondent_id, 0);
 
     try std.testing.expectEqual(@as(usize, 1), original.records().len);
@@ -390,14 +394,17 @@ test "candidate handover retains sampled references and leaves earlier history a
     const expected_state: Input.State = .{
         .activities = &.{"practice-2"},
         .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = "inspect-7" } } }},
-        .subscriptions = &.{"releases-4"},
-        .feeds = &.{"public-3"},
+        .subscription_registrations = &.{.{ .subscription_id = "releases-4", .listener = "Report stable releases." }},
+        .channel_registrations = &.{.{ .channel_id = "consumer-8", .description = "Accept CSV paths." }},
         .correspondents = &.{"reviewer+notes"},
     };
     try std.testing.expectEqualDeep(expected_state, retained.state);
     const next = try replacement.request(a, current, &.{});
     for ([_][]const u8{ summary[summary.len - 1].message.text, next[1].message.text }) |rendered| {
-        try std.testing.expect(std.mem.indexOf(u8, rendered, "public-3") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "releases-4") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Report stable releases.") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "consumer-8") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Accept CSV paths.") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered, "reviewer+notes") != null);
     }
 }
@@ -410,7 +417,7 @@ test "compaction summarizes older entries and carries forward the complete lates
     var original = try Context.init(testing.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
     defer original.deinit();
     const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
-    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{}, .subscriptions = &.{} };
+    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{} };
     const image_url = "https://example.test/old.png";
     const earlier: []const Model.Item = &.{
         .{ .continuation = "older call" },
@@ -472,7 +479,7 @@ test "compaction retains checkpointed observations following a tool round that s
     };
     var restored = try Context.restore(testing.allocator, scope, current.focus_id, entries);
     defer restored.deinit();
-    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{}, .subscriptions = &.{} };
+    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{} };
     const handover: Input.Handover = .{ .focus_id = current.focus_id, .observed_at_unix_ms = current.observed_at_unix_ms, .summary = "Previous work.", .state = state };
 
     var replacement = try restored.withHandover(testing.allocator, handover, .keep_latest_tool_round);
@@ -488,7 +495,7 @@ test "recent retention carries complete exchanges and their observations across 
     const testing = std.testing;
     const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
     const scope: Scope = .{ .session_id = 1, .epoch = 0 };
-    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{}, .subscriptions = &.{} };
+    const state: Input.State = .{ .activities = &.{}, .callbacks = &.{} };
     const handover: Input.Handover = .{ .focus_id = current.focus_id, .observed_at_unix_ms = 900, .summary = "Earlier work.", .state = state };
     const evidence: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "Keep this evidence.", .observed_at_unix_ms = 910 } };
     const arrival: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "New observation.", .observed_at_unix_ms = 950 } };

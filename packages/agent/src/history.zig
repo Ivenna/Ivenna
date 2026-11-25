@@ -23,16 +23,23 @@ const Source = union(enum) {
 };
 
 pub const History = struct {
-    pub const Wakeup = struct { id: u64, at_unix_ms: i64, text: []const u8 };
+    pub const Wakeup = struct {
+        id: u64,
+        at_unix_ms: i64,
+        /// Null after publication. The original time stays until admission.
+        text: ?[]const u8,
+    };
     pub const CallbackRegistration = struct { id: u64, reference: []const u8, session_id: u64, source: contracts.Callback.Source };
 
     subscription_catalog: [32]u8,
     next_session_id: u64,
     next_callback_id: u64,
-    next_command_id: u64,
+    next_runtime_reference_id: u64,
     sessions: []const Session,
     wakeups: []const Wakeup,
     callbacks: []const CallbackRegistration,
+    /// Open channel registrations. The opening focus may have ended.
+    channels: []const Channel,
     activity_reports: ?Reports.Checkpoint,
 
     pub const Session = struct {
@@ -44,20 +51,30 @@ pub const History = struct {
         was_running: bool,
         subscription_through: u64,
         epoch: u64,
-        /// Null when unloaded; the confirmed checkpoint retains its selection.
+        /// Within an epoch, Context only appends. Null when unloaded; the
+        /// confirmed checkpoint retains its selection.
         entries: ?[]const Entry,
         observations: []const Input.Event,
     };
 
+    pub const Channel = struct {
+        id: []const u8,
+        opened_by: []const u8,
+        opened_at_unix_ms: i64,
+        description: ?[]const u8 = null,
+    };
+
     fn validate(self: History, a: Allocator) !void {
-        if (self.sessions.len == 0 or self.next_callback_id == 0 or self.next_command_id == 0) return error.InvalidHistory;
-        var identities: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        if (self.sessions.len == 0 or self.next_callback_id == 0 or self.next_runtime_reference_id == 0) return error.InvalidHistory;
+        var identities: std.AutoHashMapUnmanaged(u64, []const u8) = .empty;
         defer identities.deinit(a);
         var cores: usize = 0;
         for (self.sessions) |session| {
             if (session.session_id == 0 or session.session_id >= self.next_session_id or
-                (try identities.getOrPut(a, session.session_id)).found_existing) return error.InvalidHistory;
-            if (contracts.Reference.sequence(session.focus_id) != session.session_id) return error.InvalidHistory;
+                contracts.Reference.sequence(session.focus_id) != session.session_id) return error.InvalidHistory;
+            const identity = try identities.getOrPut(a, session.session_id);
+            if (identity.found_existing) return error.InvalidHistory;
+            identity.value_ptr.* = session.focus_id;
             switch (session.role) {
                 .core => {
                     if (session.session_id != 1 or !std.mem.eql(u8, session.focus_id, "core-1")) return error.InvalidHistory;
@@ -74,7 +91,7 @@ pub const History = struct {
         }
         if (cores != 1) return error.InvalidHistory;
         if (self.activity_reports) |reports| try reports.validate();
-        var callbacks: std.AutoHashMapUnmanaged(u64, contracts.Callback.Source) = .empty;
+        var callbacks: std.AutoHashMapUnmanaged(u64, std.meta.Tag(contracts.Callback.Source)) = .empty;
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
             if (callback.id == 0 or callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
@@ -82,13 +99,23 @@ pub const History = struct {
             if (callback.source == .host and contracts.Reference.sequence(callback.source.host.command_id) == null) return error.InvalidHistory;
             const entry = try callbacks.getOrPut(a, callback.id);
             if (entry.found_existing) return error.InvalidHistory;
-            entry.value_ptr.* = callback.source;
+            entry.value_ptr.* = std.meta.activeTag(callback.source);
         }
-        var wakeup_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
-        defer wakeup_ids.deinit(a);
         for (self.wakeups) |wakeup| {
-            const source = callbacks.get(wakeup.id) orelse return error.InvalidHistory;
-            if (source != .wakeup or (try wakeup_ids.getOrPut(a, wakeup.id)).found_existing) return error.InvalidHistory;
+            const registration = callbacks.fetchRemove(wakeup.id) orelse return error.InvalidHistory;
+            if (registration.value != .wakeup) return error.InvalidHistory;
+        }
+        var channel_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer channel_ids.deinit(a);
+        for (self.channels) |channel| {
+            const sequence = contracts.Reference.sequence(channel.id) orelse return error.InvalidHistory;
+            const opener = contracts.Reference.sequence(channel.opened_by) orelse return error.InvalidHistory;
+            // The opening focus can have ended; the registration outlives it.
+            if (sequence >= self.next_runtime_reference_id or opener >= self.next_session_id) return error.InvalidHistory;
+            if (identities.get(opener)) |owner| {
+                if (!std.mem.eql(u8, owner, channel.opened_by)) return error.InvalidHistory;
+            }
+            if ((try channel_ids.getOrPut(a, sequence)).found_existing) return error.InvalidHistory;
         }
     }
 };
@@ -98,10 +125,13 @@ const Checkpoint = struct {
     subscription_catalog: [32]u8,
     next_session_id: u64,
     next_callback_id: u64,
+    /// The stored field name for the next command or channel reference.
     next_command_id: u64,
     sessions: []const Session,
     wakeups: []const History.Wakeup,
     callbacks: []const History.CallbackRegistration,
+    /// Absent from checkpoints written before a restart restored channels.
+    channels: []const History.Channel = &.{},
     activity_reports: ?Reports.Checkpoint,
 
     const Session = struct {
@@ -246,10 +276,11 @@ pub const Persistence = struct {
             .subscription_catalog = checkpoint.subscription_catalog,
             .next_session_id = checkpoint.next_session_id,
             .next_callback_id = checkpoint.next_callback_id,
-            .next_command_id = checkpoint.next_command_id,
+            .next_runtime_reference_id = checkpoint.next_command_id,
             .sessions = sessions,
             .wakeups = checkpoint.wakeups,
             .callbacks = checkpoint.callbacks,
+            .channels = checkpoint.channels,
             .activity_reports = checkpoint.activity_reports,
         };
         try history.validate(a);
@@ -295,11 +326,17 @@ pub const Persistence = struct {
             const bodies = try self.store.read(scratch.allocator(), references[0..count]);
             for (batch, bodies) |selected, body| {
                 if (!equalKey(Codec.digest(body), selected.reference.key)) return error.InvalidHistory;
-                switch (try Codec.decode(Source, a, body)) {
+                const source = try Codec.decode(Source, a, body);
+                switch (source) {
                     .entry => |entry| {
                         if (!equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
                         switch (selected.destination) {
-                            .entry => |destination| destination.* = entry.value,
+                            .entry => |destination| {
+                                var value = entry.value;
+                                if (value == .record and value.record == .handover)
+                                    try value.record.handover.state.restoreLegacyFields(a);
+                                destination.* = value;
+                            },
                             else => return error.InvalidHistory,
                         }
                     },
@@ -349,20 +386,15 @@ pub const Persistence = struct {
             const cached = try candidate.add(saved.*);
             saved.group = cached.checkpoint.group;
             saved.focus_id = cached.checkpoint.focus_id;
+            if (current) |known| try cached.keys.appendSlice(candidate.arena.allocator(), known.keys.items);
             if (session.entries) |entries| {
-                if (current) |known| if (entries.len < known.keys.items.len) return error.InvalidHistory;
-                for (entries, 0..) |entry, index| {
-                    const previous = if (index == 0) null else cached.keys.items[index - 1];
-                    const key = try builder.entry(saved.group, previous, entry, if (current) |known|
-                        if (index < known.keys.items.len) known.keys.items[index] else null
-                    else
-                        null);
+                const confirmed = cached.keys.items.len;
+                if (entries.len < confirmed) return error.InvalidHistory;
+                for (entries[confirmed..]) |entry| {
+                    const key = try builder.entry(saved.group, cached.keys.getLastOrNull(), entry);
                     try cached.keys.append(candidate.arena.allocator(), key);
                 }
-            } else {
-                const known = current orelse return error.InvalidHistory;
-                try cached.keys.appendSlice(candidate.arena.allocator(), known.keys.items);
-            }
+            } else if (current == null) return error.InvalidHistory;
             saved.count = cached.keys.items.len;
             saved.head = if (saved.count == 0) null else cached.keys.items[saved.count - 1];
             if (session.observations.len != 0) saved.observations = try builder.observations(
@@ -377,19 +409,21 @@ pub const Persistence = struct {
             .subscription_catalog = history.subscription_catalog,
             .next_session_id = history.next_session_id,
             .next_callback_id = history.next_callback_id,
-            .next_command_id = history.next_command_id,
+            .next_command_id = history.next_runtime_reference_id,
             .sessions = sessions,
             .wakeups = history.wakeups,
             .callbacks = history.callbacks,
+            .channels = history.channels,
             .activity_reports = history.activity_reports,
         });
         const candidate_digest = Codec.digest(document);
         if (self.published_checkpoint_digest) |published| {
             if (equalKey(published, candidate_digest)) return;
         }
-        // A failed publication may still have changed the stored checkpoint.
-        self.published_checkpoint_digest = null;
-        try self.store.save(document);
+        self.store.save(document) catch |err| {
+            if (err != error.HistoryCheckpointTooLarge) self.published_checkpoint_digest = null;
+            return err;
+        };
         std.mem.swap(Cache, &self.cache, &candidate);
         self.published_checkpoint_digest = candidate_digest;
     }
@@ -477,13 +511,11 @@ const Builder = struct {
         self.batch.deinit();
     }
 
-    fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry, confirmed: ?Key) !Key {
+    fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
         const body = try Codec.encode(self.encoding.allocator(), Source{ .entry = .{ .previous = previous, .value = value } });
         const key = Codec.digest(body);
-        if (confirmed) |known| {
-            if (!equalKey(known, key)) return error.InvalidHistory;
-        } else try self.add(group, key, previous, body);
+        try self.add(group, key, previous, body);
         return key;
     }
 
@@ -526,4 +558,107 @@ fn equalKey(left: Key, right: Key) bool {
 fn equalPrevious(left: ?Key, right: ?Key) bool {
     if (left) |key| return if (right) |other| equalKey(key, other) else false;
     return right == null;
+}
+
+test "working history can append after a handover with a retired sampled field" {
+    const t = std.testing;
+    const TestStore = @import("test_history.zig").TestStore;
+    var store: TestStore = .{};
+    defer store.arena.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var persistence = Persistence.init(t.allocator, store.port());
+    defer persistence.deinit();
+    const body = ".{.entry=.{.previous=null,.value=.{.record=.{.handover=.{" ++
+        ".focus_id=\"core-1\",.observed_at_unix_ms=0,.summary=\"Keep investigating.\"," ++
+        ".state=.{.activities=.{},.callbacks=.{},.subscriptions=.{\"watch-1\"},.feeds=.{\"old-1\"},.correspondents=null}" ++
+        "}}}}}";
+    const group = try persistence.store.allocateGroup(a);
+    const key = Codec.digest(body);
+    try persistence.store.create(a, &.{.{ .group = group, .key = key, .previous = null, .body = body }});
+    try persistence.store.save(try Codec.encode(a, Checkpoint{
+        .subscription_catalog = @splat(0),
+        .next_session_id = 2,
+        .next_callback_id = 1,
+        .next_command_id = 7,
+        .sessions = &.{.{
+            .session_id = 1,
+            .focus_id = "core-1",
+            .role = .core,
+            .was_running = true,
+            .subscription_through = 0,
+            .epoch = 1,
+            .group = group,
+            .head = key,
+            .count = 1,
+            .observations = null,
+        }},
+        .wakeups = &.{},
+        .callbacks = &.{},
+        .activity_reports = null,
+    }));
+
+    var history = (try persistence.load(a, 1)).?;
+    try t.expectEqual(7, history.next_runtime_reference_id);
+    try t.expectEqual(0, history.channels.len);
+    var core = history.sessions[0];
+    const handover = core.entries.?[0].record.handover;
+    try t.expectEqualStrings("Keep investigating.", handover.summary);
+    try t.expectEqualStrings("watch-1", handover.state.subscription_registrations[0].subscription_id);
+    try t.expectEqual(null, handover.state.subscription_registrations[0].listener);
+    core.entries = &.{ core.entries.?[0], .{ .exchange = &.{.{ .continuation = "Continuing." }} } };
+    history.sessions = &.{core};
+    try persistence.save(a, history);
+
+    try t.expectEqual(2, store.records.items.len);
+    try t.expectEqual(key, store.records.items[1].previous.?);
+    const continued = (try persistence.load(a, 1)).?.sessions[0].entries.?;
+    try t.expectEqualStrings("Keep investigating.", continued[0].record.handover.summary);
+    try t.expectEqualStrings("Continuing.", continued[1].exchange[0].continuation);
+}
+
+test "earlier channel registrations can omit descriptions" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const registration = try Codec.decode(History.Channel, a, ".{.id=\"imports-2\",.opened_by=\"core-1\",.opened_at_unix_ms=0}");
+    try t.expectEqual(null, registration.description);
+}
+
+test "channel opener validation allows ended focuses and checks retained identities" {
+    const t = std.testing;
+    var channels = [_]History.Channel{.{
+        .id = "imports-1",
+        .opened_by = "core-1",
+        .opened_at_unix_ms = 0,
+    }};
+    const history: History = .{
+        .subscription_catalog = @splat(0),
+        .next_session_id = 3,
+        .next_callback_id = 1,
+        .next_runtime_reference_id = 2,
+        .sessions = &.{.{
+            .session_id = 1,
+            .focus_id = "core-1",
+            .role = .core,
+            .was_running = false,
+            .subscription_through = 0,
+            .epoch = 0,
+            .entries = &.{},
+            .observations = &.{},
+        }},
+        .wakeups = &.{},
+        .callbacks = &.{},
+        .channels = &channels,
+        .activity_reports = null,
+    };
+    try history.validate(t.allocator);
+    channels[0].opened_by = "other-1";
+    try t.expectError(error.InvalidHistory, history.validate(t.allocator));
+    channels[0].opened_by = "finished-2";
+    try history.validate(t.allocator);
+    channels[0].opened_by = "unissued-3";
+    try t.expectError(error.InvalidHistory, history.validate(t.allocator));
 }

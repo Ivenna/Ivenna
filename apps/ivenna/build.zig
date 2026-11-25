@@ -42,7 +42,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/cli_test.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "instance_state", .module = state }},
+        .imports = &.{
+            .{ .name = "instance_state", .module = state },
+            .{ .name = "agent_contracts", .module = contracts },
+        },
     });
     const app_options = b.addOptions();
     app_options.addOptionPath("executable", app.getEmittedBin());

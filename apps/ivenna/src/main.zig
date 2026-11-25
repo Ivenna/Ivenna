@@ -1,5 +1,6 @@
 const std = @import("std");
 const state = @import("instance_state");
+const receive = @import("receive.zig");
 const cli = @import("cli.zig");
 const serve = @import("serve.zig");
 const subscription = @import("subscription.zig");
@@ -11,12 +12,16 @@ pub fn main(init: std.process.Init) !u8 {
     switch (command) {
         .serve => try serve.run(init),
         .help => |help| try std.Io.File.stdout().writeStreamingAll(init.io, help),
-        else => localCommand(init, command) catch |err| return failure(init.io, err),
+        .receive => |options| receive.run(init, options) catch |err| switch (err) {
+            error.BrokenPipe => return 0,
+            else => return failure(init.io, err),
+        },
+        .subscription => |request| runSubscription(init, request) catch |err| return failure(init.io, err),
     }
     return 0;
 }
 
-fn localCommand(init: std.process.Init, command: cli.Command) !void {
+fn runSubscription(init: std.process.Init, request: @FieldType(cli.Command, "subscription")) !void {
     const a = init.arena.allocator();
     const directory = init.environ_map.get("DATA_DIR") orelse "";
     if (directory.len == 0) {
@@ -24,50 +29,43 @@ fn localCommand(init: std.process.Init, command: cli.Command) !void {
         return error.MissingDataDirectory;
     }
     const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    switch (command) {
-        .feed => |query| {
-            var reader = try state.feeds.Reader.open(a, path);
-            defer reader.close();
-            try writeJson(init.io, try reader.read(a, query.feed_id, query.after, query.limit));
+    var store = try state.subscriptions.Store.open(a, path);
+    defer store.close();
+    switch (request.action) {
+        .inspect => try cli.writeJson(init.io, try store.inspect(a, request.id)),
+        .publish => try cli.writeJson(init.io, try subscription.publish(a, init.io, &store, request.id)),
+        .checkpoint => {
+            try subscription.checkpoint(a, init.io, &store, request.id);
+            try cli.writeJson(init.io, "accepted");
         },
-        .subscription => |request| {
-            var store = try state.subscriptions.Store.open(a, path);
-            defer store.close();
-            switch (request.action) {
-                .inspect => try writeJson(init.io, try store.inspect(a, request.id)),
-                .publish => try writeJson(init.io, try subscription.publish(a, init.io, &store, request.id)),
-                .checkpoint => {
-                    try subscription.checkpoint(a, init.io, &store, request.id);
-                    try writeJson(init.io, "accepted");
-                },
-            }
-        },
-        .serve, .help => unreachable,
     }
 }
 
 fn failure(io: std.Io, err: anyerror) !u8 {
     const reason: []const u8 = switch (err) {
         error.InvalidArguments => "invalid_request",
-        error.UnknownFeed => "unknown_feed",
         error.SubscriptionWithdrawn => "withdrawn",
         error.CursorConflict => "cursor_conflict",
         error.StateStoreBusy => "busy",
         error.StateStoreFull => "storage_full",
-        error.MissingDataDirectory, error.StateStorageFailed => return 1,
+        error.InvalidReceiveArguments, error.MissingDataDirectory, error.StateStorageFailed => return 1,
+        error.UnknownChannel => {
+            std.log.err("no open channel matches CHANNEL_ID. Check the complete ID and DATA_DIR", .{});
+            return 1;
+        },
+        error.ChannelServiceUnavailable => {
+            std.log.err("the channel service is unavailable. Check that the kernel is running and DATA_DIR points to its data directory", .{});
+            return 1;
+        },
+        error.InvalidChannelReply => {
+            std.log.err("the channel service returned an invalid reply. Check that serve and receive use the same build", .{});
+            return 1;
+        },
         else => {
             std.log.err("{s}", .{@errorName(err)});
             return 1;
         },
     };
-    try writeJson(io, reason);
+    try cli.writeJson(io, reason);
     return 1;
-}
-
-fn writeJson(io: std.Io, value: anytype) !void {
-    var buffer: [1024]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
-    try std.json.Stringify.value(value, .{}, &stdout.interface);
-    try stdout.interface.writeByte('\n');
-    try stdout.interface.flush();
 }

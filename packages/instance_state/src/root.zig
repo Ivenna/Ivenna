@@ -4,11 +4,9 @@ const database = @import("database.zig");
 
 pub const filename = database.filename;
 pub const initialize = database.initialize;
-pub const feeds = @import("feeds.zig");
 pub const subscriptions = @import("subscriptions.zig");
 
 test {
     _ = database;
-    _ = feeds;
     _ = subscriptions;
 }

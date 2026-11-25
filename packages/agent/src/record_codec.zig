@@ -10,7 +10,7 @@ pub fn encode(a: Allocator, value: anytype) ![]const u8 {
     @setEvalBranchQuota(10_000);
     var writer: std.Io.Writer.Allocating = .init(a);
     defer writer.deinit();
-    try std.zon.stringify.serialize(value, .{ .whitespace = false }, &writer.writer);
+    try std.zon.stringify.serialize(value, .{ .whitespace = false, .emit_default_optional_fields = false }, &writer.writer);
     return writer.toOwnedSlice();
 }
 

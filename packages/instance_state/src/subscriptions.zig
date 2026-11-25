@@ -15,6 +15,11 @@ pub const Subscription = struct {
     cursor: ?[]const u8,
 };
 
+pub const ActiveRegistration = struct {
+    subscription_id: []const u8,
+    listener: []const u8,
+};
+
 pub const Report = struct {
     sequence: u64,
     reference: []const u8,
@@ -102,12 +107,15 @@ pub const Store = struct {
         return try sql.integer(self.db, "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE focus_id=?)", .{focus_id}) != 0;
     }
 
-    pub fn activeReferences(self: *Store, a: Allocator, focus_id: []const u8) ![]const []const u8 {
-        const s = try sql.statement(self.db, "SELECT reference FROM subscriptions WHERE focus_id=? ORDER BY id", .{focus_id});
+    pub fn activeRegistrations(self: *Store, a: Allocator, focus_id: []const u8) ![]const ActiveRegistration {
+        const s = try sql.statement(self.db, "SELECT reference,listener FROM subscriptions WHERE focus_id=? ORDER BY id", .{focus_id});
         defer s.deinit();
-        var references: std.ArrayList([]const u8) = .empty;
-        while (try sql.checked(s.step())) try references.append(a, try sql.copyText(a, s, 0));
-        return references.toOwnedSlice(a);
+        var registrations: std.ArrayList(ActiveRegistration) = .empty;
+        while (try sql.checked(s.step())) try registrations.append(a, .{
+            .subscription_id = try sql.copyText(a, s, 0),
+            .listener = try sql.copyText(a, s, 1),
+        });
+        return registrations.toOwnedSlice(a);
     }
 
     pub fn inspect(self: *Store, a: Allocator, reference: []const u8) !?Subscription {

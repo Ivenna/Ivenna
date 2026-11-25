@@ -6,7 +6,9 @@ The design guide sets Ivenna's goals and interface principles. The architecture 
 
 The project is exploratory. Data structures, interfaces, and module boundaries are not yet settled; change them directly to match the design.
 
-Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided. When a design changes, remove superseded behavior and state; do not retain compatibility paths or introduce migration frameworks.
+Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided.
+
+When a design changes, remove superseded runtime interfaces and state. Keep the decoding needed to read retained history at the storage boundary. Avoid migration frameworks.
 
 Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 
@@ -14,20 +16,9 @@ Communication and memory are operating requirements of the whole runtime. Compon
 
 Start with the intended behavior and its reason, then establish responsibilities and interfaces. Explain design changes through their effects on Ivenna, its correspondents, or the deployment user. Implementation experience can inform these choices; a current code path or service limitation alone does not establish a design requirement.
 
-Keep each document focused on the decision it helps its reader make.
+Use the [documentation index](README.md) to find the guide for a task. Put behavioral choices and their reasons in the design guide, operations and outcomes in the owning interface guide, and implementation details in the architecture guide. CLI help gives readers the syntax, defaults, and results they need at the command line.
 
-| Document | Scope |
-| --- | --- |
-| Design guide | Goals, behavioral choices, interface principles, and their reasons |
-| Development guide | Change conventions, implementation boundaries, builds, and validation |
-| Testing guide | Test selection, execution, and maintenance |
-| Interface guides | Operations, fields, formats, and outcomes |
-| Model-facing resources | Semantics needed to choose actions and interpret observations |
-| CLI help | Command syntax, defaults, examples, and exit results |
-| Architecture guide | The current implementation's package ownership, dependencies, algorithms, synchronization, storage representation, and service protocols |
-| Running and local development guides | Deployment configuration and service procedures |
-
-Pull requests describe the difference from their target branch. Release notes describe what changes for users in a release and link to version-specific upgrade instructions when the update calls for a procedure.
+Use the running guide for deployment and service procedures and the local development guide for the supplied environment. Put steps specific to updating an existing deployment in the [upgrade guide](upgrading.md). Pull requests describe the difference from their target branch. Release notes describe user-visible changes and link to upgrade steps when needed.
 
 Keep project guidance focused on Ivenna's interfaces, integration choices, and their operational effects. Refer readers to component documentation for general use and administration, keeping Ivenna-specific settings and procedures here.
 
@@ -41,7 +32,7 @@ Organize packages around cohesive capabilities, keeping their types, rules, reso
 
 Use `packages/agent_contracts` for shared communication and capability contracts. Keep execution policy, model-input types and rendering, prompts, and runtime tool declarations in `packages/agent`. Follow the [architecture guide's responsibilities and dependency graph](architecture.md#responsibilities), and update producers and consumers together when changing a shared type or operation.
 
-Keep configuration with the behavior it controls. Execution owns scheduling, context limits, and reasoning selection. Capability packages own connection settings and protocol encoding. The application loads these settings from the environment and configures its own HTTP listener.
+Keep configuration with the behavior it controls. Execution owns scheduling, context limits, and reasoning selection. Capability implementations own their connection settings and protocol encoding. The application reads deployment settings from the environment and runs the HTTP status and local channel listeners.
 
 ### Types and protocols
 
@@ -49,7 +40,7 @@ Decode external protocols in the components that own them and pass typed values 
 
 Keep native mail record IDs, headers, folders, and thread grouping in the email adapter. The adapter passes correspondence and callback observations in typed envelopes. The agent owns callback registration, source attribution, routing, and admission. See the [inbox contract](../packages/agent_contracts/src/inbox.zig).
 
-`Input` defines and renders the runtime's user messages. Include the complete ID when an observation or result supplies a reference. Choose the information for the receiving focus and the decisions it can make at that point. Keep the state needed for delivery and resumption in runtime records through persistence and compaction. See [context and continuity](design.md#context-and-continuity), the [input contract](input.md), and the [input renderer](../packages/agent/src/input.zig).
+`Input` defines and renders the runtime's user messages. Include the complete ID when an observation or result supplies a reference. Keep the state needed for delivery and resumption in runtime records through persistence and compaction. See the [input contract](input.md) and the [input renderer](../packages/agent/src/input.zig).
 
 Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
 
@@ -62,7 +53,7 @@ Prompts and tool declarations are interfaces. Each resource gives the model the 
 | Resource | Purpose |
 | --- | --- |
 | [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
-| [Agent tools](../packages/agent/src/tools.json) | Send messages, manage feeds, open focuses, schedule wakeups, and manage subscriptions |
+| [Agent tools](../packages/agent/src/tools.json) | Send messages, manage channels and subscriptions, open focuses, and schedule wakeups |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. The configured [web reader](../packages/resources/src/web.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
@@ -72,11 +63,11 @@ Follow the [design's prompt boundary](design.md#a-self-in-the-world) when editin
 
 Keep capability tool declarations with their implementation and register capabilities through `Tools`. The agent owns availability policy and must use the same role selection for declaration and invocation.
 
-Keep agent-owned action recognition, typed arguments, and role selection together in [tools.zig](../packages/agent/src/tools.zig); Kernel owns their effects. All sessions use the same system prompt. Express differences in available actions through tool selection, and identify the current focus, task, and circumstances in user input. Ordinary inference, admission measurement, and compaction prepend the same prompt independently of retained history.
+Keep agent-owned action recognition, typed arguments, and role selection together in [tools.zig](../packages/agent/src/tools.zig). Kernel owns the actions' effects. All sessions use the same system prompt. Express differences in available actions through tool selection. See [request assembly](architecture.md#working-history-and-user-messages).
 
 Read each tool declaration as a whole. Express value choices and bounds in its schema, and match schema defaults to runtime behavior. Use descriptions to explain effects and the implications of picking an argument or receiving a result. Keep cues of ownership and continuity brief and leave content, organization, and learned practices to Ivenna's judgment. See the [capability principles](design.md#understanding-and-autonomy).
 
-Put task facts and observations in user input. Prompts and tool descriptions should explain decisions and interpretation; field references belong in the [input contract](input.md), mechanisms in the architecture guide, and procedures in the running guides. Update affected resources and interface documentation together.
+Put the current focus, task facts, and observations in user input. Choose details for the decision the focus can make at that point. Describe an action's destination, cost, or other effects in its declaration when they matter before a call. In the result, report what happened and which effects remain uncertain. Keep native service and host diagnostics in logs. Update the owning interface guide when its contract changes. See [context and continuity](design.md#context-and-continuity).
 
 ### Session execution
 

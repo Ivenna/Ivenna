@@ -61,10 +61,10 @@ test "inference honors the model's recovery delay and resumes the original reque
             .activity_tools = &.{},
         };
         if (cancel_wait) {
-            try std.testing.expectError(error.Canceled, engine.infer(std.testing.allocator, "activity-2", request, .wait_for_service));
+            try std.testing.expectError(error.Canceled, engine.infer("activity-2", request, .wait_for_service));
             try std.testing.expectEqual(1, fixture.attempts);
         } else {
-            var inference = (try engine.infer(std.testing.allocator, "activity-2", request, .wait_for_service)).ready;
+            var inference = (try engine.infer("activity-2", request, .wait_for_service)).ready;
             defer inference.deinit();
             try std.testing.expectEqualStrings("Resumed.", inference.response.text.?);
             try std.testing.expectEqual(2, fixture.attempts);

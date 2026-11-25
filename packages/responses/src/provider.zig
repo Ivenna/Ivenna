@@ -167,19 +167,21 @@ pub const Provider = struct {
         uncertain,
 
         fn part(self: UploadFailure, arena: Allocator, file: File) !Content.Part {
-            const http_status: ?u16 = if (self == .rejected) @backingInt(self.rejected) else null;
             return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
                 .file = .{ .byte_length = file.bytes.len },
                 .@"error" = .{
                     .code = if (self == .uncertain) "file_upload_uncertain" else "file_upload_failed",
                     .message = switch (self) {
                         .not_sent => "The upload attempt ended before sending the file.",
-                        .rejected => "The file service rejected the upload.",
+                        .rejected => |status| switch (status) {
+                            .payload_too_large => "The file exceeds the upload service's size limit.",
+                            .too_many_requests => "The file service is limiting uploads. Try again later.",
+                            else => "The file service rejected the upload.",
+                        },
                         .uncertain => "No file reference was confirmed. The service may have stored the file.",
                     },
-                    .http_status = http_status,
                 },
-            }, .{ .emit_null_optional_fields = false }) };
+            }, .{}) };
         }
     };
 
@@ -248,6 +250,10 @@ pub const Provider = struct {
         if (!completeRepresentation(response.head)) {
             request.connection.?.closing = true;
             const status = response.head.status;
+            std.log.info("model file endpoint returned HTTP {d} (request_id={s})", .{
+                @backingInt(status),
+                responseRequestId(response.head) orelse "unavailable",
+            });
             if (status.class() == .client_error or status == .not_implemented or status == .http_version_not_supported)
                 failure.* = .{ .rejected = status };
             return .{ .failure = failure.* };
@@ -337,15 +343,15 @@ pub const Provider = struct {
                 .payment_required => return error.ModelQuotaExhausted,
                 .unauthorized, .proxy_auth_required, .method_not_allowed, .not_implemented, .http_version_not_supported => return error.ModelHttpFailure,
                 .bad_request => {
-                    on_timeout.* = requestRejected(status, false);
+                    on_timeout.* = .{ .rejected = .request_rejected };
                     const diagnostic = try serviceDiagnostic(temporary, &response) orelse return on_timeout.*;
                     code = diagnostic.logCode();
-                    return requestRejected(status, diagnostic.matches("context_length_exceeded"));
+                    return .{ .rejected = if (diagnostic.matches("context_length_exceeded")) .context_window else .request_rejected };
                 },
                 .request_timeout, .too_many_requests => {},
                 else => switch (status.class()) {
                     .success, .informational => return .{ .rejected = .invalid_response },
-                    .client_error => return requestRejected(status, false),
+                    .client_error => return .{ .rejected = .request_rejected },
                     .redirect => return error.ModelHttpFailure,
                     .server_error => {},
                 },
@@ -629,10 +635,6 @@ fn serviceDiagnostic(arena: Allocator, response: *std.http.Client.Response) !?Se
     return diagnostic.@"error";
 }
 
-fn requestRejected(status: std.http.Status, context_length: bool) Model.Outcome {
-    return .{ .rejected = .{ .request_rejected = .{ .status = @backingInt(status), .context_length = context_length } } };
-}
-
 fn invalidEnvelope(err: anyerror) bool {
     return switch (err) {
         error.HttpHeadersInvalid, error.HttpHeadersOversize, error.HttpChunkInvalid, error.HttpContentEncodingUnsupported => true,
@@ -668,7 +670,7 @@ fn retryDisposition(head: std.http.Client.Response.Head, io: std.Io) Model.Outco
     var headers = head.iterateHeaders();
     while (headers.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "x-should-retry") and std.ascii.eqlIgnoreCase(header.value, "false"))
-            return requestRejected(head.status, false);
+            return .{ .rejected = .request_rejected };
         if (std.ascii.eqlIgnoreCase(header.name, "retry-after"))
             after_ms = retryAfterMilliseconds(header.value, std.Io.Clock.real.now(io).toMilliseconds());
     }

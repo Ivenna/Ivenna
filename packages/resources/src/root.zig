@@ -53,7 +53,7 @@ pub const Resources = struct {
     pub fn tools(self: *Resources, a: Allocator) !contracts.Tools {
         const declarations = try std.json.parseFromSliceLeaky([]contracts.Model.Tool, a, @embedFile("tools.json"), .{});
         if (self.web) |web|
-            declarations[0].description = try a.print("{s} A web page preview fetches a Markdown snapshot. Reopen result.uri to read the same copy. {s}", .{ declarations[0].description, web.disclosure });
+            declarations[0].description = try a.print("{s} Open a web page URL in the default view to fetch a Markdown snapshot. Continue with result.uri to read the same copy without another fetch. {s}", .{ declarations[0].description, web.disclosure });
         return .{
             .context = self,
             .invoke = invoke,
@@ -93,7 +93,7 @@ pub const Resources = struct {
     }
 
     fn fetchWeb(self: *Resources, a: Allocator, url: []const u8, window: Window) !Content {
-        const web = self.web orelse return result.failure(a, "web_unavailable", "Web page reading is disabled in this runtime.");
+        const web = self.web orelse return result.failure(a, "web_unavailable", "Web page retrieval is disabled.");
         var scratch: std.heap.ArenaAllocator = .init(self.allocator);
         defer scratch.deinit();
         return switch (try web.fetch(web.context, scratch.allocator(), url)) {

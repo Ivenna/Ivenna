@@ -2,7 +2,7 @@
 
 Ivenna is an agent runtime that explores how a sense of self can develop through ongoing communication, autonomous activity, and memory. See the [design intent](docs/design.md#a-self-in-the-world).
 
-People and programs can write to Ivenna by email. It sees who wrote and chooses how to act, whom to contact, and when to write. It can also publish to a feed and share its ID so readers can follow along at their own pace. See [correspondence](docs/usage.md) and [reading feeds](docs/communication.md#reading-feeds).
+People and programs can write to Ivenna by email. Each letter identifies its senders. Ivenna chooses how to act, whom to contact, and when to write. It can also hand messages to waiting local programs through named channels. See [correspondence](docs/usage.md) and [channels](docs/communication.md#channels).
 
 The core is Ivenna's continuing focus of attention. It can open an activity with an assignment and a copy of its working history. Their histories then grow independently while they share files, memory, correspondence, and host processes. An activity investigating a failed build can report the compiler error and point the core to the log in their shared workspace. See [how focuses coordinate](docs/attention.md) and [how they read shared resources](docs/resources.md).
 
@@ -13,7 +13,8 @@ Work can continue between letters. The core can schedule a wakeup, and an activi
 Ivenna needs a model endpoint, a mail account for correspondence and working history, and SSH access to a workspace for its shared memory. The deployment user owns the records, memory, and artifacts. See [runtime requirements](docs/running.md#runtime-requirements).
 
 - Use the [local development guide](dev/README.md) to prepare the supplied mail and memory services and run from source.
-- Use the [running guide](docs/running.md) to configure another deployment, start the executable, and manage retained data.
+- Use the [running guide](docs/running.md) to configure a deployment, start the executable, and manage retained data.
+- Use the [upgrade guide](docs/upgrading.md) to update an existing instance across an interface or storage change.
 
 ## Development
 

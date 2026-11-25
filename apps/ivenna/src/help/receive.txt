@@ -1,0 +1,29 @@
+ivenna receive CHANNEL_ID [--timeout MS]
+ivenna receive CHANNEL_ID --follow
+
+Pass the complete ID returned by open_channel. Set DATA_DIR to the instance
+data directory. It must resolve to the same absolute path for the receiver and
+the kernel. Run both with the same ivenna build and effective user ID in the
+same Linux network namespace. Host commands inherit DATA_DIR and can call
+"$IVENNA" receive.
+
+Start receiving before sending. By default, wait for one message or for the
+channel to close. Use --timeout MS to limit the wait for a message to 1 through
+{d} milliseconds.
+
+A completed single read writes one JSON line to stdout and exits with
+status 0. The status field gives the outcome.
+
+  message    One message was read. The text field contains the message.
+  timeout    The wait elapsed before a message arrived.
+  closed     The channel closed while the read was waiting.
+
+Use --follow to stream one JSON line per message. The command flushes each
+line before requesting the next read. On channel close it writes any matched
+message and exits with status 0.
+
+If the output pipe closes during a wait or write, either mode exits with
+status 0. A write in progress may leave a partial line.
+
+An unknown ID on the initial request or an unavailable channel service
+produces a diagnostic on stderr and exit status 1.
