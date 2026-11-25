@@ -155,6 +155,21 @@ test "completed responses expose total input usage when it is available" {
     try fixture.finish();
 }
 
+test "input usage scope follows the configured endpoint and model" {
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    defer client.deinit();
+    var provider: Provider = .{ .client = &client, .base_url = "https://model.example/v1" };
+    const scope = provider.port().usage_scope;
+    provider.base_url = "https://model.example/v1/";
+    provider.api_key = "rotated-key";
+    try std.testing.expectEqual(scope, provider.port().usage_scope);
+    provider.base_url = "https://model.example/v2";
+    try std.testing.expect(!std.meta.eql(scope, provider.port().usage_scope));
+    provider.base_url = "https://model.example/v1";
+    provider.model = "second-model";
+    try std.testing.expect(!std.meta.eql(scope, provider.port().usage_scope));
+}
+
 test "request rejections and unusable generations yield no tools" {
     for ([_]struct { response: []const u8, rejection: Model.Rejection, wait_for_close: bool = false }{
         .{ .response = reply("400 Bad Request", "X-Request-ID: req-context\r\n", "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum is 1048576 tokens; private echoed input\"}}"), .rejection = .context_window },

@@ -59,7 +59,7 @@ An activity that ends calls for the core's attention even if it said nothing. Wh
 
 ## Communication with people and programs
 
-Correspondence reaches the core as observations of who said what and when the runtime observed it. Ivenna can consider a message addressed to it or a conversation someone relays. Retained exchanges connect these observations with what Ivenna chose to say and the effects that followed. The core carries these relationships across assignments.
+Email lets correspondents and Ivenna act on their own schedules. An accepted letter can wait in the mailbox while the core is occupied. It reaches the core as an observation of who said what and when the runtime observed it. Ivenna can consider a message addressed to it or a conversation someone relays. Retained exchanges connect these observations with what Ivenna chose to say and the effects that followed. The core carries these relationships across assignments.
 
 Ivenna chooses when to send, whom or what to reach, and what to say. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna acts and reports the outcome, so Ivenna can revise its understanding as circumstances change. Internal reasoning and activity completion stay within Ivenna. See [sending a message](communication.md#sending-a-message).
 

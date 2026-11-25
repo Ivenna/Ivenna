@@ -1,5 +1,14 @@
 # Upgrading Ivenna
 
+## Upgrading to saved session progress
+
+1. Stop the kernel. Keep the previous executable and make a matched backup of the mailbox and instance database. See [backups and transfers](running.md#backups-and-transfers).
+2. Start the updated executable with the existing mailbox and its paired `state.sqlite3`.
+
+Startup restores the saved history from that mailbox and publishes it in the new checkpoint format before history maintenance and the first model request. See [checkpoint saving and restoration](architecture.md#saving-and-restoration).
+
+To roll back, stop the kernel and restore the mailbox and instance database from the pre-upgrade backup. Start the previous executable with that restored pair to resume at the backup's saved state. See [backups and transfers](running.md#backups-and-transfers).
+
 ## From feeds to channels
 
 Feed readers paged through stored messages. A channel hands each message to one waiting receiver while the kernel runs. Update senders to handle `channel_would_block` when a send cannot hand off the message. See [send outcomes](communication.md#sending-to-a-channel).

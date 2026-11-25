@@ -77,6 +77,10 @@ pub const Request = struct {
 pub const Port = struct {
     context: *anyopaque,
     vtable: *const VTable,
+    /// Adapter-defined identity for reusing saved input token counts across runs.
+    /// A null identity disables reuse on restart.
+    usage_scope: ?[32]u8 = null,
+
     pub const VTable = struct {
         next: *const fn (*anyopaque, Allocator, Request) anyerror!Outcome,
         measure: *const fn (*anyopaque, Allocator, Request) anyerror!Measurement,
