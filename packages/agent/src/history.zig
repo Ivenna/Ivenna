@@ -46,7 +46,8 @@ pub const History = struct {
 
     /// Admission order and inference usage saved with the session's history.
     pub const Progress = struct {
-        /// Input tokens reported for the last ordinary response committed in this epoch.
+        /// Input tokens reported for the last response committed in this epoch,
+        /// whether it completed without tools or through a tool round.
         last_input_tokens: ?u64 = null,
         /// Starting stream for the next admission batch, after any startup observation.
         first_stream: Stream = .ordinary,

@@ -612,6 +612,7 @@ pub const Registry = struct {
         const completed_activity = finished and try self.canEnd(session);
         if (!completed_activity) try history.appendBatch(response.output, &.{});
         if (session != self.core) try self.reportResponseLocked(session, response.text, observed_at, completed_activity);
+        const previous_tokens = session.progress.last_input_tokens;
         if (completed_activity) {
             const removed = self.sessions.remove(session.session_id);
             std.debug.assert(removed);
@@ -620,6 +621,10 @@ pub const Registry = struct {
             std.mem.swap(Context, &session.context.?, history);
             session.progress.last_input_tokens = response.input_tokens;
         }
+        errdefer if (!completed_activity) {
+            std.mem.swap(Context, &session.context.?, history);
+            session.progress.last_input_tokens = previous_tokens;
+        };
         if (finished) {
             session.state = .idle;
             work.activation.destroy(self.allocator);

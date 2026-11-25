@@ -4,7 +4,7 @@
 
 Stop the kernel, keep the previous executable, and make a matched backup of the mailbox and instance database. See [backups and transfers](running.md#backups-and-transfers).
 
-Start the updated executable with the existing mailbox and its paired `state.sqlite3`. The updated executable reads earlier checkpoints and can write the new format during startup, before the first model request. A focus restored without a saved input token count uses the byte threshold until it commits an ordinary round with usage. See [context budgets](running.md#context-budgets).
+Start the updated executable with the existing mailbox and its paired `state.sqlite3`. The updated executable reads earlier checkpoints and can write the new format during startup, before the first model request. A focus restored without a saved input token count uses the byte threshold until it commits a round that reports usage. See [context budgets](running.md#context-budgets).
 
 To roll back after the updated executable writes a checkpoint in the new format, restore the pre-upgrade backup and start the previous executable.
 

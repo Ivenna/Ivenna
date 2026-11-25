@@ -68,7 +68,7 @@ Choose an ordinary reasoning effort for each role from the values supported by y
 
 ### Context budgets
 
-For soft compaction, the kernel compares the input token count saved with the focus's last ordinary round with `CONTEXT_COMPACT_AT_TOKENS`. The count includes cached input and survives restart with the same configured model and service endpoint. When the count is unavailable, `CONTEXT_COMPACT_AT_BYTES` applies to an encoded request containing the older history eligible for compaction. See [what compaction measures](architecture.md#when-compaction-runs).
+For soft compaction, the kernel compares the input token count saved with the focus's last committed model round with `CONTEXT_COMPACT_AT_TOKENS`. The count includes cached input and survives restart with the same configured model and service endpoint. When the count is unavailable, `CONTEXT_COMPACT_AT_BYTES` applies to an encoded request containing the older history eligible for compaction. See [what compaction measures](architecture.md#when-compaction-runs).
 
 `CONTEXT_OBSERVATION_BATCH_BYTES` sets the target for encoded bytes added by a batch of new observations. The first observation can exceed that target if the full request fits the adapter's limits. See [how observations are admitted](architecture.md#activation-admission).
 
