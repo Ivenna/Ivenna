@@ -21,7 +21,7 @@ Retained records identify the focus that admitted their events or produced their
 
 The `name` supplied when opening a focus or channel, running a command, scheduling attention, or subscribing contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
 
-Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control host commands and channel IDs address open channels within the runtime that issued them.
+Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control host commands in their originating runtime. Channel IDs can address a restored channel after restart. See [channel lifetimes](communication.md#channel-lifetimes).
 
 ## Retained records
 
@@ -167,9 +167,9 @@ Core samples always include `correspondents`, even when empty. Other collections
 
 A `SampledSubscription` has `subscription_id: Text` and the registered `listener` description of what to watch and when to report. A new subscription can appear before its first report. A report accepted before withdrawal can still reach the focus after the subscription leaves the sample. See [subscriptions](attention.md#subscriptions).
 
-A `SampledChannel` has `channel_id: Text` and the `description` supplied when the channel opened. A retained handover can still refer to a channel after closure or restart. See [channel send outcomes](communication.md#sending-to-a-channel).
+A `SampledChannel` has `channel_id: Text` and the `description` supplied when the channel opened, when available. A retained handover describes what was open at the time of the sample. The send result tells the focus whether a handoff could take place this time. See [channel send outcomes](communication.md#sending-to-a-channel).
 
-`listener` and `description` are `Text` or `null`. Older samples that stored only IDs use `null`.
+`listener` and `description` are `Text` or `null`. Older samples that stored only IDs use `null`. Some older checkpoints can also restore a channel without a saved description.
 
 Each `PendingCallback` contains `callback_id: Text` and `source: Source`, with `scheduled_for: Time` when the original scheduled time of a wakeup is known. A callback remains pending until its observation enters the history of the focus that arranged it. A pending host callback can refer to a command that has already finished. See [callback observations](#callback-observations) and [command lifetimes](host.md#command-lifetimes).
 

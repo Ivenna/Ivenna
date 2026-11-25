@@ -63,7 +63,7 @@ Correspondence reaches the core as observations of who said what and when the ru
 
 Ivenna chooses when to send, whom or what to reach, and what to say. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna acts and reports the outcome, so Ivenna can revise its understanding as circumstances change. Internal reasoning and activity completion stay within Ivenna. See [sending a message](communication.md#sending-a-message).
 
-Any focus can open a channel with a description of its purpose and share its ID with a local program or another focus. The program chooses when to receive a message and how to act on it. A send immediately tells Ivenna whether the runtime handed the message to a waiting receiver. The channel can serve a replacement if a receiver leaves, and the program can continue working after Ivenna closes the channel. See [channels](communication.md#channels).
+Any focus can open a channel with a description of its purpose and share its ID with a local program or another focus. The program chooses when to receive a message and how to act on it. A send immediately tells Ivenna whether the runtime handed the message to a waiting receiver. The same ID can serve a replacement receiver and let programs reconnect after a restart that restores the opening focus. The program can continue working after Ivenna closes the channel. See [channels](communication.md#channels).
 
 ## Sessions and continued work
 
@@ -103,7 +103,7 @@ The runtime uses its own records to deliver observations and resume pending work
 
 #### Continuing work
 
-A handover can refer to a channel that has since closed or belonged to an earlier runtime. When Ivenna sends, the result helps it decide whether to retry or open a new channel. See [sending to a channel](communication.md#sending-to-a-channel).
+A handover can refer to a channel that has since closed or whose receiver still needs to reconnect. When Ivenna sends, the result helps it decide whether to retry or open a new channel. See [sending to a channel](communication.md#sending-to-a-channel).
 
 Restart restores saved understanding and pending work. Host processes are not restored and old tool calls are not repeated. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result; Ivenna inspects uncertain effects before deciding how to continue. The [startup contract](architecture.md#startup-and-interruption) defines reconstruction and its limits.
 

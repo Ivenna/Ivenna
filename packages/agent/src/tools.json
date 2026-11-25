@@ -53,7 +53,7 @@
   },
   {
     "name": "open_channel",
-    "description": "Open a named channel for local programs. Give its `channel_id` to the receiving program. A replacement receiver can use the same ID while the channel stays open. In host commands, `\"$IVENNA\" receive --help` shows how to receive.",
+    "description": "Open a named channel for local programs. Give its `channel_id` to the receiver. A replacement receiver can reuse the ID while the channel is open. In host commands, `\"$IVENNA\" receive --help` shows how to receive.",
     "parameters": {
       "type": "object",
       "properties": {

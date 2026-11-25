@@ -16,7 +16,7 @@ pub const Registry = struct {
     const max_connections = 128;
     const Channel = struct {
         opening_focus_id: []const u8,
-        description: []const u8,
+        description: ?[]const u8,
         waiting: std.DoublyLinkedList = .{},
     };
     const ReceiveRequest = struct {
@@ -134,7 +134,7 @@ pub const Registry = struct {
         } };
     }
 
-    fn open(context: *anyopaque, id: []const u8, opening_focus_id: []const u8, description: []const u8) !void {
+    fn open(context: *anyopaque, id: []const u8, opening_focus_id: []const u8, description: ?[]const u8) !void {
         const self: *Registry = @ptrCast(@alignCast(context));
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -143,8 +143,8 @@ pub const Registry = struct {
         errdefer self.allocator.free(owned_id);
         const owned_focus = try self.allocator.dupe(u8, opening_focus_id);
         errdefer self.allocator.free(owned_focus);
-        const owned_description = try self.allocator.dupe(u8, description);
-        errdefer self.allocator.free(owned_description);
+        const owned_description = if (description) |text| try self.allocator.dupe(u8, text) else null;
+        errdefer if (owned_description) |text| self.allocator.free(text);
         try self.channels.putNoClobber(self.allocator, owned_id, .{ .opening_focus_id = owned_focus, .description = owned_description });
     }
 
@@ -166,7 +166,7 @@ pub const Registry = struct {
     fn release(self: *Registry, id: []const u8, channel: Channel) void {
         std.debug.assert(channel.waiting.first == null);
         self.allocator.free(channel.opening_focus_id);
-        self.allocator.free(channel.description);
+        if (channel.description) |text| self.allocator.free(text);
         self.allocator.free(id);
     }
 
@@ -216,7 +216,7 @@ pub const Registry = struct {
             if (opening_focus_id) |focus| if (!std.mem.eql(u8, focus, channel.opening_focus_id)) continue;
             try registrations.append(arena, .{
                 .channel_id = try arena.dupe(u8, id),
-                .description = try arena.dupe(u8, channel.description),
+                .description = if (channel.description) |text| try arena.dupe(u8, text) else null,
             });
         }
         return registrations.items;

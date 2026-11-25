@@ -38,6 +38,9 @@ pub const History = struct {
     sessions: []const Session,
     wakeups: []const Wakeup,
     callbacks: []const CallbackRegistration,
+    /// Channels open at the last checkpoint. The channel registry owns the
+    /// live set; these records only let a restart restore the same IDs.
+    channels: []const Channel,
     activity_reports: ?Reports.Checkpoint,
 
     pub const Session = struct {
@@ -53,6 +56,13 @@ pub const History = struct {
         /// confirmed checkpoint retains its selection.
         entries: ?[]const Entry,
         observations: []const Input.Event,
+    };
+
+    pub const Channel = struct {
+        id: []const u8,
+        opened_by: []const u8,
+        opened_at_unix_ms: i64,
+        description: ?[]const u8 = null,
     };
 
     fn validate(self: History, a: Allocator) !void {
@@ -94,6 +104,14 @@ pub const History = struct {
             const registration = callbacks.fetchRemove(wakeup.id) orelse return error.InvalidHistory;
             if (registration.value != .wakeup) return error.InvalidHistory;
         }
+        var channel_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer channel_ids.deinit(a);
+        for (self.channels) |channel| {
+            const sequence = contracts.Reference.sequence(channel.id) orelse return error.InvalidHistory;
+            const opener = contracts.Reference.sequence(channel.opened_by) orelse return error.InvalidHistory;
+            if (sequence >= self.next_runtime_reference_id or opener >= self.next_session_id) return error.InvalidHistory;
+            if ((try channel_ids.getOrPut(a, sequence)).found_existing) return error.InvalidHistory;
+        }
     }
 };
 
@@ -107,6 +125,8 @@ const Checkpoint = struct {
     sessions: []const Session,
     wakeups: []const History.Wakeup,
     callbacks: []const History.CallbackRegistration,
+    /// Absent from checkpoints written before a restart restored channels.
+    channels: []const History.Channel = &.{},
     activity_reports: ?Reports.Checkpoint,
 
     const Session = struct {
@@ -255,6 +275,7 @@ pub const Persistence = struct {
             .sessions = sessions,
             .wakeups = checkpoint.wakeups,
             .callbacks = checkpoint.callbacks,
+            .channels = checkpoint.channels,
             .activity_reports = checkpoint.activity_reports,
         };
         try history.validate(a);
@@ -387,6 +408,7 @@ pub const Persistence = struct {
             .sessions = sessions,
             .wakeups = history.wakeups,
             .callbacks = history.callbacks,
+            .channels = history.channels,
             .activity_reports = history.activity_reports,
         });
         const candidate_digest = Codec.digest(document);
@@ -587,4 +609,37 @@ test "working history can append after a handover with a retired sampled field" 
     const continued = (try persistence.load(a, 1)).?.sessions[0].entries.?;
     try t.expectEqualStrings("Keep investigating.", continued[0].record.handover.summary);
     try t.expectEqualStrings("Continuing.", continued[1].exchange[0].continuation);
+}
+
+test "older checkpoints can omit channel registrations and descriptions" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const BeforeChannels = struct {
+        subscription_catalog: [32]u8,
+        next_session_id: u64,
+        next_callback_id: u64,
+        next_command_id: u64,
+        sessions: []const Checkpoint.Session,
+        wakeups: []const History.Wakeup,
+        callbacks: []const History.CallbackRegistration,
+        activity_reports: ?Reports.Checkpoint,
+    };
+    const document = try Codec.encode(a, BeforeChannels{
+        .subscription_catalog = @splat(0),
+        .next_session_id = 2,
+        .next_callback_id = 1,
+        .next_command_id = 3,
+        .sessions = &.{},
+        .wakeups = &.{},
+        .callbacks = &.{},
+        .activity_reports = null,
+    });
+    try t.expect(std.mem.indexOf(u8, document, "channel") == null);
+    const checkpoint = try Codec.decode(Checkpoint, a, document);
+    try t.expectEqual(0, checkpoint.channels.len);
+
+    const registration = try Codec.decode(History.Channel, a, ".{.id=\"imports-2\",.opened_by=\"core-1\",.opened_at_unix_ms=0}");
+    try t.expectEqual(null, registration.description);
 }

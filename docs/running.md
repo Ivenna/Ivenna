@@ -237,7 +237,9 @@ At restart the core sees the current outgoing correspondent IDs, including chang
 
 Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose scheduled times passed while the kernel was unavailable become due. For a host completion, Ivenna uses the stored result when available and reports an interruption with unknown effects otherwise.
 
-Stopping the kernel cleans up its host commands, ends the channel service, and retires its open channel IDs. On restart, Ivenna continues from saved working history and pending observations. An interrupted operation may have produced effects without a saved result. Include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) and [startup and interruption](architecture.md#startup-and-interruption).
+Stopping the kernel cleans up its host commands and disconnects channel receivers. When the kernel comes back, receivers can start new reads with the restored channel IDs. A channel whose opening activity ended expires when the kernel stops. See [channel lifetimes](communication.md#channel-lifetimes).
+
+Ivenna continues from saved working history and pending observations. An interrupted operation may have produced effects without a saved result. Include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) and [startup and interruption](architecture.md#startup-and-interruption).
 
 ### Updating the executable
 

@@ -212,7 +212,7 @@ test "receive follow flushes successive matches and exits when its channel close
     try expectFollowMessage(a, &output.interface, "first message\ncontinued");
     try expectSendOutcome(channels, receiver.id, "matched before closing", .accepted);
     try testing.expect(try channels.close(receiver.id));
-    try testing.expectEqualStrings(purpose, registrations[0].description);
+    try testing.expectEqualStrings(purpose, registrations[0].description.?);
     try channel_ipc.requestNext(waiting);
     try expectReceiveReply(waiting, .closed);
     try expectFollowMessage(a, &output.interface, "matched before closing");

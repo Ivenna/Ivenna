@@ -54,7 +54,7 @@ pub const Kernel = struct {
     };
 
     pub fn init(allocator: Allocator, io: std.Io, dependencies: Dependencies, config: Config) !Kernel {
-        return .{
+        var kernel: Kernel = .{
             .allocator = allocator,
             .io = io,
             .engine = dependencies.engine,
@@ -74,6 +74,9 @@ pub const Kernel = struct {
                 dependencies.sender.registered_correspondents,
             ),
         };
+        errdefer kernel.deinit();
+        try kernel.sessions.restoreChannels(kernel.channels);
+        return kernel;
     }
 
     pub fn deinit(self: *Kernel) void {
@@ -203,12 +206,11 @@ pub const Kernel = struct {
             return switch (request) {
                 .send => |message| self.send(a, message.to, message.text),
                 .open_channel => |args| blk: {
-                    const channel_id = try self.kernel.sessions.issueRuntimeReference(a, self.work, args.name);
-                    try self.kernel.channels.open(channel_id, self.work.session.focus_id, args.description);
+                    const channel_id = try self.kernel.sessions.openChannel(a, self.work, self.kernel.channels, args.name, args.description);
                     break :blk try runtimeResult(a, .{ .channel_id = channel_id });
                 },
                 .close_channel => |args| blk: {
-                    const changed = try self.kernel.channels.close(args.channel_id);
+                    const changed = try self.kernel.sessions.closeChannel(self.kernel.channels, args.channel_id);
                     break :blk try runtimeResult(a, .{ .channel_id = args.channel_id, .changed = changed });
                 },
                 .schedule_attention => |args| blk: {
@@ -556,7 +558,7 @@ const SubscriptionFixture = struct {
                 .vtable = &.{
                     .trySend = trySendToChannel,
                     .open = openChannel,
-                    .close = undefined,
+                    .close = closeChannel,
                     .sample = sampleChannels,
                 },
             },
@@ -571,9 +573,24 @@ const SubscriptionFixture = struct {
         return self.send_outcome;
     }
 
-    fn openChannel(context: *anyopaque, channel_id: []const u8, focus_id: []const u8, description: []const u8) !void {
+    fn openChannel(context: *anyopaque, channel_id: []const u8, focus_id: []const u8, description: ?[]const u8) !void {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        self.channel = .{ .opening_focus_id = focus_id, .registration = .{ .channel_id = channel_id, .description = description } };
+        const a = self.storage.arena.allocator();
+        self.channel = .{
+            .opening_focus_id = try a.dupe(u8, focus_id),
+            .registration = .{
+                .channel_id = try a.dupe(u8, channel_id),
+                .description = if (description) |text| try a.dupe(u8, text) else null,
+            },
+        };
+    }
+
+    fn closeChannel(context: *anyopaque, channel_id: []const u8) !bool {
+        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
+        const channel = self.channel orelse return false;
+        if (!std.mem.eql(u8, channel.registration.channel_id, channel_id)) return false;
+        self.channel = null;
+        return true;
     }
 
     fn sampleChannels(context: *anyopaque, a: Allocator, focus_id: ?[]const u8) ![]const Channels.Registration {
@@ -582,7 +599,7 @@ const SubscriptionFixture = struct {
         if (focus_id) |id| if (!std.mem.eql(u8, channel.opening_focus_id, id)) return &.{};
         return a.dupe(Channels.Registration, &.{.{
             .channel_id = try a.dupe(u8, channel.registration.channel_id),
-            .description = try a.dupe(u8, channel.registration.description),
+            .description = if (channel.registration.description) |text| try a.dupe(u8, text) else null,
         }});
     }
 
@@ -1181,5 +1198,135 @@ test "a pending document can accompany completed exchanges across a handover" {
         try testing.expectEqualDeep(pending, carried[carried.len - 1].exchange);
         const first_response = carried[0].exchange[0].continuation;
         try testing.expectEqualStrings(if (completed_has_pdf) "Pending call" else "Recent response", first_response);
+    }
+}
+
+test "restart preserves an open channel's ID and description and a close retires it" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer core_history.deinit();
+    const description = "Send the path of each file to process.";
+    const opened = try call(a, &core, "open_channel", .{ .name = "core", .description = description });
+    const channel_id = opened.object.get("result").?.object.get("channel_id").?.string;
+    try SubscriptionFixture.finish(&kernel, core.work, &core_history);
+
+    // The live registry dies with the runtime; only the checkpoint carries the
+    // ID forward.
+    fixture.channel = null;
+    const restarted = try fixture.kernel(&engine, &store);
+    kernel.deinit();
+    kernel = restarted;
+    try testing.expectEqualStrings("core-1", fixture.channel.?.opening_focus_id);
+    const sample = try kernel.compactionSnapshot(a, kernel.sessions.core);
+    try testing.expectEqualDeep(@as([]const Input.SampledChannel, &.{.{
+        .channel_id = channel_id,
+        .description = description,
+    }}), sample.state.channel_registrations);
+
+    // A restored channel is open but has no waiting reader.
+    fixture.send_outcome = .would_block;
+    var restarted_core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer restarted_core.deinit();
+    var restarted_history = try SubscriptionFixture.admit(&kernel, a, restarted_core.work);
+    defer restarted_history.deinit();
+    const rejected = try call(a, &restarted_core, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Process this." });
+    try testing.expectEqualStrings("channel_would_block", rejected.object.get("error").?.object.get("code").?.string);
+    const closed = try call(a, &restarted_core, "close_channel", .{ .channel_id = channel_id });
+    try testing.expect(closed.object.get("result").?.object.get("changed").?.bool);
+    try testing.expect(fixture.channel == null);
+    try SubscriptionFixture.finish(&kernel, restarted_core.work, &restarted_history);
+
+    const after_close = try fixture.kernel(&engine, &store);
+    kernel.deinit();
+    kernel = after_close;
+    try testing.expect(fixture.channel == null);
+}
+
+test "a channel opened by an activity that ended is not restored" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer core.deinit();
+    var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
+    defer core_history.deinit();
+    _ = try call(a, &core, "open_focus", .{ .name = "research", .task = "Collect findings." });
+    try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks, null);
+    var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+    defer activity.deinit();
+    var activity_history = try SubscriptionFixture.admit(&kernel, a, activity.work);
+    defer activity_history.deinit();
+    const opened = try call(a, &activity, "open_channel", .{ .name = "findings", .description = "Send findings for the local program to process." });
+    const channel_id = opened.object.get("result").?.object.get("channel_id").?.string;
+    const activity_id = activity.work.session.session_id;
+    // No subscriptions or callbacks remain, so the response ends the activity.
+    try SubscriptionFixture.finish(&kernel, activity.work, &activity_history);
+    try testing.expect(!kernel.sessions.sessions.contains(activity_id));
+    try testing.expectEqualStrings(channel_id, fixture.channel.?.registration.channel_id);
+
+    fixture.channel = null;
+    const restarted = try fixture.kernel(&engine, &store);
+    kernel.deinit();
+    kernel = restarted;
+    try testing.expect(fixture.channel == null);
+}
+
+test "unconfirmed channel registration changes leave the live transport alone" {
+    const testing = std.testing;
+    const call = SubscriptionFixture.callTool;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    {
+        var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+        defer kernel.sessions.endWorker(core.work.session);
+        defer core.deinit();
+        var history = try SubscriptionFixture.admit(&kernel, a, core.work);
+        defer history.deinit();
+        fixture.storage.fail_save = .after_commit;
+        try testing.expectError(error.UnconfirmedCheckpoint, call(a, &core, "open_channel", .{
+            .name = "imports",
+            .description = "Accept CSV paths.",
+        }));
+        try testing.expect(fixture.channel == null);
+    }
+
+    fixture.storage.fail_save = .none;
+    const restarted = try fixture.kernel(&engine, &store);
+    kernel.deinit();
+    kernel = restarted;
+    const channel_id = fixture.channel.?.registration.channel_id;
+    {
+        var core: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
+        defer kernel.sessions.endWorker(core.work.session);
+        defer core.deinit();
+        var history = try SubscriptionFixture.admit(&kernel, a, core.work);
+        defer history.deinit();
+        fixture.storage.fail_save = .before_commit;
+        try testing.expectError(error.UnconfirmedCheckpoint, call(a, &core, "close_channel", .{ .channel_id = channel_id }));
+        try testing.expectEqualStrings(channel_id, fixture.channel.?.registration.channel_id);
     }
 }

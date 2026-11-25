@@ -2,7 +2,7 @@
 
 ## From feeds to channels
 
-Channels hand each message to one waiting receiver while the kernel runs. Receivers wait for new messages, and each kernel start requires new channel IDs.
+Channels hand each message to one waiting receiver while the kernel runs. A channel has its own ID. See [channel lifetimes](communication.md#channel-lifetimes) for when receivers can reuse it.
 
 ### Prepare the existing instance
 
@@ -20,6 +20,10 @@ Channels hand each message to one waiting receiver while the kernel runs. Receiv
 Replace page and sequence tracking with one JSON line per receive result. Use `--timeout MS` for a bounded wait or `--follow` for a stream. See [sending to a channel](communication.md#sending-to-a-channel) and [receiving from a channel](communication.md#receiving-from-a-channel).
 
 Start the updated kernel with the existing instance database and mailbox to resume subscriptions and working history. Open a channel for each stream you want to continue. Give its ID to the receiving program and start the receiver before sending. See [channel receiver deployment](running.md#channel-receivers).
+
+## Updating channel receivers
+
+Use `receive --timeout MS` for the bounded wait previously selected by `--wait MS`. Handle `channel_would_block` in place of `channel_not_ready`. After upgrading a kernel that ran without channel checkpoints, open channels for the streams you want to resume and give receivers their IDs. Subsequent restarts restore saved channels whose opening focuses return. See [channel receive and send outcomes](communication.md#channels).
 
 ## Reading tool results
 

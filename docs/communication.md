@@ -131,4 +131,8 @@ Either role can call `close_channel` with a complete channel ID.
 
 Closing the channel retires its ID. A waiting single read reports `closed`, and a matched read can finish. A follower between reads observes the close on its next request. Closing a channel that is already absent returns `changed: false`.
 
-A channel stays open when its readers exit or the opening focus ends. It lasts until a focus closes it or the kernel stops. After restart, give the receiving program an ID from a new `open_channel` call.
+### Channel lifetimes
+
+A channel stays open when its readers exit or its opening focus ends. A channel whose opening activity has ended expires when the kernel stops.
+
+When the kernel restarts, it reopens saved channels whose opening focuses are restored. Each keeps its ID and any saved description. A receiving program starts a new read with the same ID. The restored channel starts with no pending reads or messages, so a send can return `channel_would_block` until a receiver is waiting. See [receiver deployment](running.md#channel-receivers).

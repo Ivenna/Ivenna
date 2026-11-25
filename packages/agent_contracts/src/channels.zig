@@ -1,7 +1,7 @@
 const Allocator = @import("std").mem.Allocator;
 
 /// Named channels hand text to waiting local receivers. The implementation
-/// owns channel lifetimes and copies registration data it keeps.
+/// owns pending receive requests and copies registration data it keeps.
 pub const Channels = struct {
     pub const max_message_bytes = 4096;
 
@@ -16,7 +16,7 @@ pub const Channels = struct {
 
     pub const Registration = struct {
         channel_id: []const u8,
-        description: []const u8,
+        description: ?[]const u8,
     };
 
     context: *anyopaque,
@@ -24,7 +24,7 @@ pub const Channels = struct {
 
     pub const VTable = struct {
         trySend: *const fn (*anyopaque, []const u8, []const u8) anyerror!SendOutcome,
-        open: *const fn (context: *anyopaque, channel_id: []const u8, opening_focus_id: []const u8, description: []const u8) anyerror!void,
+        open: *const fn (context: *anyopaque, channel_id: []const u8, opening_focus_id: []const u8, description: ?[]const u8) anyerror!void,
         close: *const fn (context: *anyopaque, channel_id: []const u8) anyerror!bool,
         sample: *const fn (*anyopaque, Allocator, ?[]const u8) anyerror![]const Registration,
     };
@@ -33,7 +33,8 @@ pub const Channels = struct {
         return self.vtable.trySend(self.context, channel_id, text);
     }
 
-    pub fn open(self: Channels, channel_id: []const u8, opening_focus_id: []const u8, description: []const u8) !void {
+    /// A restored registration may predate description storage.
+    pub fn open(self: Channels, channel_id: []const u8, opening_focus_id: []const u8, description: ?[]const u8) !void {
         return self.vtable.open(self.context, channel_id, opening_focus_id, description);
     }
 
