@@ -7,7 +7,7 @@
 
 Startup validates the saved history and publishes it in the new checkpoint format before history maintenance and the first model request. See [checkpoint saving and restoration](architecture.md#saving-and-restoration).
 
-To roll back, [restore the mailbox and instance database](running.md#backups-and-transfers) from the pre-upgrade backup, then start the previous executable.
+To roll back, [restore the mailbox and instance database](running.md#backups-and-transfers) from the pre-upgrade backup, then start the previous executable. Checkpoint selection prefers a published checkpoint over a legacy one regardless of revision, so work the previous executable commits after a rollback is not resumed when this build starts again. Restore a matched backup to return.
 
 ## From feeds to channels
 
