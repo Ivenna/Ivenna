@@ -326,6 +326,9 @@ pub const Kernel = struct {
     const Fit = union(enum) { ready: Prepared, over_limit: Model.Limit };
     const CompactionTrigger = union(enum) { threshold: Prepared, limit };
     const core_extra_history_bytes = 256 * 1024;
+    /// Four bytes per token, the conservative side of the encoders we serve.
+    /// Only used to estimate a request that has no committed usage yet.
+    const bytes_per_token = 4;
 
     /// Bound the space added by a batch of observations across I/O pages.
     /// Always give the first observation the full space available to it.
@@ -379,7 +382,12 @@ pub const Kernel = struct {
         const fit = try self.fitRequest(a, work, history, current, !history.hasHistoryForCompaction(keep_pending));
         switch (fit) {
             .ready => |prepared| {
-                if (soft_compaction.* and history.canCompact(keep_pending) and try self.reachedCompactionThreshold(history, current, work.session.progress.last_input_tokens)) {
+                // The round carrying an assignment is how a focus learns its
+                // task. A fork inherits the core's history, so it starts over
+                // the threshold before reading anything; compacting there would
+                // replace the inherited handover with a summary of history the
+                // focus never used. Later rounds may compact normally.
+                if (soft_compaction.* and !carriesAssignment(work) and history.canCompact(keep_pending) and try self.reachedCompactionThreshold(history, current, work.session.progress.last_input_tokens)) {
                     const scope = try self.softCompactionScope(a, history, current.role);
                     switch (try self.compactRequest(a, work, history, current, scope, .{ .threshold = prepared })) {
                         .ready => |input| return .{ .ready = input },
@@ -414,13 +422,27 @@ pub const Kernel = struct {
         }
     }
 
+    /// The round that delivers this focus's assignment.
+    fn carriesAssignment(work: Work) bool {
+        for (work.activation.deliveries.items) |delivery| {
+            if (delivery.event == .assignment) return true;
+        }
+        return false;
+    }
+
+    /// A session without committed usage in this epoch, such as a fork before
+    /// its first answer, can only be judged by what it would send. Estimate the
+    /// tokens from that request so the token threshold applies, and keep the
+    /// byte ceiling as its own trigger for a request whose text is huge but
+    /// whose token count is not.
     fn reachedCompactionThreshold(self: *Kernel, history: *const Context, current: Input.Current, last_input_tokens: ?u64) !bool {
         if (last_input_tokens) |tokens| return tokens >= self.limits.compact_at_tokens;
         var scratch: std.heap.ArenaAllocator = .init(self.allocator);
         defer scratch.deinit();
         const a = scratch.allocator();
         const retained = try history.retainedRequest(a, current, &.{});
-        return (try self.engine.measure(a, retained, current.role)).bytes >= self.limits.compact_at_bytes;
+        const bytes = (try self.engine.measure(a, retained, current.role)).bytes;
+        return bytes / bytes_per_token >= self.limits.compact_at_tokens or bytes >= self.limits.compact_at_bytes;
     }
 
     fn softCompactionScope(self: *Kernel, a: Allocator, history: *const Context, role: Input.Role) !Context.CompactionScope {
@@ -1248,6 +1270,86 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         try testing.expectEqual(if (case.compacted) null else case.observed_tokens, work.session.progress.last_input_tokens);
         if (!case.delivered) try testing.expect(!work.activation.admitted);
     }
+}
+
+test "the round that carries an assignment does not compact inherited history" {
+    const testing = std.testing;
+    const Stub = struct {
+        bytes: u64 = 0,
+        summaries: usize = 0,
+
+        fn measure(context: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Measurement {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{ .bytes = self.bytes };
+        }
+
+        fn next(context: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.summaries += 1;
+            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "A summary of the core's work." } };
+        }
+    };
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var stub: Stub = .{};
+    engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolReplies = undefined } };
+    kernel.limits.compact_at_tokens = 8;
+    kernel.limits.compact_at_bytes = 1_000_000;
+
+    const startup = try SubscriptionFixture.takeWork(&kernel, a);
+    var core = try SubscriptionFixture.admit(&kernel, a, startup);
+    defer core.deinit();
+    // Completed work the fork will inherit, long enough to be over the limit.
+    try core.appendBatch(&.{.{ .continuation = "Read the plan." }}, &.{});
+
+    var round: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = startup };
+    defer round.deinit();
+    _ = try kernel.sessions.prepareFork(startup, &round.changes, "research", "Read the plan.");
+    try round.commit(&core, null);
+
+    const assignment = try SubscriptionFixture.takeWork(&kernel, a);
+    var history = try kernel.sessions.snapshot(assignment.session);
+    defer history.deinit();
+    try testing.expect(history.records().len != 0);
+    try testing.expectEqual(@as(?u64, null), assignment.session.progress.last_input_tokens);
+    const subscription = try kernel.sessions.subscribe(a, assignment, "updates", "Source listener");
+    // The inherited request is over the token threshold, which alone would
+    // compact it before the focus has read its task.
+    stub.bytes = 32;
+    var soft_compaction = true;
+    const input = (try kernel.prepareRequest(a, assignment, &history, &soft_compaction)).ready;
+    try testing.expectEqual(@as(usize, 0), stub.summaries);
+    try testing.expectEqual(@as(u64, 0), history.scope.epoch);
+    try testing.expect(std.mem.indexOf(u8, input[input.len - 1].message.text, "Read the plan.") != null);
+
+    // The open subscription keeps the focus after this round, and the answer
+    // reports usage for this epoch, so the next round may compact.
+    const finished = try kernel.sessions.commitResponse(assignment, &history, .{
+        .output = &.{},
+        .calls = &.{},
+        .text = "Watching.",
+        .input_tokens = 8,
+    });
+    try testing.expect(finished);
+    kernel.sessions.endWorker(assignment.session);
+    try testing.expectEqual(.accepted, try store.publish(subscription.subscription_id, .{
+        .key = "update",
+        .text = "Something changed.",
+    }, 120));
+    const next = try SubscriptionFixture.takeWork(&kernel, a);
+    defer kernel.sessions.endWorker(next.session);
+    var next_history = try kernel.sessions.snapshot(next.session);
+    defer next_history.deinit();
+    var next_soft_compaction = true;
+    _ = (try kernel.prepareRequest(a, next, &next_history, &next_soft_compaction)).ready;
+    try testing.expectEqual(@as(usize, 1), stub.summaries);
+    try testing.expectEqual(@as(u64, 1), next_history.scope.epoch);
 }
 
 test "a pending document can accompany completed exchanges across a handover" {
