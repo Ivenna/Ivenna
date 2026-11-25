@@ -27,6 +27,7 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_REQUEST_TIMEOUT_MS` | Time limit for one inference attempt or one file upload, including upload negotiation | `600000` (10 minutes) |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
 | `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
+| `LLM_COMPACTION_REASONING_EFFORT` | Reasoning effort for the request that writes a handover summary | `high` |
 | `DEEPSEEK_API_KEY` | DeepSeek Fetch credential for [web page access](#web-page-access) | Web page retrieval disabled |
 | `CONTEXT_COMPACT_AT_TOKENS` | Input-token threshold for compaction | `262144` |
 | `CONTEXT_COMPACT_AT_BYTES` | Fallback threshold for compaction, in encoded request bytes | `1048576` (1 MiB) |
