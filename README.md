@@ -1,6 +1,6 @@
 # Ivenna
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg?repo=Ivenna/Ivenna)](https://deepwiki.com/Ivenna/Ivenna)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Ivenna/Ivenna)
 
 Ivenna is an agent runtime that explores how a sense of self can develop through ongoing communication, autonomous activity, and memory. See the [design intent](docs/design.md#a-self-in-the-world).
 
