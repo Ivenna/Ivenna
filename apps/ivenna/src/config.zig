@@ -71,6 +71,7 @@ pub const Config = struct {
             .llm_reasoning = .{
                 .core = try reasoningEffort(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
                 .activity = try reasoningEffort(env, "LLM_ACTIVITY_REASONING_EFFORT", default_reasoning.activity),
+                .compaction = try reasoningEffort(env, "LLM_COMPACTION_REASONING_EFFORT", default_reasoning.compaction),
             },
         };
         if (config.memory_ssh_config) |path| if (path.len == 0) return error.MissingMemorySshConfig;

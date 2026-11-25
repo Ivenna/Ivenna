@@ -44,7 +44,7 @@ pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, sna
     const request: Model.Request = .{
         .history = history,
         .tools = &.{},
-        .reasoning_effort = .high,
+        .reasoning_effort = engine.reasoning.compaction,
     };
     var violation = (try engine.model.measure(arena, request)).violation;
     if (violation != null and try Context.replaceSummaryMedia(arena, history)) {
