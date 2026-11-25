@@ -8,32 +8,12 @@ const Input = @import("input.zig");
 const WorkInput = @import("work.zig");
 const Delivery = WorkInput.Delivery;
 const Activation = WorkInput.Activation;
+const Stream = WorkInput.Stream;
 const Allocator = std.mem.Allocator;
 const contracts = @import("agent_contracts");
 const Model = contracts.Model;
 const Incoming = contracts.Inbox.Incoming;
 const report_read_batch = 64;
-
-const Stream = enum(u8) {
-    ordinary,
-    subscription,
-    activity,
-
-    fn next(self: Stream) Stream {
-        return switch (self) {
-            .ordinary => .subscription,
-            .subscription => .activity,
-            .activity => .ordinary,
-        };
-    }
-    fn of(event: Input.Event) Stream {
-        return switch (event) {
-            .subscription => .subscription,
-            .activity => .activity,
-            else => .ordinary,
-        };
-    }
-};
 
 /// Identity, working context, and pending observations for one session.
 pub const Session = struct {
@@ -42,8 +22,7 @@ pub const Session = struct {
     role: Input.Role,
     epoch: u64 = 0,
     context: ?Context = null,
-    /// Input usage from the latest committed ordinary inference in this epoch.
-    last_input_tokens: ?u64 = null,
+    progress: History.Progress = .{},
     /// A restored activity still needs its first observation of this runtime.
     needs_startup: bool = false,
     state: union(enum) {
@@ -55,7 +34,6 @@ pub const Session = struct {
     pending: std.ArrayList(*Delivery) = .empty,
     borrowed_workers: usize = 0,
     subscription_through: u64 = 0,
-    first_stream: Stream = .ordinary,
 
     /// Only genuinely new work makes an interrupted focus eligible again.
     fn notify(self: *Session) void {
@@ -87,6 +65,7 @@ pub const Registry = struct {
     max_pending: usize,
     subscriptions: *Subscriptions.Store,
     subscription_catalog: [32]u8,
+    usage_scope: ?[32]u8,
     history: Persistence,
     reports: Reports.Outbox,
     mutex: std.Io.Mutex = .init,
@@ -108,6 +87,11 @@ pub const Registry = struct {
     next_runtime_reference_id: u64 = 1,
     started_at_unix_ms: i64,
 
+    pub const Startup = struct {
+        correspondents: []const []const u8 = &.{},
+        usage_scope: ?[32]u8 = null,
+    };
+
     pub fn init(
         allocator: Allocator,
         io: std.Io,
@@ -115,7 +99,7 @@ pub const Registry = struct {
         max_pending: usize,
         history: contracts.HistoryStore,
         subscriptions: *Subscriptions.Store,
-        correspondents: []const []const u8,
+        startup: Startup,
     ) !Registry {
         var self: Registry = .{
             .allocator = allocator,
@@ -124,6 +108,7 @@ pub const Registry = struct {
             .max_pending = max_pending,
             .subscriptions = subscriptions,
             .subscription_catalog = try subscriptions.identity(),
+            .usage_scope = startup.usage_scope,
             .history = .init(allocator, history),
             .reports = try Reports.Outbox.init(allocator, history, null),
             .core = undefined,
@@ -142,6 +127,7 @@ pub const Registry = struct {
             self.next_session_id = retained.next_session_id;
             self.next_callback_id = retained.next_callback_id;
             self.next_runtime_reference_id = retained.next_runtime_reference_id;
+            const same_usage_scope = std.meta.eql(retained.usage_scope, self.usage_scope);
             for (retained.sessions) |record| {
                 const session = try allocator.create(Session);
                 session.* = .{
@@ -149,8 +135,10 @@ pub const Registry = struct {
                     .role = record.role,
                     .epoch = record.epoch,
                     .subscription_through = record.subscription_through,
+                    .progress = record.progress,
                     .needs_startup = record.role == .activity,
                 };
+                if (!same_usage_scope) session.progress.last_input_tokens = null;
                 errdefer self.destroySession(session);
                 session.focus_id = try allocator.dupe(u8, record.focus_id);
                 if (record.role == .core) {
@@ -186,7 +174,7 @@ pub const Registry = struct {
             try self.sessions.put(allocator, 1, core);
             self.core = core;
         }
-        try self.queueStartupLocked(self.core, correspondents);
+        try self.queueStartupLocked(self.core, startup.correspondents);
         try self.saveLocked();
         try subscriptions.markBound();
         // A prior checkpoint may have committed just before the process stopped.
@@ -313,7 +301,7 @@ pub const Registry = struct {
         }
         // Rotate which source receives the first part of a bounded input.
         // Each source preserves its own arrival order.
-        var stream = session.first_stream;
+        var stream = session.progress.first_stream;
         while (true) {
             switch (stream) {
                 .ordinary => try deliveries.appendSlice(self.allocator, ordinary),
@@ -321,7 +309,7 @@ pub const Registry = struct {
                 .subscription => try self.appendSubscriptionReports(session.focus_id, activation),
             }
             stream = stream.next();
-            if (stream == session.first_stream) break;
+            if (stream == session.progress.first_stream) break;
         }
         session.pending.clearRetainingCapacity();
         activation.admitted = deliveries.items.len == 0;
@@ -382,12 +370,12 @@ pub const Registry = struct {
         std.mem.swap(Context, &session.context.?, &retained);
         if (session.epoch != history.scope.epoch) {
             session.epoch = history.scope.epoch;
-            session.last_input_tokens = null;
+            session.progress.last_input_tokens = null;
         }
         work.activation.admitted = !deferred_all;
         for (deliveries.items) |delivery| {
             if (delivery.event == .startup) continue;
-            session.first_stream = Stream.of(delivery.event).next();
+            session.progress.first_stream = Stream.of(delivery.event).next();
             break;
         }
         const previous_through = session.subscription_through;
@@ -461,6 +449,9 @@ pub const Registry = struct {
 
         std.mem.swap(Context, &session.context.?, completed);
         errdefer std.mem.swap(Context, &session.context.?, completed);
+        const previous_tokens = session.progress.last_input_tokens;
+        session.progress.last_input_tokens = input_tokens;
+        errdefer session.progress.last_input_tokens = previous_tokens;
         for (changes.forks.items) |fork| self.sessions.putAssumeCapacity(fork.session_id, fork);
         errdefer for (changes.forks.items) |fork| {
             _ = self.sessions.remove(fork.session_id);
@@ -474,7 +465,6 @@ pub const Registry = struct {
         changes.forks.clearRetainingCapacity();
         for (changes.channels.items) |channel| channel.transport.activate(channel.record.id);
         changes.channels.clearRetainingCapacity();
-        session.last_input_tokens = input_tokens;
     }
 
     pub fn snapshot(self: *Registry, session: *Session) !Context {
@@ -524,6 +514,7 @@ pub const Registry = struct {
                 .role = session.role,
                 .epoch = session.epoch,
                 .subscription_through = session.subscription_through,
+                .progress = session.progress,
                 .was_running = session.role == .activity and (session.state != .idle or hasStartup(session.pending.items)),
                 .entries = if (session.context) |*context| context.records() else null,
                 .observations = observations.items,
@@ -531,6 +522,7 @@ pub const Registry = struct {
         }
         try self.history.save(a, .{
             .subscription_catalog = self.subscription_catalog,
+            .usage_scope = self.usage_scope,
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
             .next_runtime_reference_id = self.next_runtime_reference_id,
@@ -626,13 +618,13 @@ pub const Registry = struct {
             self.core.notify();
         } else {
             std.mem.swap(Context, &session.context.?, history);
+            session.progress.last_input_tokens = response.input_tokens;
         }
         if (finished) {
             session.state = .idle;
             work.activation.destroy(self.allocator);
         }
         try self.saveLocked();
-        session.last_input_tokens = response.input_tokens;
         if (finished and !completed_activity) unloadActivityContext(session);
         return finished;
     }
@@ -716,8 +708,7 @@ pub const Registry = struct {
             self.wakeups.putAssumeCapacityNoClobber(callback.id, .{ .id = callback.id, .at_unix_ms = at, .text = owned });
             break :registered callback;
         };
-        try self.saveLocked();
-        return a.dupe(u8, registration.reference);
+        return (try self.commitCallbackLocked(a, registration)).reference;
     }
 
     pub fn dueWakeups(self: *Registry, a: Allocator) ![]const contracts.Callback.Message {
@@ -761,8 +752,7 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         assertWork(work);
         const registration = try self.registerCallbackLocked(work.session, name, source);
-        try self.saveLocked();
-        return .{ .id = registration.id, .reference = try a.dupe(u8, registration.reference) };
+        return self.commitCallbackLocked(a, registration);
     }
 
     pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, listener: []const u8) !Subscriptions.Created {
@@ -807,6 +797,16 @@ pub const Registry = struct {
         try self.callbacks.append(self.allocator, registration);
         self.next_callback_id = next;
         return registration;
+    }
+
+    /// Confirm the checkpoint before exposing the registration to this runtime.
+    /// A lost reply can still leave the registration in the checkpoint selected at startup.
+    fn commitCallbackLocked(self: *Registry, a: Allocator, registration: History.CallbackRegistration) !contracts.Callback.Registration {
+        errdefer self.completeCallbackLocked(registration.id);
+        const reference = try a.dupe(u8, registration.reference);
+        errdefer a.free(reference);
+        try self.saveLocked();
+        return .{ .id = registration.id, .reference = reference };
     }
 
     fn restoreCallback(self: *Registry, saved: History.CallbackRegistration) !void {
@@ -1139,7 +1139,7 @@ test "an interrupted activation retains its receipts and only fresh arrivals wak
     defer storage.arena.deinit();
     var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, &.{});
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
     defer registry.deinit();
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
@@ -1205,7 +1205,7 @@ test "a wakeup retains its scheduled time after publication and restart" {
     const observed_at = 61_000;
     const text = "Return to the plan.";
     const published = scheduled: {
-        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, &.{});
+        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
         defer registry.deinit();
         var core = try admitTestInput(&registry, a);
         defer core.history.deinit();
@@ -1217,7 +1217,7 @@ test "a wakeup retains its scheduled time after publication and restart" {
         break :scheduled .{ .callback_id = callback_id, .message = due[0] };
     };
 
-    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, &.{});
+    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
     defer registry.deinit();
     try testing.expectEqual(0, (try registry.dueWakeups(a)).len);
     const snapshot = try registry.compactionSnapshot(a, registry.core);
@@ -1245,6 +1245,38 @@ test "a wakeup retains its scheduled time after publication and restart" {
     try testing.expectEqual(0, (try registry.compactionSnapshot(a, registry.core)).state.callbacks.len);
 }
 
+test "a wakeup with unconfirmed registration is eligible only after restart restores it" {
+    const testing = std.testing;
+    const cases = [_]struct { failure: TestStore.SaveFailure, err: anyerror, restored: bool }{
+        .{ .failure = .checkpoint_too_large, .err = error.HistoryCheckpointTooLarge, .restored = false },
+        .{ .failure = .after_commit, .err = error.UnconfirmedCheckpoint, .restored = true },
+    };
+    for (cases) |case| {
+        var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        var storage: TestStore = .{};
+        defer storage.arena.deinit();
+        var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
+        defer subscriptions.close();
+        {
+            var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+            defer registry.deinit();
+            var core = try admitTestInput(&registry, a);
+            defer core.history.deinit();
+            defer registry.endWorker(core.work.session);
+
+            storage.fail_save = case.failure;
+            try testing.expectError(case.err, registry.scheduleWakeup(a, core.work, "revisit", 1_000, "Return to the plan."));
+            try testing.expectEqual(0, (try registry.dueWakeups(a)).len);
+        }
+        storage.fail_save = .none;
+        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+        defer registry.deinit();
+        try testing.expectEqual(@intFromBool(case.restored), (try registry.dueWakeups(a)).len);
+    }
+}
+
 test "compaction samples the active subscriptions addressed to this focus" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
@@ -1253,7 +1285,7 @@ test "compaction samples the active subscriptions addressed to this focus" {
     defer storage.arena.deinit();
     var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, &.{});
+    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
     defer registry.deinit();
     var core = try admitTestInput(&registry, a);
     defer core.history.deinit();
@@ -1291,7 +1323,7 @@ test "activity completion publishes once and maintenance republishes the same ch
         defer storage.arena.deinit();
         var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
         defer subscriptions.close();
-        var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, &.{});
+        var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
         defer registry.deinit();
         var core = try admitTestInput(&registry, a);
         defer core.history.deinit();
@@ -1305,7 +1337,12 @@ test "activity completion publishes once and maintenance republishes the same ch
         try registry.commitToolRound(core.work, &core.history, &changes, null);
         var activity = try admitTestInput(&registry, a);
         defer activity.history.deinit();
-        const response: Model.Response = .{ .output = &.{.{ .continuation = "final response" }}, .calls = &.{}, .text = "Read the notes." };
+        const response: Model.Response = .{
+            .output = &.{.{ .continuation = "final response" }},
+            .calls = &.{},
+            .text = "Read the notes.",
+            .input_tokens = 7,
+        };
         if (sleeping) {
             _ = try registry.registerCallback(a, activity.work, "read", .{ .host = .{ .command_id = "read-1" } });
             storage.fail_save = .after_commit;

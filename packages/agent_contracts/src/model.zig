@@ -77,6 +77,9 @@ pub const Request = struct {
 pub const Port = struct {
     context: *anyopaque,
     vtable: *const VTable,
+    /// Opaque model scope for reusing saved input token counts across runs.
+    usage_scope: ?[32]u8 = null,
+
     pub const VTable = struct {
         next: *const fn (*anyopaque, Allocator, Request) anyerror!Outcome,
         measure: *const fn (*anyopaque, Allocator, Request) anyerror!Measurement,

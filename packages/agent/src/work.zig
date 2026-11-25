@@ -2,6 +2,28 @@ const std = @import("std");
 const Input = @import("input.zig");
 const Allocator = std.mem.Allocator;
 
+pub const Stream = enum(u8) {
+    ordinary,
+    subscription,
+    activity,
+
+    pub fn next(self: Stream) Stream {
+        return switch (self) {
+            .ordinary => .subscription,
+            .subscription => .activity,
+            .activity => .ordinary,
+        };
+    }
+
+    pub fn of(event: Input.Event) Stream {
+        return switch (event) {
+            .subscription => .subscription,
+            .activity => .activity,
+            else => .ordinary,
+        };
+    }
+};
+
 pub const Delivery = struct {
     arena: std.heap.ArenaAllocator,
     event: Input.Event,

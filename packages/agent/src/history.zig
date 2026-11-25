@@ -1,6 +1,7 @@
 const std = @import("std");
 const contracts = @import("agent_contracts");
 const Input = @import("input.zig");
+const Stream = @import("work.zig").Stream;
 const Codec = @import("record_codec.zig");
 const Reports = @import("reports.zig");
 const Allocator = std.mem.Allocator;
@@ -32,6 +33,7 @@ pub const History = struct {
     pub const CallbackRegistration = struct { id: u64, reference: []const u8, session_id: u64, source: contracts.Callback.Source };
 
     subscription_catalog: [32]u8,
+    usage_scope: ?[32]u8 = null,
     next_session_id: u64,
     next_callback_id: u64,
     next_runtime_reference_id: u64,
@@ -42,6 +44,14 @@ pub const History = struct {
     channels: []const Channel,
     activity_reports: ?Reports.Checkpoint,
 
+    /// Admission order and inference usage saved with the session's history.
+    pub const Progress = struct {
+        /// Input tokens reported for the last ordinary response committed in this epoch.
+        last_input_tokens: ?u64 = null,
+        /// Starting stream for the next admission batch, after any startup observation.
+        first_stream: Stream = .ordinary,
+    };
+
     pub const Session = struct {
         session_id: u64,
         focus_id: []const u8,
@@ -51,6 +61,7 @@ pub const History = struct {
         was_running: bool,
         subscription_through: u64,
         epoch: u64,
+        progress: Progress = .{},
         /// Within an epoch, Context only appends. Null when unloaded; the
         /// confirmed checkpoint retains its selection.
         entries: ?[]const Entry,
@@ -123,6 +134,7 @@ pub const History = struct {
 /// Each session selects the committed prefix of its current epoch's group.
 const Checkpoint = struct {
     subscription_catalog: [32]u8,
+    usage_scope: ?[32]u8 = null,
     next_session_id: u64,
     next_callback_id: u64,
     /// The stored field name for the next command or channel reference.
@@ -141,6 +153,7 @@ const Checkpoint = struct {
         was_running: bool,
         subscription_through: u64,
         epoch: u64,
+        progress: History.Progress = .{},
         group: []const u8,
         head: ?Key,
         count: usize,
@@ -224,6 +237,7 @@ pub const Persistence = struct {
                 .was_running = session.was_running,
                 .subscription_through = session.subscription_through,
                 .epoch = session.epoch,
+                .progress = session.progress,
                 .entries = try a.alloc(Entry, session.count),
                 .observations = &.{},
             };
@@ -274,6 +288,7 @@ pub const Persistence = struct {
         try self.readSelections(a, selections.items);
         const history: History = .{
             .subscription_catalog = checkpoint.subscription_catalog,
+            .usage_scope = checkpoint.usage_scope,
             .next_session_id = checkpoint.next_session_id,
             .next_callback_id = checkpoint.next_callback_id,
             .next_runtime_reference_id = checkpoint.next_command_id,
@@ -378,6 +393,7 @@ pub const Persistence = struct {
                 .was_running = session.was_running,
                 .subscription_through = session.subscription_through,
                 .epoch = session.epoch,
+                .progress = session.progress,
                 .group = if (current) |known| known.checkpoint.group else try self.store.allocateGroup(a),
                 .head = null,
                 .count = 0,
@@ -407,6 +423,7 @@ pub const Persistence = struct {
         try builder.flush();
         const document = try Codec.encode(a, Checkpoint{
             .subscription_catalog = history.subscription_catalog,
+            .usage_scope = history.usage_scope,
             .next_session_id = history.next_session_id,
             .next_callback_id = history.next_callback_id,
             .next_command_id = history.next_runtime_reference_id,
@@ -560,7 +577,7 @@ fn equalPrevious(left: ?Key, right: ?Key) bool {
     return right == null;
 }
 
-test "working history can append after a handover with a retired sampled field" {
+test "working history can append after restoring an older checkpoint and handover" {
     const t = std.testing;
     const TestStore = @import("test_history.zig").TestStore;
     var store: TestStore = .{};
@@ -602,7 +619,9 @@ test "working history can append after a handover with a retired sampled field" 
     var history = (try persistence.load(a, 1)).?;
     try t.expectEqual(7, history.next_runtime_reference_id);
     try t.expectEqual(0, history.channels.len);
+    try t.expectEqual(null, history.usage_scope);
     var core = history.sessions[0];
+    try t.expectEqualDeep(History.Progress{}, core.progress);
     const handover = core.entries.?[0].record.handover;
     try t.expectEqualStrings("Keep investigating.", handover.summary);
     try t.expectEqualStrings("watch-1", handover.state.subscription_registrations[0].subscription_id);

@@ -71,7 +71,10 @@ pub const Kernel = struct {
                 config.max_pending_events,
                 dependencies.history,
                 dependencies.subscriptions,
-                dependencies.sender.registered_correspondents,
+                .{
+                    .correspondents = dependencies.sender.registered_correspondents,
+                    .usage_scope = dependencies.engine.model.usage_scope,
+                },
             ),
         };
         errdefer kernel.deinit();
@@ -372,7 +375,7 @@ pub const Kernel = struct {
         const fit = try self.fitRequest(a, work, history, current, !history.hasHistoryForCompaction(keep_pending));
         switch (fit) {
             .ready => |prepared| {
-                if (soft_compaction.* and history.canCompact(keep_pending) and try self.reachedCompactionThreshold(history, current, work.session.last_input_tokens)) {
+                if (soft_compaction.* and history.canCompact(keep_pending) and try self.reachedCompactionThreshold(history, current, work.session.progress.last_input_tokens)) {
                     const scope = try self.softCompactionScope(a, history, current.role);
                     switch (try self.compactRequest(a, work, history, current, scope, .{ .threshold = prepared })) {
                         .ready => |input| return .{ .ready = input },
@@ -525,6 +528,7 @@ const SubscriptionFixture = struct {
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
     storage: TestStore = .{},
     correspondents: []const []const u8 = &.{},
+    usage_scope: ?[32]u8 = null,
     send_outcome: Channels.SendOutcome = .accepted,
     channel_send: ?struct { id: []const u8, text: []const u8 } = null,
     open_channel_id: ?[]const u8 = null,
@@ -538,7 +542,11 @@ const SubscriptionFixture = struct {
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
-            .model = .{ .context = self, .vtable = &.{ .measure = measure, .next = undefined, .prepareToolReplies = undefined } },
+            .model = .{
+                .context = self,
+                .vtable = &.{ .measure = measure, .next = undefined, .prepareToolReplies = undefined },
+                .usage_scope = self.usage_scope,
+            },
             .shared_tools = &.{},
             .activity_tools = &.{},
         };
@@ -1000,6 +1008,92 @@ test "a subscription backlog leaves another focus schedulable and each source ge
     try testing.expectEqual(.duplicate, try kernel.sessions.accept(callback));
 }
 
+test "restart resumes observation source rotation after the startup observation" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    const ordinary: contracts.Inbox.Incoming = .{ .content = .{ .message = .{
+        .from = &.{"operator"},
+        .text = "budget-marker",
+        .observed_at_unix_ms = 100,
+    } } };
+    const stream = registered: {
+        var kernel = try fixture.kernel(&engine, &store);
+        defer kernel.deinit();
+        try testing.expectEqual(.accepted, try kernel.sessions.accept(ordinary));
+        const startup = try SubscriptionFixture.takeWork(&kernel, a);
+        var initial = try SubscriptionFixture.admit(&kernel, a, startup);
+        defer initial.deinit();
+        const stream = try kernel.sessions.subscribe(a, startup, "stream", "listener");
+        try SubscriptionFixture.finish(&kernel, startup, &initial);
+        break :registered stream;
+    };
+
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    kernel.limits.observation_batch_bytes = 1;
+    try testing.expectEqual(.accepted, try kernel.sessions.accept(ordinary));
+    try testing.expectEqual(.accepted, try store.publish(stream.subscription_id, .{ .key = "first", .text = "budget-marker" }, 110));
+    const work = try SubscriptionFixture.takeWork(&kernel, a);
+    defer kernel.sessions.endWorker(work.session);
+    var history = try SubscriptionFixture.admit(&kernel, a, work);
+    defer history.deinit();
+    const observations = history.records()[history.records().len - 1].record.events.items;
+    try testing.expectEqual(2, observations.len);
+    try testing.expect(observations[0] == .startup and observations[1] == .subscription);
+}
+
+test "restart uses saved input-token counts only for a matching model scope" {
+    const testing = std.testing;
+    const Budget = struct {
+        fn measure(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Measurement {
+            return .{ .bytes = 100 };
+        }
+
+        fn next(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Outcome {
+            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "Retained summary." } };
+        }
+    };
+    for ([_]bool{ false, true }) |changed_model| {
+        var fixture: SubscriptionFixture = .{ .usage_scope = @splat(1) };
+        defer fixture.deinit();
+        const a = fixture.storage.arena.allocator();
+        var store = try Subscriptions.Store.openInMemory(a);
+        defer store.close();
+        var engine: Engine = undefined;
+        {
+            var kernel = try fixture.kernel(&engine, &store);
+            defer kernel.deinit();
+            const startup = try SubscriptionFixture.takeWork(&kernel, a);
+            defer kernel.sessions.endWorker(startup.session);
+            var history = try SubscriptionFixture.admit(&kernel, a, startup);
+            defer history.deinit();
+            try testing.expect(try kernel.sessions.commitResponse(startup, &history, .{
+                .output = &.{.{ .continuation = "Latest response" }},
+                .calls = &.{},
+                .text = null,
+                .input_tokens = 7,
+            }));
+        }
+
+        if (changed_model) fixture.usage_scope = @splat(2);
+        var kernel = try fixture.kernel(&engine, &store);
+        defer kernel.deinit();
+        engine.model.vtable = &.{ .next = Budget.next, .measure = Budget.measure, .prepareToolReplies = undefined };
+        kernel.limits.compact_at_bytes = 50;
+        kernel.limits.compact_at_tokens = 8;
+        const startup = try SubscriptionFixture.takeWork(&kernel, a);
+        defer kernel.sessions.endWorker(startup.session);
+        var history = try SubscriptionFixture.admit(&kernel, a, startup);
+        defer history.deinit();
+        try testing.expectEqual(@intFromBool(changed_model), history.scope.epoch);
+    }
+}
+
 test "a rejected inference resumes for remaining reports while failed admission waits for fresh input" {
     const testing = std.testing;
     var fixture: SubscriptionFixture = .{};
@@ -1140,7 +1234,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             .input = .{ .from = &.{"operator"}, .text = "older context marker", .observed_at_unix_ms = 90 },
         }} } });
         try history.appendBatch(exchange[0..1], exchange[1..]);
-        work.session.last_input_tokens = case.observed_tokens;
+        work.session.progress.last_input_tokens = case.observed_tokens;
 
         var model: BudgetModel = .{ .hard_limit = case.ceiling, .summary = case.summary };
         engine.model = .{ .context = &model, .vtable = &.{ .next = BudgetModel.next, .measure = BudgetModel.measure, .prepareToolReplies = undefined } };
@@ -1160,6 +1254,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             try testing.expectEqual(@as(usize, 3), input.len);
         }
         try testing.expectEqual(@as(u64, @intFromBool(case.compacted)), history.scope.epoch);
+        try testing.expectEqual(if (case.compacted) null else case.observed_tokens, work.session.progress.last_input_tokens);
         if (!case.delivered) try testing.expect(!work.activation.admitted);
     }
 }
@@ -1315,7 +1410,7 @@ test "a rejected tool round publishes neither its channel nor its fork" {
     try testing.expectEqual(1, kernel.sessions.sessions.count());
 }
 
-test "restart selects an unconfirmed round and its channel together" {
+test "restart selects a tool round, its token count, and its channel together" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
     for ([_]TestStore.SaveFailure{ .before_commit, .after_commit }) |failure| {
@@ -1342,8 +1437,9 @@ test "restart selects an unconfirmed round and its channel together" {
             try SubscriptionFixture.appendChannelReply(a, &history, opened);
 
             fixture.storage.fail_save = failure;
-            try testing.expectError(error.UnconfirmedCheckpoint, core.commit(&history, null));
+            try testing.expectError(error.UnconfirmedCheckpoint, core.commit(&history, 123));
             try testing.expect(fixture.open_channel_id == null);
+            try testing.expectEqual(null, core.work.session.progress.last_input_tokens);
             const sample = try kernel.compactionSnapshot(a, core.work.session);
             try testing.expectEqual(0, sample.state.channel_registrations.len);
         }
@@ -1357,12 +1453,14 @@ test "restart selects an unconfirmed round and its channel together" {
         defer retained.deinit();
         const records = retained.records();
         if (failure == .after_commit) {
+            try testing.expectEqual(@as(?u64, 123), kernel.sessions.core.progress.last_input_tokens);
             try testing.expectEqualStrings(channel_id, fixture.open_channel_id.?);
             try testing.expectEqual(previous_count + 1, records.len);
             const reply = records[records.len - 1].exchange[1].tool_result.content.parts[0].text;
             const decoded = try std.json.parseFromSliceLeaky(std.json.Value, a, reply, .{});
             try testing.expectEqualStrings(channel_id, decoded.object.get("result").?.object.get("channel_id").?.string);
         } else {
+            try testing.expectEqual(null, kernel.sessions.core.progress.last_input_tokens);
             try testing.expect(fixture.open_channel_id == null);
             try testing.expectEqual(previous_count, records.len);
         }

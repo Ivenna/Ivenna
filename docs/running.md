@@ -68,7 +68,7 @@ Choose an ordinary reasoning effort for each role from the values supported by y
 
 ### Context budgets
 
-Each focus compares the input-token count from its last successful ordinary request, including cached input, with `CONTEXT_COMPACT_AT_TOKENS`. When no count is available, `CONTEXT_COMPACT_AT_BYTES` applies to the encoded request containing the older history eligible for compaction. See [what compaction measures](architecture.md#when-compaction-runs).
+For soft compaction, the kernel compares the input token count saved with the focus's last ordinary round with `CONTEXT_COMPACT_AT_TOKENS`. The count includes cached input and survives restart with the same configured model and service endpoint. When the count is unavailable, `CONTEXT_COMPACT_AT_BYTES` applies to an encoded request containing the older history eligible for compaction. See [what compaction measures](architecture.md#when-compaction-runs).
 
 `CONTEXT_OBSERVATION_BATCH_BYTES` sets the target for encoded bytes added by a batch of new observations. The first observation can exceed that target if the full request fits the adapter's limits. See [how observations are admitted](architecture.md#activation-admission).
 
@@ -245,7 +245,7 @@ Registered wakeups and host completions keep their original receiving sessions a
 
 Stopping the kernel cleans up its host commands and disconnects channel receivers. When the kernel comes back, receivers can start new reads with the restored channel IDs, including channels whose opening activity ended. See [channel lifetimes](communication.md#channel-lifetimes).
 
-Ivenna continues from saved working history and pending observations. An interrupted operation may have produced effects without a saved result. Include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) and [startup and interruption](architecture.md#startup-and-interruption).
+Ivenna continues from saved working history and pending observations. An interrupted operation may have produced effects without a saved result. Include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) and the [recovery state inventory](architecture.md#recovery-state). For compaction after restart, see [context budgets](#context-budgets).
 
 ### Updating the executable
 
@@ -264,7 +264,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
-| `<DATA_DIR>/state.sqlite3` | Subscriptions, listener cursors, accepted report keys and pending reports |
+| `<DATA_DIR>/state.sqlite3` | Subscription catalog identity and binding status, registrations, listener cursors, accepted report keys, and pending reports |
 | Configured model-service account | Uploaded files and their service-side parsing results |
 
 Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).
@@ -289,11 +289,11 @@ Keep original correspondence separately if you need it beyond the Trash retentio
 
 ### Working history
 
-A message with the subject `Ivenna history checkpoint` lists the state the kernel uses to resume its sessions. For each session, `head` points to the latest retained history record and `count` gives the number of records in that chain. Admitted observations and model/tool exchanges live in those separate records, so a whole new exchange can change just a few fields in the checkpoint. The checkpoint also tracks saved channel registrations, scheduled wakeups, callback registrations, unread activity reports, and each focus's last admitted subscription report.
+A message with the subject `Ivenna history checkpoint` records the state the kernel uses to resume its sessions. In each session's entry, `head` identifies the latest retained history record and `count` gives the number of records in that chain. See the [recovery state inventory](architecture.md#recovery-state) for the other saved state and where it lives.
 
 Suppose the core receives a letter and the model returns text without calling tools. In an otherwise idle kernel, this normally produces two revisions. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response in the core's history. Sending a reply to the correspondent requires a `send` call.
 
-Ivenna cleans up the history folder at startup and periodically while it runs. Between maintenance passes, several checkpoints can still appear in `Ivenna History`. The kernel selects the candidate marked `ivenna-current` with the highest numeric `X-Ivenna-History-Revision`. If two candidates share that highest revision, restoration fails.
+Ivenna cleans up the history folder at startup and periodically while it runs. Between maintenance passes, several checkpoints can still appear in `Ivenna History`. The email adapter selects the candidate marked `ivenna-current` with the highest numeric `X-Ivenna-History-Revision`. If distinct candidates share that highest revision, restoration fails with `AmbiguousHistoryRevision`. See [history storage](architecture.md#history-storage).
 
 | Location | Contents after maintenance |
 | --- | --- |

@@ -29,11 +29,23 @@ pub const Provider = struct {
     request_ceiling_bytes: u64 = default_ceiling_bytes,
 
     pub fn port(self: *Provider) Model.Port {
-        return .{ .context = self, .vtable = &.{
-            .next = next,
-            .measure = measure,
-            .prepareToolReplies = prepareToolReplies,
-        } };
+        var scope = std.crypto.hash.sha2.Sha256.init(.{});
+        scope.update("responses");
+        for ([_][]const u8{ std.mem.trimEnd(u8, self.base_url, "/"), self.model }) |part| {
+            var length: [8]u8 = undefined;
+            std.mem.writeInt(u64, &length, part.len, .little);
+            scope.update(&length);
+            scope.update(part);
+        }
+        return .{
+            .context = self,
+            .vtable = &.{
+                .next = next,
+                .measure = measure,
+                .prepareToolReplies = prepareToolReplies,
+            },
+            .usage_scope = scope.finalResult(),
+        };
     }
 
     fn next(context: *anyopaque, arena: Allocator, request: Model.Request) anyerror!Model.Outcome {
