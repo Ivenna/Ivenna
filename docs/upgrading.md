@@ -5,9 +5,9 @@
 1. Stop the kernel. Keep the previous executable and make a matched backup of the mailbox and instance database. See [backups and transfers](running.md#backups-and-transfers).
 2. Start the updated executable with the existing mailbox and its paired `state.sqlite3`.
 
-Startup validates the saved history and publishes it in the new checkpoint format before history maintenance and the first model request. See [checkpoint saving and restoration](architecture.md#saving-and-restoration).
+Startup restores the saved history from that mailbox and publishes it in the new checkpoint format before history maintenance and the first model request. See [checkpoint saving and restoration](architecture.md#saving-and-restoration).
 
-To roll back, [restore the mailbox and instance database](running.md#backups-and-transfers) from the pre-upgrade backup, then start the previous executable. Checkpoint selection prefers a published checkpoint over a legacy one regardless of revision, so work the previous executable commits after a rollback is not resumed when this build starts again. Restore a matched backup to return.
+To roll back, stop the kernel and restore the mailbox and instance database from the pre-upgrade backup. Start the previous executable with that restored pair to resume at the backup's saved state. See [backups and transfers](running.md#backups-and-transfers).
 
 ## From feeds to channels
 
