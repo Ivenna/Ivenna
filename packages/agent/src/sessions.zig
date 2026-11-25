@@ -69,6 +69,10 @@ pub const Registry = struct {
     history: Persistence,
     reports: Reports.Outbox,
     mutex: std.Io.Mutex = .init,
+    /// Set when a checkpoint save fails. Once set it is never cleared: every
+    /// later lock returns this same error, including calls unrelated to the
+    /// failed save. The kernel propagates it to shutdown, so a caller that
+    /// caught it and kept serving would keep seeing a stale failure.
     checkpoint_failure: ?anyerror = null,
     core: *Session,
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
