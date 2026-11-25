@@ -120,9 +120,9 @@ pub const Kernel = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            for (try self.sessions.dueWakeups(a)) |source| {
-                try self.callbacks.send(a, .{ .id = source.id, .text = source.text });
-                try self.sessions.wakeupSent(source.id);
+            for (try self.sessions.dueWakeups(a)) |wakeup| {
+                try self.callbacks.send(a, wakeup);
+                try self.sessions.markWakeupPublished(wakeup.id);
             }
             const waiting = try self.inbox.poll(a, try self.sessions.pollRequest());
             try self.sessions.reconcile(waiting);
@@ -148,7 +148,7 @@ pub const Kernel = struct {
         if (pending.len == 0) return;
         const text = try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{
             .code = "host_interrupted",
-            .message = "The command's outcome is unknown after restart. Effects may already have occurred. The command was not replayed; the source command_id belongs to the previous runtime and is not a current control handle.",
+            .message = "The command's outcome is unknown after restart. It may already have had effects. Its command ID is no longer valid for shell control.",
         } }, .{});
         for (pending) |callback| try self.callbacks.send(a, .{ .id = callback.id, .text = text });
     }
@@ -167,9 +167,7 @@ pub const Kernel = struct {
 
     fn execute(self: *Kernel, work: Work) !void {
         defer self.sessions.endWorker(work.session);
-        var diagnostics: std.heap.ArenaAllocator = .init(self.allocator);
-        defer diagnostics.deinit();
-        const interrupted = self.respond(work, diagnostics.allocator()) catch |err| {
+        const interrupted = self.respond(work) catch |err| {
             if (err == error.Canceled) return error.Canceled;
             std.log.err("execution failed in {s}: {s}", .{ work.session.focus_id, @errorName(err) });
             return err;
@@ -205,14 +203,12 @@ pub const Kernel = struct {
             return switch (request) {
                 .send => |message| self.send(a, message.to, message.text),
                 .open_channel => |args| blk: {
-                    const channels = self.kernel.channels;
                     const channel_id = try self.kernel.sessions.issueRuntimeReference(a, self.work, args.name);
-                    try channels.open(channels.context, channel_id, self.work.session.focus_id);
+                    try self.kernel.channels.open(channel_id, self.work.session.focus_id, args.description);
                     break :blk try runtimeResult(a, .{ .channel_id = channel_id });
                 },
                 .close_channel => |args| blk: {
-                    const channels = self.kernel.channels;
-                    const changed = try channels.close(channels.context, args.channel_id);
+                    const changed = try self.kernel.channels.close(args.channel_id);
                     break :blk try runtimeResult(a, .{ .channel_id = args.channel_id, .changed = changed });
                 },
                 .schedule_attention => |args| blk: {
@@ -250,13 +246,13 @@ pub const Kernel = struct {
                     .not_submitted => try runtimeError(a, "not_submitted", "Sending stopped before the submission attempt."),
                     .submission_unknown => try runtimeError(a, "submission_unknown", "The service may already have accepted this message. Sending it again could create a duplicate."),
                 },
-                .channel_id => |id| switch (try self.kernel.channels.submit(id, text)) {
+                .channel_id => |id| switch (try self.kernel.channels.trySend(id, text)) {
                     .accepted => try runtimeResult(a, .{ .channel_id = id, .status = "accepted" }),
-                    .not_ready => try runtimeError(a, "channel_not_ready", "This send did not hand off or queue the message. You can retry."),
+                    .would_block => try runtimeError(a, "channel_would_block", "The text was not handed off and was not queued."),
                     .unknown_channel => try runtimeError(a, "unknown_channel", "No open channel in this runtime matches the ID."),
                     .too_long => try runtimeError(a, "channel_message_too_long", std.fmt.comptimePrint(
                         "Channel messages can contain up to {d} UTF-8 bytes.",
-                        .{Channels.max_bytes},
+                        .{Channels.max_message_bytes},
                     )),
                 },
                 .focus_id => |id| blk: {
@@ -271,7 +267,7 @@ pub const Kernel = struct {
         }
     };
 
-    fn respond(self: *Kernel, work: Work, diagnostics: Allocator) !?[]const u8 {
+    fn respond(self: *Kernel, work: Work) !?[]const u8 {
         const session = work.session;
         var soft_compaction = true;
         while (true) {
@@ -284,17 +280,17 @@ pub const Kernel = struct {
             defer history.deinit();
             const input = switch (try self.prepareRequest(a, work, &history, &soft_compaction)) {
                 .ready => |input| input,
-                .interrupted => |reason| return try diagnostics.dupe(u8, reason),
+                .interrupted => |reason| return reason,
             };
             var round = switch (try self.engine.beginRound(a, session.focus_id, input, session.role)) {
                 .ready => |round| round,
-                .interrupted => |reason| return try diagnostics.dupe(u8, reason),
+                .interrupted => |reason| return reason,
             };
             defer round.inference.deinit();
             const response = round.inference.response;
             if (response.calls.len == 0) {
                 if (response.output.len == 0 and !work.activation.admitted)
-                    return "The model returned no output for the pending tool exchange. The waiting observations did not fit in that request and remain queued.";
+                    return "The model did not continue after tool use. Waiting observations could not fit and remain queued.";
                 if (try self.sessions.commitResponse(work, &history, response)) return null;
                 continue;
             }
@@ -395,7 +391,7 @@ pub const Kernel = struct {
                     break :blk if ((try self.engine.measure(trial, latest, current.role)).violation == null) keep_pending else .all_history;
                 } else keep_pending;
                 if (!history.hasHistoryForCompaction(scope))
-                    return .{ .interrupted = try Engine.describeRequestLimit(a, "The next request", limit) };
+                    return .{ .interrupted = Engine.reportRequestLimit(work.session.focus_id, "next request", limit) };
                 const compacted = try self.compactRequest(a, work, history, current, scope, .limit);
                 if (compacted == .interrupted and scope == keep_pending and has_pending) {
                     // The hard limit may only apply when the waiting observation
@@ -436,8 +432,13 @@ pub const Kernel = struct {
         var snapshot = try self.sessions.compactionSnapshot(a, session);
         const is_core = session.role == .core;
         if (is_core) snapshot.state.correspondents = self.sender.registered_correspondents;
-        const channels = self.channels;
-        snapshot.state.channels = try channels.sample(channels.context, a, if (is_core) null else session.focus_id);
+        const channels = try self.channels.sample(a, if (is_core) null else session.focus_id);
+        const registrations = try a.alloc(Input.SampledChannel, channels.len);
+        for (channels, registrations) |channel, *registration| registration.* = .{
+            .channel_id = channel.channel_id,
+            .description = channel.description,
+        };
+        snapshot.state.channel_registrations = registrations;
         return snapshot;
     }
 
@@ -468,7 +469,7 @@ pub const Kernel = struct {
                 },
             }
         }
-        return .{ .interrupted = try rejection.?.description(a) };
+        return .{ .interrupted = rejection.?.interruption(work.session.focus_id) };
     }
 
     fn fitRequest(self: *Kernel, a: Allocator, work: Work, history: *const Context, current: Input.Current, may_defer: bool) !Fit {
@@ -529,9 +530,9 @@ const SubscriptionFixture = struct {
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
     storage: TestStore = .{},
     correspondents: []const []const u8 = &.{},
-    send_outcome: Channels.Outcome = .accepted,
-    channel_message: ?struct { id: []const u8, text: []const u8 } = null,
-    channel: ?struct { id: []const u8, focus_id: []const u8 } = null,
+    send_outcome: Channels.SendOutcome = .accepted,
+    channel_send: ?struct { id: []const u8, text: []const u8 } = null,
+    channel: ?struct { opening_focus_id: []const u8, registration: Channels.Registration } = null,
 
     fn deinit(self: *SubscriptionFixture) void {
         self.storage.arena.deinit();
@@ -552,42 +553,37 @@ const SubscriptionFixture = struct {
             .sender = .{ .context = undefined, .submit = undefined, .registered_correspondents = self.correspondents },
             .channels = .{
                 .context = self,
-                .send = sendToChannel,
-                .open = openChannel,
-                .close = closeChannel,
-                .sample = sampleChannels,
+                .vtable = &.{
+                    .trySend = trySendToChannel,
+                    .open = openChannel,
+                    .close = undefined,
+                    .sample = sampleChannels,
+                },
             },
             .callbacks = undefined,
             .history = self.storage.port(),
         }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
     }
 
-    fn sendToChannel(context: *anyopaque, id: []const u8, text: []const u8) !Channels.Outcome {
+    fn trySendToChannel(context: *anyopaque, id: []const u8, text: []const u8) !Channels.SendOutcome {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        const channel = self.channel orelse return .unknown_channel;
-        if (!std.mem.eql(u8, channel.id, id)) return .unknown_channel;
-        if (self.send_outcome == .accepted) self.channel_message = .{ .id = id, .text = text };
+        self.channel_send = .{ .id = id, .text = text };
         return self.send_outcome;
     }
 
-    fn openChannel(context: *anyopaque, channel_id: []const u8, focus_id: []const u8) !void {
+    fn openChannel(context: *anyopaque, channel_id: []const u8, focus_id: []const u8, description: []const u8) !void {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        self.channel = .{ .id = channel_id, .focus_id = focus_id };
+        self.channel = .{ .opening_focus_id = focus_id, .registration = .{ .channel_id = channel_id, .description = description } };
     }
 
-    fn closeChannel(context: *anyopaque, channel_id: []const u8) !bool {
-        const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        const channel = self.channel orelse return false;
-        if (!std.mem.eql(u8, channel.id, channel_id)) return false;
-        self.channel = null;
-        return true;
-    }
-
-    fn sampleChannels(context: *anyopaque, a: Allocator, focus_id: ?[]const u8) ![]const []const u8 {
+    fn sampleChannels(context: *anyopaque, a: Allocator, focus_id: ?[]const u8) ![]const Channels.Registration {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
         const channel = self.channel orelse return &.{};
-        if (focus_id) |id| if (!std.mem.eql(u8, channel.focus_id, id)) return &.{};
-        return a.dupe([]const u8, &.{channel.id});
+        if (focus_id) |id| if (!std.mem.eql(u8, channel.opening_focus_id, id)) return &.{};
+        return a.dupe(Channels.Registration, &.{.{
+            .channel_id = try a.dupe(u8, channel.registration.channel_id),
+            .description = try a.dupe(u8, channel.registration.description),
+        }});
     }
 
     fn measure(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
@@ -692,21 +688,22 @@ test "continuations omit destination directories and focus and channel sends res
     var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer kernel.sessions.endWorker(activity.work.session);
 
-    const channel = (try call(a, &activity, "open_channel", .{
-        .name = "core",
-        .description = "Send findings for the local program to process.",
-    })).object.get("result").?.object;
+    const description = "Receives paths to the findings ready for processing.";
+    const channel = (try call(a, &activity, "open_channel", .{ .name = "core", .description = description })).object.get("result").?.object;
     const channel_id = channel.get("channel_id").?.string;
-    try testing.expectEqualStrings(sender_id, fixture.channel.?.focus_id);
+    try testing.expectEqualStrings(sender_id, fixture.channel.?.opening_focus_id);
     for ([_]*Sessions.Session{ core.work.session, activity.work.session }) |session| {
         const sample = try kernel.compactionSnapshot(a, session);
-        try testing.expectEqualDeep(@as([]const []const u8, &.{channel_id}), sample.state.channels);
+        try testing.expectEqualDeep(@as([]const Input.SampledChannel, &.{.{
+            .channel_id = channel_id,
+            .description = description,
+        }}), sample.state.channel_registrations);
     }
 
     var soft_compaction = true;
     const input = (try kernel.prepareRequest(a, core.work, &history, &soft_compaction)).ready;
     const turn = input[input.len - 1].message.text;
-    for ([_][]const u8{ "activities:", "correspondents:", "channels:" }) |field| {
+    for ([_][]const u8{ "activities:", "correspondents:", "channels:", description }) |field| {
         try testing.expect(std.mem.indexOf(u8, turn, field) == null);
     }
 
@@ -723,8 +720,8 @@ test "continuations omit destination directories and focus and channel sends res
     const receipt = sent.object.get("result").?.object;
     try testing.expectEqualStrings(channel_id, receipt.get("channel_id").?.string);
     try testing.expectEqualStrings("accepted", receipt.get("status").?.string);
-    try testing.expectEqualStrings(channel_id, fixture.channel_message.?.id);
-    try testing.expectEqualStrings("Process these findings.", fixture.channel_message.?.text);
+    try testing.expectEqualStrings(channel_id, fixture.channel_send.?.id);
+    try testing.expectEqualStrings("Process these findings.", fixture.channel_send.?.text);
     try kernel.sessions.collectPending(core.work);
     const deliveries = core.work.activation.deliveries.items;
     try testing.expectEqual(1, deliveries.len);
@@ -732,18 +729,12 @@ test "continuations omit destination directories and focus and channel sends res
     try testing.expectEqualStrings(sender_id, message.from_focus);
     try testing.expectEqualStrings("Findings are ready.", message.text);
 
-    fixture.send_outcome = .not_ready;
+    fixture.send_outcome = .would_block;
     const rejected = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Process more findings." });
-    try testing.expectEqualStrings("channel_not_ready", rejected.object.get("error").?.object.get("code").?.string);
-    const closed = try call(a, &core, "close_channel", .{ .channel_id = channel_id });
-    try testing.expect(closed.object.get("result").?.object.get("changed").?.bool);
-    const late = try call(a, &activity, "send", .{ .to = .{ .channel_id = channel_id }, .text = "Late findings." });
-    try testing.expectEqualStrings("unknown_channel", late.object.get("error").?.object.get("code").?.string);
-    const sampled = try kernel.compactionSnapshot(a, core.work.session);
-    try testing.expectEqual(0, sampled.state.channels.len);
+    try testing.expectEqualStrings("channel_would_block", rejected.object.get("error").?.object.get("code").?.string);
 }
 
-test "an activity can use the reference returned by subscribe to withdraw another focus's registration" {
+test "an activity can withdraw another focus's subscription by reference" {
     const testing = std.testing;
     const call = SubscriptionFixture.callTool;
     var fixture: SubscriptionFixture = .{};
@@ -759,17 +750,17 @@ test "an activity can use the reference returned by subscribe to withdraw anothe
     var core_history = try SubscriptionFixture.admit(&kernel, a, core.work);
     defer core_history.deinit();
     const created = (try call(a, &core, "subscribe", .{ .name = "releases", .listener = "release feed" })).object.get("result").?;
-    const core_id = created.object.get("subscription_id").?.string;
+    const subscription_id = created.object.get("subscription_id").?.string;
     _ = try call(a, &core, "open_focus", .{ .name = "research", .task = "Watch for releases." });
     try kernel.sessions.commitToolRound(core.work, &core_history, &core.forks, null);
 
     var activity: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = try SubscriptionFixture.takeWork(&kernel, a) };
     defer activity.deinit();
-    const closed = (try call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
-    try testing.expectEqualStrings(core_id, closed.get("subscription_id").?.string);
+    const closed = (try call(a, &activity, "withdraw_subscription", .{ .subscription_id = subscription_id })).object.get("result").?.object;
+    try testing.expectEqualStrings(subscription_id, closed.get("subscription_id").?.string);
     try testing.expect(closed.get("changed").?.bool);
 
-    const repeated = (try call(a, &activity, "withdraw_subscription", .{ .subscription_id = core_id })).object.get("result").?.object;
+    const repeated = (try call(a, &activity, "withdraw_subscription", .{ .subscription_id = subscription_id })).object.get("result").?.object;
     try testing.expect(!repeated.get("changed").?.bool);
 }
 
@@ -1065,7 +1056,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             self.summaries += 1;
             return switch (self.summary) {
                 .success => .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "A useful handover." } },
-                .rejection => .{ .rejected = .{ .request_rejected = .{ .status = 400 } } },
+                .rejection => .{ .rejected = .request_rejected },
                 .outage => .{ .unavailable = .{} },
             };
         }
@@ -1183,7 +1174,7 @@ test "a pending document can accompany completed exchanges across a handover" {
             .focus_id = "core-1",
             .observed_at_unix_ms = 100,
             .summary = "Older work.",
-            .state = .{ .activities = &.{}, .callbacks = &.{}, .subscriptions = &.{} },
+            .state = .{ .activities = &.{}, .callbacks = &.{} },
         }, scope);
         defer replacement.deinit();
         const carried = replacement.records()[1..];

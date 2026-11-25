@@ -13,33 +13,34 @@ pub const Registry = struct {
     channels: std.StringArrayHashMapUnmanaged(Channel) = .{},
 
     // Bound the sockets and tasks serving local receivers.
-    const max_receivers = 128;
+    const max_connections = 128;
     const Channel = struct {
-        focus_id: []const u8,
+        opening_focus_id: []const u8,
+        description: []const u8,
         waiting: std.DoublyLinkedList = .{},
     };
-    const Receive = struct {
+    const ReceiveRequest = struct {
         connection: Stream,
         deadline: ?std.Io.Clock.Timestamp,
         node: std.DoublyLinkedList.Node = .{},
         linked: bool = false,
 
-        fn expired(self: *const Receive, io: std.Io) bool {
+        fn expired(self: *const ReceiveRequest, io: std.Io) bool {
             const end = self.deadline orelse return false;
             return end.durationFromNow(io).raw.toNanoseconds() <= 0;
         }
 
-        fn park(self: *Receive, waiting: *std.DoublyLinkedList) void {
+        fn park(self: *ReceiveRequest, waiting: *std.DoublyLinkedList) void {
             waiting.append(&self.node);
             self.linked = true;
         }
 
-        fn remove(self: *Receive, waiting: *std.DoublyLinkedList) void {
+        fn remove(self: *ReceiveRequest, waiting: *std.DoublyLinkedList) void {
             waiting.remove(&self.node);
             self.linked = false;
         }
 
-        fn finish(self: *Receive, waiting: *std.DoublyLinkedList) void {
+        fn finish(self: *ReceiveRequest, waiting: *std.DoublyLinkedList) void {
             self.remove(waiting);
             ipc.endRequests(self.connection);
         }
@@ -68,7 +69,7 @@ pub const Registry = struct {
                 connection.close(self.io);
                 continue;
             };
-            if (active.load(.monotonic) >= max_receivers) {
+            if (active.load(.monotonic) >= max_connections) {
                 connection.close(self.io);
                 continue;
             }
@@ -85,29 +86,25 @@ pub const Registry = struct {
         defer connection.close(self.io);
         var data: [ipc.request_buffer_size]u8 = undefined;
         const request = ipc.readRequest(connection, self.io, &data) catch return;
-        var receive: Receive = .{
+        var receive: ReceiveRequest = .{
             .connection = connection,
-            .deadline = if (request.wait_ms) |ms| .fromNow(self.io, .{ .raw = .fromMilliseconds(ms), .clock = .awake }) else null,
+            .deadline = if (request.timeout_ms) |ms| .fromNow(self.io, .{ .raw = .fromMilliseconds(ms), .clock = .awake }) else null,
         };
         if (!self.startReceive(request.id, &receive)) return;
         while (self.waitForNext(request.id, &receive)) {}
     }
 
-    fn waitForNext(self: *Registry, id: []const u8, receive: *Receive) bool {
-        var timed_out = false;
-        const next = ipc.waitForNext(receive.connection, self.io, receive.deadline) catch |err| blk: {
-            timed_out = err == error.Timeout;
-            break :blk false;
-        };
+    fn waitForNext(self: *Registry, id: []const u8, receive: *ReceiveRequest) bool {
+        const result = ipc.waitForNext(receive.connection, self.io, receive.deadline);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (receive.linked) {
             const channel = self.channels.getPtr(id).?;
             receive.remove(&channel.waiting);
-            if (timed_out) ipc.reply(receive.connection, .timeout) catch {};
+            if (result == .timeout) ipc.reply(receive.connection, .timeout) catch {};
             return false;
         }
-        if (!next or receive.deadline != null) return false;
+        if (result != .next or receive.deadline != null) return false;
         const channel = self.channels.getPtr(id) orelse {
             ipc.reply(receive.connection, .closed) catch {};
             return false;
@@ -116,7 +113,7 @@ pub const Registry = struct {
         return true;
     }
 
-    fn startReceive(self: *Registry, id: []const u8, receive: *Receive) bool {
+    fn startReceive(self: *Registry, id: []const u8, receive: *ReceiveRequest) bool {
         self.mutex.lock(self.io) catch return false;
         defer self.mutex.unlock(self.io);
         const channel = self.channels.getPtr(id) orelse {
@@ -129,19 +126,26 @@ pub const Registry = struct {
     }
 
     pub fn port(self: *Registry) Channels {
-        return .{ .context = self, .open = open, .close = close, .send = send, .sample = sample };
+        return .{ .context = self, .vtable = &.{
+            .open = open,
+            .close = close,
+            .trySend = trySend,
+            .sample = sample,
+        } };
     }
 
-    fn open(context: *anyopaque, id: []const u8, focus_id: []const u8) !void {
+    fn open(context: *anyopaque, id: []const u8, opening_focus_id: []const u8, description: []const u8) !void {
         const self: *Registry = @ptrCast(@alignCast(context));
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
         const owned_id = try self.allocator.dupe(u8, id);
         errdefer self.allocator.free(owned_id);
-        const owned_focus_id = try self.allocator.dupe(u8, focus_id);
-        errdefer self.allocator.free(owned_focus_id);
-        try self.channels.putNoClobber(self.allocator, owned_id, .{ .focus_id = owned_focus_id });
+        const owned_focus = try self.allocator.dupe(u8, opening_focus_id);
+        errdefer self.allocator.free(owned_focus);
+        const owned_description = try self.allocator.dupe(u8, description);
+        errdefer self.allocator.free(owned_description);
+        try self.channels.putNoClobber(self.allocator, owned_id, .{ .opening_focus_id = owned_focus, .description = owned_description });
     }
 
     fn close(context: *anyopaque, id: []const u8) !bool {
@@ -151,7 +155,7 @@ pub const Registry = struct {
         const removed = self.channels.fetchOrderedRemove(id) orelse return false;
         var channel = removed.value;
         while (channel.waiting.first) |node| {
-            const receive: *Receive = @alignCast(@fieldParentPtr("node", node));
+            const receive: *ReceiveRequest = @alignCast(@fieldParentPtr("node", node));
             ipc.reply(receive.connection, if (receive.expired(self.io)) .timeout else .closed) catch {};
             receive.finish(&channel.waiting);
         }
@@ -161,23 +165,24 @@ pub const Registry = struct {
 
     fn release(self: *Registry, id: []const u8, channel: Channel) void {
         std.debug.assert(channel.waiting.first == null);
-        self.allocator.free(channel.focus_id);
+        self.allocator.free(channel.opening_focus_id);
+        self.allocator.free(channel.description);
         self.allocator.free(id);
     }
 
-    fn send(context: *anyopaque, id: []const u8, message: []const u8) !Channels.Outcome {
+    fn trySend(context: *anyopaque, id: []const u8, message: []const u8) !Channels.SendOutcome {
         const self: *Registry = @ptrCast(@alignCast(context));
         std.debug.assert(message.len != 0);
-        if (message.len > Channels.max_bytes) return .too_long;
+        if (message.len > Channels.max_message_bytes) return .too_long;
         try self.io.checkCancel();
-        if (!self.mutex.tryLock()) return .not_ready;
+        if (!self.mutex.tryLock()) return .would_block;
         defer self.mutex.unlock(self.io);
 
         const channel = self.channels.getPtr(id) orelse return .unknown_channel;
         var candidate = channel.waiting.first;
         while (candidate) |node| {
             candidate = node.next;
-            const receive: *Receive = @alignCast(@fieldParentPtr("node", node));
+            const receive: *ReceiveRequest = @alignCast(@fieldParentPtr("node", node));
             if (receive.expired(self.io)) {
                 ipc.reply(receive.connection, .timeout) catch {};
                 receive.finish(&channel.waiting);
@@ -198,24 +203,22 @@ pub const Registry = struct {
             }
             return .accepted;
         }
-        return .not_ready;
+        return .would_block;
     }
 
-    fn sample(context: *anyopaque, a: Allocator, focus_id: ?[]const u8) ![]const []const u8 {
+    fn sample(context: *anyopaque, arena: Allocator, opening_focus_id: ?[]const u8) ![]const Channels.Registration {
         const self: *Registry = @ptrCast(@alignCast(context));
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
-        var ids: std.ArrayList([]const u8) = .empty;
-        errdefer {
-            for (ids.items) |id| a.free(id);
-            ids.deinit(a);
-        }
+        var registrations: std.ArrayList(Channels.Registration) = .empty;
         for (self.channels.keys(), self.channels.values()) |id, channel| {
-            if (focus_id) |focus| if (!std.mem.eql(u8, focus, channel.focus_id)) continue;
-            try ids.ensureUnusedCapacity(a, 1);
-            ids.appendAssumeCapacity(try a.dupe(u8, id));
+            if (opening_focus_id) |focus| if (!std.mem.eql(u8, focus, channel.opening_focus_id)) continue;
+            try registrations.append(arena, .{
+                .channel_id = try arena.dupe(u8, id),
+                .description = try arena.dupe(u8, channel.description),
+            });
         }
-        return ids.toOwnedSlice(a);
+        return registrations.items;
     }
 };

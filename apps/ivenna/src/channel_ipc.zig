@@ -5,13 +5,12 @@ const net = std.Io.net;
 
 const max_id_bytes = 4 * contracts.Reference.max_name_characters + 21;
 const prefix = "\x00ivenna.channels.";
-const wait_header_size = @sizeOf(u64);
-const unlimited_wait = std.math.maxInt(u64);
+const timeout_header_size = @sizeOf(u32);
 const next_request = "\x01";
 
 pub const handshake_time = std.Io.Clock.Duration{ .raw = .fromSeconds(2), .clock = .awake };
-pub const request_buffer_size = wait_header_size + max_id_bytes + 1;
-pub const response_buffer_size = 1 + contracts.Channels.max_bytes + 1;
+pub const request_buffer_size = timeout_header_size + max_id_bytes + 1;
+pub const response_buffer_size = 1 + contracts.Channels.max_message_bytes + 1;
 
 pub const Response = union(enum(u8)) {
     waiting,
@@ -37,7 +36,7 @@ pub fn listen(io: std.Io, data_directory: []const u8) !net.Server {
     }
 }
 
-pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8, wait_ms: ?u32) !net.Stream {
+pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8, timeout_ms: ?u32) !net.Stream {
     if (id.len > max_id_bytes) return error.UnknownChannel;
     const socket = try openSocket(true);
     errdefer socket.close(io);
@@ -52,9 +51,8 @@ pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8, wait_ms: 
     }
     const connection: net.Stream = .{ .socket = socket };
     try requireSameUser(connection);
-    var header: [wait_header_size]u8 = undefined;
-    const encoded_wait: u64 = if (wait_ms) |ms| ms else unlimited_wait;
-    std.mem.writeInt(u64, &header, encoded_wait, .little);
+    var header: [timeout_header_size]u8 = undefined;
+    std.mem.writeInt(u32, &header, timeout_ms orelse 0, .little);
     try writeRequest(connection, &header, id);
     return connection;
 }
@@ -107,16 +105,15 @@ pub fn requireSameUser(connection: net.Stream) !void {
         return error.AccessDenied;
 }
 
-pub const Request = struct { id: []const u8, wait_ms: ?u32 };
+pub const Request = struct { id: []const u8, timeout_ms: ?u32 };
 
 pub fn readRequest(connection: net.Stream, io: std.Io, buffer: *[request_buffer_size]u8) !Request {
     const size = try read(connection, io, buffer, .{ .duration = handshake_time });
-    if (size <= wait_header_size or size >= buffer.len) return error.InvalidChannelRequest;
-    const wait = std.mem.readInt(u64, buffer[0..wait_header_size], .little);
-    if (wait == 0) return error.InvalidChannelRequest;
+    if (size <= timeout_header_size or size >= buffer.len) return error.InvalidChannelRequest;
+    const timeout = std.mem.readInt(u32, buffer[0..timeout_header_size], .little);
     return .{
-        .id = buffer[wait_header_size..size],
-        .wait_ms = if (wait == unlimited_wait) null else std.math.cast(u32, wait) orelse return error.InvalidChannelRequest,
+        .id = buffer[timeout_header_size..size],
+        .timeout_ms = if (timeout == 0) null else timeout,
     };
 }
 
@@ -137,26 +134,33 @@ pub fn readResponse(connection: net.Stream, buffer: *[response_buffer_size]u8) !
     return switch (tag) {
         .message => message: {
             const text = buffer[1..size];
-            if (text.len == 0 or !std.unicode.utf8ValidateSlice(text)) return error.InvalidMessage;
+            if (text.len == 0 or !std.unicode.utf8ValidateSlice(text)) return error.InvalidChannelReply;
             break :message .{ .message = text };
         },
         inline else => |status| if (size == 1) @unionInit(Response, @tagName(status), {}) else error.InvalidChannelReply,
     };
 }
 
-pub fn waitForNext(connection: net.Stream, io: std.Io, deadline: ?std.Io.Clock.Timestamp) !bool {
+const WaitResult = enum { next, ended, timeout };
+
+pub fn waitForNext(connection: net.Stream, io: std.Io, deadline: ?std.Io.Clock.Timestamp) WaitResult {
     // The extra byte lets us reject oversized requests on the packet socket.
     var packet: [next_request.len + 1]u8 = undefined;
-    const size = read(connection, io, &packet, if (deadline) |end| .{ .deadline = end } else .none) catch |err| switch (err) {
-        error.Timeout => {
-            // Threaded I/O polls with millisecond resolution. Honor the absolute
-            // deadline if the transport wait rounded down its final fraction.
-            try deadline.?.wait(io);
-            return error.Timeout;
-        },
-        else => return err,
-    };
-    return std.mem.eql(u8, packet[0..size], next_request);
+    const timeout: std.Io.Timeout = if (deadline) |end| .{ .deadline = end } else .none;
+    while (true) {
+        const size = read(connection, io, &packet, timeout) catch |err| switch (err) {
+            error.Timeout => {
+                const end = deadline.?;
+                const remaining = end.durationFromNow(io).raw.toNanoseconds();
+                // Threaded I/O caps long polls and rounds down to milliseconds.
+                if (remaining >= std.time.ns_per_ms) continue;
+                if (remaining > 0) end.wait(io) catch return .ended;
+                return .timeout;
+            },
+            else => return .ended,
+        };
+        return if (std.mem.eql(u8, packet[0..size], next_request)) .next else .ended;
+    }
 }
 
 pub fn endRequests(connection: net.Stream) void {

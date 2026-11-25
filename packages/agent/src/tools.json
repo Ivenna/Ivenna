@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send text to one correspondent, focus, or open channel. A correspondence `reference` confirms that the sending service accepted the message for delivery. A focus message becomes an observation and can wake the recipient. A channel send attempts an immediate handoff to a waiting reader and reports `accepted` when it succeeds.",
+    "description": "Send text to one correspondent, focus, or channel. A correspondence `reference` confirms submission for delivery. A focus message becomes an observation and can wake its recipient. A channel send attempts a handoff to a waiting receive request.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -53,7 +53,7 @@
   },
   {
     "name": "open_channel",
-    "description": "Open a named channel for local programs. Give the receiver the returned `channel_id`. A replacement can use the same ID. In an activity, `\"$IVENNA\" receive --help` shows how to receive.",
+    "description": "Open a named channel for local programs. Give its `channel_id` to the receiving program. A replacement receiver can use the same ID while the channel stays open. In host commands, `\"$IVENNA\" receive --help` shows how to receive.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -61,7 +61,7 @@
         "description": {
           "type": "string",
           "minLength": 1,
-          "description": "Describe the channel's purpose and what messages a receiver should expect."
+          "description": "Describe the channel's purpose and what each message should contain."
         }
       },
       "required": ["name", "description"],
@@ -70,7 +70,7 @@
   },
   {
     "name": "close_channel",
-    "description": "Close a channel and end waiting reads. `changed` is true if this call closed the channel.",
+    "description": "Close a channel and end waiting reads. `changed` tells you whether this call closed the channel.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -138,7 +138,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Subscribe this focus to reports from a listener you set up. Give the listener the returned `subscription_id`. Its reports can wake this focus. In an activity, `\"$IVENNA\" subscription --help` lists the listener commands.",
+    "description": "Register this focus to receive observations from a listener you set up. Give the listener the returned `subscription_id`. Its reports can wake this focus. In host commands, `\"$IVENNA\" subscription --help` lists the listener commands.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -150,7 +150,7 @@
         "listener": {
           "type": "string",
           "minLength": 1,
-          "description": "Describe what the listener watches and when it reports."
+          "description": "Describe what the listener watches and when it should report."
         }
       },
       "required": ["name", "listener"],
@@ -159,7 +159,7 @@
   },
   {
     "name": "withdraw_subscription",
-    "description": "Withdraw any subscription by ID. Accepted reports stay with the subscribing focus. Stop the listener separately if needed.",
+    "description": "Withdraw a subscription by ID to stop accepting new reports. Accepted reports can still reach the subscribing focus. Stop the listener separately if needed.",
     "parameters": {
       "type": "object",
       "properties": {

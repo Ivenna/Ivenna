@@ -23,7 +23,12 @@ const Source = union(enum) {
 };
 
 pub const History = struct {
-    pub const Wakeup = struct { id: u64, at_unix_ms: i64, text: []const u8 };
+    pub const Wakeup = struct {
+        id: u64,
+        at_unix_ms: i64,
+        /// Null after publication. The original time stays until admission.
+        text: ?[]const u8,
+    };
     pub const CallbackRegistration = struct { id: u64, reference: []const u8, session_id: u64, source: contracts.Callback.Source };
 
     subscription_catalog: [32]u8,
@@ -75,7 +80,7 @@ pub const History = struct {
         }
         if (cores != 1) return error.InvalidHistory;
         if (self.activity_reports) |reports| try reports.validate();
-        var callbacks: std.AutoHashMapUnmanaged(u64, contracts.Callback.Source) = .empty;
+        var callbacks: std.AutoHashMapUnmanaged(u64, std.meta.Tag(contracts.Callback.Source)) = .empty;
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
             if (callback.id == 0 or callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
@@ -83,13 +88,11 @@ pub const History = struct {
             if (callback.source == .host and contracts.Reference.sequence(callback.source.host.command_id) == null) return error.InvalidHistory;
             const entry = try callbacks.getOrPut(a, callback.id);
             if (entry.found_existing) return error.InvalidHistory;
-            entry.value_ptr.* = callback.source;
+            entry.value_ptr.* = std.meta.activeTag(callback.source);
         }
-        var wakeup_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
-        defer wakeup_ids.deinit(a);
         for (self.wakeups) |wakeup| {
-            const source = callbacks.get(wakeup.id) orelse return error.InvalidHistory;
-            if (source != .wakeup or (try wakeup_ids.getOrPut(a, wakeup.id)).found_existing) return error.InvalidHistory;
+            const registration = callbacks.fetchRemove(wakeup.id) orelse return error.InvalidHistory;
+            if (registration.value != .wakeup) return error.InvalidHistory;
         }
     }
 };
@@ -174,7 +177,7 @@ pub const Persistence = struct {
             self.published_checkpoint_digest = null;
             return null;
         };
-        const checkpoint = try Codec.decode(Checkpoint, a, document, .{});
+        const checkpoint = try Codec.decode(Checkpoint, a, document);
         if (checkpoint.sessions.len > max_sessions) return error.SessionCapacityUnavailable;
         const sessions = try a.alloc(History.Session, checkpoint.sessions.len);
         var candidate: Cache = .init(self.allocator);
@@ -297,15 +300,17 @@ pub const Persistence = struct {
             const bodies = try self.store.read(scratch.allocator(), references[0..count]);
             for (batch, bodies) |selected, body| {
                 if (!equalKey(Codec.digest(body), selected.reference.key)) return error.InvalidHistory;
-                const source = try Codec.decode(Source, a, body, .{
-                    // Historical entries can contain retired handover fields.
-                    .ignore_unknown_fields = selected.destination == .entry,
-                });
+                const source = try Codec.decode(Source, a, body);
                 switch (source) {
                     .entry => |entry| {
                         if (!equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
                         switch (selected.destination) {
-                            .entry => |destination| destination.* = entry.value,
+                            .entry => |destination| {
+                                var value = entry.value;
+                                if (value == .record and value.record == .handover)
+                                    try value.record.handover.state.restoreLegacyFields(a);
+                                destination.* = value;
+                            },
                             else => return error.InvalidHistory,
                         }
                     },
@@ -571,7 +576,8 @@ test "working history can append after a handover with a retired sampled field" 
     var core = history.sessions[0];
     const handover = core.entries.?[0].record.handover;
     try t.expectEqualStrings("Keep investigating.", handover.summary);
-    try t.expectEqualStrings("watch-1", handover.state.subscriptions[0]);
+    try t.expectEqualStrings("watch-1", handover.state.subscription_registrations[0].subscription_id);
+    try t.expectEqual(null, handover.state.subscription_registrations[0].listener);
     core.entries = &.{ core.entries.?[0], .{ .exchange = &.{.{ .continuation = "Continuing." }} } };
     history.sessions = &.{core};
     try persistence.save(a, history);

@@ -59,8 +59,6 @@ test "command help and argument errors work without instance or service settings
     const receive = try runWithoutConfig(a, &.{ executable, "receive", "--help" });
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, receive.term);
     try testing.expect(std.mem.indexOf(u8, receive.stdout, "ivenna receive CHANNEL_ID") != null);
-    try testing.expect(std.mem.indexOf(u8, receive.stdout, "--wait MS") != null);
-    try testing.expect(std.mem.indexOf(u8, receive.stdout, "--follow") != null);
 
     const typo = try runWithoutConfig(a, &.{ executable, "subscription", "publsh", "news-1" });
     try testing.expect(typo.term == .exited and typo.term.exited != 0);
@@ -110,25 +108,15 @@ test "the subscription command accepts observations while the kernel is stopped 
     try testing.expect((try listener.request("inspect", null, true)) == .null);
 }
 
-test "receive validates its arguments before looking for a channel" {
+test "receive reports invalid arguments before requiring instance configuration" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const invalid_args = [_][]const []const u8{
-        &.{},
-        &.{ "events-1", "--wait" },
-        &.{ "events-1", "--wait", "0" },
-        &.{ "events-1", "--wait", "4294967296" },
-        &.{ "events-1", "--wait", "1.5" },
-        &.{ "events-1", "--follow", "--wait", "1" },
-    };
-    for (invalid_args) |args| {
-        const argv = try std.mem.concat(a, []const u8, &.{ &.{ executable, "receive" }, args });
-        const result = try runWithoutConfig(a, argv);
-        try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
-        try testing.expectEqualStrings("", result.stdout);
-        try testing.expect(result.stderr.len != 0);
-    }
+    const invalid_timeout = try runWithoutConfig(a, &.{ executable, "receive", "events-1", "--timeout", "0" });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, invalid_timeout.term);
+    try testing.expectEqualStrings("", invalid_timeout.stdout);
+    try testing.expect(std.mem.indexOf(u8, invalid_timeout.stderr, "--timeout") != null);
+
     const missing_data_dir = try runWithoutConfig(a, &.{ executable, "receive", "events-1" });
     try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, missing_data_dir.term);
     try testing.expectEqualStrings("", missing_data_dir.stdout);
@@ -142,7 +130,12 @@ test "a channel matches one pending read and holds no message between receivers"
     const a = arena.allocator();
     var temporary = testing.tmpDir(.{});
     defer temporary.cleanup();
-    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    try temporary.dir.createDirPath(io, "target/child");
+    try temporary.dir.symLink(io, "target/child", "link", .{ .is_directory = true });
+    const root = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const configured = try std.fs.path.join(a, &.{ root, "link", "..", "data" });
+    const directory = try @import("serve.zig").prepareDataDirectory(io, configured, a);
+    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ root, "target", "data" }), directory);
     var registry = try Registry.listen(testing.allocator, io, directory);
     defer registry.deinit();
     var task = try io.concurrent(Registry.run, .{&registry});
@@ -150,13 +143,13 @@ test "a channel matches one pending read and holds no message between receivers"
 
     const channels = registry.port();
     const id = try contracts.Reference.create(a, "--工 作/path", 1);
-    const receiver = try Receiver.init(a, directory, id);
-    try channels.open(channels.context, receiver.id, "core-1");
+    const receiver = try Receiver.init(a, configured, id);
+    try channels.open(receiver.id, "core-1", "Read one work item at a time.");
 
-    try expectSendOutcome(channels, receiver.id, "before any receiver", .not_ready);
+    try expectSendOutcome(channels, receiver.id, "before any receiver", .would_block);
 
-    const oversize: [contracts.Channels.max_bytes + 1]u8 = @splat('x');
-    const maximum = oversize[0..contracts.Channels.max_bytes];
+    const oversize: [contracts.Channels.max_message_bytes + 1]u8 = @splat('x');
+    const maximum = oversize[0..contracts.Channels.max_message_bytes];
     try expectSendOutcome(channels, receiver.id, &oversize, .too_long);
     {
         var pending = try io.concurrent(Receiver.once, .{ &receiver, a, &.{} });
@@ -165,17 +158,17 @@ test "a channel matches one pending read and holds no message between receivers"
         try expectMessage(try pending.await(io), maximum);
     }
 
-    try expectReceiveStatus(try receiver.once(a, &.{ "--wait", "10" }), "timeout");
-    try expectSendOutcome(channels, receiver.id, "after the wait expired", .not_ready);
+    try expectReceiveStatus(try receiver.once(a, &.{ "--timeout", "10" }), "timeout");
+    try expectSendOutcome(channels, receiver.id, "after the wait expired", .would_block);
     {
         const canceled = try channel_ipc.connect(io, directory, receiver.id, null);
         defer canceled.close(io);
         try expectReceiveReply(canceled, .waiting);
     }
-    try expectSendOutcome(channels, receiver.id, "after the waiting receiver disconnected", .not_ready);
+    try expectSendOutcome(channels, receiver.id, "after the waiting receiver disconnected", .would_block);
 
     const second = "前半段\x00\n\"\\second half";
-    var replacement = try io.concurrent(Receiver.once, .{ &receiver, a, &.{ "--wait", "5000" } });
+    var replacement = try io.concurrent(Receiver.once, .{ &receiver, a, &.{ "--timeout", "5000" } });
     defer _ = replacement.cancel(io) catch {};
     try expectSendOutcome(channels, receiver.id, second, .accepted);
     try expectMessage(try replacement.await(io), second);
@@ -196,16 +189,19 @@ test "receive follow flushes successive matches and exits when its channel close
 
     const channels = registry.port();
     const receiver = try Receiver.init(a, directory, "events-1");
-    try channels.open(channels.context, receiver.id, "activity-1");
+    const purpose = "Stream notices to a local program.";
+    var description = purpose.*;
+    try channels.open(receiver.id, "activity-1", &description);
+    @memset(&description, 0);
+    const registrations = try channels.sample(a, "activity-1");
+    try testing.expectEqualDeep(@as([]const contracts.Channels.Registration, &.{.{ .channel_id = receiver.id, .description = purpose }}), registrations);
+    try testing.expectEqual(0, (try channels.sample(a, "activity-2")).len);
     const waiting = try channel_ipc.connect(io, directory, receiver.id, null);
     defer waiting.close(io);
     try expectReceiveReply(waiting, .waiting);
     try expectSendOutcome(channels, receiver.id, "first request", .accepted);
     try expectReceiveReply(waiting, .{ .message = "first request" });
-    try expectSendOutcome(channels, receiver.id, "before the next request", .not_ready);
-    try channel_ipc.requestNext(waiting);
-    try expectSendOutcome(channels, receiver.id, "next request on the same socket", .accepted);
-    try expectReceiveReply(waiting, .{ .message = "next request on the same socket" });
+    try expectSendOutcome(channels, receiver.id, "before the next request", .would_block);
 
     var child = try receiver.spawn(&.{ executable, "receive", receiver.id, "--follow" });
     defer child.kill(io);
@@ -215,7 +211,8 @@ test "receive follow flushes successive matches and exits when its channel close
     try expectSendOutcome(channels, receiver.id, "first message\ncontinued", .accepted);
     try expectFollowMessage(a, &output.interface, "first message\ncontinued");
     try expectSendOutcome(channels, receiver.id, "matched before closing", .accepted);
-    try testing.expect(try channels.close(channels.context, receiver.id));
+    try testing.expect(try channels.close(receiver.id));
+    try testing.expectEqualStrings(purpose, registrations[0].description);
     try channel_ipc.requestNext(waiting);
     try expectReceiveReply(waiting, .closed);
     try expectFollowMessage(a, &output.interface, "matched before closing");
@@ -244,7 +241,7 @@ test "receive follow exits when a shell pipeline takes one message" {
 
     const channels = registry.port();
     const receiver = try Receiver.init(a, directory, "events-1");
-    try channels.open(channels.context, receiver.id, "core-1");
+    try channels.open(receiver.id, "core-1", "Pass JSON lines to the pipeline.");
     const script =
         \\{
         \\    "$1" receive "$2" --follow || printf '%s\n' 'receive failed' >&2
@@ -264,16 +261,64 @@ test "receive follow exits when a shell pipeline takes one message" {
     var diagnostics = child.stderr.?.readerStreaming(io, &buffer);
     try testing.expectEqual(null, try readFollowLine(&diagnostics.interface));
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
-
-    try expectSendOutcome(channels, receiver.id, "after the follower exits", .not_ready);
 }
 
-fn expectSendOutcome(channels: contracts.Channels, id: []const u8, message: []const u8, expected: contracts.Channels.Outcome) !void {
+test "receive exits successfully when its output pipe closes during a matched write" {
+    const io = testing.io;
+    const linux = std.os.linux;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", arena.allocator());
+    var registry = try Registry.listen(testing.allocator, io, directory);
+    defer registry.deinit();
+    var task = try io.concurrent(Registry.run, .{&registry});
+    defer task.cancel(io) catch {};
+
+    const channels = registry.port();
+    const receiver = try Receiver.init(arena.allocator(), directory, "events-1");
+    try channels.open(receiver.id, "core-1", "Pass a single message.");
+
+    var child = running: {
+        // A one-page packet pipe holds only the first write, even on kernels
+        // whose page size exceeds the length of the JSON-encoded message.
+        const handles = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .DIRECT = true });
+        const output: std.Io.File = .{ .handle = handles[0], .flags = .{ .nonblocking = false } };
+        defer output.close(io);
+        const writer: std.Io.File = .{ .handle = handles[1], .flags = .{ .nonblocking = false } };
+        defer writer.close(io);
+        try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.fcntl(output.handle, linux.F.SETPIPE_SZ, std.heap.pageSize())));
+
+        var process = try std.process.spawn(io, .{
+            .argv = &.{ executable, "receive", receiver.id },
+            .environ_map = &receiver.env,
+            .stdin = .ignore,
+            .stdout = .{ .file = writer },
+            .stderr = .pipe,
+        });
+        errdefer process.kill(io);
+        const message: [contracts.Channels.max_message_bytes]u8 = @splat(0);
+        try expectSendOutcome(channels, receiver.id, &message, .accepted);
+
+        var descriptors = [_]std.posix.pollfd{.{ .fd = output.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        try testing.expect(try std.posix.poll(&descriptors, 5000) != 0);
+        try testing.expect(descriptors[0].revents & std.posix.POLL.IN != 0);
+        break :running process;
+    };
+    defer child.kill(io);
+    var buffer: [256]u8 = undefined;
+    var diagnostics = child.stderr.?.readerStreaming(io, &buffer);
+    try testing.expectEqual(null, try readFollowLine(&diagnostics.interface));
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+}
+
+fn expectSendOutcome(channels: contracts.Channels, id: []const u8, message: []const u8, expected: contracts.Channels.SendOutcome) !void {
     const io = testing.io;
     const deadline = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
     while (true) {
-        const outcome = try channels.submit(id, message);
-        const retrying = outcome == .not_ready and expected != .not_ready;
+        const outcome = try channels.trySend(id, message);
+        const retrying = outcome == .would_block and expected != .would_block;
         if (!retrying or std.Io.Clock.awake.now(io).compare(.gte, deadline))
             return testing.expectEqual(expected, outcome);
         try io.sleep(.fromMilliseconds(2), .awake);

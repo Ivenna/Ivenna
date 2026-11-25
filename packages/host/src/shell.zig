@@ -56,7 +56,7 @@ pub const Shell = struct {
         }
     };
     pub const Streams = struct { stdout: ?Stream, stderr: ?Stream };
-    pub const Start = union(enum) { ready: Invocation, unavailable: anyerror };
+    pub const Start = union(enum) { ready: Invocation, unavailable };
     pub const Invocation = struct {
         io: std.Io,
         backend: union(enum) { process: process.Process, not_started: []const u8 },
@@ -104,7 +104,10 @@ pub const Shell = struct {
     pub fn start(self: Shell, a: Allocator, session_id: u64, args: Command) !Start {
         return .{ .ready = self.prepare(a, session_id, args) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,
-            else => return .{ .unavailable = err },
+            else => {
+                std.log.debug("could not prepare host command logs for {s}: {s}", .{ args.name.bytes, @errorName(err) });
+                return .unavailable;
+            },
         } };
     }
 
@@ -143,7 +146,10 @@ pub const Shell = struct {
             .terminal = args.mode == .terminal,
         })) |child| .{ .process = child } else |err| switch (err) {
             error.Canceled, error.OutOfMemory => return err,
-            else => .{ .not_started = @errorName(err) },
+            else => blk: {
+                std.log.debug("could not start host command {s}: {s}", .{ args.name.bytes, @errorName(err) });
+                break :blk .{ .not_started = launchFailure(err) };
+            },
         };
         return .{
             .io = self.io,
@@ -156,6 +162,16 @@ pub const Shell = struct {
         };
     }
 };
+
+fn launchFailure(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound, error.NotDir => "Could not find a path needed to start the command. Check cwd and shell.",
+        error.AccessDenied, error.PermissionDenied => "The host lacks permission to start the command. Check access to the working directory and shell.",
+        error.InvalidExe, error.IsDir => "Could not execute a program required to start the command. Check that shell points to an executable file.",
+        error.TerminalUnsupported, error.TerminalSessionUnsupported => "Terminal mode is unavailable on this host. Use batch or pipe if a terminal is unnecessary.",
+        else => "The host could not start the command.",
+    };
+}
 
 fn splitBudget(total: usize, remaining: [2]u64) [2]usize {
     const smaller: usize = @intFromBool(remaining[1] < remaining[0]);

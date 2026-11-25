@@ -25,7 +25,7 @@ pub const Client = struct {
     pub fn reader(self: *const Client) web.Reader {
         return .{
             .context = self,
-            .disclosure = "DeepSeek Fetch receives the page URL and may charge for each fetch.",
+            .disclosure = "Fetching a page sends its URL to DeepSeek and may incur a charge.",
             .fetch = fetch,
         };
     }
@@ -40,7 +40,7 @@ pub const Client = struct {
             error.FetchTimeout => .failed(.read_timeout, "The web reader timed out while retrieving this page."),
             error.InvalidFetchResponse => .failed(.web_unavailable, "The web service returned an unusable response."),
             error.FetchUnavailable => .failed(.web_unavailable, "Could not reach the web service or complete the read."),
-            error.ConcurrencyUnavailable => .failed(.web_unavailable, "The runtime could not start the web request."),
+            error.ConcurrencyUnavailable => .failed(.web_unavailable, "Could not start the web read."),
         };
     }
 
@@ -97,7 +97,7 @@ fn exchange(service: Client, arena: Allocator, url: []const u8) Error!Outcome {
             .payment_required => .failed(.web_unavailable, "The web service account has insufficient balance."),
             .too_many_requests => .failed(.rate_limited, "The web service is rate limiting requests. Try again later."),
             .request_timeout, .gateway_timeout => .failed(.read_timeout, "The web service timed out handling this request."),
-            else => .failed(.web_unavailable, try arena.print("The web service returned HTTP {d}.", .{@backingInt(status)})),
+            else => .failed(.web_unavailable, "The web service could not retrieve this page."),
         };
     }
     if (response.head.content_encoding != .identity) return error.InvalidFetchResponse;

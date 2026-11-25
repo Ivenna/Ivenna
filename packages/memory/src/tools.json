@@ -129,7 +129,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Revisit a memory. Read text in pages or receive a complete image or file.",
+    "description": "Revisit a memory. Read text in pages, or open a complete image or file through the model service.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -199,7 +199,7 @@
                     "path": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Path to a regular host file, or its local file URI. Relative paths resolve from the startup directory."
+                      "description": "Path to a regular host file, or its local file URI. Relative paths resolve from the startup directory. The file's bytes go to the memory service."
                     }
                   },
                   "required": [
@@ -315,7 +315,7 @@
   },
   {
     "name": "forget_memory",
-    "description": "Let go of a memory or room you no longer want to keep.",
+    "description": "Let go of a memory or an empty room you no longer want to keep.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -325,7 +325,8 @@
         },
         "recursive": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "description": "Set true to remove a room and all its contents."
         }
       },
       "required": [

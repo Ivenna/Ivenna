@@ -1,6 +1,6 @@
 # Tool content
 
-Tool results can carry text, images, or complete files into the calling focus's working history. A focus can ask to see an image by supplying its location. The reader returns the image as a separate part of the tool result. Observations delivered as events have their own [input contract](input.md#retained-records).
+Tool results can carry text, images, or complete files into the calling focus's working history. This guide describes what the model receives when a tool returns media. See the [input contract](input.md#retained-records) for observations delivered as events.
 
 ## Automatic classification
 
@@ -12,7 +12,7 @@ Readers recognize JPEG, PNG, GIF, and WebP by signature and PDF by its header. O
 
 ## Content and results
 
-When a tool supplies media, a text part identifies the source. An image part carries either the image bytes or an image URL. In a model request, the Responses adapter sends image bytes as a Base64 data URL in the image part. A file part carries the complete source for [upload](#complete-files).
+When a tool supplies media, an accompanying text part identifies its source. An image part carries the image bytes or an [image URL](#image-url-references). A file part carries the complete source for [upload](#complete-files).
 
 When the reader identifies an oversized source, `content.unavailable` gives its `byte_length` and the reason.
 
@@ -30,10 +30,10 @@ If the upload ends without a usable reference, a text part replaces the attachme
 
 | Code | What happened |
 | --- | --- |
-| `file_upload_failed` | The adapter could not send the file, or the file service rejected it. A rejection includes `error.http_status`. |
+| `file_upload_failed` | The upload stopped before sending the file, or the file service rejected it. The message distinguishes these outcomes and identifies a size or rate limit when reported. |
 | `file_upload_uncertain` | The adapter could not confirm whether the service stored the file. A new upload could create another copy. |
 
-See [upload handling](architecture.md#tool-results) for how the adapter handles these outcomes.
+The service status is available in the kernel log. See [upload handling](architecture.md#tool-results).
 
 ## Image URL references
 

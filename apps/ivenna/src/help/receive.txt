@@ -1,25 +1,26 @@
-ivenna receive CHANNEL_ID [--wait MS]
+ivenna receive CHANNEL_ID [--timeout MS]
 ivenna receive CHANNEL_ID --follow
 
-Use the ID returned by open_channel. Run under the kernel's OS account with
-DATA_DIR set to the running instance's data directory. Ivenna host commands
-inherit DATA_DIR and can call the executable as "$IVENNA".
+Pass the complete ID returned by open_channel. Use the same ivenna build as
+the kernel. Run receive under the kernel's effective user ID and in its
+Linux network namespace. Both processes must resolve DATA_DIR to the same
+absolute path. Host commands inherit DATA_DIR and can call "$IVENNA".
 
 Start receiving before sending. Without options, wait for one message.
-Use --wait MS to limit that wait to 1 through {d} milliseconds.
+Use --timeout MS to limit that wait to 1 through {d} milliseconds.
 
-For any of the results below, a single read exits with code 0 and writes
-one JSON object to stdout. Its status field gives the outcome.
+A single read writes one JSON line to stdout and exits with status 0 when
+it reports one of these outcomes in the status field.
 
   message    One message was read. The text field contains the message.
   timeout    The wait elapsed before a message arrived.
   closed     The channel closed during the wait.
 
-Use --follow to receive successive messages as JSON lines. Each line is
-flushed before the next read begins. When the channel closes, the
-follower writes any message already handed off and exits with code 0.
-If the output pipe closes during a wait, either mode exits with code 0
-without printing another record.
+Use --follow to stream message records, one JSON line per message. The command
+flushes each line before requesting the next read. It finishes writing any
+matched message and exits with status 0 when it observes the channel close.
+Either mode exits with status 0 if the output pipe closes during a wait or
+write.
 
-An unknown ID or unavailable channel service produces a diagnostic on
-stderr and exit code 1.
+An unknown ID on the initial request or an unavailable channel service
+produces a diagnostic on stderr and exit status 1.

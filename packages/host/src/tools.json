@@ -8,13 +8,13 @@
         "command_id": {
           "type": "string",
           "minLength": 1,
-          "description": "Select one command; omit to list current commands."
+          "description": "Select one command by its full ID. Omit to list available commands."
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
           "default": 0,
-          "description": "Position in the matching command list."
+          "description": "Use the returned next_offset for the next page."
         }
       },
       "required": [],
@@ -23,14 +23,15 @@
   },
   {
     "name": "run_host_shell",
-    "description": "Run a command in a fresh shell. Short text appears inline. Partial or binary output includes a log path. A command still running after the initial wait returns a handle and schedules a completion callback for this focus.",
+    "description": "Run a command in a fresh shell. Short text appears inline. Partial or binary output includes a log path. If the wait ends before execution and cleanup finish, the result gives a command_id and a callback_id for the completion observation to this focus.",
     "parameters": {
       "type": "object",
       "properties": {
         "name": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 32
+          "maxLength": 32,
+          "description": "Name the work so it can be recognized by its command ID."
         },
         "command": {
           "type": "string",
@@ -72,7 +73,7 @@
           "minimum": 512,
           "maximum": 16384,
           "default": 4096,
-          "description": "Combined byte budget for JSON-encoded stdout and stderr previews."
+          "description": "Combined byte budget for stdout and stderr previews after JSON escaping."
         },
         "yield_ms": {
           "type": "integer",
@@ -91,7 +92,7 @@
   },
   {
     "name": "continue_host_shell",
-    "description": "Read output or interact with a command by its handle. Activities share one read position per stream, starting at byte zero. Initial previews and callbacks leave those positions in place. Draining a finished command retires its handle.",
+    "description": "Read output or interact with a command by its handle. Continuation reads advance a position shared across activities for each stream. Initial previews and callbacks read independently. Draining a finished command retires its handle.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -158,7 +159,7 @@
                         "terminate",
                         "kill"
                       ],
-                      "description": "Interrupt reaches the terminal foreground group; terminate and kill reach its original session. Without a terminal, signals reach the command's process group."
+                      "description": "In terminal mode, interrupt targets the foreground group. Terminate and kill target the original terminal session. In other modes, signals target the command's process group."
                     }
                   },
                   "required": [
@@ -212,14 +213,14 @@
           "minimum": 0,
           "maximum": 4294967295,
           "default": 1000,
-          "description": "Wait for unread output or completion; zero returns the current state."
+          "description": "Wait for unread output or completion. Use zero to skip the wait."
         },
         "max_output_bytes": {
           "type": "integer",
           "minimum": 512,
           "maximum": 16384,
           "default": 4096,
-          "description": "Combined byte budget for JSON-encoded stdout and stderr previews."
+          "description": "Combined byte budget for stdout and stderr previews after JSON escaping."
         }
       },
       "required": [

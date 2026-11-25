@@ -22,9 +22,7 @@ pub fn run(init: std.process.Init) !void {
     defer arena.deinit();
     const a = arena.allocator();
     const host_directory = try std.process.currentPathAlloc(io, a);
-    const configured_directory = try std.fs.path.resolve(a, &.{ host_directory, config.data_dir });
-    _ = try std.Io.Dir.cwd().createDirPathStatus(io, configured_directory, .fromMode(0o700));
-    const data_directory = try std.Io.Dir.cwd().realPathFileAlloc(io, configured_directory, a);
+    const data_directory = try prepareDataDirectory(io, config.data_dir, a);
     var channels = try ChannelRegistry.listen(init.gpa, io, data_directory);
     defer channels.deinit();
     const database_path = try std.fs.path.join(a, &.{ data_directory, state.filename });
@@ -131,6 +129,12 @@ pub fn run(init: std.process.Init) !void {
             std.log.info("stopping Ivenna and waiting for active work", .{});
         },
     }
+}
+
+pub fn prepareDataDirectory(io: std.Io, path: []const u8, a: std.mem.Allocator) ![]const u8 {
+    const cwd = std.Io.Dir.cwd();
+    _ = try cwd.createDirPathStatus(io, path, .fromMode(0o700));
+    return cwd.realPathFileAlloc(io, path, a);
 }
 
 fn requestStop(_: std.posix.SIG) callconv(.c) void {

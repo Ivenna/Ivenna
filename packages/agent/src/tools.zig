@@ -44,11 +44,11 @@ pub const Request = union(enum) {
         };
         switch (request) {
             .send => |args| if (args.text.len == 0) return error.InvalidToolArguments,
-            .open_channel => |args| if (!contracts.Reference.validName(args.name) or args.description.len == 0) return error.InvalidToolArguments,
+            .open_channel => |args| if (args.description.len == 0) return error.InvalidToolArguments,
             .close_channel => |args| if (args.channel_id.len == 0) return error.InvalidToolArguments,
             .subscribe => {},
-            .open_focus => |args| if (!contracts.Reference.validName(args.name) or args.task.len == 0) return error.InvalidToolArguments,
-            .schedule_attention => |args| if (!contracts.Reference.validName(args.name) or args.text.len == 0) return error.InvalidToolArguments,
+            .open_focus => |args| if (args.task.len == 0) return error.InvalidToolArguments,
+            .schedule_attention => |args| if (args.text.len == 0) return error.InvalidToolArguments,
             .withdraw_subscription => |args| if (args.subscription_id.len == 0) return error.InvalidToolArguments,
         }
         return request;
@@ -108,13 +108,5 @@ test "send rejects a call that selects two destinations" {
     defer arena.deinit();
     try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "send",
         \\{"to":{"focus_id":"core-1","channel_id":"core-1"},"text":"Hello"}
-    ));
-}
-
-test "opening a channel requires a nonempty description" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.InvalidToolArguments, Request.parse(arena.allocator(), .core, "open_channel",
-        \\{"name":"task-input","description":""}
     ));
 }

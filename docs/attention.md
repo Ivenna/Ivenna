@@ -8,7 +8,7 @@ The core and activities are focuses of one Ivenna. Each has a working history, a
 | [Reach an existing focus](#reaching-an-existing-focus) | `send` |
 | [Return to something later](#returning-later) | `schedule_attention` |
 | [Receive recurring observations in this focus](#subscriptions) | `subscribe` |
-| [Withdraw a subscription](#subscriptions) | `withdraw_subscription` |
+| [Withdraw a subscription](#withdrawing-a-subscription) | `withdraw_subscription` |
 
 See [names and references](input.md#names-and-references) for the `name` argument and the [tool schema](../packages/agent/src/tools.json) for the declarations.
 
@@ -56,19 +56,17 @@ The core calls `schedule_attention` with a short `name`, the wakeup time in `at`
 {"name":"revisit-practice","at":"2026-11-10T18:00:00Z","text":"Revisit the French practice plan."}
 ```
 
-The arrangement survives restart. Success returns its `callback_id`.
+The wakeup survives restart. The result gives its `callback_id`.
 
 ```json
 {"result":{"callback_id":"revisit-practice-5"}}
 ```
 
-The text reaches the core as a callback observation with source `wakeup`. Past timestamps are due immediately. Polling, queue capacity, and scheduling can delay inference. The core stays available for other work while waiting. Cancellation is unavailable.
+A past `at` makes the wakeup due immediately. The core can keep working while it waits. The callback carries the supplied text and the original time in `scheduled_for`, even when it reaches the core later. Cancellation is unavailable. See [wakeup and callback fields](input.md#callback-observations).
 
 ### Callback observations
 
-Scheduled wakeups and host commands that outlive their initial call each arrange one callback. Its observation returns to the calling focus with the original ID and source, even after sleep or restart. See [command lifetimes](host.md#command-lifetimes), [observation fields](input.md#callback-observations), and [pending callbacks in sampled state](input.md#sampled-state).
-
-The focus admits each callback at most once. Repeated publication preserves the first identifiable stored result. See the [callback protocol](architecture.md#callback-delivery).
+A scheduled wakeup or a host command that outlasts its initial call arranges one callback. The observation returns to the focus that arranged it, with the same callback ID, even after sleep or restart. The focus admits at most one observation per callback ID. See [command lifetimes](host.md#command-lifetimes), [observation fields](input.md#callback-observations), and [callback delivery](architecture.md#callback-delivery).
 
 ## Subscriptions
 
@@ -81,19 +79,21 @@ Call `subscribe` in the focus that should receive the reports. Describe in `list
 }
 ```
 
-Each call creates a subscription with a new `subscription_id`, even if this focus already follows the same source.
+Each successful call creates a subscription with a new `subscription_id`, even if this focus already follows the same source.
 
 ```json
 {"result":{"subscription_id":"release-watch-1"}}
 ```
 
-Give the returned `subscription_id` to the listener you set up. In this example, reports go to the core even if an activity runs the listener on the host. See the [listener protocol](subscriptions.md) for reporting and resuming from a saved position.
+Give the returned `subscription_id` to the program that watches the source and reports observations. If the core calls `subscribe`, reports go to the core even when an activity runs the listener on the host. See the [listener protocol](subscriptions.md) for reporting and resuming from a saved position.
 
 An accepted report makes a sleeping focus ready. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. See [subscription observations](input.md#subscription-observations).
 
-Subscriptions survive sleep and restart. The focus can find its active subscription IDs in the [state sampled for a handover](input.md#sampled-state).
+Subscriptions survive sleep and restart. A handover can carry the active subscriptions and their descriptions. See [sampled state](input.md#sampled-state).
 
-Any focus can call `withdraw_subscription` with the complete `subscription_id`. The result echoes the ID with `changed: true` if the call withdrew the subscription, or `changed: false` if it was already withdrawn or unknown. Reports accepted before withdrawal still reach the subscribing focus. Stop the listener separately if needed.
+### Withdrawing a subscription
+
+Any focus can call `withdraw_subscription` with the complete `subscription_id`. The result echoes the ID with `changed: true` if the call withdrew the subscription, or `changed: false` if the subscription was already withdrawn or unknown. Reports already accepted remain addressed to the subscribing focus. Stop the listener separately if needed. See [listener behavior after withdrawal](subscriptions.md#withdrawal).
 
 ## Results and errors
 

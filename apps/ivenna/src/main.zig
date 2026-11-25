@@ -12,7 +12,10 @@ pub fn main(init: std.process.Init) !u8 {
     switch (command) {
         .serve => try serve.run(init),
         .help => |help| try std.Io.File.stdout().writeStreamingAll(init.io, help),
-        .receive => |options| receive.run(init, options) catch |err| return failure(init.io, err),
+        .receive => |options| receive.run(init, options) catch |err| switch (err) {
+            error.BrokenPipe => return 0,
+            else => return failure(init.io, err),
+        },
         .subscription => |request| runSubscription(init, request) catch |err| return failure(init.io, err),
     }
     return 0;
@@ -54,8 +57,8 @@ fn failure(io: std.Io, err: anyerror) !u8 {
             std.log.err("the channel service is unavailable. Check DATA_DIR and the running instance before retrying", .{});
             return 1;
         },
-        error.InvalidMessage => {
-            std.log.err("the channel message contains invalid UTF-8", .{});
+        error.InvalidChannelReply => {
+            std.log.err("the channel service returned an invalid reply. Check that serve and receive use the same build", .{});
             return 1;
         },
         else => {

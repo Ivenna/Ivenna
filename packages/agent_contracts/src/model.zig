@@ -37,7 +37,8 @@ pub const Outcome = union(enum) {
 };
 
 pub const Rejection = union(enum) {
-    request_rejected: struct { status: u16, context_length: bool = false },
+    request_rejected,
+    context_window,
     limit: Limit,
     invalid_response,
     incomplete_response,

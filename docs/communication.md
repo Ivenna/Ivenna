@@ -54,32 +54,32 @@ The observation's `text` contains the subject and body separated by a blank line
 
 ## Channels
 
-A channel lets Ivenna hand text to a waiting local program. Ivenna can open it before the program starts and use the same ID with a replacement.
+A channel hands each message to one waiting receive request from a local program. The channel holds no queue between reads. Ivenna can open a channel before the program starts and give the same ID to a replacement receiver.
 
 ### Opening a channel
 
-The core or an activity calls `open_channel` with a [name](input.md#names-and-references) and a nonempty `description` of the channel's purpose. The call records the description in the opening focus's working history.
+Any focus can call `open_channel`. Give it a name and a description of the channel's purpose and the text the receiver expects. See [names and references](input.md#names-and-references).
 
 ```json
-{"name":"task-input","description":"Send the path of each file to process."}
+{"name":"task-input","description":"Receives the absolute path of each CSV file ready for import."}
 ```
 
 ```json
 {"result":{"channel_id":"task-input-18"}}
 ```
 
-Pass the complete `channel_id` to the receiving program. Use the same ID to send or close the channel. A focus can share the ID with another focus or find it in a [handover state sample](input.md#sampled-state).
+Pass the complete `channel_id` to the receiving program and use it to send or close the channel. The description gives the ID context in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
 
 ### Receiving from a channel
 
-Run `ivenna receive CHANNEL_ID` on the kernel host under the same OS account. The examples use `IVENNA` and `DATA_DIR` as provided to [host commands](host.md#command-environment). For an independently launched program, use the path to `ivenna` and set `DATA_DIR` to the running instance's data directory.
+Run `ivenna receive CHANNEL_ID` to wait for one message. This example runs in an Ivenna host command. See the [command environment](host.md#command-environment) and [receiver setup](running.md#channel-receivers).
 
 ```sh
 channel_id='task-input-18'
 "$IVENNA" receive "$channel_id"
 ```
 
-`receive CHANNEL_ID` waits for one message. Use `--wait MS` with a positive number of milliseconds to limit the wait. A single read that reaches one of these outcomes writes one JSON line and exits with status 0.
+Add `--timeout MS` to limit the wait to a positive number of milliseconds. Each single-read outcome writes one JSON line to stdout and exits with status 0.
 
 | JSON on stdout | Meaning |
 | --- | --- |
@@ -87,15 +87,15 @@ channel_id='task-input-18'
 | `{"status":"timeout"}` | The wait ended before a message arrived. |
 | `{"status":"closed"}` | The channel closed while the read was waiting. |
 
-`--follow` writes successive `message` records as JSON lines. It flushes each line before requesting the next message, so a send between reads can return `channel_not_ready`. The stream exits with status 0 when it observes [channel close](#closing-a-channel), without a final `closed` record.
-
-When several readers are waiting, one receives each message. An unknown ID or an unavailable channel service produces a diagnostic on stderr and exit status 1. See `ivenna receive --help` for CLI limits.
+Use `--follow` to write successive `message` records, one JSON line per message. The command exits with status 0 when it observes the channel close. See [closing a channel](#closing-a-channel).
 
 ```sh
 "$IVENNA" receive "$channel_id" --follow | ./handle-messages
 ```
 
-Here `handle-messages` reads JSON lines from stdin. A full pipe delays the next receive request until the write can finish. If the output pipe closes during a wait, either receive mode exits with status 0.
+Here `handle-messages` reads JSON lines from stdin. The `receive` command flushes each line before requesting the next read. A full pipe delays that request. In that gap, a send can return `channel_would_block` if no other receiver is waiting.
+
+If the output pipe closes during a wait or write, either mode exits with status 0. An unknown ID on the initial request or an unavailable channel service produces a diagnostic on stderr and exit status 1. Run `ivenna receive --help` for syntax and limits.
 
 ### Sending to a channel
 
@@ -105,7 +105,7 @@ While a program is waiting to receive, call `send` with the complete ID in `to.c
 {"to":{"channel_id":"task-input-18"},"text":"/work/ready.csv"}
 ```
 
-`send` returns immediately. `accepted` confirms that the runtime wrote the message to a waiting reader's connection. The program can [report what it did with the message](subscriptions.md#reporting-after-a-channel-read).
+`send` returns without waiting for a receiver. The `accepted` status confirms that the runtime handed the message to a waiting receive request. A subscription report can tell a focus how the program handled it. See [reporting after a channel read](subscriptions.md#reporting-after-a-channel-read).
 
 ```json
 {"result":{"channel_id":"task-input-18","status":"accepted"}}
@@ -113,7 +113,7 @@ While a program is waiting to receive, call `send` with the complete ID in `to.c
 
 | Send error | Meaning |
 | --- | --- |
-| `channel_not_ready` | This attempt neither handed off nor queued the message. You can retry. This result does not confirm that the ID is open. |
+| `channel_would_block` | The message is unsent and unqueued. The result can arrive before the runtime checks the ID. You can retry when a receiver is waiting. |
 | `unknown_channel` | The lookup found no open channel for the supplied ID. |
 | `channel_message_too_long` | The text exceeds the channel's message limit. |
 
@@ -129,6 +129,6 @@ Either role can call `close_channel` with a complete channel ID.
 {"result":{"channel_id":"task-input-18","changed":true}}
 ```
 
-Closing the channel retires its ID and ends waiting reads with `closed`. A matched read can finish. A follower between reads notices the close on its next request. Closing an unknown ID returns `changed: false`.
+Closing the channel retires its ID. A waiting single read reports `closed`, and a matched read can finish. A follower between reads observes the close on its next request. Closing a channel that is already absent returns `changed: false`.
 
-A channel stays open when its readers exit or the opening focus ends. It lasts until a focus closes it or the runtime stops. After restart, open a new channel and give the new ID to the receiving program.
+A channel stays open when its readers exit or the opening focus ends. It lasts until a focus closes it or the kernel stops. After restart, give the receiving program an ID from a new `open_channel` call.

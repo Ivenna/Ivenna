@@ -1,6 +1,6 @@
 # Reading resources
 
-Both the core and activities can call `read_resource`. Set `location` to an absolute host path, a file URI, an HTTP(S) URL, or a web page snapshot URI. Omit it to list the kernel's startup directory.
+Both the core and activities can call `read_resource`. Use an absolute host path or file URI for [local files and directories](#local-files-and-directories), or omit `location` to list the kernel's startup directory. An HTTP(S) URL opens a [remote image](#remote-images) with the image view or a [web page](#web-pages) when page retrieval is enabled.
 
 ## Reading a window
 
@@ -30,9 +30,9 @@ Absolute paths are literal, so `/srv/reports/Q4 #1%.pdf` opens the file with exa
 
 ## Web pages
 
-Opening an HTTP(S) URL in the default view fetches the page as Markdown when web page access is enabled. The URL must have a host and omit embedded usernames and passwords. The tool description names the page service and any potential charge. See [web page access](running.md#web-page-access).
+When web page access is enabled, use an HTTP(S) URL with the default view to fetch the page as Markdown. The URL must have a host and omit embedded usernames and passwords. The tool description names the service that receives the URL and indicates whether fetching the page may incur a charge. See [web page access](running.md#web-page-access).
 
-In the initial result, `result.uri` starts with `ivenna:fetch/` and identifies the copy held by this kernel. Both the core and activities can reopen it without another web request. `result.source_uri` is the original URL. Opening it fetches a fresh copy, which may have changed.
+The initial result gives two references. Use `result.uri` to read the same snapshot in the core or an activity without another fetch. Use `result.source_uri`, the original URL, to fetch a fresh copy.
 
 For example, `{"location":"https://example.org/guide","view":{"limit":6}}` might return the heading of a page.
 
@@ -86,4 +86,4 @@ A failed read returns an `error` with a `code` and a `message`.
 | `not_readable` | Check the message for the cause, such as a file exceeding the view's size limit during the read. |
 | `rate_limited`, `read_timeout` | The service is limiting requests or the read timed out. A later read may succeed. |
 | `page_too_large` | The page is too large to retrieve or retain. A smaller reading window still requires the whole page. |
-| `web_unavailable` | Check the message for details about page access, the local request, or the page service. |
+| `web_unavailable` | Check the message to see whether page retrieval is disabled or the page service could not complete the request. |

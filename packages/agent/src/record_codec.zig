@@ -10,18 +10,17 @@ pub fn encode(a: Allocator, value: anytype) ![]const u8 {
     @setEvalBranchQuota(10_000);
     var writer: std.Io.Writer.Allocating = .init(a);
     defer writer.deinit();
-    try std.zon.stringify.serialize(value, .{ .whitespace = false }, &writer.writer);
+    try std.zon.stringify.serialize(value, .{ .whitespace = false, .emit_default_optional_fields = false }, &writer.writer);
     return writer.toOwnedSlice();
 }
 
-pub fn decode(comptime T: type, a: Allocator, data: []const u8, options: struct { ignore_unknown_fields: bool = false }) !T {
+pub fn decode(comptime T: type, a: Allocator, data: []const u8) !T {
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     return std.zon.parse.fromSlice(T, .{
         .gpa = a,
         .arena = a,
         .source = try a.dupeSentinel(u8, data, 0),
         .diagnostics = &diagnostics,
-        .ignore_unknown_fields = options.ignore_unknown_fields,
     }) catch |err| switch (err) {
         error.ParseZon => error.InvalidHistory,
         else => err,

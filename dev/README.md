@@ -145,15 +145,15 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 ## Trying a channel
 
-Use the [mail example](#sending-a-message) to give Ivenna this assignment.
+Send this request using the [mail example](#sending-a-message).
 
-> Open an activity to try a channel. In that activity, open `task-input` with the description `Send test messages to local receivers`. Try sending `first` before starting a receiver.
+> Open an activity and have it open a channel named `task-input` for the two messages `first` and `second`. Ask it to try sending `first` before starting a receiver.
 >
-> In the same activity, start `"$IVENNA" receive CHANNEL_ID --follow` with `yield_ms` set to `0`, substituting the complete channel ID. Send `first` and use `continue_host_shell` to read its output before sending `second`. If either send reports `channel_not_ready`, check that the command is still running before retrying that send.
+> In the activity, use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" receive CHANNEL_ID --follow` with the complete channel ID. Send `first` and read the receiver's output with `continue_host_shell`. Then send `second` and read its output. If a send reports `channel_would_block`, check the command's state before retrying it.
 >
-> After reading both messages, close the channel and report the send results, command output, and exit status.
+> After reading both messages, close the channel and collect the receiver's exit status. Report the send results, command output, and exit status.
 
-The send before the receiver starts should return `channel_not_ready`. The two successful sends should return `accepted` and produce two JSON `message` records in the same command's output. After the channel closes, the command should exit with status 0. See the [channel interface](../docs/communication.md#channels).
+The first send should report `channel_would_block`. Once the receiver is waiting, each successful send returns `accepted` and the receiver writes one JSON `message` record. The receiver should exit with status 0 after the channel closes. See the [channel interface](../docs/communication.md#channels).
 
 ## Trying a subscription listener
 
@@ -188,13 +188,13 @@ The external volumes and private instance files remain in place. Use the [startu
 
 ## Updating the kernel and middleware
 
-For compatible updates, keep the same instance directory and [load its configuration](#configuration). Preparation preserves private copies of the examples. Incorporate relevant changes from [.env.example](../.env.example) into the instance's `.env` and reload it.
+For compatible updates, keep the same instance directory. Incorporate relevant changes from `.env.example` into the instance's `.env` and reload it. See the [configuration steps](#configuration) and [example environment](../.env.example).
 
 ### Kernel
 
-For a change in storage format, see [updating an existing instance](../docs/running.md#updating-the-executable). For a fresh development instance, choose a new `DEV_INSTANCE_DIR`. With the supplied Stalwart account plan, configure a new `MAIL_VOLUME_NAME` in that instance and provision it as described in [mail setup](#configuring-mail).
+For changes that require instance or caller updates, follow the [upgrade guide](../docs/upgrading.md).
 
-After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent subscription listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
+After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent channel receivers and subscription listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
 
 ### Memory
 

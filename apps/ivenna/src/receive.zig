@@ -15,13 +15,13 @@ pub fn run(init: std.process.Init, request: cli.Receive) !void {
         else => return err,
     };
     var buffer: [ipc.response_buffer_size]u8 = undefined;
+    const timeout_ms = if (request.mode == .once) request.mode.once else null;
+    const connection = (try start(io, data_directory, request.id, timeout_ms, &buffer)) orelse return;
     switch (request.mode) {
-        .once => |wait_ms| {
-            const response = response: {
-                const connection = (try start(io, data_directory, request.id, wait_ms, &buffer)) orelse return;
-                defer connection.close(io);
-                break :response (try readReply(io, connection, &buffer, null)) orelse return;
-            };
+        .once => {
+            const reply = readReply(io, connection, &buffer, null);
+            connection.close(io);
+            const response = (try reply) orelse return;
             switch (response) {
                 .message => |text| try cli.writeJson(io, .{ .status = "message", .text = text }),
                 .timeout, .closed => try cli.writeJson(io, .{ .status = @tagName(response) }),
@@ -29,7 +29,6 @@ pub fn run(init: std.process.Init, request: cli.Receive) !void {
             }
         },
         .follow => {
-            const connection = (try start(io, data_directory, request.id, null, &buffer)) orelse return;
             defer connection.close(io);
             try follow(io, connection, &buffer);
         },
@@ -39,10 +38,7 @@ pub fn run(init: std.process.Init, request: cli.Receive) !void {
 fn follow(io: std.Io, connection: std.Io.net.Stream, buffer: *[ipc.response_buffer_size]u8) !void {
     while (try readReply(io, connection, buffer, null)) |response| {
         switch (response) {
-            .message => |text| cli.writeJson(io, .{ .status = "message", .text = text }) catch |err| switch (err) {
-                error.BrokenPipe => return,
-                else => return err,
-            },
+            .message => |text| try cli.writeJson(io, .{ .status = "message", .text = text }),
             .closed => return,
             else => return error.InvalidChannelReply,
         }
@@ -51,9 +47,8 @@ fn follow(io: std.Io, connection: std.Io.net.Stream, buffer: *[ipc.response_buff
     }
 }
 
-fn start(io: std.Io, data_directory: []const u8, id: []const u8, wait_ms: ?u32, buffer: *[ipc.response_buffer_size]u8) !?std.Io.net.Stream {
-    if (try outputClosed()) return null;
-    const connection = try ipc.connect(io, data_directory, id, wait_ms);
+fn start(io: std.Io, data_directory: []const u8, id: []const u8, timeout_ms: ?u32, buffer: *[ipc.response_buffer_size]u8) !?std.Io.net.Stream {
+    const connection = try ipc.connect(io, data_directory, id, timeout_ms);
     errdefer connection.close(io);
     const deadline = std.Io.Clock.Timestamp.fromNow(io, ipc.handshake_time).raw;
     const response = (try readReply(io, connection, buffer, deadline)) orelse {

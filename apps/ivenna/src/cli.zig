@@ -41,11 +41,11 @@ fn parseReceive(args: []const []const u8) error{InvalidArguments}!Command {
         if (options.len > 1) return unexpected(options[1]);
         return .{ .receive = .{ .id = id, .mode = .follow } };
     }
-    if (!equal(options[0], "--wait")) return unexpected(options[0]);
-    const wait_ms = try decimal(u32, options);
-    if (wait_ms == 0) return invalid("--wait requires a positive duration in milliseconds", .{});
+    if (!equal(options[0], "--timeout")) return unexpected(options[0]);
+    const timeout_ms = try decimal(u32, options);
+    if (timeout_ms == 0) return invalid("--timeout requires a positive duration in milliseconds", .{});
     if (options.len > 2) return unexpected(options[2]);
-    return .{ .receive = .{ .id = id, .mode = .{ .once = wait_ms } } };
+    return .{ .receive = .{ .id = id, .mode = .{ .once = timeout_ms } } };
 }
 
 pub fn writeJson(io: std.Io, value: anytype) !void {

@@ -83,7 +83,7 @@ pub const Registry = struct {
     core: *Session,
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
     noticed: std.StringHashMapUnmanaged(enum { scheduled, acknowledged }) = .empty,
-    wakeups: std.ArrayList(History.Wakeup) = .empty,
+    wakeups: std.AutoArrayHashMapUnmanaged(u64, History.Wakeup) = .empty,
     callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
     queued_callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty,
     reserved_sessions: usize = 0,
@@ -148,13 +148,10 @@ pub const Registry = struct {
             self.core = self.sessions.get(1).?;
             for (retained.callbacks) |callback| try self.restoreCallback(callback);
             for (retained.wakeups) |wakeup| {
-                const text = try allocator.dupe(u8, wakeup.text);
-                errdefer allocator.free(text);
-                try self.wakeups.append(allocator, .{
-                    .id = wakeup.id,
-                    .at_unix_ms = wakeup.at_unix_ms,
-                    .text = text,
-                });
+                var owned = wakeup;
+                owned.text = if (wakeup.text) |text| try allocator.dupe(u8, text) else null;
+                errdefer if (owned.text) |text| allocator.free(text);
+                try self.wakeups.put(allocator, wakeup.id, owned);
             }
             for (retained.sessions) |record| {
                 const session = self.sessions.get(record.session_id).?;
@@ -194,7 +191,7 @@ pub const Registry = struct {
         var notice_keys = self.noticed.keyIterator();
         while (notice_keys.next()) |key| self.allocator.free(key.*);
         self.noticed.deinit(self.allocator);
-        for (self.wakeups.items) |wakeup| self.allocator.free(wakeup.text);
+        for (self.wakeups.values()) |wakeup| if (wakeup.text) |text| self.allocator.free(text);
         self.wakeups.deinit(self.allocator);
         for (self.callbacks.items) |callback| self.freeCallback(callback);
         self.callbacks.deinit(self.allocator);
@@ -233,6 +230,7 @@ pub const Registry = struct {
                     .source = registration.source,
                     .observed_at_unix_ms = callback.observed_at_unix_ms,
                     .text = callback.text,
+                    .scheduled_for_unix_ms = self.wakeupTimeLocked(callback.id),
                 } } };
             },
         };
@@ -494,7 +492,7 @@ pub const Registry = struct {
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
             .next_runtime_reference_id = self.next_runtime_reference_id,
-            .wakeups = self.wakeups.items,
+            .wakeups = self.wakeups.values(),
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
             .activity_reports = self.reports.checkpoint(),
@@ -522,13 +520,20 @@ pub const Registry = struct {
         for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
             .callback_id = try a.dupe(u8, callback.reference),
             .source = try cloneSource(a, callback.source),
+            .scheduled_for_unix_ms = self.wakeupTimeLocked(callback.id),
         });
+        const subscriptions = try self.subscriptions.activeRegistrations(a, session.focus_id);
+        const registrations = try a.alloc(Input.SampledSubscription, subscriptions.len);
+        for (subscriptions, registrations) |subscription, *registration| registration.* = .{
+            .subscription_id = subscription.subscription_id,
+            .listener = subscription.listener,
+        };
         return .{
             .current = try self.currentLocked(a, session),
             .state = .{
                 .activities = activities,
                 .callbacks = try own_callbacks.toOwnedSlice(a),
-                .subscriptions = try self.subscriptions.activeReferences(a, session.focus_id),
+                .subscription_registrations = registrations,
             },
         };
     }
@@ -651,32 +656,38 @@ pub const Registry = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        const owned = try self.allocator.dupe(u8, text);
-        var transferred = false;
-        errdefer if (!transferred) self.allocator.free(owned);
-        try self.wakeups.ensureUnusedCapacity(self.allocator, 1);
-        const registration = try self.registerCallbackLocked(work.session, name, .wakeup);
-        self.wakeups.appendAssumeCapacity(.{ .id = registration.id, .at_unix_ms = at, .text = owned });
-        transferred = true;
+        const registration = registered: {
+            try self.wakeups.ensureUnusedCapacity(self.allocator, 1);
+            const owned = try self.allocator.dupe(u8, text);
+            errdefer self.allocator.free(owned);
+            const callback = try self.registerCallbackLocked(work.session, name, .wakeup);
+            self.wakeups.putAssumeCapacityNoClobber(callback.id, .{ .id = callback.id, .at_unix_ms = at, .text = owned });
+            break :registered callback;
+        };
         try self.saveLocked();
         return a.dupe(u8, registration.reference);
     }
 
-    pub fn dueWakeups(self: *Registry, a: Allocator) ![]const History.Wakeup {
+    pub fn dueWakeups(self: *Registry, a: Allocator) ![]const contracts.Callback.Message {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        var due: std.ArrayList(History.Wakeup) = .empty;
+        var due: std.ArrayList(contracts.Callback.Message) = .empty;
         const observed_at = self.now();
-        for (self.wakeups.items) |wakeup_source| if (wakeup_source.at_unix_ms <= observed_at) {
-            try due.append(a, .{ .id = wakeup_source.id, .at_unix_ms = wakeup_source.at_unix_ms, .text = try a.dupe(u8, wakeup_source.text) });
-        };
+        for (self.wakeups.values()) |wakeup| {
+            if (wakeup.at_unix_ms > observed_at) continue;
+            const text = wakeup.text orelse continue;
+            try due.append(a, .{ .id = wakeup.id, .text = try a.dupe(u8, text) });
+        }
         return due.toOwnedSlice(a);
     }
 
-    pub fn wakeupSent(self: *Registry, id: u64) !void {
+    /// Intake confirms a due wakeup's publication before polling for callbacks.
+    pub fn markWakeupPublished(self: *Registry, id: u64) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        self.removeWakeupLocked(id);
+        const wakeup = self.wakeups.getPtr(id) orelse return; // An earlier publication was already admitted.
+        self.allocator.free(wakeup.text.?);
+        wakeup.text = null;
         try self.saveLocked();
     }
 
@@ -769,15 +780,14 @@ pub const Registry = struct {
             self.freeCallback(self.callbacks.orderedRemove(index));
             break;
         };
-        self.removeWakeupLocked(id);
+        if (self.wakeups.fetchOrderedRemove(id)) |wakeup| {
+            if (wakeup.value.text) |text| self.allocator.free(text);
+        }
     }
 
-    fn removeWakeupLocked(self: *Registry, id: u64) void {
-        for (self.wakeups.items, 0..) |wakeup_source, index| if (wakeup_source.id == id) {
-            const removed = self.wakeups.orderedRemove(index);
-            self.allocator.free(removed.text);
-            return;
-        };
+    fn wakeupTimeLocked(self: *const Registry, id: u64) ?i64 {
+        const wakeup = self.wakeups.get(id) orelse return null;
+        return wakeup.at_unix_ms;
     }
 
     pub fn acknowledged(self: *Registry, receipt: []const u8) !void {
@@ -1058,6 +1068,60 @@ fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, histo
     return .{ .work = work, .history = history };
 }
 
+test "a wakeup retains its scheduled time after publication and restart" {
+    const testing = std.testing;
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
+    defer subscriptions.close();
+
+    const scheduled_for = 1_000;
+    const observed_at = 61_000;
+    const text = "Return to the plan.";
+    const published = scheduled: {
+        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, &.{});
+        defer registry.deinit();
+        var core = try admitTestInput(&registry, a);
+        defer core.history.deinit();
+        defer registry.endWorker(core.work.session);
+        const callback_id = try registry.scheduleWakeup(a, core.work, "revisit", scheduled_for, text);
+        const due = try registry.dueWakeups(a);
+        try testing.expectEqual(1, due.len);
+        try registry.markWakeupPublished(due[0].id);
+        break :scheduled .{ .callback_id = callback_id, .message = due[0] };
+    };
+
+    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, &.{});
+    defer registry.deinit();
+    try testing.expectEqual(0, (try registry.dueWakeups(a)).len);
+    const snapshot = try registry.compactionSnapshot(a, registry.core);
+    try testing.expectEqual(1, snapshot.state.callbacks.len);
+    try testing.expectEqualStrings(published.callback_id, snapshot.state.callbacks[0].callback_id);
+    try testing.expectEqual(scheduled_for, snapshot.state.callbacks[0].scheduled_for_unix_ms.?);
+
+    var core = try admitTestInput(&registry, a);
+    defer core.history.deinit();
+    defer registry.endWorker(core.work.session);
+    try testing.expectEqual(.accepted, try registry.accept(.{ .content = .{ .callback = .{
+        .id = published.message.id,
+        .text = published.message.text,
+        .observed_at_unix_ms = observed_at,
+    } } }));
+    try registry.collectPending(core.work);
+    const deliveries = core.work.activation.deliveries.items;
+    try testing.expectEqual(1, deliveries.len);
+    try core.history.appendRecord(.{ .events = .{ .focus_id = core.work.session.focus_id, .items = &.{deliveries[0].event} } });
+    try registry.commitInput(core.work, deliveries.len, &core.history);
+    const observation = core.history.records()[core.history.records().len - 1].record.events.items[0].callback;
+    try testing.expectEqual(scheduled_for, observation.scheduled_for_unix_ms.?);
+    try testing.expectEqual(observed_at, observation.observed_at_unix_ms);
+    try testing.expectEqualStrings(text, observation.text);
+    try testing.expectEqual(0, (try registry.compactionSnapshot(a, registry.core)).state.callbacks.len);
+}
+
 test "compaction samples the active subscriptions addressed to this focus" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
@@ -1083,11 +1147,15 @@ test "compaction samples the active subscriptions addressed to this focus" {
     try std.testing.expect(try registry.withdrawSubscription(core.work, withdrawn.subscription_id));
 
     const core_sample = try registry.compactionSnapshot(a, core.work.session);
-    try std.testing.expectEqualDeep(@as([]const []const u8, &.{core_watch.subscription_id}), core_sample.state.subscriptions);
+    try std.testing.expectEqualDeep(@as([]const Input.SampledSubscription, &.{.{
+        .subscription_id = core_watch.subscription_id,
+        .listener = "Release feed",
+    }}), core_sample.state.subscription_registrations);
     const activity_sample = try registry.compactionSnapshot(a, activity.work.session);
-    try std.testing.expectEqualDeep(@as([]const []const u8, &.{activity_watch.subscription_id}), activity_sample.state.subscriptions);
-    const request = try activity.history.summaryRequest(a, activity_sample, "Summarize.", .keep_latest_tool_round);
-    try std.testing.expect(std.mem.indexOf(u8, request[request.len - 1].message.text, activity_watch.subscription_id) != null);
+    try std.testing.expectEqualDeep(@as([]const Input.SampledSubscription, &.{.{
+        .subscription_id = activity_watch.subscription_id,
+        .listener = "Document edits",
+    }}), activity_sample.state.subscription_registrations);
 }
 
 test "activity completion publishes once and maintenance republishes the same checkpoint after an unconfirmed save" {

@@ -4,11 +4,9 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 ## Runtime requirements
 
-Install the `ivenna` executable. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+Run `ivenna` on Linux with abstract Unix socket support. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
 
 The core and activities can read regular files and list directories wherever the kernel's OS account has access. Choose the account and filesystem mounts accordingly. Host commands run as the same account.
-
-Channels require Linux with abstract Unix sockets. Run receivers under the kernel's effective UID and in its network namespace, including when running them in a separate container. `DATA_DIR` must resolve to the same canonical absolute path in both environments. See [receiving from a channel](communication.md#receiving-from-a-channel).
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
@@ -162,11 +160,19 @@ export DATA_DIR=/path/to/instance/data
 
 The executable embeds its model-facing resources and can run independently of the source checkout.
 
-Give each kernel its own mailbox and `DATA_DIR`. The kernel binds `SERVICE_ADDRESS` before accessing the account. If the address is in use, startup exits. On Linux, an `AddressInUse` error just after an upgrade can persist until the older executable's connections leave `TIME_WAIT`.
+Give each kernel its own mailbox, `DATA_DIR`, and `SERVICE_ADDRESS`. If startup reports `AddressInUse`, check whether another process owns `SERVICE_ADDRESS` or a kernel is already running for the data directory.
 
 The kernel opens the instance database, initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a message](usage.md#sending-a-request). The kernel writes diagnostics to standard error.
 
 Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
+
+## Channel receivers
+
+Use the same build of `ivenna` for the running kernel and the receiver. Run the receiver under the kernel's effective UID and in its network namespace, including when they run in separate containers. Both processes must resolve `DATA_DIR` to the same absolute path after following symbolic links.
+
+Ivenna's host commands inherit the resolved `DATA_DIR` and the executable path in `IVENNA`. Give the receiver the complete ID returned by `open_channel`. See the [host command environment](host.md#command-environment) and [receive command](communication.md#receiving-from-a-channel).
+
+If `receive` reports an unavailable channel service with this setup, check that the kernel is running. A new receiver can also be refused while all connection slots are in use.
 
 ## Subscription listeners
 
@@ -217,7 +223,7 @@ For inference HTTP errors, the adapter logs the status and the service's request
 
 If the core cannot admit an incoming letter within the adapter's request limits, the letter stays unacknowledged in the mailbox. Later correspondence waits behind it. Another accepted observation or a restart can prompt a new attempt. Polling that same letter leaves it pending.
 
-If admission keeps failing, check the focus's interruption reason against the [model request limits](content.md#model-request-checks). To withdraw an oversized letter, stop the kernel, move it out of [eligible intake](#mail-intake), then restart. The kernel rebuilds pending deliveries from the mailbox. You can send a shorter letter with a reference to the original material. See [sharing material to read](usage.md#sharing-material-to-read).
+If admission keeps failing, look for a request-limit warning under the focus's ID in the kernel log. It gives the measured size or count and the applicable limit. To withdraw an oversized letter, stop the kernel, move it out of eligible intake, then restart. The kernel rebuilds pending deliveries from the mailbox. You can send a shorter letter with a reference to the original material. See [model request limits](content.md#model-request-checks), [mail intake](#mail-intake), and [sharing material to read](usage.md#sharing-material-to-read).
 
 A subscription report that cannot fit stays in the instance database. Withdrawing the subscription closes it to new reports. The focus still needs enough request space to receive the one already accepted.
 
@@ -229,7 +235,7 @@ Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to
 
 At restart the core sees the current outgoing correspondent IDs, including changes to [`MAIL_CORRESPONDENTS`](#outgoing-correspondents). An activity with unfinished work can also resume on startup. See the [startup observation contract](input.md#startup-and-restart) for delivery timing. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
-Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose deadlines passed while the runtime was unavailable become due. Host completions without stored results receive interruption observations with unknown effects; already stored results are preserved.
+Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose scheduled times passed while the kernel was unavailable become due. For a host completion, Ivenna uses the stored result when available and reports an interruption with unknown effects otherwise.
 
 Stopping the kernel cleans up its host commands, ends the channel service, and retires its open channel IDs. On restart, Ivenna continues from saved working history and pending observations. An interrupted operation may have produced effects without a saved result. Include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) and [startup and interruption](architecture.md#startup-and-interruption).
 
@@ -238,6 +244,8 @@ Stopping the kernel cleans up its host commands, ends the channel service, and r
 Before updating across a change in storage format, make a [matched backup](#backups-and-transfers) and keep the executable that can read it. Use that executable to resume the instance from the backup if needed. To start a fresh instance, use a separate mailbox and `DATA_DIR`.
 
 If `ivenna` reports `IncompatibleStateSchema`, check that `DATA_DIR` points to the intended instance and that the executable supports its database format.
+
+See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
 
 ## Data and retention
 

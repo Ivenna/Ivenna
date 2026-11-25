@@ -1,6 +1,6 @@
 # Subscription listener protocol
 
-A listener uses `ivenna subscription` to report observations to the focus that subscribed and can save its position in the source as a cursor. Pass the complete `subscription_id` returned by `subscribe` as one argument to each command. See [registering a subscription](attention.md#subscriptions).
+A listener uses `ivenna subscription` to report observations to the focus that subscribed and save where to resume in its source. The saved position is called a cursor. Pass the complete `subscription_id` returned by `subscribe` as one argument to each command. See [registering a subscription](attention.md#subscriptions).
 
 The examples call the executable through `IVENNA`. See the [command environment](host.md#command-environment) for listeners started by Ivenna and [listener deployment](running.md#subscription-listeners) for independent listeners. Run `"$IVENNA" subscription COMMAND --help` for the command's fields and exit statuses.
 
@@ -47,18 +47,18 @@ A replacement listener can use the same subscription if it understands the curso
 
 ## Command results
 
-Read the JSON receipt on stdout and check the exit status before using the new cursor. On `"cursor_conflict"`, inspect the saved cursor again before processing more items. See [write receipts and recovery](../apps/ivenna/src/help/writes.txt) for missing receipts and other errors.
+Check the exit status and JSON receipt before advancing your local cursor. On `"cursor_conflict"`, read the saved cursor again before processing more items. See [write receipts and recovery](../apps/ivenna/src/help/writes.txt) for missing receipts and other errors.
 
 In the example, retrying `release-v2.4.0` after checkpointing item 18 returns `"duplicate"` and leaves the cursor at `"18"`.
 
 ## Withdrawal
 
-Withdrawing a subscription releases its cursor and retry keys. A listener that tries to write to that ID receives `"withdrawn"`. Reports already accepted keep their destination.
+Withdrawing a subscription removes its saved cursor and retry keys. A listener that tries to write to that ID receives `"withdrawn"`. Reports already accepted keep their destination. See [withdrawing a subscription](attention.md#withdrawing-a-subscription).
 
 Subscribing again to the same source gives the listener a new ID with its own cursor and retry keys. A key used on the withdrawn subscription can be accepted again on the new one.
 
 ## Reporting after a channel read
 
-A [program receiving channel messages](communication.md#receiving-from-a-channel) can use a subscription to report what it did with a message. [Register the subscription](attention.md#subscriptions) in the focus that should receive the reports and pass its `subscription_id` to the program. The program can then [publish an observation](#publish-an-observation) for that focus.
+A program can use a channel to receive work and a subscription to report its outcome. Give it the `channel_id` for reads and the `subscription_id` from the focus that should receive the reports. See [receiving a channel message](communication.md#receiving-from-a-channel) and [publishing an observation](#publish-an-observation).
 
-Reading the message and publishing the report are separate operations. The program can keep the report and its key until publication is confirmed.
+Keep the report and its `key` until publication is confirmed so the program can retry the report independently of the read.

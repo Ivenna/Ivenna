@@ -2,7 +2,7 @@
 
 Memory rooms hold Ivenna's shared, persistent memory beyond any one session. Ivenna chooses what to keep and how to arrange it: room hierarchy, names, content formats, and cross-references are its own. The [design intent](design.md#understanding-and-autonomy) describes memory's role in its continuing understanding.
 
-The [tool declarations](../packages/memory/src/tools.json) define invocation parameters. This guide covers their effects and results; the [running guide](running.md#memory-service) covers service setup, and the [architecture guide](architecture.md#autonomous-memory) explains storage and transport.
+This guide covers memory tool effects and results. See the [tool declarations](../packages/memory/src/tools.json) for parameters, the [running guide](running.md#memory-service) for setup, and the [architecture guide](architecture.md#autonomous-memory) for storage and transport.
 
 ## Addresses and organization
 
@@ -14,7 +14,7 @@ Names consisting only of three or more dots, such as `...`, are unsupported. The
 
 Room visits, find, and recall replies are paginated. Results are sorted by address, then by line for content matches. Use `max_results` to request up to that many items. A page can contain fewer items even when more remain. Each reply includes its `offset` and the `total` number of results. Pass a non-null `next_offset` as the next call's `offset` to continue. A single result too large to return gives `result_too_large`.
 
-Each reply describes memory at that call. A sequence of calls reserves neither entries nor capacity between requests: another session can change them. Changes between pages can alter offsets, results, and totals; pagination does not preserve a snapshot across calls. [Text reads](#reading) have their own byte offsets and page sizes.
+Each reply describes the memory at the time of the call. Other sessions can update entries or use available capacity between calls. Changes can shift offsets, results, and totals. [Text reads](#reading) have their own byte offsets and page sizes.
 
 ## Visiting a room
 
@@ -83,7 +83,7 @@ The reply gives the page's text alongside the total size of the entry in bytes.
 
 Pass `next_offset` as the next call's `offset` to continue. A null `next_offset` marks the end. A page can be shorter than requested and can end within a line. It always preserves whole UTF-8 characters. An offset beyond the entry or inside a character returns `invalid_range`.
 
-When a read identifies an image or file, it returns the complete entry as a native part. The accompanying text gives its `address`, `byte_length`, and `kind` (`image` or `file`). An image also includes its `format`. A later text page can reveal binary data and return the whole file. Each read uses the entry as it exists at the time. See [automatic classification](content.md#automatic-classification).
+When a read identifies an image or file, it returns the complete entry for the model service. The accompanying text gives its `address`, `byte_length`, and `kind` (`image` or `file`). An image also includes its `format`. A later text page can reveal binary data and return the whole file. See [automatic classification](content.md#automatic-classification).
 
 An entry containing an image URL is text by default. To view the image, read it from offset zero with `interpretation: "image_url"`. The result has `kind: "image_url"` and gives the size of the stored entry. The image part carries the URL. See [image URL references](content.md#image-url-references).
 
@@ -102,7 +102,7 @@ If the entry exceeds the size limit for that image, file, or URL reference, `con
 | `{"text":"..."}` | Write the supplied text as UTF-8 |
 | `{"file":{"path":"..."}}` | Copy a file's original bytes from Ivenna's host filesystem |
 
-For a file copy, `path` must identify a regular file on the host. It can be an absolute path, a path relative to the kernel's startup directory, or a local `file://` URI. This call copies a host report into the `reports` memory room.
+For a file copy, `path` must identify a regular file on the host. It can be an absolute path, a path relative to the kernel's startup directory, or a local `file://` URI. This call sends the report's bytes to the memory service and stores them in the `reports` room.
 
 ```json
 {"address":"reports/annual.pdf","content":{"file":{"path":"/srv/reports/annual.pdf"}}}
@@ -189,7 +189,7 @@ An operation error contains `code` and `message`. Common codes include:
 | `not_found` | The addressed entry or room does not exist |
 | `already_exists` | The target is occupied for `remember` in create mode or for `move_memory` |
 | `invalid_address` | The address is outside the workspace, unsupported, reserved, or identifies the wrong kind of entry |
-| `source_unavailable` | The host source file could not be read; no memory request was sent |
+| `source_unavailable` | Reading the host source failed before the request went to the memory service |
 | `unsupported_content` | The existing entry is not valid UTF-8 text or contains NUL bytes; no revision was written |
 | `invalid_range` | A read offset or page size is invalid |
 | `invalid_argument` | An argument such as empty revision text is invalid |
