@@ -1643,6 +1643,7 @@ test "a pending document can accompany completed exchanges across a handover" {
         try history.appendBatch(&.{.{ .continuation = "Recent response" }}, &.{});
         try history.appendBatch(&.{.{ .continuation = "Completed call" }}, &.{.{ .tool_result = .{ .call_id = "completed", .content = .{ .parts = &.{completed} } } }});
         try history.appendBatch(pending[0..1], pending[1..]);
+        history.inline_image_limit_bytes = 32 * 1024 * 1024;
 
         const scope = try kernel.softCompactionScope(a, &history, .core);
         var replacement = try history.withHandover(testing.allocator, .{
@@ -1652,6 +1653,7 @@ test "a pending document can accompany completed exchanges across a handover" {
             .state = .{ .activities = &.{}, .callbacks = &.{} },
         }, scope);
         defer replacement.deinit();
+        try testing.expectEqual(history.inline_image_limit_bytes, replacement.inline_image_limit_bytes);
         const carried = replacement.records()[1..];
         try testing.expectEqualDeep(pending, carried[carried.len - 1].exchange);
         const first_response = carried[0].exchange[0].continuation;

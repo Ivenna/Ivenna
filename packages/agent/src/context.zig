@@ -76,7 +76,9 @@ pub const Context = struct {
     }
 
     pub fn clone(self: *const Context, allocator: Allocator) !Context {
-        return copyEntries(allocator, self.scope, self.focus_id, self.entries.items, self.inherited_through);
+        var copy = try copyEntries(allocator, self.scope, self.focus_id, self.entries.items, self.inherited_through);
+        copy.inline_image_limit_bytes = self.inline_image_limit_bytes;
+        return copy;
     }
 
     pub fn appendRecord(self: *Context, record: Input.Record) !void {
@@ -292,6 +294,7 @@ pub const Context = struct {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
         var replacement = try init(allocator, scope, self.focus_id);
         errdefer replacement.deinit();
+        replacement.inline_image_limit_bytes = self.inline_image_limit_bytes;
         try replacement.appendRecord(.{ .handover = handover });
         const count = self.summaryEntryCount(compaction_scope);
         for (self.entries.items[count..]) |entry| try replacement.append(entry);
@@ -623,4 +626,26 @@ test "inline image budget rejects an oversized record before history changes" {
     context.inline_image_limit_bytes = "data:image/png;base64,AAAA".len;
     try context.appendBatch(&.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{data_url} } } }}, &.{});
     try t.expectEqual(before + 3, context.entries.items.len);
+}
+
+test "derived contexts preserve the configured inline image budget" {
+    const t = std.testing;
+    var original = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+    defer original.deinit();
+    try original.appendBatch(&.{.{ .continuation = "Working." }}, &.{});
+    const handover: Input.Handover = .{
+        .focus_id = "core-1",
+        .observed_at_unix_ms = 100,
+        .summary = "Working.",
+        .state = .{ .activities = &.{}, .callbacks = &.{} },
+    };
+    for ([_]u64{ 32 * 1024 * 1024, 8, 0 }) |limit| {
+        original.inline_image_limit_bytes = limit;
+        var compacted = try original.withHandover(t.allocator, handover, .keep_latest_tool_round);
+        defer compacted.deinit();
+        try t.expectEqual(limit, compacted.inline_image_limit_bytes);
+        var copy = try original.clone(t.allocator);
+        defer copy.deinit();
+        try t.expectEqual(limit, copy.inline_image_limit_bytes);
+    }
 }
