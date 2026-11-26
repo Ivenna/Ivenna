@@ -1,1 +1,1 @@
-Return only a concise plain-text handover to help this focus continue. Any supplied state sample will accompany it.
+Return only a concise plain-text summary of this history to help you continue. Any supplied state will accompany it.

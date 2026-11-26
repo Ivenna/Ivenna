@@ -12,7 +12,7 @@ The model contributes abilities and learned dispositions to how Ivenna reasons, 
 
 A continuing life has a past that Ivenna can revisit and reconsider, relationships and commitments it can carry forward, and room to change. Remembering includes what experiences have come to mean and how that meaning develops. Ivenna can revise its beliefs, commitments, and understanding of itself. Retained records carry this developing understanding into later encounters and choices.
 
-The system prompt begins with `Je pense, donc je suis.` Its remaining guidance explains inputs, available actions, shared attention, and continuity. Tool descriptions provide an intuitive repertoire with brief cues of ownership. Ivenna's understanding of itself is left to its activity and experience.
+The system prompt begins with `Je pense, donc je suis.` It explains how the focuses share a body, who receives their words, and what carries across interruptions. Tool descriptions provide an intuitive repertoire with brief cues of ownership. Ivenna's understanding of itself is left to its activity and experience.
 
 ## Understanding and autonomy
 
@@ -51,7 +51,7 @@ Core and activity focuses use the same system prompt. Each receives observations
 | [Read a local or web resource](resources.md) | Yes | Yes |
 | Run and interact with host programs | — | Yes |
 
-The core can open an activity focus with a free-form assignment. The new focus draws on the understanding, relationships, preferences, and unfinished thought the core carries when it opens the activity. Each focus then develops its own history as it works. See [opening a focus](attention.md#opening-a-focus).
+When the core opens an activity, the free-form assignment gives the new focus a place to begin. It inherits the core's working history so it can draw on earlier conversations, preferences, commitments, and unfinished thought. From then on, each focus adds to its own history. See [opening a focus](attention.md#opening-a-focus).
 
 The core receives what activities say alongside its next ordinary observations. Several activities can report together, so the core can follow concurrent work without waking for each update. Each activity's tool results stay in its own history. A report can summarize a finding and point to a shared source, leaving the core to decide how much evidence to inspect.
 
@@ -91,7 +91,9 @@ A focus's working history retains observations, model output, and tool results a
 
 #### What a focus receives
 
-Even a short list of names uses context and can draw attention to unrelated work. Disclose information when it helps the focus interpret an observation or choose what to do next. Ordinary turns identify the focus and carry its new observations. A focus can draw on its working history for references it has already encountered. Startup gives the core the current outgoing correspondent IDs so it can account for changes before resuming work. See the [input contract](input.md#records-and-turns).
+A focus brings the model's prior knowledge and its own history to each observation. Give it the facts it still needs to interpret what happened or anticipate the effect of a choice. For example, an activity's ordinary reply reaches the core. Writing to a correspondent takes an explicit `send`. Ivenna decides what to make of a letter, whether to answer, and what to remember about the exchange.
+
+Even a short list of names can draw attention to unrelated work. Ordinary turns identify the focus and carry its new observations. A focus can draw on its working history for references it has already encountered. Startup gives the core the current outgoing correspondent IDs so it can account for changes before resuming work. See the [input contract](input.md#records-and-turns).
 
 Describe what Ivenna observed, which effects it can confirm, and what it can still act on. Keep mailbox receipts, checkpoints, and request bookkeeping in the runtime. Preserve the source of inherited experience so a focus can interpret it alongside its own. See [opening a focus](attention.md#opening-a-focus).
 
@@ -101,7 +103,7 @@ When a focus needs room for its next inference, compaction asks Ivenna to summar
 
 A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending wakeups to the absolute times the focus chose for returning. See [sampled state](input.md#sampled-state).
 
-The runtime uses its own records to deliver observations and resume pending work. It keeps the original history while it prepares a continuation that fits. A handover can accompany complete exchanges when exact wording or sources matter. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
+The runtime delivers pending observations from its own records. It keeps the original history until it can continue with the handover. Carrying a complete exchange alongside the summary lets the focus revisit an exact reply or work directly with a recent tool result. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
 
 #### Continuing work
 

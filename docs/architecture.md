@@ -129,7 +129,7 @@ The email adapter supplies correspondence and callback envelopes with optional o
 
 At a model-round boundary, the registry puts any pending startup observation first. For the rest of the batch, it cycles through ordinary deliveries, subscription reports, and activity reports, starting at the focus's saved position. Only the core reads activity reports. The registry preserves arrival order within each source and reads reports in pages of 64. `Input.coalesceActivityReports` groups activity facts by focus before measurement.
 
-The kernel measures the encoded request with the grouped observations. It extends the batch across report pages and selects a prefix within the [observation batch target](running.md#context-budgets) and the adapter's limits. The first observation can exceed the batch target if the complete request fits. If the first observation and retained history exceed an adapter limit together, the kernel checks [whether compaction can make room](#when-compaction-runs).
+The kernel measures how many encoded bytes the grouped observations add to the request. It extends the batch across report pages up to the observation batch target, checking the complete request against the adapter's limits. The first observation may exceed the batch target. If the full request with that observation exceeds an adapter limit, the kernel checks whether compaction can make room. See [context budgets](running.md#context-budgets) and [when compaction runs](#when-compaction-runs).
 
 Unselected ordinary deliveries return to the front of their queue. Unselected reports remain in their respective stores. The next batch starts one position after the source of the first admitted observation other than startup. If the batch admits no such observation, the position stays the same. A checkpoint without a saved position defaults to ordinary deliveries.
 
@@ -137,11 +137,9 @@ The worker renders the selected observations in the current turn and appends a r
 
 ## Activity forks
 
-The core's `open_focus` call reserves an activity identity and prepares its assignment. Once every tool in the round returns, the worker appends the model output and the complete batch of replies. The registry copies that context into each activity's scope and publishes the new sessions with their assignments alongside the core's updated history in one checkpoint. The core can continue from the opening exchange in its own context.
+The core's `open_focus` call reserves an activity identity and prepares its assignment. After every tool in the round returns, the worker appends the model output and replies to the core's history. Each activity opened in that round inherits a copy, including replies from calls that ran after `open_focus`. The registry publishes the core's updated history, the new sessions, and their queued assignments in one checkpoint. See [opening a focus](attention.md#opening-a-focus).
 
-The activity inherits that exchange as history, including replies from calls executed after `open_focus`. Retained event records and handovers still identify their original focus. When materializing an activity's context, `Context` finds the inherited prefix using the assignment and retained record owners. When the initial assignment is still queued on restore, the registry treats the entire loaded context as inherited. These boundaries let the kernel compact inherited exchanges as history and identify the activity's own pending exchange. See [context restoration](#saving-and-restoration) and the [context implementation](../packages/agent/src/context.zig).
-
-The assignment enters the activity's first ordinary request through [admission](#activation-admission). The activity's current identity and tools come from its own session. For the tool's result and the scope of inherited work, see [opening a focus](attention.md#opening-a-focus). For the input fields, see [assignment observations](input.md#assignments-and-reports).
+The assignment enters the activity's first ordinary request through admission. Until then, even the opening tool exchange is inherited history, eligible for compaction. When restoring an activity, the registry treats the whole saved history as inherited if the assignment is still queued. Otherwise, the retained assignment marks the start of the activity's own history. Once compaction summarizes the assignment, the activity restores its history from its own handover. See [activation admission](#activation-admission), [assignment observations](input.md#assignments-and-reports), and the [context implementation](../packages/agent/src/context.zig).
 
 ## Activity reports
 
@@ -162,7 +160,7 @@ Tool replies lead to another round. For a response without tool calls, the regis
 | An activity has no input ready and still has a pending callback or active subscription | The activity sleeps with its updated history until more work arrives. |
 | An activity has no input ready, pending callback, or active subscription | The activity ends. One checkpoint drops the session from saved history and selects the outbox records for its final message (if present) and its ending, in that order. |
 
-For a retained focus, the registry takes ownership of the worker's updated context. When a completed response has no output items and closes admitted work, the checkpoint retains an empty exchange to mark that boundary. The next request treats that work as history. A sleeping activity can unload its context after checkpoint confirmation.
+For a retained focus, the registry takes ownership of the worker's updated context. When a response with no output items completes a pending tool exchange or answers previously admitted observations, the checkpoint records an empty exchange. The kernel can then recognize the completed work after restart. A sleeping activity can unload its context after checkpoint confirmation.
 
 At startup and after a withdrawal, the dispatcher checks sleeping activities. Queued reports make the receiving activity ready. An activity whose last registration was withdrawn can end as soon as it has no more work. The registry frees an ended activity's remaining state when its last worker releases it.
 
@@ -244,17 +242,15 @@ The kernel can compact older history before the next ordinary inference. A focus
 
 ### When compaction runs
 
-When an ordinary request fits the adapter's limits, the kernel considers soft compaction. This includes a request carrying an activity's first assignment. It compares the [configured threshold](running.md#context-budgets) with the input token count from the last committed ordinary round, including rounds with tool calls. That count approximates the size of older history before the current observations. The checkpoint saves the count with that round and clears the previous count if the response supplies none.
+The kernel considers soft compaction when the next ordinary request fits the adapter's limits, including on an activity's first turn. If there is eligible history, the kernel compares the last committed ordinary round's input token count with the configured threshold. The checkpoint saves that count even for rounds with tool calls and clears it when a response supplies none. See [context budgets](running.md#context-budgets).
 
 The Responses adapter reads `usage.input_tokens`, which includes cached input. It derives a usage scope from the configured model name and base URL, trimming trailing slashes from the URL. On restart, the registry restores the saved count when the checkpoint and current model port supply the same usage scope. See the [model port](../packages/agent_contracts/src/model.zig), [Responses adapter](../packages/responses/src/provider.zig), and [DeepSeek Responses usage](https://api-docs.deepseek.com/guides/responses_api/#response-fields).
 
-When the count is unavailable, including after a fork or handover replacement, the kernel measures an ordinary request with the older history and an empty current turn. This measurement includes the encoded system prompt, turn metadata, tools, and settings. The first observation and any pending continuation contribute to the full request check. The kernel considers recompressing a lone handover only to make a request fit an adapter limit.
-
-When the ordinary request exceeds an adapter limit, the kernel measures the pending continuation on its own. If it exceeds the limit and includes a pending tool exchange, the kernel measures again with only the admitted unanswered observations. If they fit, the kernel can include the exchange in a summary. It then measures the first queued observation with the portion it plans to carry forward. The kernel can continue fitting pending work while keeping an observation that exceeds the available room queued. An activity whose first assignment cannot fit pauses with the assignment still queued. See [adapter and model limits](content.md#model-request-checks).
+When the count is unavailable, including after a fork or handover replacement, the kernel measures an ordinary request containing the eligible history, system prompt, tools, settings, and current turn metadata. Pending work and new observations count toward the full request size. If the only eligible record is a handover, the kernel considers shortening it only when the full request exceeds an adapter limit. See [adapter and model limits](content.md#model-request-checks).
 
 ### History used for a summary
 
-Compaction carries admitted unanswered observations forward intact. The kernel normally preserves the pending exchange as well. During soft compaction, the core can also carry forward up to two completed exchanges and their preceding observations when that additional history fits within 256 KiB and contains no file references.
+Compaction carries admitted unanswered observations forward intact. It also preserves the pending tool exchange unless that exchange and the unanswered observations together exceed an adapter limit. In that case, the exchange can enter the summary. During soft compaction, the core can also retain up to two completed exchanges and their preceding observations when the additional history fits within 256 KiB and contains no file references.
 
 ### Sampling state and preparing the request
 
@@ -266,11 +262,13 @@ If the summary request exceeds an adapter limit and contains image or file parts
 
 ### Continuing with a handover
 
-The kernel requires nonempty text and a tool-free summary response. It pairs the summary with its sampled state and observation time, then measures an ordinary request with the handover, carried-forward history, and selected observations. A fitting replacement and its newly admitted observations enter one checkpoint. The handover starts the new epoch, followed by carried-forward entries in order and an event record for any observations admitted with it. The [history retention policy](#history-retention) applies to the earlier epoch. See the [ordinary turn layout](input.md#handover-generation-and-replacement).
+The kernel accepts a summary response when it contains nonempty text and no tool calls. It pairs the text with the state and time sampled for that attempt, then measures the next ordinary request with the proposed handover. If that request fits, the registry starts a new epoch and saves the handover, the entries carried forward, and any newly admitted observations in one checkpoint. See the [ordinary turn layout](input.md#handover-generation-and-replacement) and [retention of earlier epochs](#history-retention).
 
 Soft compaction tries one summary. The kernel tests a replacement with the observation batch already selected for ordinary inference. A failed summary or an oversized replacement leaves the original, fitting request available for inference.
 
-When an adapter limit requires compaction, the kernel can ask for one revised summary if the first contains no usable text, includes tool calls, or leaves the ordinary request too large. The revision takes a fresh state sample and asks the model to correct the specific failure. Temporary unavailability follows the [inference retry policy](#model-transport). If the replacement fails, the worker can use a fitting continuation while waiting observations stay queued. When no usable request is available, the failure [interrupts the activation](#interrupted-activations).
+At a hard limit, the kernel checks whether removing older history would leave room for the first queued observation. If the observation still cannot fit, it stays queued. A new activity whose assignment alone exceeds the available space pauses before requesting a summary.
+
+If the kernel generates a handover, it tries the replacement with queued observations first. When only the handover and pending work fit, it commits that continuation. An unusable summary or an oversized replacement can prompt one revision with a fresh state sample. If the kernel cannot make room for the first queued observation, it can still continue pending work with the original history when that request fits. If no continuation fits, the worker interrupts the activation. See [interrupted activations](#interrupted-activations) and [inference retries](#model-transport).
 
 ## Persistent working history
 
@@ -375,7 +373,7 @@ Ordinary intake finds unhandled correspondence outside `Ivenna Callbacks`, `Iven
 
 `Inbox.Poll { messages, callbacks }` supplies independent allowances; zero disables a stream. The registry accounts for tracked receipts and pending callbacks and disables correspondence when the core is full. The adapter reads each oldest eligible prefix, paging past unsupported records, then merges by `receivedAt` without a combined cap. Correspondence backlog cannot consume callback allowance; FIFO applies within each selected stream and session queue, not account-wide across destinations. Rejected input stays stored.
 
-After durable admission, acknowledgement sets `ivenna-handled` and moves the copy to Trash. Read and answered state carry over. The registry tracks receipts in memory. The kernel defers a repeat receipt while its delivery is in progress. If a poll still contains a receipt whose acknowledgement succeeded, the kernel acknowledges the copy again using the same [inbox contract](../packages/agent_contracts/src/inbox.zig). An acknowledgement error that survives adapter recovery reaches intake supervision. See [durable callback admission](#event-sources-and-callback-admission) and [reception](#service-and-reception).
+After durable admission, acknowledgement sets `ivenna-handled` and moves the copy to Trash, preserving its read and answered state. The registry tracks receipts in memory. It defers a repeat receipt while the original delivery is in progress. If a later poll still offers an acknowledged receipt, the kernel repeats the same update. A new mail copy of an already consumed callback also needs acknowledgement. If the adapter cannot confirm the update after recovery, the kernel closes reception and exits. See the [inbox contract](../packages/agent_contracts/src/inbox.zig), [callback admission](#event-sources-and-callback-admission), and [reception](#service-and-reception).
 
 ### History storage
 

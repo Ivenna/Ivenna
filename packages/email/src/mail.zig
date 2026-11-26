@@ -302,12 +302,8 @@ pub const Mailbox = struct {
         _ = try createdId(created, "callback");
     }
 
-    /// The caller has durably admitted this input into working history.
-    ///
-    /// Acknowledgement is idempotent: the kernel repeats it whenever a poll
-    /// still offers a receipt it has already admitted. Repeating it applies the
-    /// same Trash destination and the same handled marker, so the stored copy
-    /// ends in the same state and a second call must succeed.
+    /// Move the copy to Trash and mark it handled. Assigning the same
+    /// properties makes the update safe to repeat.
     pub fn acknowledge(self: Mailbox, a: Allocator, id: []const u8) !void {
         try self.retireEmails(a, &.{.{ .id = id, .marker = .handled }});
     }
@@ -1261,47 +1257,23 @@ test "an unconfirmed folder create discovers the intended top-level folder" {
     try fixture.finish();
 }
 
-test "acknowledgement retries a lost response and reports a rejected update" {
+test "acknowledgement repeats the retirement patch and propagates a rejection" {
     const Fixture = @import("test_jmap.zig").Fixture;
     const update: []const @import("test_jmap.zig").Property = &.{
-        .{ .path = &.{ "update", "received", "mailboxIds", "trash" }, .json = "true" },
+        .{ .path = &.{ "update", "received", "mailboxIds" }, .json = "{\"trash\":true}" },
         .{ .path = &.{ "update", "received", "keywords/ivenna-handled" }, .json = "true" },
+        .{ .path = &.{ "update", "received", "keywords/$draft" }, .json = "null" },
     };
-    {
-        var fixture = try Fixture.init(&.{
-            .{ .method = "Email/set", .properties = update, .result = null },
-            .{ .method = "Email/set", .properties = update, .result = "{\"updated\":{\"received\":null}}" },
-        });
-        defer fixture.deinit();
-        const mailbox = try fixture.start();
-        try mailbox.acknowledge(fixture.arena.allocator(), "received");
-        try fixture.finish();
-    }
     var fixture = try Fixture.init(&.{
+        .{ .method = "Email/set", .properties = update, .result = null },
+        .{ .method = "Email/set", .properties = update, .result = "{\"updated\":{\"received\":null}}" },
         .{ .method = "Email/set", .properties = update, .result = "{\"notUpdated\":{\"received\":{\"type\":\"forbidden\"}}}" },
-    });
-    defer fixture.deinit();
-    const mailbox = try fixture.start();
-    try std.testing.expectError(error.MailObjectFailed, mailbox.acknowledge(fixture.arena.allocator(), "received"));
-    try fixture.finish();
-}
-
-test "a repeated acknowledgement succeeds and applies the same retirement" {
-    const Fixture = @import("test_jmap.zig").Fixture;
-    const update: []const @import("test_jmap.zig").Property = &.{
-        .{ .path = &.{ "update", "received", "mailboxIds", "trash" }, .json = "true" },
-        .{ .path = &.{ "update", "received", "keywords/ivenna-handled" }, .json = "true" },
-    };
-    const applied = "{\"updated\":{\"received\":null}}";
-    var fixture = try Fixture.init(&.{
-        .{ .method = "Email/set", .properties = update, .result = applied },
-        .{ .method = "Email/set", .properties = update, .result = applied },
     });
     defer fixture.deinit();
     const mailbox = try fixture.start();
     const a = fixture.arena.allocator();
     try mailbox.acknowledge(a, "received");
-    try mailbox.acknowledge(a, "received");
+    try std.testing.expectError(error.MailObjectFailed, mailbox.acknowledge(a, "received"));
     try fixture.finish();
 }
 

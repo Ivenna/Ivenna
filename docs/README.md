@@ -19,7 +19,8 @@
 | --- | --- |
 | Run Ivenna from source with the supplied mail and memory services | [Local development](../dev/README.md) |
 | Configure a deployment, diagnose stalled work, and manage retained data | [Running guide](running.md) |
-| Update an existing instance across an interface or storage change | [Upgrade guide](upgrading.md) |
+| Set reasoning effort or tune when a focus summarizes its history | [Model requests](running.md#model-requests) · [Context budgets](running.md#context-budgets) |
+| Update settings, stored data, or client programs when upgrading an instance | [Upgrade guide](upgrading.md) |
 | Configure a host or container for a channel receiver | [Channel receiver deployment](running.md#channel-receivers) |
 | Run a subscription listener independently of the kernel | [Subscription listener deployment](running.md#subscription-listeners) |
 
@@ -28,7 +29,7 @@
 | Task | Guide |
 | --- | --- |
 | Understand the project's goals and interface principles | [Design intent](design.md) |
-| Decide what context to disclose and what to carry forward | [Context and continuity](design.md#context-and-continuity) |
+| Review what a focus sees in prompts, observations, tool results, and handovers | [Context and continuity](design.md#context-and-continuity) · [Model-facing resources](development.md#model-facing-resources) |
 | Interpret observations, retained records, and handovers | [Input contract](input.md) |
 | Understand what the model receives when a tool returns text, an image, or a file | [Tool content](content.md) |
 | Understand component ownership and how execution fits together | [Architecture guide](architecture.md) |

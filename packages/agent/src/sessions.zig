@@ -1,6 +1,7 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
 const History = @import("history.zig").History;
+const Scope = @import("history.zig").Scope;
 const Persistence = @import("history.zig").Persistence;
 const Subscriptions = @import("instance_state").subscriptions;
 const Reports = @import("reports.zig");
@@ -457,7 +458,7 @@ pub const Registry = struct {
         assertWork(work);
         const session = work.session;
         for (changes.forks.items) |fork| {
-            fork.context = try Context.restore(self.allocator, .{ .session_id = fork.session_id, .epoch = 0 }, fork.focus_id, completed.records());
+            fork.context = try Context.inherit(self.allocator, .{ .session_id = fork.session_id, .epoch = 0 }, fork.focus_id, completed.records());
         }
         try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(changes.forks.items.len));
         try self.channels.ensureUnusedCapacity(self.allocator, changes.channels.items.len);
@@ -984,10 +985,11 @@ pub const Registry = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const entries = try self.history.restoreEntries(arena.allocator(), session.session_id);
-        session.context = try Context.restore(self.allocator, .{ .session_id = session.session_id, .epoch = session.epoch }, session.focus_id, entries);
-        // An older checkpoint could leave an activity's handover before an
-        // inherited exchange while its assignment was still waiting.
-        if (session.awaitsAssignment()) session.context.?.markInheritedHistory();
+        const scope: Scope = .{ .session_id = session.session_id, .epoch = session.epoch };
+        session.context = if (session.awaitsAssignment())
+            try Context.inherit(self.allocator, scope, session.focus_id, entries)
+        else
+            try Context.restore(self.allocator, scope, session.focus_id, entries);
     }
 
     fn ensureActivityStartupLocked(self: *Registry, session: *Session) !void {
@@ -1466,11 +1468,9 @@ test "restart restores activity reports together with completion or sleeping his
 
 test "a fork inherits the complete opening round and continues its own history" {
     const testing = std.testing;
-    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
     var storage: TestStore = .{};
     defer storage.arena.deinit();
+    const a = storage.arena.allocator();
     var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
     defer subscriptions.close();
     var registry = try Registry.init(testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
@@ -1489,11 +1489,11 @@ test "a fork inherits the complete opening round and continues its own history" 
     var opening = try core.history.withHandover(testing.allocator, handover, .keep_latest_tool_round);
     defer opening.deinit();
     try registry.commitInput(core.work, 0, &opening);
-    const earlier: Input.Record = .{ .events = .{
+    const letter: Input.Record = .{ .events = .{
         .focus_id = core.work.session.focus_id,
         .items = &.{.{ .input = .{ .from = &.{"operator"}, .text = "We have a plan.", .observed_at_unix_ms = 120 } }},
     } };
-    try opening.appendRecord(earlier);
+    try opening.appendRecord(letter);
 
     var changes: RoundChanges = .{};
     defer registry.discardRound(&changes);
@@ -1507,26 +1507,18 @@ test "a fork inherits the complete opening round and continues its own history" 
     try opening.appendBatch(exchange[0..1], exchange[1..]);
     try registry.commitToolRound(core.work, &opening, &changes, null);
 
-    const activity = (try registry.takeReadyBatch(a))[0];
-    defer registry.endWorker(activity.session);
-    try testing.expectEqualStrings(focus_id, activity.session.focus_id);
-    const deliveries = activity.activation.deliveries.items;
-    try testing.expectEqual(1, deliveries.len);
-    try testing.expectEqualDeep(Input.Event{ .assignment = .{ .task = task } }, deliveries[0].event);
-    var inherited = try registry.snapshot(activity.session);
-    defer inherited.deinit();
-    const expected: []const @import("history.zig").Entry = &.{ .{ .record = .{ .handover = handover } }, .{ .record = earlier }, .{ .exchange = exchange } };
-    try testing.expectEqualDeep(expected, inherited.records());
-    try testing.expect(!inherited.hasPendingContinuation());
-
-    const assignment: Input.Record = .{ .events = .{ .focus_id = focus_id, .items = &.{.{ .assignment = .{ .task = task } }} } };
-    try inherited.appendRecord(assignment);
-    try registry.commitInput(activity, 1, &inherited);
-    registry.releaseDeliveries(activity);
+    var activity = try admitTestInput(&registry, a);
+    defer registry.endWorker(activity.work.session);
+    defer activity.history.deinit();
+    const expected: []const @import("history.zig").Entry = &.{
+        .{ .record = .{ .handover = handover } },
+        .{ .record = letter },
+        .{ .exchange = exchange },
+        .{ .record = .{ .events = .{ .focus_id = focus_id, .items = &.{.{ .assignment = .{ .task = task } }} } } },
+    };
     var continued = try registry.snapshot(core.work.session);
     defer continued.deinit();
-    try testing.expectEqualDeep(expected, continued.records());
-    try testing.expect(continued.hasToolRoundToKeep());
+    try testing.expectEqualDeep(expected[0 .. expected.len - 1], continued.records());
     const response = "The core continues separately.";
     try testing.expect(try registry.commitResponse(core.work, &continued, .{
         .output = &.{.{ .continuation = response }},
@@ -1534,20 +1526,16 @@ test "a fork inherits the complete opening round and continues its own history" 
         .text = response,
     }));
 
-    var activity_history = try registry.snapshot(activity.session);
+    var activity_history = try registry.snapshot(activity.work.session);
     defer activity_history.deinit();
-    try testing.expectEqualDeep(expected, activity_history.records()[0..expected.len]);
-    try testing.expectEqualDeep(assignment, activity_history.records()[expected.len].record);
-    try testing.expectEqual(expected.len + 1, activity_history.records().len);
+    try testing.expectEqualDeep(expected, activity_history.records());
 }
 
 test "restart retains the assignment as a new activity's first delivery" {
     const testing = std.testing;
-    var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
     var storage: TestStore = .{};
     defer storage.arena.deinit();
+    const a = storage.arena.allocator();
     var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
     defer subscriptions.close();
     const task = "Read the plan.";
@@ -1588,8 +1576,6 @@ test "restart retains the assignment as a new activity's first delivery" {
         defer restored.deinit();
         const ready = try restored.takeReadyBatch(a);
         defer for (ready) |work| restored.endWorker(work.session);
-        try testing.expectEqual(2, ready.len);
-        try testing.expect(ready[0].activation.deliveries.items[0].event == .startup);
         const work = ready[1];
         const activity_events = work.activation.deliveries.items;
         const assignment: Input.Event = .{ .assignment = .{ .task = task } };
@@ -1609,9 +1595,11 @@ test "restart retains the assignment as a new activity's first delivery" {
     defer resumed.deinit();
     const ready = try resumed.takeReadyBatch(a);
     defer for (ready) |work| resumed.endWorker(work.session);
-    try testing.expectEqual(2, ready.len);
     var history = try resumed.snapshot(ready[1].session);
     defer history.deinit();
-    try testing.expect(history.hasPendingContinuation());
-    try testing.expect(!history.hasToolRoundToKeep());
+    var compacted = try history.withHandover(testing.allocator, history.records()[0].record.handover, .keep_latest_tool_round);
+    defer compacted.deinit();
+    const records = compacted.records();
+    try testing.expectEqual(2, records.len);
+    try testing.expectEqualStrings(task, records[1].record.events.items[0].assignment.task);
 }

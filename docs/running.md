@@ -61,23 +61,21 @@ Ivenna sends supported image references to the configured model service for retr
 
 ### Model requests
 
-For ordinary inference, Ivenna sends selected working history and the observations admitted for that turn to the configured model service. Working history can include correspondence, tool results, and prior model output. An activity can inherit these records from the core. To generate a handover, Ivenna sends the history being summarized and a dated sample that can include channel and subscription descriptions, pending wakeups, and outgoing correspondent IDs. The adapter supplies tool attachments with the request or uploads files for reference in later requests. See [inference turns](input.md#inference-turns), [sampled state](input.md#sampled-state), and [tool content](content.md).
+The configured model service receives the focus's working history and any observations admitted for the current turn. An activity's history can include correspondence, model output, and tool results inherited from the core. A handover request sends the history to summarize and a dated sample of runtime state, which can include channel and subscription descriptions, pending wakeups, and outgoing correspondent IDs. Tool results can include images or references to files uploaded to the model service. See [inference turns](input.md#inference-turns), [sampled state](input.md#sampled-state), and [tool content](content.md).
 
 Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments.
 
-The core's ordinary reasoning default favors responsive correspondence and coordination. The activity default favors deeper reasoning. `LLM_COMPACTION_REASONING_EFFORT` applies to handover generation in both roles.
-
-The model service receives each configured effort name as written, so an effort your model supports works without rebuilding the kernel. The kernel knows the names `none`, `minimal`, `low`, `medium`, `high`, `max`, and `xhigh`; it logs a warning for anything else and sends the name through unchanged. Set `LLM_REASONING_EFFORT_STRICT=1` to turn an unknown name into a startup error instead, which catches a misspelling before it reaches the model service. See the [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/).
+Ordinary core requests use a lower default reasoning effort for responsive correspondence and coordination. Activities use a higher default for deeper reasoning. Handover requests in either role use `LLM_COMPACTION_REASONING_EFFORT`. To override any of the three defaults, set the corresponding variable to a nonempty effort name supported by your model. Ivenna sends that name as written. See the [configuration table](#configuration) and [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/).
 
 `LLM_REQUEST_TIMEOUT_MS` applies separately to each inference attempt, including compaction. A temporary outage can therefore delay a decision beyond this timeout. For each file upload, the timeout covers the entire negotiation. See [when model work stalls](#when-model-work-stalls) and [file outcomes](content.md#complete-files).
 
 ### Context budgets
 
-`CONTEXT_COMPACT_AT_TOKENS` sets the soft compaction threshold using the last ordinary round's input token count. When that count is unavailable, as on an activity's first request, `CONTEXT_COMPACT_AT_BYTES` applies to an encoded request built from older retained history. See [what compaction measures](architecture.md#when-compaction-runs).
+The kernel considers summarizing older history when the last committed ordinary round's input token count reaches `CONTEXT_COMPACT_AT_TOKENS`. When that count is unavailable, as on a new activity's first request, the kernel uses `CONTEXT_COMPACT_AT_BYTES`. It measures the encoded request with the older history before adding pending work or new observations. See [what compaction measures](architecture.md#when-compaction-runs).
 
 `CONTEXT_OBSERVATION_BATCH_BYTES` sets the target for encoded bytes added by a batch of new observations. The first observation can exceed that target if the full request fits the adapter's limits. See [how observations are admitted](architecture.md#activation-admission).
 
-For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKENS` for output. Set the compaction threshold below the remaining input space, leaving room for a complete tool exchange and incoming observations. Evaluate compaction frequency and continuity on representative work. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/), [evaluating compaction](testing.md#evaluating-compaction), and [evaluating continuity](testing.md#evaluating-continuity-across-interruptions).
+For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKENS` for output. Set the token threshold below the remaining input space to leave room for a complete tool exchange and incoming observations. Evaluate compaction frequency and continuity on representative work. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/), [evaluating compaction](testing.md#evaluating-compaction), and [evaluating continuity](testing.md#evaluating-continuity-across-interruptions).
 
 The [model request limits](content.md#model-request-checks) apply to the complete encoded request. The model service checks its own limits after processing the input.
 
@@ -218,7 +216,7 @@ Look for `JMAP` on the kernel's standard error. A failed request logs its method
 
 Reception can stay open even if Ivenna loses confirmation while sending a reply. Check the reply's `send` result in [working history](#working-history) to see whether Ivenna confirmed submission. Trash can contain both submitted messages and abandoned drafts. See [correspondence outcomes](communication.md#writing-to-a-correspondent).
 
-If the kernel cannot read or confirm required mailbox state, it closes reception and exits. For a `connect` failure, check whether the kernel can reach the mail endpoint. For HTTP 401, check the credentials configured for the [mail account](#mail-service).
+If the kernel cannot read or confirm required mailbox state, it closes reception and exits. Even a duplicate delivery requires a confirmed acknowledgement. For a `connect` failure, check whether the kernel can reach the mail endpoint. For HTTP 401, check the credentials configured for the [mail account](#mail-service).
 
 ### When model work stalls
 
@@ -288,15 +286,13 @@ Ivenna does not monitor quota or evict live records in response to account capac
 | Internal callback | After saving the registered observation in the receiving session's history |
 | Outgoing message | At startup or before a mail poll, once the draft is no longer in use for sending. This includes drafts left by interrupted sends. |
 
-Pending input stays available for admission. Internal assignments and unread [activity reports](architecture.md#activity-reports) are kept in working history.
-
 An identifiable callback copy, including one in Trash, preserves the first result for that callback ID. Once the copy expires, a publisher can create another. If the receiving session has already admitted that ID, the kernel acknowledges the new copy without presenting the observation again. See [callback admission](architecture.md#event-sources-and-callback-admission).
 
 Keep original correspondence separately if you need it beyond the Trash retention period. Compaction can replace detailed observations and tool exchanges with a handover. Correspondents manage their own copies.
 
 ### Working history
 
-`Ivenna History` stores working-history records and messages with the subject `Ivenna history checkpoint`. The selected checkpoint identifies the histories and pending work the kernel restores. See the [recovery state inventory](architecture.md#recovery-state).
+The kernel publishes checkpoints in `Ivenna History` as messages with the subject `Ivenna history checkpoint`. The selected checkpoint identifies separate records for each session's working history, its pending internal observations (including queued assignments), and the activity outbox's unread reports. Pending observations and reports enter the receiving focus's working history on admission. See the [storage layout](architecture.md#persistent-working-history) and [recovery state inventory](architecture.md#recovery-state).
 
 An idle kernel typically publishes two revisions when the core receives a letter and the model responds without tool calls. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response.
 
@@ -304,7 +300,7 @@ Ivenna cleans up the history folder at startup and periodically while it runs. U
 
 | Location | Objects kept or moved during maintenance |
 | --- | --- |
-| `Ivenna History` | Selected published checkpoint, session histories it selects, and unread activity-report records |
+| `Ivenna History` | Selected published checkpoint and the records it selects for session histories, pending internal observations, and unread activity reports |
 | Trash | Unselected checkpoints and history records |
 
 Forks store independent copies of inherited history. Include these copies when sizing runtime memory and the mailbox. Compaction replaces older records with a handover and carries forward selected recent records. Previous records can then move to Trash while other sessions keep their own copies.

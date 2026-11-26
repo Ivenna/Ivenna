@@ -26,9 +26,9 @@ The result gives the activity's `focus_id`. The activity can receive messages on
 {"result":{"focus_id":"practice-2"}}
 ```
 
-The activity's first new observation is its [assignment](input.md#assignments-and-reports). It starts with the core's retained history through the complete opening round, including that round's tool results and any earlier handover. This history can include correspondence and work beyond the assignment. If the runtime compacts it first, the first ordinary inference receives the new handover alongside the assignment. See [how an activity starts](architecture.md#activity-forks) and [what the model receives after compaction](input.md#handover-generation-and-replacement).
+The activity inherits the core's retained history through the end of the opening round, including results from tools called after `open_focus` in that round. The history can include earlier correspondence, work, and a handover. The supplied `task` arrives as the activity's first new observation. If the runtime summarizes the inherited history before the activity starts reasoning, the activity receives the handover and its original assignment together. See [assignment fields](input.md#assignments-and-reports) and [how an activity starts](architecture.md#activity-forks).
 
-The activity reasons with its own focus ID and tools. Its history grows independently, and the core continues to receive its own queued observations, callbacks, and subscription reports. The core can also receive what the activity says. See [activity expressions](#activity-expressions).
+The activity reasons with its own focus ID, tools, and working history. The core keeps its queued observations and continues to receive its callbacks and subscription reports. It can also read [what the activity says](#activity-expressions).
 
 Opening an activity once the focus limit is reached returns `focus_unavailable`. See [session capacity](running.md#session-and-command-capacity).
 
@@ -127,6 +127,6 @@ If a waiting observation makes a request too large, the runtime can continue pen
 
 An activity with a pending callback or an active subscription can sleep with its identity and history intact. If its last subscription is withdrawn with reports still queued, the activity remains available to receive them.
 
-The runtime ends the activity and frees its capacity slot once it has no work, pending callbacks, or active subscriptions left. The core receives an ending observation even if the activity produced no text.
+The runtime ends the activity and frees its capacity slot once it has no work, pending callbacks, or active subscriptions left. The core can still receive unread messages under the activity's original focus ID. It also receives the ending, even if the activity produced no text. See [report fields](input.md#assignments-and-reports).
 
-The core can still receive the ended activity's expressions and ending with its original focus ID. An activity can share an open channel's ID in a report so the core can keep using it after the activity ends. See [channel lifetimes](communication.md#channel-lifetimes) and [report fields](input.md#assignments-and-reports).
+An activity can share an open channel's ID in a report so the core can keep using the channel after the activity ends. See [channel lifetimes](communication.md#channel-lifetimes).

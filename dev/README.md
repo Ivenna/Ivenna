@@ -34,7 +34,7 @@ set -a
 set +a
 ```
 
-The kernel and memory preparation script use the exported environment. The Compose commands also select the instance configuration explicitly with `--env-file`. See [kernel settings](../docs/running.md#configuration) and [local service settings](#service-settings) for defaults and how to apply changes.
+The kernel and memory preparation script use the exported environment. If you remove an override from `.env`, also `unset` that variable in any shell where you exported it. The Compose commands select the instance configuration with `--env-file`. See [kernel settings](../docs/running.md#configuration) and [local service settings](#service-settings) for defaults.
 
 ## Preparing service storage
 
@@ -188,11 +188,11 @@ The external volumes and private instance files remain in place. Use the [startu
 
 ## Updating the kernel and middleware
 
-For compatible updates, keep the same instance directory. Review the current defaults and any values set in the instance's `.env`, then reload it after edits. See the [configuration steps](#configuration) and [kernel settings](../docs/running.md#configuration).
+For compatible updates, keep the same instance directory. If you edit its `.env`, [reload the configuration](#configuration) in the shell that will launch the kernel.
 
 ### Kernel
 
-For changes that require instance or caller updates, follow the [upgrade guide](../docs/upgrading.md).
+Check the [upgrade guide](../docs/upgrading.md) for changes to defaults, stored data, and caller interfaces.
 
 After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent channel receivers and subscription listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
 

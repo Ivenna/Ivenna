@@ -16,7 +16,7 @@ Ivenna needs a model endpoint, a mail account for correspondence and working his
 
 - Use the [local development guide](dev/README.md) to prepare the supplied mail and memory services and run from source.
 - Use the [running guide](docs/running.md) to configure a deployment, start the executable, and manage retained data.
-- Use the [upgrade guide](docs/upgrading.md) to update an existing instance across an interface or storage change.
+- When updating an existing instance, check the [upgrade guide](docs/upgrading.md) for changes to settings, stored data, and programs that use Ivenna.
 
 ## Development
 

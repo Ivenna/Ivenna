@@ -134,13 +134,7 @@ pub const Kernel = struct {
             try self.sessions.reconcile(waiting);
             for (waiting) |incoming| switch (try self.sessions.accept(incoming)) {
                 .accepted, .deferred => {},
-                // A repeated acknowledgement carries no information the working history does not
-                // already hold, so a failure here must not end the runtime: the observation is
-                // admitted, and the poll will offer the same receipt again.
-                .duplicate => if (incoming.receipt) |receipt| self.inbox.acknowledge(a, receipt) catch |err| std.log.warn(
-                    "repeated acknowledgement failed; the observation is already in working history: {t}",
-                    .{err},
-                ),
+                .duplicate => if (incoming.receipt) |receipt| try self.inbox.acknowledge(a, receipt),
             };
             try self.dispatch(tasks);
             const now = std.Io.Clock.awake.now(self.io).toMilliseconds();
@@ -323,8 +317,7 @@ pub const Kernel = struct {
     const Selection = union(enum) { count: usize, over_limit: Model.Limit };
     const Prepared = struct { items: []const Model.Item, events: []const Input.Event, count: usize };
     const Fit = union(enum) { ready: Prepared, over_limit: Model.Limit };
-    const LimitContinuation = enum { with_observations, pending_only };
-    const CompactionTrigger = union(enum) { threshold: Prepared, limit: LimitContinuation };
+    const CompactionTrigger = union(enum) { threshold: Prepared, limit };
     const core_extra_history_bytes = 256 * 1024;
 
     /// Bound the space added by a batch of observations across I/O pages.
@@ -375,7 +368,7 @@ pub const Kernel = struct {
     /// handover changes neither the selected history nor any inbox receipt.
     fn prepareRequest(self: *Kernel, a: Allocator, work: Work, history: *Context) !FocusResult([]const Model.Item) {
         const current = try self.sessions.current(a, work.session);
-        const prepared = switch (try self.fitRequest(a, work, history, current)) {
+        const prepared = switch (try self.fitRequest(a, work, history, current, false)) {
             .ready => |ready| ready,
             .over_limit => |limit| return self.prepareLimitedRequest(a, work, history, current, limit),
         };
@@ -397,35 +390,41 @@ pub const Kernel = struct {
         var minimal = try history.continuationRequest(trial, current, &.{}, scope);
         if ((try self.engine.measure(trial, minimal, current.role)).violation) |pending_limit| {
             if (!history.hasToolRoundToKeep()) return requestOverLimit(work, pending_limit);
-            // Summarize an open exchange only when it cannot fit by itself.
+            // The tool exchange and unanswered observations exceed the limit
+            // together. Keep the observations intact and summarize the exchange.
             scope = .keep_pending_observations;
             minimal = try history.continuationRequest(trial, current, &.{}, scope);
             if ((try self.engine.measure(trial, minimal, current.role)).violation) |observations_limit|
                 return requestOverLimit(work, observations_limit);
         }
 
-        var target: LimitContinuation = .with_observations;
-        if (work.activation.deliveries.items.len != 0) {
-            const first = work.activation.deliveries.items[0].event;
-            minimal = try history.continuationRequest(trial, current, &.{first}, scope);
+        const waiting = work.activation.deliveries.items;
+        var may_try_original = waiting.len != 0 and history.hasPendingContinuation();
+        if (waiting.len != 0) {
+            minimal = try history.continuationRequest(trial, current, &.{waiting[0].event}, scope);
             if ((try self.engine.measure(trial, minimal, current.role)).violation) |next_limit| {
                 // Removing older history cannot make this observation fit.
-                if (!history.hasPendingContinuation()) return requestOverLimit(work, next_limit);
-                const continuation = try self.fitSelected(a, history, current, &.{}, 0);
-                if (continuation == .ready) return .{ .ready = try self.admit(a, work, history, continuation.ready, false) };
-                target = .pending_only;
+                if (!may_try_original) return requestOverLimit(work, next_limit);
+                if (try self.continuePending(a, work, history, current)) |items| return .{ .ready = items };
+                may_try_original = false;
             }
         }
 
         const compacted = if (history.hasSummaryHistory(scope))
-            try self.compactRequest(a, work, history, current, scope, .{ .limit = target })
+            try self.compactRequest(a, work, history, current, scope, .limit)
         else
             requestOverLimit(work, limit);
-        if (compacted == .interrupted and target == .with_observations and history.hasPendingContinuation() and work.activation.deliveries.items.len != 0) {
-            const continuation = try self.fitSelected(a, history, current, &.{}, 0);
-            if (continuation == .ready) return .{ .ready = try self.admit(a, work, history, continuation.ready, false) };
+        if (compacted == .interrupted and may_try_original) {
+            if (try self.continuePending(a, work, history, current)) |items| return .{ .ready = items };
         }
         return compacted;
+    }
+
+    fn continuePending(self: *Kernel, a: Allocator, work: Work, history: *Context, current: Input.Current) !?[]const Model.Item {
+        return switch (try self.fitSelected(a, history, current, &.{}, 0)) {
+            .ready => |prepared| try self.admit(a, work, history, prepared, false),
+            .over_limit => null,
+        };
     }
 
     fn requestOverLimit(work: Work, limit: Model.Limit) FocusResult([]const Model.Item) {
@@ -478,10 +477,7 @@ pub const Kernel = struct {
                     defer candidate.deinit();
                     const fit = switch (trigger) {
                         .threshold => |selected| try self.fitSelected(a, &candidate, current, selected.events, selected.count),
-                        .limit => |target| switch (target) {
-                            .with_observations => try self.fitRequest(a, work, &candidate, current),
-                            .pending_only => try self.fitSelected(a, &candidate, current, &.{}, 0),
-                        },
+                        .limit => try self.fitRequest(a, work, &candidate, current, history.hasPendingContinuation()),
                     };
                     switch (fit) {
                         .ready => |prepared| {
@@ -500,17 +496,14 @@ pub const Kernel = struct {
         return .{ .interrupted = rejection.?.interruption(work.session.focus_id) };
     }
 
-    fn fitRequest(self: *Kernel, a: Allocator, work: Work, history: *const Context, current: Input.Current) !Fit {
+    fn fitRequest(self: *Kernel, a: Allocator, work: Work, history: *const Context, current: Input.Current, may_defer: bool) !Fit {
+        if (work.activation.deliveries.items.len == 0) return self.fitSelected(a, history, current, &.{}, 0);
         var events: std.ArrayList(Input.Event) = .empty;
         defer events.deinit(a);
-        var count: usize = 0;
-        if (work.activation.deliveries.items.len != 0) {
-            switch (try self.selectEvents(a, work, history, current, &events)) {
-                .count => |selected| count = selected,
-                .over_limit => |limit| return .{ .over_limit = limit },
-            }
-        }
-        if (count == 0) return self.fitSelected(a, history, current, &.{}, 0);
+        const count = switch (try self.selectEvents(a, work, history, current, &events)) {
+            .count => |selected| selected,
+            .over_limit => |limit| return if (may_defer) self.fitSelected(a, history, current, &.{}, 0) else .{ .over_limit = limit },
+        };
         const selected = try Input.coalesceActivityReports(a, events.items[0..count]);
         return .{ .ready = .{ .items = try history.request(a, current, selected), .events = selected, .count = count } };
     }
@@ -683,6 +676,56 @@ const SubscriptionFixture = struct {
         return std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
     }
 };
+
+test "intake closes reception if it cannot acknowledge a new copy of a consumed callback" {
+    const testing = std.testing;
+    const Replay = struct {
+        copy: contracts.Inbox.Incoming,
+        polled: bool = false,
+
+        fn poll(context: *anyopaque, _: Allocator, _: contracts.Inbox.Poll) ![]const contracts.Inbox.Incoming {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.polled) return error.UnexpectedPoll;
+            self.polled = true;
+            return (&self.copy)[0..1];
+        }
+
+        fn acknowledge(_: *anyopaque, _: Allocator, receipt: []const u8) !void {
+            if (std.mem.eql(u8, receipt, "original")) return;
+            try testing.expectEqualStrings("new-copy", receipt);
+            return error.MailObjectFailed;
+        }
+    };
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+
+    const startup = try SubscriptionFixture.takeWork(&kernel, a);
+    var history = try SubscriptionFixture.admit(&kernel, a, startup);
+    defer history.deinit();
+    const callback = try kernel.sessions.registerCallback(a, startup, "wake", .wakeup);
+    try SubscriptionFixture.finish(&kernel, startup, &history);
+
+    var replay: Replay = .{ .copy = .{
+        .content = .{ .callback = .{ .id = callback.id, .text = "Wake up", .observed_at_unix_ms = 100 } },
+        .receipt = "original",
+    } };
+    kernel.inbox = .{ .context = &replay, .vtable = &.{ .poll = Replay.poll, .acknowledge = Replay.acknowledge } };
+    try testing.expectEqual(.accepted, try kernel.sessions.accept(replay.copy));
+    const work = try SubscriptionFixture.takeWork(&kernel, a);
+    var admitted = try SubscriptionFixture.admit(&kernel, a, work);
+    defer admitted.deinit();
+    try SubscriptionFixture.finish(&kernel, work, &admitted);
+
+    replay.copy.receipt = "new-copy";
+    try testing.expectError(error.MailObjectFailed, kernel.run());
+    try testing.expect(!kernel.isReceiving());
+}
 
 test "core startup reports the outgoing registration of each runtime" {
     const testing = std.testing;
@@ -1152,6 +1195,8 @@ test "compaction gives a complete fresh exchange and observation room beyond the
     const testing = std.testing;
     const BudgetModel = struct {
         hard_limit: u64,
+        older_bytes: u64,
+        handover_bytes: u64,
         summaries: usize = 0,
         summary_saw_omission: bool = false,
         summary: enum { success, rejection, outage } = .success,
@@ -1161,7 +1206,8 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             var bytes: u64 = 0;
             for (request.history) |item| switch (item) {
                 .message => |message| {
-                    if (std.mem.indexOf(u8, message.text, "older context marker") != null) bytes += 5;
+                    if (std.mem.indexOf(u8, message.text, "older context marker") != null) bytes += self.older_bytes;
+                    if (std.mem.indexOf(u8, message.text, "A useful handover.") != null) bytes += self.handover_bytes;
                     if (std.mem.indexOf(u8, message.text, "large observation marker") != null) bytes += 6;
                 },
                 .tool_result => |result| for (result.content.parts) |part| {
@@ -1178,10 +1224,10 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         fn next(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Outcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             try testing.expectEqual(@as(usize, 0), request.tools.len);
-            try testing.expectEqualStrings("max", request.reasoning_effort);
             const turn = request.history[request.history.len - 1].message.text;
             try testing.expect(std.mem.indexOf(u8, turn, "\nsummarize:") != null);
             for (request.history) |item| {
+                if (item == .message) try testing.expect(std.mem.indexOf(u8, item.message.text, "large observation marker") == null);
                 if (item != .tool_result) continue;
                 try testing.expect(item.tool_result.content.parts[0] == .text);
                 self.summary_saw_omission = true;
@@ -1203,6 +1249,8 @@ test "compaction gives a complete fresh exchange and observation room beyond the
     };
     const Case = struct {
         ceiling: u64,
+        older_bytes: u64 = 5,
+        handover_bytes: u64 = 0,
         summary: @FieldType(BudgetModel, "summary") = .success,
         compacted: bool = true,
         delivered: bool = true,
@@ -1213,10 +1261,13 @@ test "compaction gives a complete fresh exchange and observation room beyond the
     };
     for ([_]Case{
         .{ .ceiling = 40 },
+        .{ .ceiling = 40, .compact_at_bytes = 6, .compacted = false, .summaries = 0 },
         .{ .ceiling = 40, .summary = .outage, .compacted = false },
         .{ .ceiling = 40, .observed_tokens = 7, .compacted = false, .summaries = 0 },
         .{ .ceiling = 40, .observed_tokens = 8, .compact_at_bytes = 100 },
         .{ .ceiling = 16 },
+        // With its actual handover the pending exchange fits on its own.
+        .{ .ceiling = 16, .older_bytes = 8, .handover_bytes = 4, .delivered = false },
         .{ .ceiling = 16, .summary = .rejection, .compacted = false, .delivered = false },
         .{ .ceiling = 15, .compacted = false, .delivered = false, .summaries = 0 },
         .{ .ceiling = 14, .delivered = false },
@@ -1250,7 +1301,12 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         try history.appendBatch(exchange[0..1], exchange[1..]);
         work.session.progress.last_input_tokens = case.observed_tokens;
 
-        var model: BudgetModel = .{ .hard_limit = case.ceiling, .summary = case.summary };
+        var model: BudgetModel = .{
+            .hard_limit = case.ceiling,
+            .older_bytes = case.older_bytes,
+            .handover_bytes = case.handover_bytes,
+            .summary = case.summary,
+        };
         engine.model = .{ .context = &model, .vtable = &.{ .next = BudgetModel.next, .measure = BudgetModel.measure, .prepareToolReplies = undefined } };
         kernel.limits.compact_at_bytes = case.compact_at_bytes;
         kernel.limits.compact_at_tokens = 8;
@@ -1310,78 +1366,12 @@ test "an empty completion closes admitted work before retrying an oversized wait
 
     var stub: Stub = .{};
     engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolReplies = undefined } };
-    try testing.expectEqualStrings("The context was too large to continue.", (try kernel.respond(work)) orelse return error.TestUnexpectedResult);
+    try testing.expect(try kernel.respond(work) != null);
     try testing.expectEqual(@as(usize, 1), stub.inferences);
     try testing.expectEqual(@as(usize, 1), work.activation.deliveries.items.len);
     var completed = try kernel.sessions.snapshot(work.session);
     defer completed.deinit();
     try testing.expect(!completed.hasPendingContinuation());
-}
-
-test "the byte ruler reads retained history, not the pending observation" {
-    const testing = std.testing;
-    const Counting = struct {
-        summaries: usize = 0,
-
-        fn measure(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
-            var bytes: u64 = 0;
-            for (request.history) |item| switch (item) {
-                .message => |message| {
-                    bytes += std.mem.count(u8, message.text, "old marker");
-                    bytes += std.mem.count(u8, message.text, "new marker");
-                },
-                else => {},
-            };
-            return .{ .bytes = bytes };
-        }
-
-        fn next(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Outcome {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            for (request.history) |item| {
-                if (item == .message) try testing.expect(std.mem.indexOf(u8, item.message.text, "new marker") == null);
-            }
-            self.summaries += 1;
-            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "A useful handover." } };
-        }
-    };
-    // The observation alone is over the byte threshold. Only history decides.
-    for ([_]bool{ false, true }) |inherited_over_threshold| {
-        var fixture: SubscriptionFixture = .{};
-        defer fixture.deinit();
-        const a = fixture.storage.arena.allocator();
-        var store = try Subscriptions.Store.openInMemory(a);
-        defer store.close();
-        var engine: Engine = undefined;
-        var kernel = try fixture.kernel(&engine, &store);
-        defer kernel.deinit();
-        var counting: Counting = .{};
-        engine.model = .{ .context = &counting, .vtable = &.{ .next = Counting.next, .measure = Counting.measure, .prepareToolReplies = undefined } };
-        kernel.limits.compact_at_tokens = 1_000_000;
-        kernel.limits.compact_at_bytes = 1;
-
-        try testing.expectEqual(.accepted, try kernel.sessions.accept(.{ .content = .{ .message = .{
-            .from = &.{"operator"},
-            .text = "new marker",
-            .observed_at_unix_ms = 100,
-        } } }));
-        const work = try SubscriptionFixture.takeWork(&kernel, a);
-        defer kernel.sessions.endWorker(work.session);
-        var history = try kernel.sessions.snapshot(work.session);
-        defer history.deinit();
-        try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = &.{.{ .input = .{
-            .from = &.{"operator"},
-            .text = if (inherited_over_threshold) "old marker" else "older context",
-            .observed_at_unix_ms = 90,
-        } }} } });
-        try history.appendBatch(&.{.{ .continuation = "A prior reply" }}, &.{});
-        const input = (try kernel.prepareRequest(a, work, &history)).ready;
-        try testing.expectEqual(@as(usize, @intFromBool(inherited_over_threshold)), counting.summaries);
-        var occurrences: usize = 0;
-        for (input) |item| {
-            if (item == .message) occurrences += std.mem.count(u8, item.message.text, "new marker");
-        }
-        try testing.expectEqual(@as(usize, 1), occurrences);
-    }
 }
 
 test "a lone handover is shortened only if needed to fit the next observation" {

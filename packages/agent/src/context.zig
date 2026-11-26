@@ -21,11 +21,25 @@ pub const Context = struct {
     const recent_completed_rounds = 2;
 
     pub fn init(allocator: Allocator, scope: Scope, focus_id: []const u8) !Context {
-        return restore(allocator, scope, focus_id, &.{});
+        return copyEntries(allocator, scope, focus_id, &.{}, 0);
     }
 
+    /// The assignment has yet to be admitted. Everything already in this
+    /// context, including the complete opening tool round, precedes it.
+    pub fn inherit(allocator: Allocator, scope: Scope, focus_id: []const u8, entries: []const Entry) !Context {
+        return copyEntries(allocator, scope, focus_id, entries, entries.len);
+    }
+
+    /// Restore a focus that has started. Its assignment separates the fork
+    /// from its own history until a handover replaces that entire prefix.
     pub fn restore(allocator: Allocator, scope: Scope, focus_id: []const u8, entries: []const Entry) !Context {
-        return copyEntries(allocator, scope, focus_id, entries, inheritedPrefix(scope, focus_id, entries));
+        for (entries, 0..) |entry, index| {
+            if (entry != .record or entry.record != .events) continue;
+            for (entry.record.events.items) |event| {
+                if (event == .assignment) return copyEntries(allocator, scope, focus_id, entries, index);
+            }
+        }
+        return copyEntries(allocator, scope, focus_id, entries, 0);
     }
 
     fn copyEntries(allocator: Allocator, scope: Scope, focus_id: []const u8, entries: []const Entry, inherited_through: usize) !Context {
@@ -43,25 +57,6 @@ pub const Context = struct {
         return self;
     }
 
-    fn inheritedPrefix(scope: Scope, focus_id: []const u8, entries: []const Entry) usize {
-        if (scope.session_id == 1) return 0;
-        var first_own = entries.len;
-        for (entries, 0..) |entry, index| {
-            if (entry != .record) continue;
-            const owner = switch (entry.record) {
-                .events => |events| events.focus_id,
-                .handover => |handover| handover.focus_id,
-            };
-            if (!std.mem.eql(u8, owner, focus_id)) continue;
-            first_own = @min(first_own, index);
-            // Older checkpoints could contain an activity handover before its assignment.
-            if (entry.record == .events) for (entry.record.events.items) |event| {
-                if (event == .assignment) return index;
-            };
-        }
-        return first_own;
-    }
-
     pub fn deinit(self: *Context) void {
         self.entries.deinit(self.allocator);
         self.messages.deinit(self.allocator);
@@ -75,11 +70,6 @@ pub const Context = struct {
 
     pub fn clone(self: *const Context, allocator: Allocator) !Context {
         return copyEntries(allocator, self.scope, self.focus_id, self.entries.items, self.inherited_through);
-    }
-
-    /// Before an activity admits its assignment, its existing context comes from the fork.
-    pub fn markInheritedHistory(self: *Context) void {
-        self.inherited_through = self.entries.items.len;
     }
 
     pub fn appendRecord(self: *Context, record: Input.Record) !void {
@@ -108,7 +98,8 @@ pub const Context = struct {
         return buildRequest(a, self.summaryItems(.keep_latest_tool_round), .{ .current = current, .purpose = .{ .work = &.{} } });
     }
 
-    /// Assemble the exact events and exchanges that would follow a handover.
+    /// Build the request used to measure the protected history and selected
+    /// observations before a handover is available.
     pub fn continuationRequest(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event, scope: CompactionScope) ![]const Model.Item {
         const pending = self.compactionBoundary(scope);
         return buildRequest(a, self.messages.items[pending.message_index..], .{ .current = current, .purpose = .{ .work = events } });
@@ -173,12 +164,10 @@ pub const Context = struct {
 
     fn compactionBoundary(self: *const Context, compaction_scope: CompactionScope) HistoryBoundary {
         const observations = self.pendingObservations();
-        if (compaction_scope == .keep_pending_observations) return observations;
-        const pending = self.latestToolRound(observations) orelse observations;
         return switch (compaction_scope) {
-            .keep_latest_tool_round => pending,
-            .keep_recent_rounds => self.recentRounds(pending),
-            .keep_pending_observations => unreachable,
+            .keep_pending_observations => observations,
+            .keep_latest_tool_round => self.latestToolRound(observations) orelse observations,
+            .keep_recent_rounds => self.recentRounds(self.latestToolRound(observations) orelse observations),
         };
     }
 
@@ -258,8 +247,9 @@ pub const Context = struct {
 
     pub fn withHandover(self: *const Context, allocator: Allocator, handover: Input.Handover, compaction_scope: CompactionScope) !Context {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
-        var replacement = try restore(allocator, scope, self.focus_id, &.{.{ .record = .{ .handover = handover } }});
+        var replacement = try init(allocator, scope, self.focus_id);
         errdefer replacement.deinit();
+        try replacement.appendRecord(.{ .handover = handover });
         const count = self.summaryEntryCount(compaction_scope);
         for (self.entries.items[count..]) |entry| try replacement.append(entry);
         return replacement;
@@ -535,37 +525,6 @@ test "compaction retains checkpointed observations following a tool round that s
     var after_response = try restored.withHandover(testing.allocator, handover, .keep_latest_tool_round);
     defer after_response.deinit();
     try testing.expect(after_response.records()[1..].len == 0);
-}
-
-test "only the activity's own unanswered events and tool rounds await inference" {
-    const testing = std.testing;
-    const scope: Scope = .{ .session_id = 2, .epoch = 0 };
-    const focus_id = "research-2";
-    const inherited: []const Entry = &.{
-        .{ .record = .{ .events = .{ .focus_id = "core-1", .items = &.{.{ .startup = .{ .observed_at_unix_ms = 0 } }} } } },
-        .{ .exchange = &.{
-            .{ .continuation = "Opening an activity" },
-            .{ .tool_result = .{ .call_id = "open", .content = .{ .parts = &.{} } } },
-        } },
-    };
-    var context = try Context.restore(testing.allocator, scope, focus_id, inherited);
-    defer context.deinit();
-    try testing.expect(!context.hasPendingContinuation());
-    try testing.expect(!context.hasToolRoundToKeep());
-
-    const assignment: Input.Record = .{ .events = .{ .focus_id = focus_id, .items = &.{.{ .assignment = .{ .task = "Research the plan." } }} } };
-    try context.appendRecord(assignment);
-    try testing.expect(context.hasPendingContinuation());
-    try testing.expect(!context.hasToolRoundToKeep());
-    const handover: Input.Handover = .{ .focus_id = focus_id, .observed_at_unix_ms = 100, .summary = "The source's earlier work.", .state = .{ .activities = &.{}, .callbacks = &.{} } };
-    var replacement = try context.withHandover(testing.allocator, handover, .keep_latest_tool_round);
-    defer replacement.deinit();
-    try testing.expectEqualDeep(@as([]const Entry, &.{ .{ .record = .{ .handover = handover } }, .{ .record = assignment } }), replacement.records());
-
-    try replacement.appendBatch(&.{.{ .continuation = "Reading the plan" }}, &.{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{} } } }});
-    try testing.expect(replacement.hasToolRoundToKeep());
-    try replacement.appendBatch(&.{}, &.{});
-    try testing.expect(!replacement.hasPendingContinuation());
 }
 
 test "recent retention carries complete exchanges and their observations across a handover" {

@@ -10,18 +10,17 @@ pub const Rejection = union(enum) {
     unexpected_tool_call,
     too_large: Model.Limit,
 
-    fn retryInstruction(self: Rejection) []const u8 {
+    fn feedback(self: Rejection) []const u8 {
         return switch (self) {
-            .empty_summary => "The previous reply contained no handover summary.",
-            .unexpected_tool_call => "The previous reply included a tool call.",
-            .too_large => "The next request exceeded its limit with the proposed summary. Write a shorter summary.",
+            .empty_summary => "The handover reply contained no summary.",
+            .unexpected_tool_call => "The handover reply included a tool call.",
+            .too_large => "Write a shorter summary.",
         };
     }
 
     pub fn interruption(self: Rejection, focus_id: []const u8) []const u8 {
         return switch (self) {
-            .empty_summary => "The model returned no handover summary.",
-            .unexpected_tool_call => "The model returned a tool call while preparing the handover.",
+            .empty_summary, .unexpected_tool_call => self.feedback(),
             .too_large => |limit| Engine.reportRequestLimit(focus_id, "request with the proposed handover", limit),
         };
     }
@@ -36,10 +35,11 @@ pub const Result = union(enum) {
 /// Generate one summary from this history and snapshot. Kernel measures the
 /// continuation and decides whether to request a replacement summary.
 pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, snapshot: Input.Snapshot, scope: Context.CompactionScope, previous: ?Rejection, retry: Engine.Retry) !Result {
+    const task = comptime std.mem.trimEnd(u8, @embedFile("compaction.md"), "\r\n");
     const instructions = if (previous) |reason|
-        try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ @embedFile("compaction.md"), reason.retryInstruction() })
+        try std.fmt.allocPrint(arena, "{s} {s}", .{ task, reason.feedback() })
     else
-        @embedFile("compaction.md");
+        task;
     const history = try context.summaryRequest(arena, snapshot, instructions, scope);
     const request: Model.Request = .{
         .history = history,
