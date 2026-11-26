@@ -84,17 +84,17 @@ A sizing test on v1.0.2 used one 32 MiB inline image part filled with bytes requ
 
 Those measurements bound one record under each Stalwart default:
 
-| Representation | Worst-case bytes per image byte | Image bytes at the default 10,000,000-byte request limit |
-| --- | ---: | ---: |
-| History text | 4 | 8,000,000 |
-| JMAP request | 5 | 2,000,000 |
-| MIME message | about 4.2 | about 8,300,000 |
+| Representation | Worst-case bytes per image byte | Original image bytes at the default request limit | Encoded size for those image bytes |
+| --- | ---: | ---: | ---: |
+| History text | 4 | 2,000,000 | 8,000,000 |
+| JMAP request | 5 | 2,000,000 | 10,000,000 |
+| MIME message | about 4.2 | 2,000,000 | about 8,300,000 |
 
-`Jmap.maxRequestSize` is the binding default: 10,000,000 / 5 = 2,000,000 image bytes. The corresponding 8,000,000 bytes of history text fit within `Email.maxAttachmentSize` (50,000,000), and the about 8,300,000-byte MIME message fits within `Email.maxMessageSize` (75,000,000).
+`Jmap.maxRequestSize` is the binding default: 10,000,000 / 5 = 2,000,000 original image bytes. This is a theoretical maximum with no margin: the JMAP envelope, message headers, other text, file references, and the encoding of everything else also count toward those limits. That is why the 8,000,000 bytes of history text fit within `Email.maxAttachmentSize` (50,000,000), and the about 8,300,000-byte MIME message fits within `Email.maxMessageSize` (75,000,000), but a real record must stay below 2,000,000 image bytes.
 
-The kernel bounds the inline image bytes in one history record with `HISTORY_INLINE_IMAGE_BYTES`, 1 MiB by default. At the ratios above, that needs at most 4 MiB of history text, 5 MiB in the JMAP request, and about 4.4 MiB in the MIME message. Stalwart's default `Jmap.maxRequestSize` of 10,000,000 bytes therefore leaves about half of the request for the rest of the record. The same calculation gives an upper bound of 2,000,000 image bytes under the default request limit, before allowing for text and file references. A record above the kernel limit fails with `HistoryRecordTooLarge` before the kernel appends it.
+The kernel bounds the inline image bytes in one history record with `HISTORY_INLINE_IMAGE_BYTES`, 1 MiB by default. At the ratios above, that needs at most 4 MiB of history text, 5 MiB in the JMAP request, and about 4.2 MiB in the MIME message. Stalwart's default `Jmap.maxRequestSize` of 10,000,000 bytes therefore leaves about half of the request for the rest of the record. When a round exceeds the kernel limit, the kernel replaces each inline image with a text placeholder that gives its byte length and keeps the rest of the round. It does not reject the round or send the image. The limit constrains images only; non-image text, reasoning, and tool-call arguments also expand in the request, so the image limit alone does not guarantee that a record fits `Jmap.maxRequestSize`.
 
-The example plan raises the server limits so a deployment can retain the content layer's maximum 32 MiB inline image per round when it also raises `HISTORY_INLINE_IMAGE_BYTES` to `33554432`. It includes these lines:
+The example plan raises the server limits so a deployment can retain the content layer's maximum 32 MiB inline image per round when it also raises `HISTORY_INLINE_IMAGE_BYTES` to `33554432`. The sample applies to raw `.data` bytes. A data URL counts by its complete encoded length, so a 32 MiB Base64 data URL needs about 44.7 MB of image budget and this sample would replace it with a text placeholder. It includes these lines:
 
 ```jsonl
 {"@type":"update","object":"Jmap","value":{"maxRequestSize":201326592,"maxUploadSize":201326592}}

@@ -6,6 +6,14 @@ To keep the option of rolling back, back up the mailbox and instance database as
 
 Start the updated kernel with the existing mailbox and its paired instance database. It reads the DeepSeek file ID from earlier file results. If an older record has a file part without a reference, it loads as a text description with the original byte length and a `file_reference_missing` error instead of failing the whole history. New records refer to an uploaded file by its ID, including when a fork or compaction copies an older result. The original bytes in older mailbox records remain until those records are retired to Trash and expire under the mail service's retention policy.
 
+## Inline image budgets in working history
+
+The kernel now limits inline image bytes in one history record with `HISTORY_INLINE_IMAGE_BYTES`, 1 MiB by default. Older deployments did not have this limit, so an activity whose tool results include a larger image will have that image replaced by a text placeholder that gives its byte length; the rest of the round, including text and uploaded-file references, is kept. The round is not rejected.
+
+Set `HISTORY_INLINE_IMAGE_BYTES` to the largest image the deployment must keep, and size the mail service's request and message limits for that value as described in [Stalwart settings for inline images](../dev/README.md#sizing-stalwart-for-working-history). A `data:` image URL counts by its complete encoded length, not by decoded image bytes. Setting the value to `0` keeps text and file references while replacing every inline image.
+
+Older history records that stored uploaded-file bytes keep those bytes until the mail service retires the records and they expire from Trash. Once a fork or compaction writes a new record, the original bytes cannot be recovered from that copy alone; export anything you still need before the retention period ends. See [backups and transfers](running.md#backups-and-transfers).
+
 ## Adopting the new reasoning defaults
 
 The activity reasoning default changed from `high` to `max`. Handovers previously used a fixed effort of `high` and now have a separate setting that defaults to `max`.
