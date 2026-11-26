@@ -19,6 +19,8 @@ While a tool result remains in working history, later turns can use its text, in
 | HTTP(S) image URL | The URL. It can later serve a different image or become unavailable. |
 | Uploaded file | The DeepSeek file ID. Using it requires access to the account that still holds the file. |
 
+Working history does not apply a separate byte budget to inline images; each source image is still limited to 32 MiB, and the complete record must fit the mail service's [working history limits](running.md#working-history-limits).
+
 The runtime saves the complete tool round before the next inference. See [working history limits](running.md#working-history-limits).
 
 Compaction can summarize the exchange that contains a tool result. If the handover records the host path or memory address, the focus can reopen the source to see its current contents. See [handovers](input.md#handover-generation-and-replacement) and [uploaded file retention](running.md#uploaded-model-files).

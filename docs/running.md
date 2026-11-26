@@ -124,7 +124,9 @@ A model response and all of its tool results share one history record. Estimate 
 | HTTP 413 on `Email/set` | Check HTTP body limits at the proxy and mail endpoint. |
 | `MailObjectFailed` on `Email/set` | Check the mail server's rejection details, including message limits and account quota. |
 
-`HistoryRecordTooLarge` and `HistoryCheckpointTooLarge` stop the kernel before it sends the oversized request. The previous checkpoint stays selected. To resume, correct the applicable limit and restart with the same mailbox and instance database. Check the outcome of any action from an unsaved round, such as a file upload, before repeating it. If channel registrations contributed to the checkpoint size, close unused channels once reception opens.
+`HistoryRecordTooLarge` and `HistoryCheckpointTooLarge` stop the kernel before it sends the oversized request. A failed record leaves the round uncommitted; a failed checkpoint leaves the previous checkpoint selected. In either case, the saved history remains valid. Tool calls from an uncommitted round may already have produced effects, and restart cannot replay them from history. Check the outcome of each such action, including a file upload or host command, before repeating it.
+
+To resume, raise the mail service's advertised `maxSizeRequest` and any HTTP body or message limit that applies, then restart with the same mailbox and instance database. For a record, you can also reduce the space the round needs: the content layer caps one image at 32 MiB, so lowering that cap (`image_size_limit` in `packages/content/src/root.zig`) or keeping fewer or smaller images in one round reduces the record. If channel registrations contributed to the checkpoint size, close unused channels once reception opens.
 
 ### Outgoing correspondents
 
