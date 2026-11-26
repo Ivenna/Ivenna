@@ -89,10 +89,10 @@ test "reasoning environment settings apply to the intended focus" {
         if (overridden) {
             try env.put("LLM_CORE_REASONING_EFFORT", "high");
             try env.put("LLM_ACTIVITY_REASONING_EFFORT", "low");
-            try env.put("LLM_COMPACTION_REASONING_EFFORT", "new-effort");
+            try env.put("LLM_COMPACTION_REASONING_EFFORT", "xhigh");
         }
         engine.reasoning = (try Config.load(a, &env)).llm_reasoning;
-        try testing.expectEqualStrings(if (overridden) "new-effort" else "max", engine.reasoning.compaction);
+        try testing.expectEqualStrings(if (overridden) "xhigh" else "max", engine.reasoning.compaction);
         for ([_]agent.Input.Role{ .core, .activity }, [_][]const u8{
             if (overridden) "high" else "low",
             if (overridden) "low" else "max",
@@ -102,6 +102,48 @@ test "reasoning environment settings apply to the intended focus" {
             try testing.expectEqualStrings(expected, probe.effort);
         }
     }
+}
+
+test "an unknown reasoning effort is sent as written unless strictness is requested" {
+    const Probe = struct {
+        effort: []const u8 = "",
+
+        fn next(context: *anyopaque, _: std.mem.Allocator, request: contracts.Model.Request) anyerror!contracts.Model.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.effort = request.reasoning_effort;
+            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = null } };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = std.process.Environ.Map.init(a);
+    try env.put("DATA_DIR", "/unused");
+    try env.put("LLM_API_KEY", "test-key");
+    try env.put("MAIL_ADDRESS", "ivenna@example.test");
+    try env.put("MAIL_AUTHORIZATION", "Bearer test-key");
+    try env.put("LLM_ACTIVITY_REASONING_EFFORT", "new-effort");
+
+    var probe: Probe = .{};
+    var engine: agent.Engine = .{
+        .allocator = testing.allocator,
+        .io = testing.io,
+        .model = .{ .context = &probe, .vtable = &.{
+            .next = Probe.next,
+            .measure = undefined,
+            .prepareToolReplies = undefined,
+        } },
+        .shared_tools = &.{},
+        .activity_tools = &.{},
+    };
+    engine.reasoning = (try Config.load(a, &env)).llm_reasoning;
+    try testing.expectEqualStrings("new-effort", engine.reasoning.activity);
+    var round = (try engine.beginRound(a, "test-focus", &.{}, .activity)).ready;
+    defer round.inference.deinit();
+    try testing.expectEqualStrings("new-effort", probe.effort);
+
+    try env.put("LLM_REASONING_EFFORT_STRICT", "1");
+    try testing.expectError(error.UnsupportedReasoningEffort, Config.load(a, &env));
 }
 
 test "command help and argument errors work without instance or service settings" {

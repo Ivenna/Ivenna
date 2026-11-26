@@ -68,9 +68,9 @@ pub const Config = struct {
             .llm_max_output_tokens = try number(u32, env, "LLM_MAX_OUTPUT_TOKENS", responses.Provider.default_max_output_tokens),
             .llm_request_timeout_ms = try number(u32, env, "LLM_REQUEST_TIMEOUT_MS", responses.Provider.default_request_timeout_ms),
             .llm_reasoning = .{
-                .core = try nonempty(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
-                .activity = try nonempty(env, "LLM_ACTIVITY_REASONING_EFFORT", default_reasoning.activity),
-                .compaction = try nonempty(env, "LLM_COMPACTION_REASONING_EFFORT", default_reasoning.compaction),
+                .core = try reasoningEffort(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
+                .activity = try reasoningEffort(env, "LLM_ACTIVITY_REASONING_EFFORT", default_reasoning.activity),
+                .compaction = try reasoningEffort(env, "LLM_COMPACTION_REASONING_EFFORT", default_reasoning.compaction),
             },
         };
         if (config.memory_ssh_config) |path| if (path.len == 0) return error.MissingMemorySshConfig;
@@ -97,6 +97,33 @@ fn serviceAddress(env: *const std.process.Environ.Map) !std.Io.net.IpAddress {
     const address = std.Io.net.IpAddress.parseLiteral(value) catch return error.InvalidServiceAddress;
     if (address.getPort() == 0) return error.InvalidServiceAddress;
     return address;
+}
+
+/// Effort names this build knows about, in the order messages list them. The
+/// model service may accept more, so an unknown name is passed through as
+/// written unless LLM_REASONING_EFFORT_STRICT asks the kernel to refuse it.
+pub const reasoning_effort_names = "none, minimal, low, medium, high, max, xhigh";
+
+fn reasoningEffort(env: *const std.process.Environ.Map, key: []const u8, default: []const u8) ![]const u8 {
+    const value = try nonempty(env, key, default);
+    if (isReasoningEffort(value)) return value;
+    if (strictReasoningEffort(env)) {
+        std.log.warn("{s}={s} is not a known reasoning effort; use one of {s}, or drop LLM_REASONING_EFFORT_STRICT to send it as written", .{ key, value, reasoning_effort_names });
+        return error.UnsupportedReasoningEffort;
+    }
+    std.log.warn("{s}={s} is not a known reasoning effort ({s}); sending it as written", .{ key, value, reasoning_effort_names });
+    return value;
+}
+
+fn isReasoningEffort(value: []const u8) bool {
+    var names = std.mem.splitScalar(u8, reasoning_effort_names, ',');
+    while (names.next()) |name| if (std.mem.eql(u8, std.mem.trim(u8, name, " "), value)) return true;
+    return false;
+}
+
+fn strictReasoningEffort(env: *const std.process.Environ.Map) bool {
+    const value = env.get("LLM_REASONING_EFFORT_STRICT") orelse return false;
+    return std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "true");
 }
 
 fn nonempty(env: *const std.process.Environ.Map, key: []const u8, default: []const u8) ![]const u8 {

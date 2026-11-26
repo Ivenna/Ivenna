@@ -67,7 +67,7 @@ Core and activity sessions share the configured model and output-token limit. `L
 
 The core's ordinary reasoning default favors responsive correspondence and coordination. The activity default favors deeper reasoning. `LLM_COMPACTION_REASONING_EFFORT` applies to handover generation in both roles.
 
-The model service receives each configured effort name as written. If you change the model or service, use effort values it supports. To adopt a newly available effort, set the corresponding variable and restart the kernel. See the [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/).
+The model service receives each configured effort name as written, so an effort your model supports works without rebuilding the kernel. The kernel knows the names `none`, `minimal`, `low`, `medium`, `high`, `max`, and `xhigh`; it logs a warning for anything else and sends the name through unchanged. Set `LLM_REASONING_EFFORT_STRICT=1` to turn an unknown name into a startup error instead, which catches a misspelling before it reaches the model service. See the [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/).
 
 `LLM_REQUEST_TIMEOUT_MS` applies separately to each inference attempt, including compaction. A temporary outage can therefore delay a decision beyond this timeout. For each file upload, the timeout covers the entire negotiation. See [when model work stalls](#when-model-work-stalls) and [file outcomes](content.md#complete-files).
 

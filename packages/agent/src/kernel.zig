@@ -134,7 +134,13 @@ pub const Kernel = struct {
             try self.sessions.reconcile(waiting);
             for (waiting) |incoming| switch (try self.sessions.accept(incoming)) {
                 .accepted, .deferred => {},
-                .duplicate => if (incoming.receipt) |receipt| try self.inbox.acknowledge(a, receipt),
+                // A repeated acknowledgement carries no information the working history does not
+                // already hold, so a failure here must not end the runtime: the observation is
+                // admitted, and the poll will offer the same receipt again.
+                .duplicate => if (incoming.receipt) |receipt| self.inbox.acknowledge(a, receipt) catch |err| std.log.warn(
+                    "repeated acknowledgement failed; the observation is already in working history: {t}",
+                    .{err},
+                ),
             };
             try self.dispatch(tasks);
             const now = std.Io.Clock.awake.now(self.io).toMilliseconds();

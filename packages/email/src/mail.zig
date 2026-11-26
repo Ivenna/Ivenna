@@ -303,6 +303,11 @@ pub const Mailbox = struct {
     }
 
     /// The caller has durably admitted this input into working history.
+    ///
+    /// Acknowledgement is idempotent: the kernel repeats it whenever a poll
+    /// still offers a receipt it has already admitted. Repeating it applies the
+    /// same Trash destination and the same handled marker, so the stored copy
+    /// ends in the same state and a second call must succeed.
     pub fn acknowledge(self: Mailbox, a: Allocator, id: []const u8) !void {
         try self.retireEmails(a, &.{.{ .id = id, .marker = .handled }});
     }
@@ -1278,6 +1283,25 @@ test "acknowledgement retries a lost response and reports a rejected update" {
     defer fixture.deinit();
     const mailbox = try fixture.start();
     try std.testing.expectError(error.MailObjectFailed, mailbox.acknowledge(fixture.arena.allocator(), "received"));
+    try fixture.finish();
+}
+
+test "a repeated acknowledgement succeeds and applies the same retirement" {
+    const Fixture = @import("test_jmap.zig").Fixture;
+    const update: []const @import("test_jmap.zig").Property = &.{
+        .{ .path = &.{ "update", "received", "mailboxIds", "trash" }, .json = "true" },
+        .{ .path = &.{ "update", "received", "keywords/ivenna-handled" }, .json = "true" },
+    };
+    const applied = "{\"updated\":{\"received\":null}}";
+    var fixture = try Fixture.init(&.{
+        .{ .method = "Email/set", .properties = update, .result = applied },
+        .{ .method = "Email/set", .properties = update, .result = applied },
+    });
+    defer fixture.deinit();
+    const mailbox = try fixture.start();
+    const a = fixture.arena.allocator();
+    try mailbox.acknowledge(a, "received");
+    try mailbox.acknowledge(a, "received");
     try fixture.finish();
 }
 
