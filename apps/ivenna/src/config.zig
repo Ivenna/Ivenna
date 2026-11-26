@@ -61,6 +61,7 @@ pub const Config = struct {
                 .compact_at_tokens = try number(u64, env, "CONTEXT_COMPACT_AT_TOKENS", default_limits.compact_at_tokens),
                 .compact_at_bytes = try number(u64, env, "CONTEXT_COMPACT_AT_BYTES", default_limits.compact_at_bytes),
                 .observation_batch_bytes = try number(u64, env, "CONTEXT_OBSERVATION_BATCH_BYTES", default_limits.observation_batch_bytes),
+                .history_inline_image_bytes = try number(u64, env, "HISTORY_INLINE_IMAGE_BYTES", default_limits.history_inline_image_bytes),
             },
             .llm_base_url = try nonempty(env, "LLM_BASE_URL", responses.Provider.default_base_url),
             .llm_api_key = try nonempty(env, "LLM_API_KEY", ""),

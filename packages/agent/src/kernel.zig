@@ -34,6 +34,7 @@ pub const Kernel = struct {
         compact_at_tokens: u64 = 256 * 1024,
         compact_at_bytes: u64 = 1024 * 1024,
         observation_batch_bytes: u64 = 1024 * 1024,
+        history_inline_image_bytes: u64 = Context.default_inline_image_limit_bytes,
     };
 
     pub const Dependencies = struct {
@@ -283,6 +284,7 @@ pub const Kernel = struct {
             if (work.activation.deliveries.items.len == 0) try self.sessions.collectPending(work);
             var history = try self.sessions.snapshot(session);
             defer history.deinit();
+            history.inline_image_limit_bytes = self.limits.history_inline_image_bytes;
             const input = switch (try self.prepareRequest(a, work, &history)) {
                 .ready => |input| input,
                 .interrupted => |reason| return reason,

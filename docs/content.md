@@ -20,6 +20,8 @@ Working history keeps the text a tool returns. When the tool supplies media, tha
 | Image URL | The original address. A data URL contains the image itself. An HTTP(S) URL can later serve a different image or become unavailable. |
 | Uploaded file | The file ID returned by DeepSeek. Later turns can use it while the file is available in the same account. |
 
+Inline image bytes count toward the record's `HISTORY_INLINE_IMAGE_BYTES` budget. See [working history limits](running.md#working-history-limits) for how the kernel rejects an oversized record before writing it.
+
 Compaction can replace a tool result with a handover. If the handover keeps the host path or memory address, the focus can reopen the source to see its current contents. Uploaded files have a separate lifetime in the DeepSeek account. See [handovers](input.md#handover-generation-and-replacement) and [uploaded model files](running.md#uploaded-model-files).
 
 ## Source size limits

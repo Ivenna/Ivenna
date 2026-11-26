@@ -34,6 +34,7 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `CONTEXT_COMPACT_AT_TOKENS` | Input-token threshold for compaction | `262144` |
 | `CONTEXT_COMPACT_AT_BYTES` | Fallback threshold for compaction, in encoded request bytes | `1048576` (1 MiB) |
 | `CONTEXT_OBSERVATION_BATCH_BYTES` | Target for the encoded bytes a batch of observations adds to a request | `1048576` (1 MiB) |
+| `HISTORY_INLINE_IMAGE_BYTES` | Maximum inline image payload in one history record; `data:` image URLs count by their encoded length | `1048576` (1 MiB) |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | URL for [JMAP session discovery](#mail-service) | `http://127.0.0.1:8088/jmap/session` |
 | `MAIL_ADDRESS` | Kernel mailbox address and sending identity | Required |
@@ -115,7 +116,9 @@ Allow for correspondence, history from all focuses, pending records, and mail aw
 
 Set the mail service's advertised `maxSizeRequest` high enough to write the largest single history record or checkpoint you expect. The kernel reads this limit at startup and can combine several records in one request up to that size. The HTTP endpoint and any proxy must accept that request, and the mail store must accept each resulting MIME message. See the [history storage protocol](architecture.md#history-storage) and [JMAP session capabilities](https://www.rfc-editor.org/rfc/rfc8620.html#section-2).
 
-A model response and all its tool results share one record. An uploaded file contributes its ID and source description. Inline images contribute their encoded bytes, so several images in one round can exceed a limit that each image would fit on its own. See [Stalwart settings for inline images](../dev/README.md#sizing-stalwart-for-working-history) for a measured example and a sample configuration.
+A model response and all its tool results share one record. An uploaded file contributes its ID and source description. Inline images contribute their encoded bytes, so several images in one round can exceed a limit that each image would fit on its own. The kernel sums those bytes before appending the record and rejects the round with `HistoryRecordTooLarge` when the total exceeds `HISTORY_INLINE_IMAGE_BYTES`. The log line gives the measured total and the configured limit; nothing is appended. A `data:` image URL counts by its encoded length.
+
+The default 1 MiB is sized for Stalwart's default `Jmap.maxRequestSize` of 10,000,000 bytes. In the worst case the stored history text needs four bytes per image byte, and escaping each backslash for the JMAP JSON request takes a fifth. A full 1 MiB therefore needs at most about 5 MiB of the request, leaving the rest for text and file references. The same calculation bounds the default server's image capacity at 2,000,000 bytes before other content. The example plan raises the limits for larger images; see [Stalwart settings for inline images](../dev/README.md#sizing-stalwart-for-working-history) for the measured example and the corresponding settings.
 
 If the request for a single record exceeds `maxSizeRequest`, the kernel stops with `HistoryRecordTooLarge`. A checkpoint can exceed the same limit as focus and channel registrations or pending wakeups accumulate, causing `HistoryCheckpointTooLarge`. Both errors occur before the oversized request is sent and leave the previous checkpoint selected.
 

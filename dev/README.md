@@ -82,12 +82,26 @@ When a regular account writes a history message with JMAP `Email/set`, Stalwart 
 
 A sizing test on v1.0.2 used one 32 MiB inline image part filled with bytes requiring four-character escapes such as `\xff`. Escaping each backslash for JSON took a fifth byte. The history text occupied about 128 MiB, the JMAP request 160 MiB, and the stored MIME message 133 MiB.
 
-For a dedicated server expected to save one inline image of up to 32 MiB per round, the following settings allow room for the image and accompanying text. To use them, add both lines to `$DEV_INSTANCE_DIR/mail/provision.ndjson` and [apply the mail plan](#applying-the-mail-plan).
+Those measurements bound one record under each Stalwart default:
+
+| Representation | Worst-case bytes per image byte | Image bytes at the default 10,000,000-byte request limit |
+| --- | ---: | ---: |
+| History text | 4 | 8,000,000 |
+| JMAP request | 5 | 2,000,000 |
+| MIME message | about 4.2 | about 8,300,000 |
+
+`Jmap.maxRequestSize` is the binding default: 10,000,000 / 5 = 2,000,000 image bytes. The corresponding 8,000,000 bytes of history text fit within `Email.maxAttachmentSize` (50,000,000), and the about 8,300,000-byte MIME message fits within `Email.maxMessageSize` (75,000,000).
+
+The kernel bounds the inline image bytes in one history record with `HISTORY_INLINE_IMAGE_BYTES`, 1 MiB by default. At the ratios above, that needs at most 4 MiB of history text, 5 MiB in the JMAP request, and about 4.4 MiB in the MIME message. Stalwart's default `Jmap.maxRequestSize` of 10,000,000 bytes therefore leaves about half of the request for the rest of the record. The same calculation gives an upper bound of 2,000,000 image bytes under the default request limit, before allowing for text and file references. A record above the kernel limit fails with `HistoryRecordTooLarge` before the kernel appends it.
+
+The example plan raises the server limits so a deployment can retain the content layer's maximum 32 MiB inline image per round when it also raises `HISTORY_INLINE_IMAGE_BYTES` to `33554432`. It includes these lines:
 
 ```jsonl
 {"@type":"update","object":"Jmap","value":{"maxRequestSize":201326592,"maxUploadSize":201326592}}
 {"@type":"update","object":"Email","value":{"maxAttachmentSize":167772160,"maxMessageSize":201326592}}
 ```
+
+The measured 32 MiB image needs about 128 MiB of history text, 160 MiB of JMAP request, and 133 MiB of MIME message. The 160 MiB attachment limit holds the history text and the other message parts; the 192 MiB request and message limits leave room for their protocol and MIME overhead. Keep `HISTORY_INLINE_IMAGE_BYTES` at or below the value these server limits can carry.
 
 After [normal startup](#starting-the-kernel), check the two JMAP limits advertised to the kernel account.
 

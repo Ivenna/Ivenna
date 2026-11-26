@@ -15,7 +15,15 @@ pub const Context = struct {
     entries: std.ArrayList(Entry) = .empty,
     messages: std.ArrayList(Model.Item) = .empty,
     inherited_through: usize = 0,
+    /// Inline image bytes one history record may hold. A record also includes
+    /// text and uploaded-file references, so this leaves room below the mail
+    /// service's request limit.
+    inline_image_limit_bytes: u64 = default_inline_image_limit_bytes,
 
+    /// Worst-case expansion in stored history text is four bytes per image
+    /// byte, and JSON escaping for the JMAP request takes a fifth. One MiB
+    /// therefore needs at most 5 MiB of a default 10,000,000-byte request.
+    pub const default_inline_image_limit_bytes: u64 = 1024 * 1024;
     pub const CompactionScope = enum { keep_latest_tool_round, keep_recent_rounds, keep_pending_observations };
     const recent_completed_rounds = 2;
 
@@ -78,12 +86,48 @@ pub const Context = struct {
     /// Preserve the native exchange. An empty response still closes input
     /// that was waiting for inference, without adding a model message.
     pub fn appendBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
+        const image_bytes = inlineImageBytes(output, replies);
+        if (image_bytes > self.inline_image_limit_bytes) {
+            std.log.warn("history record for {s} would hold {d} inline image bytes, exceeding the {d} byte limit; the round was not saved", .{
+                self.focus_id, image_bytes, self.inline_image_limit_bytes,
+            });
+            return error.HistoryRecordTooLarge;
+        }
         if (output.len == 0 and replies.len == 0 and !self.hasPendingContinuation()) return;
         const batch = try self.allocator.alloc(Model.Item, output.len + replies.len);
         defer self.allocator.free(batch);
         @memcpy(batch[0..output.len], output);
         @memcpy(batch[output.len..], replies);
         try self.append(.{ .exchange = batch });
+    }
+
+    fn inlineImageBytes(output: []const Model.Item, replies: []const Model.Item) u64 {
+        var total: u64 = 0;
+        for (output) |item| total += itemInlineImageBytes(item);
+        for (replies) |item| total += itemInlineImageBytes(item);
+        return total;
+    }
+
+    fn itemInlineImageBytes(item: Model.Item) u64 {
+        return switch (item) {
+            .tool_result => |result| blk: {
+                var total: u64 = 0;
+                for (result.content.parts) |part| total += partInlineImageBytes(part);
+                break :blk total;
+            },
+            else => 0,
+        };
+    }
+
+    fn partInlineImageBytes(part: Model.Content.Part) u64 {
+        return switch (part) {
+            .image => |image| switch (image) {
+                .data => |data| @intCast(data.bytes.len),
+                // A data URL carries its encoded image in the record itself.
+                .url => |url| if (std.mem.startsWith(u8, url, "data:")) @intCast(url.len) else 0,
+            },
+            else => 0,
+        };
     }
 
     /// Present new observations once alongside the retained history. The
@@ -548,4 +592,35 @@ test "recent retention carries complete exchanges and their observations across 
     var replacement = try original.withHandover(testing.allocator, handover, .keep_recent_rounds);
     defer replacement.deinit();
     try testing.expectEqualDeep(entries[2..], replacement.records()[1..]);
+}
+
+test "inline image budget rejects an oversized record before history changes" {
+    const t = std.testing;
+    var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+    defer context.deinit();
+    const bytes = [_]u8{ 137, 'P', 'N', 'G', 0, 255, 1, 2 };
+    const image: Model.Content.Part = .{ .image = .{ .data = .{ .format = .png, .bytes = &bytes } } };
+    const replies: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "view", .content = .{ .parts = &.{image} } } }};
+    const before = context.entries.items.len;
+
+    // The configured limit is enforced before the batch is appended.
+    context.inline_image_limit_bytes = bytes.len - 1;
+    try t.expectError(error.HistoryRecordTooLarge, context.appendBatch(&.{}, replies));
+    try t.expectEqual(before, context.entries.items.len);
+
+    // A record at the limit passes, and the field can be raised at runtime.
+    context.inline_image_limit_bytes = bytes.len;
+    try context.appendBatch(&.{}, replies);
+    try t.expectEqual(before + 1, context.entries.items.len);
+    context.inline_image_limit_bytes = bytes.len + 1;
+    try context.appendBatch(&.{}, replies);
+    try t.expectEqual(before + 2, context.entries.items.len);
+
+    // A data URL carries its encoded image in the record too.
+    const data_url: Model.Content.Part = .{ .image = .{ .url = "data:image/png;base64,AAAA" } };
+    context.inline_image_limit_bytes = "data:image/png;base64,AAAA".len - 1;
+    try t.expectError(error.HistoryRecordTooLarge, context.appendBatch(&.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{data_url} } } }}, &.{}));
+    context.inline_image_limit_bytes = "data:image/png;base64,AAAA".len;
+    try context.appendBatch(&.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{data_url} } } }}, &.{});
+    try t.expectEqual(before + 3, context.entries.items.len);
 }
