@@ -2,16 +2,17 @@
 
 Send your letter by email while reception is open. If reception is closed, your mail service may report a delivery failure. See [service status and reception](running.md#service-status-and-reception).
 
-## Sending a request
+## Sending a letter
 
 Send through your mail service's authenticated submission path. Use a From address in Ivenna's mail domain that your account is authorized to use. If you expect a reply, ask the deployment operator to register your address for outgoing mail. See [outgoing registration](running.md#outgoing-correspondents).
 
 ```text
 From: operator@ivenna.test
 To: ivenna@ivenna.test
-Subject: French practice
+Subject: Swifts at the library
 
-Please remember that I am learning French and propose a practice plan.
+You wondered last spring whether the swifts still nest near the library.
+I saw them disappear under the east eaves this morning.
 ```
 
 Ivenna sees your correspondent ID (`operator` in this example), subject, and body. To ask Ivenna to contact someone else, give their registered ID. See [email addresses and IDs](communication.md#current-email-addressing).
@@ -32,20 +33,20 @@ A letter that exceeds the model's input limits can stay pending and delay later 
 
 Ivenna decides whether and when to write. You may receive one response, several updates, or none. See [how Ivenna sends email](communication.md#current-email-addressing).
 
-Each follow-up reaches the core as a new observation, even within an email thread. Identify the earlier request, include the details your follow-up depends on, and say what has changed.
+Each follow-up reaches the core as a new observation, even within an email thread. Name the earlier subject or exchange when it helps make the follow-up clear.
 
 ```text
 From: operator@ivenna.test
 To: ivenna@ivenna.test
-Subject: French practice schedule
+Subject: Swifts at the library, a correction
 
-About the French practice plan: use Tuesday and Saturday, and keep each
-session to 20 minutes. Please retain the vocabulary goals we agreed on.
+I went back at dusk. The birds were going under the eaves of the house
+next door. The library itself has scaffolding up now.
 ```
 
 ## Ongoing work and memory
 
-Ivenna can pursue work between your messages and may read several waiting letters together. If you ask it to follow a project's releases, a listener can bring new versions to its attention. See [subscriptions](attention.md#subscriptions).
+Ivenna may read several waiting letters together. It can keep following an interest between letters. If it chooses to follow a project's releases, a listener can bring new versions to its attention. See [subscriptions](attention.md#subscriptions).
 
 Ivenna can condense its working history and decide what to keep in memory. Keep your own mail copies if you need to retrieve or quote a letter later. See [autonomous memory](memory.md) and [mail retention](running.md#communication-copies).
 

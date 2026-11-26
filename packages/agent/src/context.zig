@@ -15,8 +15,9 @@ pub const Context = struct {
     focus_id: []const u8,
     entries: std.ArrayList(Entry) = .empty,
     messages: std.ArrayList(Model.Item) = .empty,
+    inherited_through: usize = 0,
 
-    pub const CompactionScope = enum { keep_latest_tool_round, keep_recent_rounds, all_history };
+    pub const CompactionScope = enum { keep_latest_tool_round, keep_recent_rounds, keep_pending_observations };
     const recent_completed_rounds = 2;
 
     pub fn init(allocator: Allocator, scope: Scope, focus_id: []const u8) !Context {
@@ -24,12 +25,41 @@ pub const Context = struct {
     }
 
     pub fn restore(allocator: Allocator, scope: Scope, focus_id: []const u8, entries: []const Entry) !Context {
-        var self: Context = .{ .allocator = allocator, .arena = .init(allocator), .scope = scope, .focus_id = undefined };
+        return copyEntries(allocator, scope, focus_id, entries, inheritedPrefix(scope, focus_id, entries));
+    }
+
+    fn copyEntries(allocator: Allocator, scope: Scope, focus_id: []const u8, entries: []const Entry, inherited_through: usize) !Context {
+        var self: Context = .{
+            .allocator = allocator,
+            .arena = .init(allocator),
+            .scope = scope,
+            .focus_id = undefined,
+            .inherited_through = inherited_through,
+        };
         errdefer self.deinit();
         self.focus_id = try self.arena.allocator().dupe(u8, focus_id);
         try self.entries.ensureTotalCapacity(allocator, entries.len);
         for (entries) |entry| try self.append(entry);
         return self;
+    }
+
+    fn inheritedPrefix(scope: Scope, focus_id: []const u8, entries: []const Entry) usize {
+        if (scope.session_id == 1) return 0;
+        var first_own = entries.len;
+        for (entries, 0..) |entry, index| {
+            if (entry != .record) continue;
+            const owner = switch (entry.record) {
+                .events => |events| events.focus_id,
+                .handover => |handover| handover.focus_id,
+            };
+            if (!std.mem.eql(u8, owner, focus_id)) continue;
+            first_own = @min(first_own, index);
+            // Older checkpoints could contain an activity handover before its assignment.
+            if (entry.record == .events) for (entry.record.events.items) |event| {
+                if (event == .assignment) return index;
+            };
+        }
+        return first_own;
     }
 
     pub fn deinit(self: *Context) void {
@@ -44,17 +74,22 @@ pub const Context = struct {
     }
 
     pub fn clone(self: *const Context, allocator: Allocator) !Context {
-        return restore(allocator, self.scope, self.focus_id, self.entries.items);
+        return copyEntries(allocator, self.scope, self.focus_id, self.entries.items, self.inherited_through);
+    }
+
+    /// Before an activity admits its assignment, its existing context comes from the fork.
+    pub fn markInheritedHistory(self: *Context) void {
+        self.inherited_through = self.entries.items.len;
     }
 
     pub fn appendRecord(self: *Context, record: Input.Record) !void {
         try self.append(.{ .record = record });
     }
 
-    /// Preserve the complete native exchange, including replies when model
-    /// output is empty.
+    /// Preserve the native exchange. An empty response still closes input
+    /// that was waiting for inference, without adding a model message.
     pub fn appendBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
-        if (output.len == 0 and replies.len == 0) return;
+        if (output.len == 0 and replies.len == 0 and !self.hasPendingContinuation()) return;
         const batch = try self.allocator.alloc(Model.Item, output.len + replies.len);
         defer self.allocator.free(batch);
         @memcpy(batch[0..output.len], output);
@@ -69,14 +104,14 @@ pub const Context = struct {
     }
 
     /// The ordinary turn with only the history eligible for summarization.
-    pub fn retainedRequest(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event) ![]const Model.Item {
-        return buildRequest(a, self.summaryItems(.keep_latest_tool_round), .{ .current = current, .purpose = .{ .work = events } });
+    pub fn retainedRequest(self: *const Context, a: Allocator, current: Input.Current) ![]const Model.Item {
+        return buildRequest(a, self.summaryItems(.keep_latest_tool_round), .{ .current = current, .purpose = .{ .work = &.{} } });
     }
 
-    /// Assemble a request with the pending tool round and observations admitted after it.
-    pub fn latestRequest(self: *const Context, a: Allocator, current: Input.Current) ![]const Model.Item {
-        const pending = self.compactionBoundary(.keep_latest_tool_round);
-        return buildRequest(a, self.messages.items[pending.message_index..], .{ .current = current, .purpose = .{ .work = &.{} } });
+    /// Assemble the exact events and exchanges that would follow a handover.
+    pub fn continuationRequest(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event, scope: CompactionScope) ![]const Model.Item {
+        const pending = self.compactionBoundary(scope);
+        return buildRequest(a, self.messages.items[pending.message_index..], .{ .current = current, .purpose = .{ .work = events } });
     }
 
     /// Completed exchanges and observations before the pending continuation
@@ -88,16 +123,18 @@ pub const Context = struct {
     }
 
     pub fn hasToolRoundToKeep(self: *const Context) bool {
-        return self.latestToolRound() != null;
+        return self.latestToolRound(self.pendingObservations()) != null;
     }
 
-    /// True when the scope leaves history a summary can replace. A handover
-    /// inherited without any history of its own is not: summarizing it would
-    /// describe nothing and replace the handover the focus started with.
-    pub fn hasHistoryForCompaction(self: *const Context, compaction_scope: CompactionScope) bool {
-        return self.canCompact(compaction_scope);
+    pub fn hasPendingContinuation(self: *const Context) bool {
+        return self.compactionBoundary(.keep_latest_tool_round).entry_index != self.entries.items.len;
     }
 
+    pub fn hasSummaryHistory(self: *const Context, compaction_scope: CompactionScope) bool {
+        return self.summaryEntryCount(compaction_scope) != 0;
+    }
+
+    /// A lone handover only merits recompression when it prevents the next request from fitting.
     pub fn canCompact(self: *const Context, compaction_scope: CompactionScope) bool {
         return switch (self.summaryEntryCount(compaction_scope)) {
             0 => false,
@@ -111,35 +148,37 @@ pub const Context = struct {
 
     const HistoryBoundary = struct { entry_index: usize, message_index: usize };
 
-    /// An observation can be checkpointed before the next inference receives
-    /// it. Preserve that observation with a tool round still awaiting inference.
-    fn latestToolRound(self: *const Context) ?HistoryBoundary {
-        var entry_index = self.entries.items.len;
-        var message_index = self.messages.items.len;
-        while (entry_index != 0) {
-            entry_index -= 1;
-            switch (self.entries.items[entry_index]) {
-                .record => |record| {
-                    if (record != .events) return null;
-                    message_index -= 1;
-                },
-                .exchange => |exchange| {
-                    for (exchange) |item| {
-                        if (item == .tool_result) return .{ .entry_index = entry_index, .message_index = message_index - exchange.len };
-                    }
-                    return null;
-                },
-            }
+    /// Admission can be checkpointed before inference consumes these events.
+    fn pendingObservations(self: *const Context) HistoryBoundary {
+        var boundary: HistoryBoundary = .{ .entry_index = self.entries.items.len, .message_index = self.messages.items.len };
+        while (boundary.entry_index > self.inherited_through) {
+            const entry = self.entries.items[boundary.entry_index - 1];
+            if (entry != .record or entry.record != .events) break;
+            boundary.entry_index -= 1;
+            boundary.message_index -= 1;
+        }
+        return boundary;
+    }
+
+    fn latestToolRound(self: *const Context, observations: HistoryBoundary) ?HistoryBoundary {
+        if (observations.entry_index <= self.inherited_through) return null;
+        const index = observations.entry_index - 1;
+        const entry = self.entries.items[index];
+        if (entry != .exchange) return null;
+        for (entry.exchange) |item| {
+            if (item == .tool_result) return .{ .entry_index = index, .message_index = observations.message_index - entry.exchange.len };
         }
         return null;
     }
 
     fn compactionBoundary(self: *const Context, compaction_scope: CompactionScope) HistoryBoundary {
-        const end: HistoryBoundary = .{ .entry_index = self.entries.items.len, .message_index = self.messages.items.len };
+        const observations = self.pendingObservations();
+        if (compaction_scope == .keep_pending_observations) return observations;
+        const pending = self.latestToolRound(observations) orelse observations;
         return switch (compaction_scope) {
-            .keep_latest_tool_round => self.latestToolRound() orelse end,
-            .keep_recent_rounds => self.recentRounds(self.latestToolRound() orelse end),
-            .all_history => end,
+            .keep_latest_tool_round => pending,
+            .keep_recent_rounds => self.recentRounds(pending),
+            .keep_pending_observations => unreachable,
         };
     }
 
@@ -149,7 +188,7 @@ pub const Context = struct {
         var retained = start;
         var cursor = start;
         var completed: usize = 0;
-        while (cursor.entry_index != 0) {
+        while (cursor.entry_index > self.inherited_through) {
             cursor.entry_index -= 1;
             switch (self.entries.items[cursor.entry_index]) {
                 .record => |record| {
@@ -350,22 +389,6 @@ test "encoded native exchanges restore independently of their source buffers" {
     try std.testing.expectEqualSlices(u8, &.{ 0, 255, '"', '\\', '\n' }, file.reference.?);
 }
 
-test "a lone handover is not history a summary can replace" {
-    var context = try Context.restore(std.testing.allocator, .{ .session_id = 1, .epoch = 0 }, "activity-1", &.{
-        .{ .record = .{ .handover = .{
-            .focus_id = "core-1",
-            .observed_at_unix_ms = 900,
-            .summary = "The core's earlier work.",
-            .state = .{ .activities = &.{}, .callbacks = &.{} },
-        } } },
-    });
-    defer context.deinit();
-    for ([_]Context.CompactionScope{ .keep_latest_tool_round, .keep_recent_rounds, .all_history }) |scope| {
-        try std.testing.expect(!context.canCompact(scope));
-        try std.testing.expect(!context.hasHistoryForCompaction(scope));
-    }
-}
-
 test "candidate handover retains sampled references and leaves earlier history available" {
     var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer scratch.deinit();
@@ -373,6 +396,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     var original = try Context.init(std.testing.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
     defer original.deinit();
     try original.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .input = .{ .from = &.{"operator"}, .text = "Keep working on our plan.", .observed_at_unix_ms = 100 } }} } });
+    try original.appendBatch(&.{.{ .continuation = "I will keep working on the plan." }}, &.{});
     var activity_id = "practice-2".*;
     var command_id = "inspect-7".*;
     var subscription_id = "releases-4".*;
@@ -404,7 +428,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     @memset(&description, 0);
     @memset(&correspondent_id, 0);
 
-    try std.testing.expectEqual(@as(usize, 1), original.records().len);
+    try std.testing.expectEqual(@as(usize, 2), original.records().len);
     try std.testing.expectEqualStrings("Keep working on our plan.", original.records()[0].record.events.items[0].input.text);
     try std.testing.expectEqual(@as(usize, 1), replacement.records().len);
     const retained = replacement.records()[0].record.handover;
@@ -504,10 +528,44 @@ test "compaction retains checkpointed observations following a tool round that s
     var replacement = try restored.withHandover(testing.allocator, handover, .keep_latest_tool_round);
     defer replacement.deinit();
     try testing.expectEqualDeep(entries[1..], replacement.records()[1..]);
+    var smaller = try restored.withHandover(testing.allocator, handover, .keep_pending_observations);
+    defer smaller.deinit();
+    try testing.expectEqualDeep(entries[2..], smaller.records()[1..]);
     try restored.appendBatch(&.{.{ .continuation = "Assistant response" }}, &.{});
     var after_response = try restored.withHandover(testing.allocator, handover, .keep_latest_tool_round);
     defer after_response.deinit();
     try testing.expect(after_response.records()[1..].len == 0);
+}
+
+test "only the activity's own unanswered events and tool rounds await inference" {
+    const testing = std.testing;
+    const scope: Scope = .{ .session_id = 2, .epoch = 0 };
+    const focus_id = "research-2";
+    const inherited: []const Entry = &.{
+        .{ .record = .{ .events = .{ .focus_id = "core-1", .items = &.{.{ .startup = .{ .observed_at_unix_ms = 0 } }} } } },
+        .{ .exchange = &.{
+            .{ .continuation = "Opening an activity" },
+            .{ .tool_result = .{ .call_id = "open", .content = .{ .parts = &.{} } } },
+        } },
+    };
+    var context = try Context.restore(testing.allocator, scope, focus_id, inherited);
+    defer context.deinit();
+    try testing.expect(!context.hasPendingContinuation());
+    try testing.expect(!context.hasToolRoundToKeep());
+
+    const assignment: Input.Record = .{ .events = .{ .focus_id = focus_id, .items = &.{.{ .assignment = .{ .task = "Research the plan." } }} } };
+    try context.appendRecord(assignment);
+    try testing.expect(context.hasPendingContinuation());
+    try testing.expect(!context.hasToolRoundToKeep());
+    const handover: Input.Handover = .{ .focus_id = focus_id, .observed_at_unix_ms = 100, .summary = "The source's earlier work.", .state = .{ .activities = &.{}, .callbacks = &.{} } };
+    var replacement = try context.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    defer replacement.deinit();
+    try testing.expectEqualDeep(@as([]const Entry, &.{ .{ .record = .{ .handover = handover } }, .{ .record = assignment } }), replacement.records());
+
+    try replacement.appendBatch(&.{.{ .continuation = "Reading the plan" }}, &.{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{} } } }});
+    try testing.expect(replacement.hasToolRoundToKeep());
+    try replacement.appendBatch(&.{}, &.{});
+    try testing.expect(!replacement.hasPendingContinuation());
 }
 
 test "recent retention carries complete exchanges and their observations across a handover" {

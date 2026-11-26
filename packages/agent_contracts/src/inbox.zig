@@ -30,9 +30,8 @@ pub const Inbox = struct {
 
     /// Call after storage has confirmed the complete observation and checkpoint.
     /// Acknowledgement releases the transport copy; task execution can continue.
-    /// Acknowledging the same receipt again must succeed: a receipt that is
-    /// offered after its acknowledgement was recorded means the transport did
-    /// not observe the earlier call, and the kernel simply repeats it.
+    /// The kernel can repeat acknowledgement when a poll still offers the
+    /// same receipt. A successful repeat has the same effect as the first.
     pub fn acknowledge(self: Inbox, a: Allocator, receipt: []const u8) !void {
         return self.vtable.acknowledge(self.context, a, receipt);
     }

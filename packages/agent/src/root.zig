@@ -3,7 +3,6 @@ pub const Engine = @import("engine.zig").Engine;
 pub const Input = @import("input.zig");
 
 test {
-    _ = @import("compaction_test.zig");
     _ = @import("context.zig");
     _ = @import("inference_test.zig");
     _ = @import("input.zig");

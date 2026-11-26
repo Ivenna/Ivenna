@@ -1,6 +1,5 @@
 const std = @import("std");
 const agent = @import("agent");
-const Model = @import("agent_contracts").Model;
 const responses = @import("responses");
 
 pub const Config = struct {
@@ -69,9 +68,9 @@ pub const Config = struct {
             .llm_max_output_tokens = try number(u32, env, "LLM_MAX_OUTPUT_TOKENS", responses.Provider.default_max_output_tokens),
             .llm_request_timeout_ms = try number(u32, env, "LLM_REQUEST_TIMEOUT_MS", responses.Provider.default_request_timeout_ms),
             .llm_reasoning = .{
-                .core = try reasoningEffort(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
-                .activity = try reasoningEffort(env, "LLM_ACTIVITY_REASONING_EFFORT", default_reasoning.activity),
-                .compaction = try reasoningEffort(env, "LLM_COMPACTION_REASONING_EFFORT", default_reasoning.compaction),
+                .core = try nonempty(env, "LLM_CORE_REASONING_EFFORT", default_reasoning.core),
+                .activity = try nonempty(env, "LLM_ACTIVITY_REASONING_EFFORT", default_reasoning.activity),
+                .compaction = try nonempty(env, "LLM_COMPACTION_REASONING_EFFORT", default_reasoning.compaction),
             },
         };
         if (config.memory_ssh_config) |path| if (path.len == 0) return error.MissingMemorySshConfig;
@@ -92,11 +91,6 @@ pub const Config = struct {
         return value;
     }
 };
-
-fn reasoningEffort(env: *const std.process.Environ.Map, key: []const u8, fallback: Model.ReasoningEffort) !Model.ReasoningEffort {
-    const value = env.get(key) orelse return fallback;
-    return std.meta.stringToEnum(Model.ReasoningEffort, value) orelse error.InvalidReasoningEffort;
-}
 
 fn serviceAddress(env: *const std.process.Environ.Map) !std.Io.net.IpAddress {
     const value = try nonempty(env, "SERVICE_ADDRESS", "0.0.0.0:8090");

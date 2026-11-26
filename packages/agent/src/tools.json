@@ -86,7 +86,7 @@
   },
   {
     "name": "open_focus",
-    "description": "Open an activity to pursue a task while the core continues. The activity can run host commands and report to the core. The result gives its `focus_id`.",
+    "description": "Open a concurrent activity with the core's retained history, including this round's tool results. It can run host commands and receive messages at its `focus_id` after the round.",
     "parameters": {
       "type": "object",
       "properties": {

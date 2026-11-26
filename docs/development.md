@@ -52,12 +52,12 @@ Prompts and tool declarations are interfaces. Each resource gives the model the 
 
 | Resource | Purpose |
 | --- | --- |
-| [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
+| [system.md](../packages/agent/src/system.md) | Shared orientation to focuses, observations, communication, and resumption |
 | [Agent tools](../packages/agent/src/tools.json) | Send messages, manage channels and subscriptions, open focuses, and schedule wakeups |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. The configured [web reader](../packages/resources/src/web.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
-| [compaction.md](../packages/agent/src/compaction.md) | Understanding to carry into a handover |
+| [compaction.md](../packages/agent/src/compaction.md) | Handover request and response format |
 
 Follow the [design's prompt boundary](design.md#a-self-in-the-world) when editing model-facing resources. Keep the system prompt focused on the semantics needed to interpret inputs, use available actions, and continue across activations.
 
@@ -67,7 +67,7 @@ Keep agent-owned action recognition, typed arguments, and role selection togethe
 
 Read each tool declaration as a whole. Express value choices and bounds in its schema, and match schema defaults to runtime behavior. Use descriptions to explain effects and the implications of picking an argument or receiving a result. Keep cues of ownership and continuity brief and leave content, organization, and learned practices to Ivenna's judgment. See the [capability principles](design.md#understanding-and-autonomy).
 
-Put the current focus, task facts, and observations in user input. Choose details for the decision the focus can make at that point. Describe an action's destination, cost, or other effects in its declaration when they matter before a call. In the result, report what happened and which effects remain uncertain. Keep native service and host diagnostics in logs. Update the owning interface guide when its contract changes. See [context and continuity](design.md#context-and-continuity).
+Identify the current focus and give it the observations it can consider at that point. Describe an action's destination, cost, or other effects in its declaration when they matter before a call. In the result, report what happened and which effects remain uncertain. Keep native service and host diagnostics in logs. Update the owning interface guide when its contract changes. See [context and continuity](design.md#context-and-continuity).
 
 ### Session execution
 

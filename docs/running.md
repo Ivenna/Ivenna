@@ -26,8 +26,8 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `65536` |
 | `LLM_REQUEST_TIMEOUT_MS` | Time limit for one inference attempt or one file upload, including upload negotiation | `600000` (10 minutes) |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
-| `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `high` |
-| `LLM_COMPACTION_REASONING_EFFORT` | Reasoning effort for the request that writes a handover summary | `high` |
+| `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `max` |
+| `LLM_COMPACTION_REASONING_EFFORT` | Reasoning effort used to write a handover summary | `max` |
 | `DEEPSEEK_API_KEY` | DeepSeek Fetch credential for [web page access](#web-page-access) | Web page retrieval disabled |
 | `CONTEXT_COMPACT_AT_TOKENS` | Input-token threshold for compaction | `262144` |
 | `CONTEXT_COMPACT_AT_BYTES` | Fallback threshold for compaction, in encoded request bytes | `1048576` (1 MiB) |
@@ -61,23 +61,27 @@ Ivenna sends supported image references to the configured model service for retr
 
 ### Model requests
 
+For ordinary inference, Ivenna sends selected working history and the observations admitted for that turn to the configured model service. Working history can include correspondence, tool results, and prior model output. An activity can inherit these records from the core. To generate a handover, Ivenna sends the history being summarized and a dated sample that can include channel and subscription descriptions, pending wakeups, and outgoing correspondent IDs. The adapter supplies tool attachments with the request or uploads files for reference in later requests. See [inference turns](input.md#inference-turns), [sampled state](input.md#sampled-state), and [tool content](content.md).
+
 Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments.
 
-Choose an ordinary reasoning effort for each role from the values supported by your model service. Ivenna accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Compaction always uses `high` with no tools.
+The core's ordinary reasoning default favors responsive correspondence and coordination. The activity default favors deeper reasoning. `LLM_COMPACTION_REASONING_EFFORT` applies to handover generation in both roles.
+
+The model service receives each configured effort name as written. If you change the model or service, use effort values it supports. To adopt a newly available effort, set the corresponding variable and restart the kernel. See the [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/).
 
 `LLM_REQUEST_TIMEOUT_MS` applies separately to each inference attempt, including compaction. A temporary outage can therefore delay a decision beyond this timeout. For each file upload, the timeout covers the entire negotiation. See [when model work stalls](#when-model-work-stalls) and [file outcomes](content.md#complete-files).
 
 ### Context budgets
 
-`CONTEXT_COMPACT_AT_TOKENS` sets the soft compaction threshold. The kernel uses the input token count, including cached input, from the focus's last committed ordinary model round, with or without tool calls. The kernel reuses the saved count after restart when the configured model and service endpoint match. When the count is unavailable, `CONTEXT_COMPACT_AT_BYTES` sets the threshold for an encoded request built from the retained history eligible for compaction. See [what compaction measures](architecture.md#when-compaction-runs).
+`CONTEXT_COMPACT_AT_TOKENS` sets the soft compaction threshold using the last ordinary round's input token count. When that count is unavailable, as on an activity's first request, `CONTEXT_COMPACT_AT_BYTES` applies to an encoded request built from older retained history. See [what compaction measures](architecture.md#when-compaction-runs).
 
 `CONTEXT_OBSERVATION_BATCH_BYTES` sets the target for encoded bytes added by a batch of new observations. The first observation can exceed that target if the full request fits the adapter's limits. See [how observations are admitted](architecture.md#activation-admission).
 
-For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKENS` for output. Set the compaction threshold below the remaining input space, leaving room for a complete tool exchange and incoming observations. Evaluate continuity and compaction frequency on representative work. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/) and [evaluating compaction](testing.md#evaluating-compaction).
+For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKENS` for output. Set the compaction threshold below the remaining input space, leaving room for a complete tool exchange and incoming observations. Evaluate compaction frequency and continuity on representative work. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/), [evaluating compaction](testing.md#evaluating-compaction), and [evaluating continuity](testing.md#evaluating-continuity-across-interruptions).
 
 The [model request limits](content.md#model-request-checks) apply to the complete encoded request. The model service checks its own limits after processing the input.
 
-When compaction is optional and a usable handover cannot be prepared, the original request can proceed while it fits. If the kernel cannot assemble a request within the adapter's limits, the focus waits with its history and any unadmitted observations intact. See [handover outcomes](architecture.md#continuing-with-a-handover).
+If a focus pauses at a request limit, check the logs for the limit it hit. The history and queued observations remain available when the focus resumes. See [when model work stalls](#when-model-work-stalls) and [handover outcomes](architecture.md#continuing-with-a-handover).
 
 ### Session and command capacity
 
@@ -163,7 +167,7 @@ The executable embeds its model-facing resources and can run independently of th
 
 Give each kernel its own mailbox, `DATA_DIR`, and `SERVICE_ADDRESS`. If startup reports `AddressInUse`, check whether another process owns `SERVICE_ADDRESS` or a kernel is already running for the data directory.
 
-The kernel opens the instance database, initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a message](usage.md#sending-a-request). The kernel writes diagnostics to standard error.
+The kernel opens the instance database, initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a letter](usage.md#sending-a-letter). The kernel writes diagnostics to standard error.
 
 Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
 

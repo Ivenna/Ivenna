@@ -8,7 +8,7 @@ const Allocator = std.mem.Allocator;
 const input: Model.Request = .{
     .history = &.{.{ .message = .{ .role = .user, .text = "Continue the work." } }},
     .tools = &.{},
-    .reasoning_effort = .medium,
+    .reasoning_effort = "medium",
 };
 const completed = "{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"accepted\",\"name\":\"inspect\",\"arguments\":\"{}\"}]}";
 const success = reply("200 OK", "", completed);
@@ -127,7 +127,7 @@ test "one inference sends the complete request and validates the response" {
     const large_input: Model.Request = .{
         .history = &.{.{ .message = .{ .role = .user, .text = text } }},
         .tools = input.tools,
-        .reasoning_effort = input.reasoning_effort,
+        .reasoning_effort = "provider-effort",
     };
     const response = (try provider.port().next(fixture.arena.allocator(), large_input)).response;
     try std.testing.expectEqual(@as(usize, 1), response.calls.len);
@@ -135,8 +135,12 @@ test "one inference sends the complete request and validates the response" {
     try std.testing.expectEqualStrings("inspect", response.calls[0].name);
     try std.testing.expectEqualStrings("{}", response.calls[0].arguments);
     try fixture.finish();
-    const sent = try std.json.parseFromSliceLeaky(struct { input: []struct { content: []const u8 } }, fixture.arena.allocator(), fixture.server.payload.?, .{ .ignore_unknown_fields = true });
+    const sent = try std.json.parseFromSliceLeaky(struct {
+        input: []struct { content: []const u8 },
+        reasoning: struct { effort: []const u8 },
+    }, fixture.arena.allocator(), fixture.server.payload.?, .{ .ignore_unknown_fields = true });
     try std.testing.expectEqualStrings(text, sent.input[0].content);
+    try std.testing.expectEqualStrings(large_input.reasoning_effort, sent.reasoning.effort);
 }
 
 test "completed responses expose total input usage when it is available" {
@@ -329,7 +333,7 @@ test "classified PDF uploads intact bytes and preserves paired tool outputs befo
         .{ .tool_result = .{ .call_id = "read-report", .content = .{ .parts = &parts } } },
         .{ .tool_result = .{ .call_id = "other-tool", .content = .{ .parts = &.{.{ .text = "Other result" }} } } },
     };
-    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
+    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = "high" };
     try provider.port().prepareToolReplies(a, &history);
     try std.testing.expectEqual(null, parts[1].file.reference);
     const file = history[0].tool_result.content.parts[1].file;
@@ -381,7 +385,7 @@ test "file upload negotiates from the rejection status and reuses the accepted r
     var provider = try fixture.start();
     const a = fixture.arena.allocator();
     var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{.{ .file = .{ .bytes = "plain text document" } }} } } }};
-    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
+    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = "high" };
     try provider.port().prepareToolReplies(a, &history);
     try provider.port().prepareToolReplies(a, &history);
     _ = try provider.port().next(a, request);
@@ -419,7 +423,7 @@ test "the full encoded request is measured and rejected without omitting new ima
         .{ .tool_result = .{ .call_id = "retained", .content = .{ .parts = &.{picture} } } },
         .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{ .{ .text = uri }, picture } } } },
     };
-    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
+    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = "high" };
     const size = (try provider.port().measure(a, request)).bytes;
     provider.request_ceiling_bytes = size - 1;
     try provider.port().prepareToolReplies(a, history[1..]);
@@ -460,7 +464,7 @@ test "complete request file counts include retained and newly prepared replies" 
         .{ .tool_result = .{ .call_id = "retained", .content = .{ .parts = &retained_files } } },
         .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{ .{ .text = "Source" }, .{ .file = .{ .bytes = "new bytes" } } } } } },
     };
-    var request: Model.Request = .{ .history = history[0..1], .tools = &.{}, .reasoning_effort = .high };
+    var request: Model.Request = .{ .history = history[0..1], .tools = &.{}, .reasoning_effort = "high" };
     try std.testing.expectEqual(null, (try provider.port().measure(a, request)).violation);
     try provider.port().prepareToolReplies(a, history[1..]);
     request.history = &history;
@@ -495,7 +499,7 @@ test "request encoding counts images it sends and describes overlong URLs withou
         .{ .tool_result = .{ .call_id = "new", .content = .{ .parts = &.{picture} } } },
     };
     try provider.port().prepareToolReplies(a, history[1..]);
-    var request: Model.Request = .{ .history = history[0..2], .tools = &.{}, .reasoning_effort = .high };
+    var request: Model.Request = .{ .history = history[0..2], .tools = &.{}, .reasoning_effort = "high" };
     const measurement = try provider.port().measure(a, request);
     try std.testing.expectEqual(null, measurement.violation);
     try std.testing.expect((try provider.port().next(a, request)) == .response);
@@ -537,7 +541,7 @@ test "a denied file upload leaves the other observations available for inference
     defer fixture.deinit();
     var provider = try fixture.start();
     var history = [_]Model.Item{.{ .tool_result = .{ .call_id = "read", .content = .{ .parts = &.{ .{ .file = .{ .bytes = "bytes" } }, .{ .text = "Sibling observation" } } } } }};
-    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = .high };
+    const request: Model.Request = .{ .history = &history, .tools = &.{}, .reasoning_effort = "high" };
     const a = fixture.arena.allocator();
     try provider.port().prepareToolReplies(a, &history);
     const outcome = try provider.port().next(a, request);

@@ -25,11 +25,9 @@ pub const Engine = struct {
     reasoning: Reasoning = .{},
 
     pub const Reasoning = struct {
-        core: Model.ReasoningEffort = .low,
-        activity: Model.ReasoningEffort = .high,
-        /// Compaction is its own request kind. It keeps the historical high
-        /// default even when ordinary requests are tuned below or above it.
-        compaction: Model.ReasoningEffort = .high,
+        core: []const u8 = "low",
+        activity: []const u8 = "max",
+        compaction: []const u8 = "max",
     };
 
     /// Kernel supplies effects tied to the calling session and round without

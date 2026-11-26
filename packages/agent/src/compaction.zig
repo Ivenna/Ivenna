@@ -12,16 +12,16 @@ pub const Rejection = union(enum) {
 
     fn retryInstruction(self: Rejection) []const u8 {
         return switch (self) {
-            .empty_summary => "The previous summary was empty. Include what this focus needs to continue.",
-            .unexpected_tool_call => "The previous reply tried to call a tool. Return the handover as plain text.",
-            .too_large => "The proposed handover left too little room to continue. Write a shorter summary.",
+            .empty_summary => "The previous reply contained no handover summary.",
+            .unexpected_tool_call => "The previous reply included a tool call.",
+            .too_large => "The next request exceeded its limit with the proposed summary. Write a shorter summary.",
         };
     }
 
     pub fn interruption(self: Rejection, focus_id: []const u8) []const u8 {
         return switch (self) {
-            .empty_summary => "The handover summary was empty.",
-            .unexpected_tool_call => "The handover response tried to call a tool.",
+            .empty_summary => "The model returned no handover summary.",
+            .unexpected_tool_call => "The model returned a tool call while preparing the handover.",
             .too_large => |limit| Engine.reportRequestLimit(focus_id, "request with the proposed handover", limit),
         };
     }
@@ -59,8 +59,7 @@ pub fn summarize(engine: *Engine, arena: Allocator, context: *const Context, sna
     defer inference.deinit();
     const response = inference.response;
     if (response.calls.len != 0) return .{ .rejected = .unexpected_tool_call };
-    const summary = response.text orelse return .{ .rejected = .empty_summary };
-    const text = std.mem.trim(u8, summary, " \t\r\n");
+    const text = std.mem.trim(u8, response.text orelse "", " \t\r\n");
     if (text.len == 0) return .{ .rejected = .empty_summary };
     return .{ .handover = .{
         .focus_id = context.focus_id,

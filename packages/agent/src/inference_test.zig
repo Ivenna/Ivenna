@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const request: Model.Request = .{
     .history = &.{.{ .message = .{ .role = .user, .text = "Continue from the observation." } }},
     .tools = &.{.{ .name = "inspect", .description = "Inspect an entry.", .parameters = .{ .object = .empty } }},
-    .reasoning_effort = .high,
+    .reasoning_effort = "high",
 };
 const retry_after_ms = 600_000;
 

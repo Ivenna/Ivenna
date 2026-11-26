@@ -54,7 +54,7 @@ Stalwart stores accounts, receiving rules, and retention settings in its data vo
 | Address | Role | Example password |
 | --- | --- | --- |
 | `ivenna@ivenna.test` | Dedicated kernel mailbox | `ivenna-local-password` |
-| `operator@ivenna.test` | Send requests and receive Ivenna's messages | `operator-local-password` |
+| `operator@ivenna.test` | Correspond with Ivenna | `operator-local-password` |
 | `admin@ivenna.test` | Stalwart administration | `admin-local-password` |
 
 The plan requires authenticated SMTP submission. `MtaStageAuth.mustMatchSender` checks that the account may use the SMTP envelope sender. At `DATA`, the `ivenna-sender` script selected by `MtaStageData` requires exactly one From address matching that sender, ignoring case. See Stalwart's [sender verification](https://stalw.art/docs/mta/inbound/auth/#sender-verification) and [From-header example](https://stalw.art/docs/sieve/examples/#require-the-from-header-to-match-the-sender-of-authenticated-mail).
@@ -188,7 +188,7 @@ The external volumes and private instance files remain in place. Use the [startu
 
 ## Updating the kernel and middleware
 
-For compatible updates, keep the same instance directory. Incorporate relevant changes from `.env.example` into the instance's `.env` and reload it. See the [configuration steps](#configuration) and [example environment](../.env.example).
+For compatible updates, keep the same instance directory. Review the current defaults and any values set in the instance's `.env`, then reload it after edits. See the [configuration steps](#configuration) and [kernel settings](../docs/running.md#configuration).
 
 ### Kernel
 

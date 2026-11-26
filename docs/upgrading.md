@@ -1,5 +1,9 @@
 # Upgrading Ivenna
 
+## Adopting the new reasoning defaults
+
+Check the kernel's launch environment for existing `LLM_ACTIVITY_REASONING_EFFORT` and `LLM_COMPACTION_REASONING_EFFORT` settings, including in any `.env` copied from an older template. Explicit values take precedence. Remove an override to adopt the new default, or set a level supported by your model. Restart the kernel with the updated environment. See [model request settings](running.md#model-requests).
+
 ## Upgrading to saved session progress
 
 1. Stop the kernel. Keep the previous executable and make a matched backup of the mailbox and instance database. See [backups and transfers](running.md#backups-and-transfers).

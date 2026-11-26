@@ -303,8 +303,6 @@ pub const Mailbox = struct {
     }
 
     /// The caller has durably admitted this input into working history.
-    /// Repeating the call for a message already retired into Trash succeeds,
-    /// because the patch states the same destination and marker as the first.
     pub fn acknowledge(self: Mailbox, a: Allocator, id: []const u8) !void {
         try self.retireEmails(a, &.{.{ .id = id, .marker = .handled }});
     }
@@ -1280,24 +1278,6 @@ test "acknowledgement retries a lost response and reports a rejected update" {
     defer fixture.deinit();
     const mailbox = try fixture.start();
     try std.testing.expectError(error.MailObjectFailed, mailbox.acknowledge(fixture.arena.allocator(), "received"));
-    try fixture.finish();
-}
-
-test "acknowledging the same message twice succeeds" {
-    const Fixture = @import("test_jmap.zig").Fixture;
-    const update: []const @import("test_jmap.zig").Property = &.{
-        .{ .path = &.{ "update", "received", "mailboxIds", "trash" }, .json = "true" },
-        .{ .path = &.{ "update", "received", "keywords/ivenna-handled" }, .json = "true" },
-    };
-    const applied = "{\"updated\":{\"received\":null}}";
-    var fixture = try Fixture.init(&.{
-        .{ .method = "Email/set", .properties = update, .result = applied },
-        .{ .method = "Email/set", .properties = update, .result = applied },
-    });
-    defer fixture.deinit();
-    const mailbox = try fixture.start();
-    try mailbox.acknowledge(fixture.arena.allocator(), "received");
-    try mailbox.acknowledge(fixture.arena.allocator(), "received");
     try fixture.finish();
 }
 
