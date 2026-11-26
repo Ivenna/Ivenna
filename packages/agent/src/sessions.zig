@@ -1,6 +1,7 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
 const History = @import("history.zig").History;
+const Scope = @import("history.zig").Scope;
 const Persistence = @import("history.zig").Persistence;
 const Subscriptions = @import("instance_state").subscriptions;
 const Reports = @import("reports.zig");
@@ -42,6 +43,10 @@ pub const Session = struct {
             .interrupted => self.state = .idle,
             .idle => {},
         }
+    }
+
+    fn awaitsAssignment(self: *const Session) bool {
+        return self.pending.items.len != 0 and self.pending.items[0].event == .assignment;
     }
 };
 
@@ -158,12 +163,12 @@ pub const Registry = struct {
             }
             for (retained.sessions) |record| {
                 const session = self.sessions.get(record.session_id).?;
-                if (record.was_running or record.observations.len != 0) try self.ensureActivityStartupLocked(session);
                 for (record.observations) |event| {
                     const delivery = try Delivery.create(allocator, event, null);
                     errdefer delivery.destroy(allocator);
                     try session.pending.append(allocator, delivery);
                 }
+                if (record.was_running or record.observations.len != 0) try self.ensureActivityStartupLocked(session);
             }
             for (retained.channels) |record| try self.appendChannel(record);
         } else {
@@ -247,7 +252,13 @@ pub const Registry = struct {
                 } } };
             },
         };
-        if (incoming.receipt) |key| if (self.noticed.contains(key)) return .deferred;
+        // A scheduled receipt still belongs to an unfinished batch. An
+        // acknowledged receipt can reappear in a poll collected before the
+        // acknowledgement finished.
+        if (incoming.receipt) |key| if (self.noticed.get(key)) |state| switch (state) {
+            .scheduled => return .deferred,
+            .acknowledged => return .duplicate,
+        };
         if (!self.hasCapacity(session)) return .deferred;
         const delivery = try Delivery.create(self.allocator, event, incoming.receipt);
         errdefer delivery.destroy(self.allocator);
@@ -447,7 +458,7 @@ pub const Registry = struct {
         assertWork(work);
         const session = work.session;
         for (changes.forks.items) |fork| {
-            fork.context = try Context.restore(self.allocator, .{ .session_id = fork.session_id, .epoch = 0 }, fork.focus_id, completed.records());
+            fork.context = try Context.inherit(self.allocator, .{ .session_id = fork.session_id, .epoch = 0 }, fork.focus_id, completed.records());
         }
         try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(changes.forks.items.len));
         try self.channels.ensureUnusedCapacity(self.allocator, changes.channels.items.len);
@@ -974,12 +985,17 @@ pub const Registry = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const entries = try self.history.restoreEntries(arena.allocator(), session.session_id);
-        session.context = try Context.restore(self.allocator, .{ .session_id = session.session_id, .epoch = session.epoch }, session.focus_id, entries);
+        const scope: Scope = .{ .session_id = session.session_id, .epoch = session.epoch };
+        session.context = if (session.awaitsAssignment())
+            try Context.inherit(self.allocator, scope, session.focus_id, entries)
+        else
+            try Context.restore(self.allocator, scope, session.focus_id, entries);
     }
 
     fn ensureActivityStartupLocked(self: *Registry, session: *Session) !void {
         if (!session.needs_startup) return;
-        try self.queueStartupLocked(session, null);
+        // A focus that has yet to begin starts with its assignment.
+        if (!session.awaitsAssignment()) try self.queueStartupLocked(session, null);
         session.needs_startup = false;
     }
 
@@ -1208,6 +1224,45 @@ test "an interrupted activation retains its receipts and only fresh arrivals wak
     registry.endWorker(retry.session);
 }
 
+test "a stale poll distinguishes queued and acknowledged mail" {
+    const testing = std.testing;
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
+    defer subscriptions.close();
+    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    defer registry.deinit();
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const letter: Incoming = .{
+        .receipt = "mail-1",
+        .content = .{ .message = .{ .from = &.{"visitor"}, .text = "Hello", .observed_at_unix_ms = 10 } },
+    };
+    const waiting: []const Incoming = &.{letter};
+    const initial_budget = try registry.pollRequest();
+    try testing.expectEqual(Registry.Intake.accepted, try registry.accept(letter));
+    const work = (try registry.takeReadyBatch(a))[0];
+    defer registry.endWorker(work.session);
+    try testing.expectEqual(Registry.Intake.deferred, try registry.accept(letter));
+
+    var history = try registry.snapshot(work.session);
+    defer history.deinit();
+    const deliveries = work.activation.deliveries.items;
+    try testing.expectEqual(2, deliveries.len);
+    try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = &.{ deliveries[0].event, deliveries[1].event } } });
+    try registry.commitInput(work, deliveries.len, &history);
+    try registry.acknowledged(deliveries[1].receipt.?);
+    deliveries[1].receipt = null;
+    registry.releaseDeliveries(work);
+
+    // The poll can still hold a snapshot taken before acknowledgement.
+    try registry.reconcile(waiting);
+    try testing.expectEqual(Registry.Intake.duplicate, try registry.accept(letter));
+    try registry.reconcile(&.{});
+    try testing.expectEqualDeep(initial_budget, try registry.pollRequest());
+}
+
 /// Start the next ready focus and admit its single startup or assignment.
 fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, history: Context } {
     const work = (try registry.takeReadyBatch(a))[0];
@@ -1409,4 +1464,142 @@ test "restart restores activity reports together with completion or sleeping his
         try testing.expectEqualStrings(response.text.?, reports[0].content.assistant);
         if (!sleeping) try testing.expect(reports[1].content == .ended);
     }
+}
+
+test "a fork inherits the complete opening round and continues its own history" {
+    const testing = std.testing;
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    const a = storage.arena.allocator();
+    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
+    defer subscriptions.close();
+    var registry = try Registry.init(testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    defer registry.deinit();
+    var core = try admitTestInput(&registry, a);
+    defer core.history.deinit();
+    defer registry.endWorker(core.work.session);
+
+    try core.history.appendBatch(&.{.{ .continuation = "An earlier response" }}, &.{});
+    const handover: Input.Handover = .{
+        .focus_id = core.work.session.focus_id,
+        .observed_at_unix_ms = 100,
+        .summary = "The core is following a research plan.",
+        .state = .{ .activities = &.{}, .callbacks = &.{} },
+    };
+    var opening = try core.history.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    defer opening.deinit();
+    try registry.commitInput(core.work, 0, &opening);
+    const letter: Input.Record = .{ .events = .{
+        .focus_id = core.work.session.focus_id,
+        .items = &.{.{ .input = .{ .from = &.{"operator"}, .text = "We have a plan.", .observed_at_unix_ms = 120 } }},
+    } };
+    try opening.appendRecord(letter);
+
+    var changes: RoundChanges = .{};
+    defer registry.discardRound(&changes);
+    const task = "Read the plan.";
+    const focus_id = try registry.prepareFork(core.work, &changes, "research", task);
+    const exchange: []const contracts.Model.Item = &.{
+        .{ .continuation = "Open a focus and read a memory." },
+        .{ .tool_result = .{ .call_id = "open_focus", .content = .{ .parts = &.{.{ .text = focus_id }} } } },
+        .{ .tool_result = .{ .call_id = "recall", .content = .{ .parts = &.{.{ .text = "The latest plan is in the research room." }} } } },
+    };
+    try opening.appendBatch(exchange[0..1], exchange[1..]);
+    try registry.commitToolRound(core.work, &opening, &changes, null);
+
+    var activity = try admitTestInput(&registry, a);
+    defer registry.endWorker(activity.work.session);
+    defer activity.history.deinit();
+    const expected: []const @import("history.zig").Entry = &.{
+        .{ .record = .{ .handover = handover } },
+        .{ .record = letter },
+        .{ .exchange = exchange },
+        .{ .record = .{ .events = .{ .focus_id = focus_id, .items = &.{.{ .assignment = .{ .task = task } }} } } },
+    };
+    var continued = try registry.snapshot(core.work.session);
+    defer continued.deinit();
+    try testing.expectEqualDeep(expected[0 .. expected.len - 1], continued.records());
+    const response = "The core continues separately.";
+    try testing.expect(try registry.commitResponse(core.work, &continued, .{
+        .output = &.{.{ .continuation = response }},
+        .calls = &.{},
+        .text = response,
+    }));
+
+    var activity_history = try registry.snapshot(activity.work.session);
+    defer activity_history.deinit();
+    try testing.expectEqualDeep(expected, activity_history.records());
+}
+
+test "restart retains the assignment as a new activity's first delivery" {
+    const testing = std.testing;
+    var storage: TestStore = .{};
+    defer storage.arena.deinit();
+    const a = storage.arena.allocator();
+    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
+    defer subscriptions.close();
+    const task = "Read the plan.";
+    {
+        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+        defer registry.deinit();
+        var core = try admitTestInput(&registry, a);
+        defer core.history.deinit();
+        defer registry.endWorker(core.work.session);
+        var changes: RoundChanges = .{};
+        defer registry.discardRound(&changes);
+        const focus_id = try registry.prepareFork(core.work, &changes, "research", task);
+        try core.history.appendBatch(&.{.{ .continuation = "Open the focus." }}, &.{.{ .tool_result = .{ .call_id = "open_focus", .content = .{ .parts = &.{} } } }});
+        try registry.commitToolRound(core.work, &core.history, &changes, null);
+        try registry.sendFocusMessage(core.work, focus_id, "The file is in the research room.");
+
+        // An older kernel could keep the inherited tool round after an activity
+        // handover and defer the assignment when the two did not fit together.
+        const activity = (try registry.takeReadyBatch(a))[0];
+        defer registry.endWorker(activity.session);
+        var inherited = try registry.snapshot(activity.session);
+        defer inherited.deinit();
+        const legacy_handover: Input.Handover = .{
+            .focus_id = focus_id,
+            .observed_at_unix_ms = 100,
+            .summary = "The core's earlier work.",
+            .state = .{ .activities = &.{}, .callbacks = &.{} },
+        };
+        var legacy = try Context.restore(testing.allocator, .{ .session_id = activity.session.session_id, .epoch = 1 }, focus_id, &.{
+            .{ .record = .{ .handover = legacy_handover } }, inherited.records()[inherited.records().len - 1],
+        });
+        defer legacy.deinit();
+        try registry.commitInput(activity, 0, &legacy);
+    }
+
+    {
+        var restored = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+        defer restored.deinit();
+        const ready = try restored.takeReadyBatch(a);
+        defer for (ready) |work| restored.endWorker(work.session);
+        const work = ready[1];
+        const activity_events = work.activation.deliveries.items;
+        const assignment: Input.Event = .{ .assignment = .{ .task = task } };
+        try testing.expectEqual(2, activity_events.len);
+        try testing.expectEqualDeep(assignment, activity_events[0].event);
+        try testing.expect(activity_events[1].event == .focus_message);
+
+        var history = try restored.snapshot(work.session);
+        defer history.deinit();
+        try testing.expect(!history.hasPendingContinuation());
+        try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = &.{assignment} } });
+        try restored.commitInput(work, 1, &history);
+        restored.releaseDeliveries(work);
+    }
+
+    var resumed = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    defer resumed.deinit();
+    const ready = try resumed.takeReadyBatch(a);
+    defer for (ready) |work| resumed.endWorker(work.session);
+    var history = try resumed.snapshot(ready[1].session);
+    defer history.deinit();
+    var compacted = try history.withHandover(testing.allocator, history.records()[0].record.handover, .keep_latest_tool_round);
+    defer compacted.deinit();
+    const records = compacted.records();
+    try testing.expectEqual(2, records.len);
+    try testing.expectEqualStrings(task, records[1].record.events.items[0].assignment.task);
 }

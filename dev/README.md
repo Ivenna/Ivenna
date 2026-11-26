@@ -34,7 +34,7 @@ set -a
 set +a
 ```
 
-The kernel and memory preparation script use the exported environment. The Compose commands also select the instance configuration explicitly with `--env-file`. See [kernel settings](../docs/running.md#configuration) and [local service settings](#service-settings) for defaults and how to apply changes.
+The kernel and memory preparation script use the exported environment. If you remove an override from `.env`, also `unset` that variable in any shell where you exported it. The Compose commands select the instance configuration with `--env-file`. See [kernel settings](../docs/running.md#configuration) and [local service settings](#service-settings) for defaults.
 
 ## Preparing service storage
 
@@ -54,7 +54,7 @@ Stalwart stores accounts, receiving rules, and retention settings in its data vo
 | Address | Role | Example password |
 | --- | --- | --- |
 | `ivenna@ivenna.test` | Dedicated kernel mailbox | `ivenna-local-password` |
-| `operator@ivenna.test` | Send requests and receive Ivenna's messages | `operator-local-password` |
+| `operator@ivenna.test` | Correspond with Ivenna | `operator-local-password` |
 | `admin@ivenna.test` | Stalwart administration | `admin-local-password` |
 
 The plan requires authenticated SMTP submission. `MtaStageAuth.mustMatchSender` checks that the account may use the SMTP envelope sender. At `DATA`, the `ivenna-sender` script selected by `MtaStageData` requires exactly one From address matching that sender, ignoring case. See Stalwart's [sender verification](https://stalw.art/docs/mta/inbound/auth/#sender-verification) and [From-header example](https://stalw.art/docs/sieve/examples/#require-the-from-header-to-match-the-sender-of-authenticated-mail).
@@ -188,11 +188,11 @@ The external volumes and private instance files remain in place. Use the [startu
 
 ## Updating the kernel and middleware
 
-For compatible updates, keep the same instance directory. Incorporate relevant changes from `.env.example` into the instance's `.env` and reload it. See the [configuration steps](#configuration) and [example environment](../.env.example).
+For compatible updates, keep the same instance directory. If you edit its `.env`, [reload the configuration](#configuration) in the shell that will launch the kernel.
 
 ### Kernel
 
-For changes that require instance or caller updates, follow the [upgrade guide](../docs/upgrading.md).
+Check the [upgrade guide](../docs/upgrading.md) for changes to defaults, stored data, and caller interfaces.
 
 After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent channel receivers and subscription listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
 

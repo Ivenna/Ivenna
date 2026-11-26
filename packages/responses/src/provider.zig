@@ -104,7 +104,7 @@ pub const Provider = struct {
         tools: []const WireTool,
         tool_choice: []const u8,
         max_output_tokens: u32,
-        reasoning: struct { effort: Model.ReasoningEffort },
+        reasoning: struct { effort: []const u8 },
         stream: bool = false,
     };
 

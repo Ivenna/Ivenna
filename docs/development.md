@@ -48,26 +48,22 @@ The agent chooses tools and reasoning for each request and decides which history
 
 ### Model-facing resources
 
-Prompts and tool declarations are interfaces. Each resource gives the model the information it needs at a different point in execution.
+Review model-facing text in the request the focus will receive. Read the shared prompt together with the retained history, current turn, and tools available for that inference. Before adding an explanation, ask what the model can already infer and which fact it still needs for the decision at hand. See [what a focus receives](design.md#what-a-focus-receives) and [request assembly](architecture.md#working-history-and-user-messages).
 
 | Resource | Purpose |
 | --- | --- |
-| [system.md](../packages/agent/src/system.md) | Runtime orientation, continuity, observation interpretation, action scope, and focus lifecycles shared by all sessions |
+| [system.md](../packages/agent/src/system.md) | Shared orientation to focuses, observations, communication, and resumption |
 | [Agent tools](../packages/agent/src/tools.json) | Send messages, manage channels and subscriptions, open focuses, and schedule wakeups |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. The configured [web reader](../packages/resources/src/web.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
-| [compaction.md](../packages/agent/src/compaction.md) | Understanding to carry into a handover |
+| [compaction.md](../packages/agent/src/compaction.md) | Instructions for writing the summary in a handover |
 
-Follow the [design's prompt boundary](design.md#a-self-in-the-world) when editing model-facing resources. Keep the system prompt focused on the semantics needed to interpret inputs, use available actions, and continue across activations.
+Use the shared prompt for orientation across focuses and turns. Explain a tool's destination, cost, or effects in its declaration when they matter before the call. For example, `open_focus` tells the core that the new activity will inherit the results of other tools called in the same round. Express allowed values and bounds in the schema and match defaults to runtime behavior.
 
-Keep capability tool declarations with their implementation and register capabilities through `Tools`. The agent owns availability policy and must use the same role selection for declaration and invocation.
+Use observations and tool results to convey what happened, which effects are confirmed, and what remains uncertain. When asking for a revision, say what the focus can change. If a handover leaves too little room to continue, ask for a shorter summary and leave the choice of content to Ivenna. Keep the measured size and limit in operator logs with other runtime diagnostics.
 
-Keep agent-owned action recognition, typed arguments, and role selection together in [tools.zig](../packages/agent/src/tools.zig). Kernel owns the actions' effects. All sessions use the same system prompt. Express differences in available actions through tool selection. See [request assembly](architecture.md#working-history-and-user-messages).
-
-Read each tool declaration as a whole. Express value choices and bounds in its schema, and match schema defaults to runtime behavior. Use descriptions to explain effects and the implications of picking an argument or receiving a result. Keep cues of ownership and continuity brief and leave content, organization, and learned practices to Ivenna's judgment. See the [capability principles](design.md#understanding-and-autonomy).
-
-Put the current focus, task facts, and observations in user input. Choose details for the decision the focus can make at that point. Describe an action's destination, cost, or other effects in its declaration when they matter before a call. In the result, report what happened and which effects remain uncertain. Keep native service and host diagnostics in logs. Update the owning interface guide when its contract changes. See [context and continuity](design.md#context-and-continuity).
+Keep capability tool declarations with their implementation and register capabilities through `Tools`. The agent uses the same role selection for declaration and invocation. Agent-owned action recognition, typed arguments, and role selection live together in [tools.zig](../packages/agent/src/tools.zig). The kernel owns the actions' effects.
 
 ### Session execution
 

@@ -28,8 +28,9 @@ pub const Inbox = struct {
         return self.vtable.poll(self.context, a, request);
     }
 
-    /// Call after storage has confirmed the complete observation and checkpoint.
-    /// Acknowledgement releases the transport copy; task execution can continue.
+    /// Release the transport copy once admission is durable. A new copy of a
+    /// consumed callback has its own receipt to acknowledge. If a poll repeats
+    /// a receipt, a successful repeat has the same effect as the first.
     pub fn acknowledge(self: Inbox, a: Allocator, receipt: []const u8) !void {
         return self.vtable.acknowledge(self.context, a, receipt);
     }

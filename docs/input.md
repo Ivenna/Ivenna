@@ -1,6 +1,6 @@
 # Runtime user messages
 
-Observations, handovers, and the current inference turn appear as YAML messages with the `user` role. The turn identifies the focus receiving it. Retained records keep their original focus IDs and observation times. See the [input definitions and renderers](../packages/agent/src/input.zig).
+Observations, handovers, and the current inference turn appear as YAML messages with the `user` role. See the [input definitions and renderers](../packages/agent/src/input.zig).
 
 The message order and role-specific tool selection are described in [message assembly](architecture.md#working-history-and-user-messages). Tool results have a separate [content contract](content.md). The Responses adapter associates uploaded files carried in user messages with the tool calls that supplied them. See [tool result encoding](architecture.md#tool-results).
 
@@ -15,7 +15,7 @@ Newly admitted events enter working history as records. The runtime also retains
 
 `Text` denotes a string. `Time` denotes a UTC RFC 3339 string with millisecond precision, such as `2026-11-06T12:00:01.000Z`. Records, events, and callback sources are mappings with one key for the branch name and its payload as the value.
 
-Retained records identify the focus that admitted their events or produced their handover. Inherited records keep that focus ID. The turn's `current.focus_id` identifies the focus performing the current inference.
+The turn's `current.focus_id` identifies the focus receiving the turn. Inherited records keep their original focus IDs and observation times, so an activity can see the core's ID in its history.
 
 ## Names and references
 
@@ -37,7 +37,7 @@ Each `Event` selects one branch.
 | --- | --- | --- |
 | `startup` | `Startup` | Observation that a new runtime has begun |
 | `input` | `IncomingMessage` | Observation of what correspondents said |
-| `assignment` | `Assignment` | Initial work for a newly opened activity focus |
+| `assignment` | `Assignment` | The core's initial intent for a new activity |
 | `activity` | `ActivityReport` | One activity's newly admitted messages and ending information |
 | `focus_message` | `FocusMessage` | Explicit message from a focus |
 | `focus_interrupted` | `FocusInterrupted` | Runtime observation that an activity could not continue reasoning |
@@ -46,7 +46,7 @@ Each `Event` selects one branch.
 
 #### Startup and restart
 
-The core receives `startup` on first launch and every restart. The runtime resumes restored activities with unfinished activations or unread internal observations and gives them `startup` first. Other restored activities receive it when they next have work. Newly opened activities begin with an assignment. See [startup and interruption](architecture.md#startup-and-interruption).
+The core receives `startup` on first launch and every restart. A restored activity with its initial assignment still queued begins with the assignment. An activity whose assignment was already admitted receives `startup` when it next resumes after restart. See [startup and interruption](architecture.md#startup-and-interruption).
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -69,25 +69,23 @@ Use `from` to attribute the observation. See [correspondents and IDs](communicat
 
 #### Assignments and reports
 
-An `Assignment` has `task: Text`, specifying what the activity should pursue within its inherited understanding. It is the activity's first new queued observation after [opening that focus](attention.md#opening-a-focus).
+An activity's first new observation is an `assignment`. Its `task: Text` field contains the text the core passed to `open_focus`. The same text can also appear in the inherited tool call. See [opening a focus](attention.md#opening-a-focus).
 
-An `ActivityReport` groups a single activity's newly admitted messages and ending.
+In the core's input, an `ActivityReport` groups newly admitted messages and any ending from one activity.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `from_focus` | `Text` | Source activity focus |
 | `messages` | `ActivityMessage[]`, when nonempty | New assistant texts from this activity, in recorded order |
-| `ended_at` | `Time`, when present | Time the runtime established focus completion |
+| `ended_at` | `Time`, when present | Time the runtime ended the activity |
 
-Each `ActivityMessage` has `text: Text` and `observed_at: Time`. The time dates the collection of the complete model response, before its tools execute.
+Each ordinary activity response that contains assistant text contributes one `ActivityMessage`. Its `text: Text` carries that text, including an explicitly empty string. Its `observed_at: Time` records when the runtime collected the complete response, before executing any accompanying tool calls.
 
-Each report contains at least one message or an ending. When no unread messages accompany an ending, the report omits `messages`. An explicitly empty assistant text remains a message with `text: ""`. Use `ended_at` as evidence of completion when it appears.
-
-Each ordinary activity inference that returns assistant text produces one message. Absent text records no message. Reasoning, tool replies, compaction output, and inherited history do not produce new messages. The text records what the activity expressed, not whether its proposed actions took effect.
+A report contains messages, an ending, or both. An ending with no unread messages has just `from_focus` and `ended_at`.
 
 One ordinary core input, including a tool continuation, can contain events and reports from several activities. Newly admitted messages for the same focus are grouped once. Each group's position follows that focus's first appearance in the selected observations, and messages within it keep their original order. Use the observation times for messages and endings from different focuses. Those times survive waiting, persistence, and restart.
 
-See [activity expressions](attention.md#activity-expressions) for when the core reads these messages and [activity completion](attention.md#activity-completion) for what an ending means.
+See how the core receives [activity expressions](attention.md#activity-expressions) and when the runtime [ends an activity](attention.md#activity-completion).
 
 #### Activity interruptions
 
@@ -235,8 +233,10 @@ events:
 
 ## Handover generation and replacement
 
-A compaction request presents the history to summarize and a turn with `current` and `summarize` under the shared system prompt. The [handover instructions](../packages/agent/src/compaction.md) ask for a plain-text summary. Observations awaiting admission stay queued and the request offers no tools. The summary request may show a short omission notice in place of a tool attachment. The tool result's existing text and source description stay in the request. On a revision request, `summarize.instructions` says what to correct.
+A compaction request presents the history to summarize and a turn with `current` and `summarize` under the shared system prompt. It offers no tools and asks for a plain-text summary. On a revision request, `summarize.instructions` says what to correct. See the [handover instructions](../packages/agent/src/compaction.md).
 
-After accepting a handover, the next ordinary request presents it first in the retained history. Any carried-forward observations and complete exchanges follow it. New observations appear in the current turn.
+The summary request can substitute short omission notices for tool attachments. Tool result text and source descriptions stay in the request. See [summary request preparation](architecture.md#sampling-state-and-preparing-the-request).
+
+The next ordinary request begins its retained history with the accepted handover, followed by any records and complete exchanges carried forward. Observations already in history and still awaiting inference remain intact. Observations admitted for this turn appear in its `events` field. An activity whose inherited history was summarized before its first ordinary inference still sees its original [assignment](#assignments-and-reports).
 
 See [bounded model context](architecture.md#bounded-model-context) for which history is summarized or carried forward and when a handover replaces it.

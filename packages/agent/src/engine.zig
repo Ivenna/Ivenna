@@ -25,8 +25,9 @@ pub const Engine = struct {
     reasoning: Reasoning = .{},
 
     pub const Reasoning = struct {
-        core: Model.ReasoningEffort = .low,
-        activity: Model.ReasoningEffort = .high,
+        core: []const u8 = "low",
+        activity: []const u8 = "max",
+        compaction: []const u8 = "max",
     };
 
     /// Kernel supplies effects tied to the calling session and round without

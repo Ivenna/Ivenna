@@ -1,7 +1,9 @@
 const std = @import("std");
+const agent = @import("agent");
 const state = @import("instance_state");
 const contracts = @import("agent_contracts");
 const channel_ipc = @import("channel_ipc.zig");
+const Config = @import("config.zig").Config;
 const Registry = @import("channels.zig").Registry;
 const testing = std.testing;
 const executable = @import("app_options").executable;
@@ -50,6 +52,35 @@ fn readJson(a: std.mem.Allocator, child: *std.process.Child, success: bool) !std
 fn runWithoutConfig(a: std.mem.Allocator, argv: []const []const u8) !std.process.RunResult {
     const env = std.process.Environ.Map.init(a);
     return std.process.run(a, testing.io, .{ .argv = argv, .environ_map = &env });
+}
+
+test "reasoning settings load defaults and provider-specific effort names" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = std.process.Environ.Map.init(a);
+    try env.put("DATA_DIR", "/unused");
+    try env.put("LLM_API_KEY", "test-key");
+    try env.put("MAIL_ADDRESS", "ivenna@example.test");
+    try env.put("MAIL_AUTHORIZATION", "Bearer test-key");
+
+    try testing.expectEqualDeep(agent.Engine.Reasoning{
+        .core = "low",
+        .activity = "max",
+        .compaction = "max",
+    }, (try Config.load(a, &env)).llm_reasoning);
+
+    try env.put("LLM_CORE_REASONING_EFFORT", "provider-core");
+    try env.put("LLM_ACTIVITY_REASONING_EFFORT", "provider-activity");
+    try env.put("LLM_COMPACTION_REASONING_EFFORT", "provider-compaction");
+    try testing.expectEqualDeep(agent.Engine.Reasoning{
+        .core = "provider-core",
+        .activity = "provider-activity",
+        .compaction = "provider-compaction",
+    }, (try Config.load(a, &env)).llm_reasoning);
+
+    try env.put("LLM_COMPACTION_REASONING_EFFORT", "");
+    try testing.expectError(error.MissingConfiguration, Config.load(a, &env));
 }
 
 test "command help and argument errors work without instance or service settings" {

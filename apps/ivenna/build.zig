@@ -43,8 +43,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "agent", .module = agent },
             .{ .name = "instance_state", .module = state },
             .{ .name = "agent_contracts", .module = contracts },
+            .{ .name = "responses", .module = responses },
         },
     });
     const app_options = b.addOptions();

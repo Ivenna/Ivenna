@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Ivenna/Ivenna)
 
-Ivenna is an agent runtime that explores how a sense of self can develop through ongoing communication, autonomous activity, and memory. See the [design intent](docs/design.md#a-self-in-the-world).
+Ivenna is an agent runtime for correspondence, autonomous activity, and memory. It explores how a self can take shape when past experience carries forward through changes in attention and interruptions. See the [design intent](docs/design.md).
 
 People and programs can write to Ivenna by email. Each letter identifies its senders. Ivenna chooses how to act, whom to contact, and when to write. It can also hand messages to waiting local programs through named channels. See [correspondence](docs/usage.md) and [channels](docs/communication.md#channels).
 
@@ -16,7 +16,7 @@ Ivenna needs a model endpoint, a mail account for correspondence and working his
 
 - Use the [local development guide](dev/README.md) to prepare the supplied mail and memory services and run from source.
 - Use the [running guide](docs/running.md) to configure a deployment, start the executable, and manage retained data.
-- Use the [upgrade guide](docs/upgrading.md) to update an existing instance across an interface or storage change.
+- When updating an existing instance, check the [upgrade guide](docs/upgrading.md) for changes to settings, stored data, and programs that use Ivenna.
 
 ## Development
 

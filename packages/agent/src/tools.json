@@ -12,7 +12,7 @@
               "properties": {
                 "correspondent_id": {
                   "type": "string",
-                  "description": "Complete registered correspondent ID."
+                  "description": "Complete registered correspondent ID. A `correspondents` list gives the outgoing IDs known at the time it was recorded."
                 }
               },
               "required": ["correspondent_id"],
@@ -86,7 +86,7 @@
   },
   {
     "name": "open_focus",
-    "description": "Open an activity to pursue a task while the core continues. The activity can run host commands and report to the core. The result gives its `focus_id`.",
+    "description": "Open an activity to pursue this task while the core continues. It can run host commands and inherits all tool results from this round. The returned `focus_id` can receive messages after the round.",
     "parameters": {
       "type": "object",
       "properties": {
