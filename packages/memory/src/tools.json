@@ -129,7 +129,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Revisit a memory. Read text in pages or supply a complete image or file to the model service.",
+    "description": "Revisit a memory in one of your rooms. Read a passage, look at an image, or open a document you kept there.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -142,12 +142,12 @@
           "enum": [
             "image_url"
           ],
-          "description": "Pass the URL stored in the entry to the model service as an image reference. Read from offset 0."
+          "description": "View the image at the stored URL. Requires offset 0."
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
-          "description": "Byte offset at a UTF-8 character boundary; applies to text pages.",
+          "description": "Start of a text page, in bytes, at a UTF-8 character boundary.",
           "maximum": 9223372036854775807,
           "default": 0
         },
@@ -167,7 +167,7 @@
   },
   {
     "name": "remember",
-    "description": "Keep something you want to carry beyond the present context. This can create missing parent rooms. A write and its resulting memory can each contain up to 32 MiB. The previous memory stays intact until the update is ready.",
+    "description": "Keep something in your memory rooms to return to later. Missing rooms along its address are created as needed.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -177,6 +177,7 @@
         },
         "content": {
           "type": "object",
+          "description": "The resulting memory can be up to 32 MiB.",
           "anyOf": [
             {
               "type": "object",
@@ -199,7 +200,7 @@
                     "path": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Copy a regular host file into shared memory. Use a path or local file URI. Relative paths resolve from the startup directory."
+                      "description": "Copy a regular file from your host into this memory. Use a path or local file URI. Relative paths resolve from the startup directory."
                     }
                   },
                   "required": [
@@ -217,7 +218,7 @@
         },
         "mode": {
           "type": "string",
-          "description": "create requires an unused address; append adds no separator. Append and replace also create a missing memory.",
+          "description": "Create needs an unused address. Append adds no separator. Append and replace create the memory if it is missing.",
           "enum": [
             "create",
             "append",
@@ -235,13 +236,13 @@
   },
   {
     "name": "revise_memory",
-    "description": "Let a memory change as your understanding changes. Replace matching text while keeping the rest. The existing memory must be UTF-8 text without NUL bytes; both versions are limited to 32 MiB.",
+    "description": "Change a passage in one of your memories while keeping the rest.",
     "parameters": {
       "type": "object",
       "properties": {
         "address": {
           "type": "string",
-          "description": "Memory path from the shared entrance."
+          "description": "Path to a text memory from the shared entrance. The original and revised memory can each be up to 32 MiB."
         },
         "old_text": {
           "type": "string",
@@ -253,7 +254,7 @@
         },
         "replace_all": {
           "type": "boolean",
-          "description": "Replace every non-overlapping match; otherwise require one unique match.",
+          "description": "Replace every non-overlapping match. By default, multiple matches return an error.",
           "default": false
         },
         "match_mode": {
@@ -293,7 +294,7 @@
   },
   {
     "name": "move_memory",
-    "description": "Reshape how your memories belong together. Move or rename a memory or a room with its contents. An occupied target is an error.",
+    "description": "Move or rename one of your memories or rooms. A room takes its contents with it.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -303,7 +304,7 @@
         },
         "destination": {
           "type": "string",
-          "description": "New path from the shared entrance, or an existing room to move into. The containing room must exist."
+          "description": "New path from the shared entrance, or an existing room to move into under the original name. The containing room must exist and the final address must be free."
         }
       },
       "required": [

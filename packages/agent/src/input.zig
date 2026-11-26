@@ -253,7 +253,7 @@ pub const State = struct {
     }
 };
 
-pub fn cloneState(a: Allocator, state: State) !State {
+fn cloneState(a: Allocator, state: State) !State {
     const subscriptions = try a.alloc(SampledSubscription, state.subscription_registrations.len);
     for (state.subscription_registrations, subscriptions) |source, *item| item.* = .{
         .subscription_id = try a.dupe(u8, source.subscription_id),
@@ -408,6 +408,21 @@ pub const Record = union(enum) {
     events: EventGroup,
     handover: Handover,
 };
+
+pub fn cloneRecord(a: Allocator, record: Record) !Record {
+    return switch (record) {
+        .events => |events| .{ .events = .{
+            .focus_id = try a.dupe(u8, events.focus_id),
+            .items = try cloneEvents(a, events.items),
+        } },
+        .handover => |handover| .{ .handover = .{
+            .focus_id = try a.dupe(u8, handover.focus_id),
+            .observed_at_unix_ms = handover.observed_at_unix_ms,
+            .summary = try a.dupe(u8, handover.summary),
+            .state = try cloneState(a, handover.state),
+        } },
+    };
+}
 
 /// Identity and time with new observations or a compaction request.
 pub const Turn = struct {

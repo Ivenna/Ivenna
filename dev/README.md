@@ -19,7 +19,7 @@ dev/prepare.sh
 
 The preparation script copies [.env.example](../.env.example) to `$DEV_INSTANCE_DIR/.env` and the [mail plan example](mail/provision.example.ndjson) to `$DEV_INSTANCE_DIR/mail/provision.ndjson`. Running it again preserves existing private files.
 
-In the instance's `.env`, set `LLM_API_KEY`. If you customize the kernel or operator account, use the same address and credentials in `.env` and the private mail plan. The sample registers the operator mailbox in `MAIL_CORRESPONDENTS` so Ivenna can reply to it. See [configuring mail](#configuring-mail).
+In the instance's `.env`, set `LLM_API_KEY` to your DeepSeek API key. If you customize the kernel or operator account, use the same address and credentials in `.env` and the private mail plan. The sample registers the operator mailbox in `MAIL_CORRESPONDENTS` so Ivenna can reply to it. See [configuring mail](#configuring-mail).
 
 The example stores kernel files in `$DEV_INSTANCE_DIR/data` and uses `$DEV_INSTANCE_DIR/memory/config` for `MEMORY_SSH_CONFIG`. To use other services, configure their connections and prepare the services you run locally. See [mail service setup](../docs/running.md#mail-service) and [memory service setup](../docs/running.md#memory-service).
 
@@ -66,6 +66,29 @@ The script rejects that recipient with `550` when the readiness header is absent
 Use the SMTP submission path for correspondence. Direct JMAP imports into the kernel account bypass the receiving checks. Wakeup and host completion callbacks use direct JMAP writes to their dedicated folder; see the [mail-service requirements](../docs/running.md#mail-service).
 
 For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days), applying to Trash and Junk across all accounts. See Stalwart's [mail retention](https://stalw.art/docs/email/settings/maintenance/) and [storage maintenance](https://stalw.art/docs/storage/maintenance/) documentation for policy and space reclamation.
+
+### Sizing Stalwart for working history
+
+The [example mail plan](mail/provision.example.ndjson) sets the three limits below to 64 MiB. One 32 MiB inline image contributes about 43 MiB to a history record after Base64 encoding. The rest of the round and the JMAP envelope use the remaining space. See [working history limits](../docs/running.md#working-history-limits).
+
+Stalwart v1.0.2 applies these server-wide limits when a regular account creates a history message with JMAP `Email/set`. [JMAP request handler](https://github.com/stalwartlabs/stalwart/blob/v1.0.2/crates/http/src/request.rs#L171-L187) · [Email part-size check](https://github.com/stalwartlabs/stalwart/blob/v1.0.2/crates/jmap/src/email/set.rs#L771-L788)
+
+| Setting | What must fit | v1.0.2 default (bytes) |
+| --- | --- | ---: |
+| `Jmap.maxRequestSize` | Complete JMAP JSON request, which can contain several records | 10,000,000 |
+| `Jmap.maxUploadSize` | Incoming HTTP body, including JMAP JSON requests | 50,000,000 |
+| `Email.maxAttachmentSize` | Sum of message part sizes before MIME transfer encoding, including the history text | 50,000,000 |
+
+The default JSON request limit is too small for a 32 MiB inline image. To use the example limits with an existing instance, follow the [mail update steps](#mail).
+
+After [normal startup](#starting-the-kernel), you can use `jq` to see the two JMAP limits advertised to the kernel account. Run this with the example username and password settings loaded.
+
+```sh
+curl --fail --silent --show-error --user "$MAIL_USERNAME:$MAIL_PASSWORD" "$MAIL_SESSION_URL" |
+  jq '.capabilities["urn:ietf:params:jmap:core"] | {maxSizeRequest, maxSizeUpload}'
+```
+
+### Applying the mail plan
 
 To apply the initial plan or later edits, stop the kernel, [load the instance configuration](#configuration), and run:
 
@@ -210,7 +233,7 @@ For another memory deployment, update its handler and entry point as described i
 
 ### Mail
 
-Incorporate changes from the [mail plan example](mail/provision.example.ndjson) into the private plan, keeping the deployment's credentials, addresses, and readiness URL. Apply the plan through [mail setup](#configuring-mail), then return to normal startup. Stalwart retains its account and policy configuration in the data volume; [config.json](mail/config.json) selects that store.
+Incorporate changes from the [mail plan example](mail/provision.example.ndjson) into the private plan, keeping the deployment's credentials, addresses, and readiness URL. [Apply the mail plan](#applying-the-mail-plan), then return to normal startup. Stalwart retains its account and policy configuration in the data volume; [config.json](mail/config.json) selects that store.
 
 ## Service settings
 
@@ -230,9 +253,7 @@ These settings configure the supplied local services in [dev/compose.yaml](compo
 | `MEMORY_IMAGE` | Memory image | `localhost/ivenna-memory:dev` |
 | `MEMORY_CAPACITY_BYTES` | Shared memory-room capacity | `1073741824` (1 GiB) |
 
-If changing the mail HTTP port, update `MAIL_SESSION_URL` too. Apply account and server policy changes from the private provisioning plan through [local mail setup](#configuring-mail).
-
-Stalwart's `Jmap.maxRequestSize` sets the advertised size limit that Ivenna uses when saving working history. See [recovering from a size rejection](../docs/running.md#working-history) and [Stalwart's request settings](https://stalw.art/docs/ref/object/jmap/#maxrequestsize).
+If changing the mail HTTP port, update `MAIL_SESSION_URL` too. For account and server policy changes, [apply the private mail plan](#applying-the-mail-plan).
 
 After changing service settings, reload `$DEV_INSTANCE_DIR/.env` and use [normal startup](#starting-the-kernel) to recreate affected containers. If changing `MEMORY_SSH_PORT`, first run `dev/memory/prepare.sh` again to update the SSH connection. Existing volumes and SSH keys remain in place. Changing `MAIL_VOLUME_NAME` or `MEMORY_VOLUME_NAME` selects different storage; create that volume before startup, and transfer existing data separately if needed. For mail transfers, follow the [history preservation requirements](../docs/running.md#backups-and-transfers).
 

@@ -123,10 +123,6 @@ pub const Shell = struct {
         const stderr_path = try std.fmt.allocPrint(a, "{s}/{s}.stderr.log", .{ log_directory, id });
         const stdout_reference = try LocalPath.reference(a, stdout_path);
         const stderr_reference = try LocalPath.reference(a, stderr_path);
-        const stdout = try std.Io.Dir.createFileAbsolute(self.io, stdout_path, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-        errdefer stdout.close(self.io);
-        const stderr = try std.Io.Dir.createFileAbsolute(self.io, stderr_path, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-        errdefer stderr.close(self.io);
         var environment = try self.environ.clone(a);
         defer environment.deinit();
         try environment.put("NO_COLOR", "1");
@@ -136,6 +132,9 @@ pub const Shell = struct {
             if (std.fs.path.isAbsolute(cwd.bytes)) cwd.bytes else try std.fs.path.join(a, &.{ self.directory, cwd.bytes })
         else
             self.directory;
+        const stdout, const stderr = try createOutputLogs(.cwd(), self.io, stdout_path, stderr_path);
+        errdefer stdout.close(self.io);
+        errdefer stderr.close(self.io);
         const backend: @FieldType(Invocation, "backend") = if (process.Process.start(self.io, a, .{
             .argv = &.{ if (args.shell) |shell| shell.bytes else "/bin/sh", if (args.login) "-lc" else "-c", args.command.bytes },
             .directory = directory,
@@ -163,6 +162,18 @@ pub const Shell = struct {
     }
 };
 
+fn createOutputLogs(dir: std.Io.Dir, io: std.Io, stdout_path: []const u8, stderr_path: []const u8) !struct { std.Io.File, std.Io.File } {
+    const options: std.Io.Dir.CreateFileOptions = .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) };
+    const stdout = try dir.createFile(io, stdout_path, options);
+    errdefer {
+        stdout.close(io);
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        dir.deleteFile(io, stdout_path) catch |err| std.log.warn("could not remove unused stdout log {s}: {s}", .{ stdout_path, @errorName(err) });
+    }
+    return .{ stdout, try dir.createFile(io, stderr_path, options) };
+}
+
 fn launchFailure(err: anyerror) []const u8 {
     return switch (err) {
         error.FileNotFound, error.NotDir => "Could not find a path needed to start the command. Check cwd and shell.",
@@ -187,6 +198,17 @@ fn splitBudget(total: usize, remaining: [2]u64) [2]usize {
 fn chunkStream(path: []const u8, chunk: output.Chunk) ?Shell.Stream {
     const range: Shell.Range = .{ .offset = chunk.offset, .next_offset = chunk.next_offset };
     return Shell.Stream.observe(path, chunk.byte_length, range, chunk.content);
+}
+
+test "a conflicting stderr log preserves its contents and leaves no partial stdout log" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "stderr", .data = "existing" });
+    try t.expectError(error.PathAlreadyExists, createOutputLogs(tmp.dir, t.io, "stdout", "stderr"));
+    try t.expectError(error.FileNotFound, tmp.dir.access(t.io, "stdout", .{}));
+    var buffer: [8]u8 = undefined;
+    try t.expectEqualStrings("existing", try tmp.dir.readFile(t.io, "stderr", &buffer));
 }
 
 test "partial text carries the retained path and incremental reads identify their byte range" {

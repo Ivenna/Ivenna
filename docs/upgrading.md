@@ -1,5 +1,15 @@
 # Upgrading Ivenna
 
+## Working history encoding
+
+The updated kernel restores image bytes and upload IDs from records selected by the saved checkpoint. Newly written records store uploaded files by ID and encode inline images losslessly in Base64. This also applies when a fork or handover copies an older record. Older records keep their original bodies until the mail service expires them from Trash.
+
+1. Stop the kernel. Keep the previous executable and make a [matched backup of the mailbox and instance database](running.md#backups-and-transfers).
+2. If you use the supplied Stalwart setup, [update and apply your mail plan](../dev/README.md#mail). Check the [working history limits](running.md#working-history-limits) against the largest rounds you expect to save, including retained exchanges that a fork or handover can rewrite in the new encoding.
+3. Start the updated executable with the existing mailbox and its paired instance database.
+
+To roll back after the update writes records in the new encoding, stop the kernel, restore the matched backup, and start the previous executable.
+
 ## Adopting the new reasoning defaults
 
 The activity reasoning default changed from `high` to `max`. Handovers previously used a fixed effort of `high` and now have a separate setting that defaults to `max`.

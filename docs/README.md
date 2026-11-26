@@ -19,6 +19,7 @@
 | --- | --- |
 | Run Ivenna from source with the supplied mail and memory services | [Local development](../dev/README.md) |
 | Configure a deployment, diagnose stalled work, and manage retained data | [Running guide](running.md) |
+| Set mail request limits or recover from a history size error | [Working history limits](running.md#working-history-limits) |
 | Set reasoning effort or tune when a focus summarizes its history | [Model requests](running.md#model-requests) · [Context budgets](running.md#context-budgets) |
 | Update settings, stored data, or client programs when upgrading an instance | [Upgrade guide](upgrading.md) |
 | Configure a host or container for a channel receiver | [Channel receiver deployment](running.md#channel-receivers) |

@@ -1,6 +1,8 @@
 {"@type":"upsert","object":"Domain","matchOn":["name"],"value":{"local-domain":{"name":"ivenna.test","certificateManagement":{"@type":"Manual"},"dkimManagement":{"@type":"Manual"},"dnsManagement":{"@type":"Manual"},"subAddressing":{"@type":"Disabled"}}}}
 {"@type":"update","object":"SystemSettings","value":{"defaultHostname":"mail.ivenna.test","defaultDomainId":"#local-domain"}}
 {"@type":"update","object":"DataRetention","value":{"expungeTrashAfter":2592000000}}
+{"@type":"update","object":"Jmap","value":{"maxRequestSize":67108864,"maxUploadSize":67108864}}
+{"@type":"update","object":"Email","value":{"maxAttachmentSize":67108864}}
 {"@type":"reconcile","object":"NetworkListener","matchOn":["name"],"value":{"http":{"name":"local-jmap","protocol":"http","bind":{"0.0.0.0:8080":true},"implicitTls":false,"useTls":false},"smtp":{"name":"local-submission","protocol":"smtp","bind":{"0.0.0.0:2525":true},"implicitTls":false,"useTls":false}}}
 {"@type":"update","object":"MtaStageAuth","value":{"require":{"else":"true"},"saslMechanisms":{"else":"[plain, login]"},"mustMatchSender":{"else":"true"}}}
 {"@type":"upsert","object":"SieveSystemScript","matchOn":["name"],"value":{"ivenna-sender":{"name":"ivenna-sender","isActive":true,"contents":"require [\"variables\", \"envelope\", \"reject\", \"relational\", \"comparator-i;ascii-numeric\"];\nif anyof (\n    not address :count \"eq\" :comparator \"i;ascii-numeric\" \"from\" \"1\",\n    not address :all :comparator \"i;ascii-casemap\" :is \"from\" \"${envelope.from}\"\n) {\n    reject \"550 5.7.1 Use one From address matching the envelope sender.\";\n}"}}}

@@ -67,7 +67,7 @@ fn openFile(io: std.Io, a: Allocator, source: LocalFile, uri: []const u8) !Conte
     if (source.size > content.file_size_limit)
         return result.unavailable(a, uri, .{ .byte_length = source.size, .reason = .file_too_large });
     const bytes = try source.readAll(io, a, content.file_size_limit);
-    return result.attachment(a, .{ .uri = uri, .kind = "file", .byte_length = bytes.len }, .{ .file = .{ .bytes = bytes } });
+    return result.attachment(a, .{ .uri = uri, .kind = "file", .byte_length = bytes.len }, .{ .file = bytes });
 }
 
 fn openImage(io: std.Io, a: Allocator, source: LocalFile, uri: []const u8) !Content {
@@ -311,7 +311,7 @@ test "file pages make progress at character boundaries and return local read fai
         try testing.expectEqual(11, rest.get("byte_length").?.integer);
         try testing.expect(rest.get("next_offset") == null);
         const attachment = try openFile(testing.io, a, .{ .file = file, .size = nominal_size }, "file:///nominal");
-        try testing.expectEqualStrings("hello world", attachment.parts[1].file.bytes);
+        try testing.expectEqualStrings("hello world", attachment.parts[1].file);
     }
     const source: LocalFile = .{ .file = file, .size = 0 };
     try testing.expectError(error.StreamTooLong, source.readAll(testing.io, a, "hello world".len - 1));
@@ -359,7 +359,7 @@ test "previews identify media and only explicit views attach complete sources" {
                 try testing.expectEqual(.png, attached.parts[1].image.data.format);
                 try testing.expectEqualSlices(u8, image, attached.parts[1].image.data.bytes);
             },
-            .file => try testing.expectEqualSlices(u8, if (window.offset == 0) pdf else &bytes, attached.parts[1].file.bytes),
+            .file => try testing.expectEqualSlices(u8, if (window.offset == 0) pdf else &bytes, attached.parts[1].file),
             .window => unreachable,
         }
     }
@@ -404,7 +404,7 @@ test "explicit image reads pass a complete local URL source as a native referenc
     try testing.expectEqualStrings(url, image.parts[1].image.url);
     try testing.expect(std.mem.indexOf(u8, image.parts[0].text, url) == null);
     const attached = try readTemporaryView(a, tmp, "stdout", .file);
-    try testing.expectEqualSlices(u8, source, attached.parts[1].file.bytes);
+    try testing.expectEqualSlices(u8, source, attached.parts[1].file);
 
     const https = "https://example.org/file?q=a%2Fb";
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "stdout", .data = https });

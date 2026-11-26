@@ -1,18 +1,18 @@
 [
   {
     "name": "read_resource",
-    "description": "Read local text, list a directory, view an image, or attach a complete file.",
+    "description": "Read local text, list a directory, view an image, or open a complete file.",
     "parameters": {
       "type": "object",
       "properties": {
         "location": {
           "type": "string",
           "minLength": 1,
-          "description": "Absolute host path, local file URI, or `result.uri` from an earlier read. Use an HTTP(S) image URL with the image view. Omit to list the startup directory."
+          "description": "Absolute host path, local file URI, or `result.uri` from an earlier read. Omit to list the startup directory."
         },
         "view": {
           "default": {},
-          "description": "When a preview suggests a media view, use `result.uri` as `location` and `result.view` as `view`.",
+          "description": "The default view previews local media and suggests a view.",
           "anyOf": [
             {
               "type": "object",
@@ -41,7 +41,7 @@
             {
               "type": "string",
               "enum": ["image", "file"],
-              "description": "The image view supplies an image or an image URL to the model service. A local file can hold the URL. The file view sends a whole local file to the model service for parsing."
+              "description": "Use `image` for a local image, an HTTP(S) image URL, or a local file containing an image URL. The `file` view sends the entire local file to the model service for parsing, which may incur a charge."
             }
           ]
         }

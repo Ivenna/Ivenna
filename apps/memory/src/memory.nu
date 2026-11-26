@@ -53,19 +53,19 @@ def relative-address [root: string, path: string] {
 # new addresses and symbolic links under the same workspace boundary.
 def resolve [root: string, address: string] {
     if $address == "" or ($address | str starts-with "/") or ($address | str contains (char nul)) {
-        fail invalid_address "Use an address relative to the shared entrance; use '.' for the entrance."
+        fail invalid_address "Use an address relative to the shared entrance, or '.' for the entrance itself."
     }
     # Nu expands three-or-more dots even in string-valued filesystem paths.
     # Reject that spelling before any path command can alias another address.
     if ($address | split row "/" | any {|component| $component =~ '^\.{3,}$' }) {
-        fail invalid_address "Names consisting only of three or more dots are unsupported by the memory filesystem adapter."
+        fail invalid_address "A room or memory name cannot consist only of three or more dots."
     }
     let lexical = [$root $address] | path join | path expand --no-symlink
     if (within (staging-path $root) $lexical) {
-        fail invalid_address "This address is reserved for unpublished memory writes."
+        fail invalid_address "This address is reserved."
     }
     if not (within $root $lexical) {
-        fail invalid_address "This address is outside the memory workspace."
+        fail invalid_address "This address leads outside your memory rooms."
     }
     mut ancestor = $lexical
     mut remaining = []
@@ -73,14 +73,14 @@ def resolve [root: string, address: string] {
         $remaining = $remaining | prepend ($ancestor | path basename)
         $ancestor = $ancestor | path dirname
     }
-    let parent = try { $ancestor | path expand --strict } catch {|failure|
-        fail invalid_address $"This address cannot be resolved: ($failure.msg)"
+    let parent = try { $ancestor | path expand --strict } catch {
+        fail invalid_address $"Could not follow the address '($address)'."
     }
     if (within (staging-path $root) $parent) {
-        fail invalid_address "This address resolves to unpublished memory writes."
+        fail invalid_address "This address leads to a reserved address."
     }
     if not (within $root $parent) {
-        fail invalid_address "This address resolves outside the memory workspace."
+        fail invalid_address "This address leads outside your memory rooms."
     }
     {
         path: ([$parent ...$remaining] | path join),
@@ -204,7 +204,7 @@ def check-write [root: string, path: string, byte_length: int, capacity: int] {
         fail entry_too_large "An individual memory entry can contain at most 33554432 bytes (32 MiB)."
     }
     if ($path | path exists) and ($path | path type) != "file" {
-        fail invalid_address "A memory entry must be a regular file."
+        fail invalid_address "This address is occupied. Choose a memory or an unused address."
     }
     let current = if ($path | path type) == "file" { ls --long $path | first } else { null }
     let usage = workspace-usage $root
@@ -370,7 +370,7 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
         "remember" => {
             let target = resolve $root $args.address
             if ($args.data | str length --utf-8-bytes) > 44739244 {
-                fail entry_too_large "A memory write can transfer at most 33554432 bytes (32 MiB)."
+                fail entry_too_large "The supplied content exceeds the 32 MiB limit for one memory."
             }
             let content = $args.data | decode base64
             let append = match ($args.mode? | default "create") {
@@ -442,7 +442,12 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
         },
         "create_memory_room" => {
             let target = resolve $root $args.address
-            filesystem-operation { mkdir $target.path }
+            try { mkdir $target.path } catch {|failure|
+                if ($target.path | path type) == "file" {
+                    fail operation_failed $"A memory already occupies '($target.address)'."
+                }
+                fail operation_failed $failure.msg
+            }
             {address: $target.address}
         },
         "move_memory" => {
@@ -464,7 +469,16 @@ def dispatch [root: string, operation: string, args: record, capacity: int] {
         "forget_memory" => {
             let target = existing $root $args.address
             if $target.path == $root { fail invalid_address "The shared entrance cannot be removed." }
-            filesystem-operation { rm --recursive=($args.recursive? | default false) $target.entry_path }
+            let recursive = $args.recursive? | default false
+            try { rm --recursive=$recursive $target.entry_path } catch {|failure|
+                if not $recursive and ($target.entry_path | path type) == "dir" {
+                    let has_contents = try { ls --all $target.entry_path | is-not-empty } catch {
+                        fail operation_failed $"Could not inspect or remove room '($target.address)'."
+                    }
+                    if $has_contents { fail operation_failed $"Room '($target.address)' still has contents." }
+                }
+                fail operation_failed $failure.msg
+            }
             {address: $target.address}
         },
         _ => { fail invalid_operation "Unknown memory operation." }

@@ -27,6 +27,8 @@ pub const HistoryStore = struct {
         previous: ?Key,
         /// Opaque to execution; only the adapter interprets its contents.
         locator: []const u8,
+        /// Estimated stored size for batching body reads.
+        stored_bytes: usize,
     };
 
     pub const RecordId = struct {

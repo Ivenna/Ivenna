@@ -11,7 +11,7 @@ This guide describes how the application assembles Ivenna, how the kernel coordi
 | [packages/agent](../packages/agent/src/root.zig) | Own sessions, scheduling, retained history, model input, prompts, and the communication and attention tools |
 | [packages/agent_contracts](../packages/agent_contracts/src/root.zig) | Define the communication, history storage, and capability contracts shared by execution and concrete implementations |
 | [packages/email](../packages/email/src/root.zig) | Own native addressing, message projection, submission, storage, and retention behind the communication and history contracts |
-| [packages/responses](../packages/responses/src/root.zig) | Encode, measure, and decode model exchanges; own model HTTP transport, file uploads, and request content limits |
+| [packages/responses](../packages/responses/src/root.zig) | Own DeepSeek transport, file uploads, request encoding and measurement, and response decoding |
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, process interaction and cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/resources](../packages/resources/src/root.zig) | Resolve resource references, read host files and directories, retrieve web pages, and present remote images by URL |
@@ -21,7 +21,7 @@ This guide describes how the application assembles Ivenna, how the kernel coordi
 
 `ivenna serve` runs the kernel and its [HTTP listener](../apps/ivenna/src/service.zig) in the same process. Host commands receive the executable path and data directory in their [environment](host.md#command-environment). The kernel reaches the memory app over SSH. See [local service setup](../dev/README.md).
 
-The agent and its capability implementations share `agent_contracts`. That module uses Content to represent tool results. The graph follows imports between Ivenna's Zig modules and shows selected library dependencies.
+The graph follows imports between Ivenna's Zig modules and shows selected library dependencies.
 
 ```mermaid
 flowchart TD
@@ -68,7 +68,7 @@ The application supplies the agent and host with capability implementations thro
 | [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Expose registered outgoing correspondent IDs and submit messages by ID | Email integration |
 | [Channels](../packages/agent_contracts/src/channels.zig) | Reserve, activate, and close local delivery endpoints and attempt handoffs by channel ID | Application |
 | [HistoryStore](../packages/agent_contracts/src/history.zig) | Publish and load checkpoints, allocate storage groups, read and write records, and maintain retained history | Email integration |
-| [Model.Port](../packages/agent_contracts/src/model.zig) | Infer, measure encoded requests, and prepare tool results for model input | Responses adapter |
+| [Model.Port](../packages/agent_contracts/src/model.zig) | Prepare tool results for working history, measure requests, and run inference | Responses adapter |
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
 | [Tools](../packages/agent_contracts/src/tool.zig) | Register a capability's declarations with its invocation entry point | Host, Memory, and Resources |
 
@@ -204,13 +204,13 @@ Context puts the same embedded [system prompt](../packages/agent/src/system.md) 
 
 [Engine](../packages/agent/src/engine.zig) combines messages, selected tool declarations, and reasoning effort into [Model.Request](../packages/agent_contracts/src/model.zig). [tools.zig](../packages/agent/src/tools.zig) selects agent declarations and parses their arguments using one explicit role rule. Memory and Resources join through `shared_tools`. Activity sessions also receive Host through `activity_tools`. Declarations stay with their owning capabilities; invocation uses the same role selection. Runtime action effects remain in Kernel's calling round, including focus preparation and atomic publication with the completed round.
 
-Kernel calls inference and tool execution separately. The activation remains owned by the same worker through the returned batch. The adapter prepares each reply's content, and Engine returns the replies for commit with the model output.
+Kernel calls inference and tool execution separately. The same worker owns the activation until the batch completes. Engine invokes the calls in order while other sessions can run their own batches concurrently. Unknown tools and invalid arguments become ordinary tool errors.
 
-Engine selects ordinary reasoning effort by role. [Compaction](../packages/agent/src/compaction.zig) uses the same summary effort for both roles. The [Responses adapter](../packages/responses/src/provider.zig) encodes the selected value as `reasoning.effort` and applies the same request checks during measurement and before sending inference. Deployment settings and defaults are in the [running guide](running.md#model-requests).
-
-Engine invokes the returned calls in order, while other sessions can run their own tool batches concurrently. Unknown tools and invalid arguments become ordinary tool errors.
+Engine selects ordinary reasoning effort by role. Compaction uses the same summary effort for both roles. The Responses adapter encodes the selected value as `reasoning.effort` and uses the same encoder and limits for measurement and inference. See [compaction](../packages/agent/src/compaction.zig), the [Responses adapter](../packages/responses/src/provider.zig), and [model request settings](running.md#model-requests).
 
 ### Model transport
+
+The adapter sends the selected history with each inference request because DeepSeek's Responses API is stateless. See [DeepSeek's Responses API](https://api-docs.deepseek.com/api/create-response/).
 
 `Model.Port.next` checks the adapter's request limits before making one non-streaming HTTP attempt under a monotonic deadline. Inference and file uploads share a request writer. It finishes the HTTP body and flushes the connection, including any buffered TLS records, before waiting for response headers. The adapter checks any declared response length and validates the complete model output before returning tool calls. On timeout or cancellation, it joins the exchange before releasing borrowed data.
 
@@ -226,15 +226,13 @@ A rejected ordinary inference interrupts the activation. The interruption observ
 
 ### Tool results
 
-Capabilities return [Content](../packages/content/src/root.zig) parts owned by the model-round arena. Content supplies byte classification, media limits, and image-reference interpretation. Each capability reads its sources and identifies them in the result. Engine associates results with call IDs and passes the complete tool batch to the Responses adapter before the exchange is committed.
+Tools return `Content` in the model-round arena. A file result includes its complete bytes and text identifying its source. After all calls run, Engine passes each result to `Model.Port.prepareToolResult` and pairs the prepared `Model.Content` with the original call ID. At round commit, Context copies the prepared results into working history alongside the model output. See the [tool content type](../packages/content/src/root.zig) and the [model contract](../packages/agent_contracts/src/model.zig).
 
-The adapter copies new reply parts before preparing file uploads. When encoding the request, it sends images in the function-call output as `input_image` parts and constructs Base64 data URLs for local image bytes. It encodes an overlong HTTP(S) image URL as a `content_limit` text part alongside the source description and retains the URL in history. Measurement and inference each count the attachments encoded in the complete request. See [model request checks](content.md#model-request-checks).
+The Responses adapter uploads each file under a generic filename with purpose `rich_layout_recognition`. On HTTP 400 it tries `user_data` once within the same deadline. It replaces the file bytes with a `file_reference` on success or a text part describing the failed or unconfirmed upload. See [DeepSeek file purposes](https://api-docs.deepseek.com/guides/files_api/#upload-a-file) and [file upload outcomes](content.md#complete-files).
 
-Each file part holds complete bytes and an optional upload reference. For a file that needs a reference, the adapter sends a generic filename and the purpose `rich_layout_recognition`. A definite HTTP 400 rejection permits one attempt with `user_data` under the same per-file deadline. If the upload fails or its outcome is uncertain, the adapter replaces that file part with a description of what happened. The kernel can commit the round with its other results. See the provider's [Files API](https://api-docs.deepseek.com/guides/files_api/) and the [file result contract](content.md#complete-files).
+The request encoder turns each tool result into a `function_call_output`. It preserves the tool's text and marks each uploaded file's position. After the consecutive tool outputs, it adds one user-role message for each result with file references. The message identifies the tool call and carries its file IDs as `input_file` parts in their original order.
 
-On success, the adapter retains the service file identifier alongside the original bytes. Measurement and inference use the same encoder and reuse that reference. The function-call output preserves the tool's source description and marks each attachment in its original position. After the batch of tool results, the adapter adds one user-role message per result containing files. That message identifies the originating tool call once, followed by its `input_file` references in order.
-
-At round commit, Context copies the prepared parts into its retained arena. History persistence stores the bytes and references. See [persistent working history](#persistent-working-history) and [file retention at the model service](running.md#uploaded-model-files).
+Images travel in the function-call output as `input_image` parts. The encoder builds a Base64 data URL from inline image bytes. For an existing URL, it uses the stored address or adds a notice when an HTTP(S) address exceeds the adapter's length limit. See [image URL handling](content.md#image-url-references).
 
 ## Bounded model context
 
@@ -258,7 +256,7 @@ The session registry reads `current` and samples runtime state under its lock. T
 
 `Context.summaryRequest` combines the system prompt and selected history with a summary turn carrying the instructions and state sample. The request uses the configured summary effort and offers no tools. See the [summary instructions](../packages/agent/src/compaction.md) and [handover contract](input.md#handover-generation-and-replacement).
 
-If the summary request exceeds an adapter limit and contains image or file parts, the runtime measures a copy with omission notices in their place. The revised request preserves tool-call IDs and the original text parts, including source descriptions. The retained records still carry their original attachments.
+If the summary request contains media and exceeds an adapter limit, the runtime substitutes omission notices for images and file references in the request and measures it again. The request keeps tool-call IDs and the original text, including source descriptions. The substitution applies only to the summary request.
 
 ### Continuing with a handover
 
@@ -281,9 +279,11 @@ The agent's [history persistence](../packages/agent/src/history.zig) stores immu
 | Storage group | An opaque identifier used by `HistoryStore` to discover related immutable records, such as a session segment or report journal |
 | Committed chain | The checkpoint's selected records in one segment, identified by a head key and entry count |
 
-Each entry contains a retained event record, handover, or model/tool exchange. Event records carry the receiving focus and its observations. Handovers carry the producing focus, sample time, generated summary, and sampled state. Inherited records keep their original focus references. Exchanges preserve opaque model output and typed tool replies, including local media bytes, upload references for files, and source URLs for remote images. See the [retained record contract](input.md#retained-records).
+Each entry contains an event record, a handover, or a complete model/tool exchange. Inherited records keep their original focus references. See the [retained record contract](input.md#retained-records) and [tool result preparation](#tool-results).
 
-Working history and the activity outbox share a [record codec](../packages/agent/src/record_codec.zig) for compact UTF-8 ZON bodies and content keys. The encoder leaves default field values implicit when the schema allows it. An entry record contains the entry and its predecessor's SHA-256 key within that segment, or null for the first entry. Its own key is the SHA-256 of the stored body. The storage group and predecessor keys distinguish occurrences even when their payloads are equal. Unread internal observations are stored together in a separate immutable record in the session's current group.
+Working history and the activity outbox share a record codec for UTF-8 ZON bodies and SHA-256 content keys. The encoder can omit defaulted optional fields. An entry record contains the entry and its predecessor's key within the segment, or null for the first entry. The storage group and predecessor keys distinguish entries with equal payloads. Unread internal observations occupy a separate record in the session's current group. See the [record codec](../packages/agent/src/record_codec.zig).
+
+History persistence encodes inline image bytes as Base64 to avoid repeated escaping of binary data in ZON and JMAP JSON. It restores the original bytes and format on read. See [history persistence](../packages/agent/src/history.zig).
 
 One checkpoint covers all registered sessions. For each session it records the internal ID, `focus_id`, role, epoch, storage group, committed head, entry count, and an optional key for unread internal observations. See [recovery state](#recovery-state) for the state used to continue execution.
 
@@ -297,11 +297,15 @@ The registry holds its lock through checkpoint publication at [admission](#activ
 
 Within an epoch, persistence carries forward the confirmed keys and encodes newly appended entries. It confirms the new records before publishing the checkpoint that selects them. Startup publishes a checkpoint even when the restored document is unchanged, because a delayed retirement from the previous run can still target the restored copy. After that publication, saves skip publication when the document's digest matches the confirmed one.
 
-The registry records a checkpoint save error before releasing its lock and propagates it to the kernel for shutdown. The error stops further registry work and retention for all sessions, preserving the records of any checkpoint the mail service may have published. On restart, the registry restores the checkpoint the adapter selects. See [working history limits](running.md#working-history) and [history storage](#history-storage).
+The registry records a checkpoint save error before releasing its lock and propagates it to the kernel for shutdown. The error stops further registry work and retention for all sessions, preserving the records of any checkpoint the mail service may have published. On restart, the registry restores the checkpoint the adapter selects. See [working history limits](running.md#working-history-limits) and [history storage](#history-storage).
 
-Session restoration discovers group metadata, follows each committed predecessor chain, then reads selected bodies in batches. Hashes, checkpoint selections, record kinds, counts, and predecessor metadata must agree. Owners of retained event and handover records must match the complete ID of the restoring focus or the core (`core-1`). A saved channel's opening focus ID has a suffix below the next focus sequence. If the opening focus is still present in the checkpoint, its complete ID must match. Matching physical duplicates can supply one logical occurrence. Missing or inconsistent records fail restoration. When loading older handovers, restoration converts channel and subscription ID lists to sampled records with `null` descriptions and drops retired feed IDs from the sample.
+Restoration follows the selected checkpoint's predecessor chains using record metadata, then fetches and decodes the selected bodies. The agent uses estimated stored sizes to group small records and fetch larger bodies individually. It validates record hashes, kinds, counts, and predecessor metadata. Matching physical duplicates can supply one logical record. A selected record that is missing, cannot be decoded, or fails validation prevents restoration.
 
-Restoration rebuilds the outbox's unread metadata and materializes the core context. Report bodies are loaded during admission. When an activity is scheduled, the registry materializes its context by reading only that session's history. Delivery objects, receipts, worker ownership, and host process handles are not checkpointed. See [startup](#startup-and-interruption) for reconstruction.
+Owners of retained event and handover records must match the complete ID of the restoring focus or the core (`core-1`). A saved channel's opening focus ID must have a suffix below the next focus sequence. If the opener is still in the checkpoint, the recorded ID must match that session's complete ID.
+
+The reader restores original image bytes from either raw-byte or Base64 records. For earlier file parts it requires the saved upload ID and discards the source bytes. For older handovers, it converts channel and subscription ID lists to sampled records with null descriptions and drops retired feed IDs. See [upgrading working history](upgrading.md#working-history-encoding).
+
+At startup the registry validates every selected session's history in temporary memory, then keeps a materialized context for the core. When it schedules an activity with no loaded context, it reads that activity's segment. The registry restores the outbox's unread metadata at startup and reads report bodies at admission. Delivery objects, receipts, worker ownership, and host process handles exist only at runtime. See [startup and interruption](#startup-and-interruption).
 
 ### History retention
 
@@ -389,11 +393,11 @@ Each subsequent page of checkpoint candidates uses the preceding page's last `Em
 
 The fresh startup publication gets a new `Email.id` and a revision above the prepared-format candidates found by the scan. The revision starts at 1 when the scan finds no candidates in the prepared format. An earlier process using the prepared format could request publication only for a message whose ID it already obtained. If that message is still eligible when the update arrives, its revision ranks below the new checkpoint. Delayed Trash moves can only address earlier message IDs.
 
-During [restoration](#saving-and-restoration), the adapter queries the folder by state and group keywords in pages of up to 512 IDs. It validates ownership and group membership and returns record metadata and transient `Email.id` locators. The agent selects the committed chains, then asks for their bodies. Bulk `Email/get` rechecks ownership, group, key, and predecessor and returns complete text. The agent verifies the hashes and decodes the records.
+The adapter discovers records by state and group keywords in pages of up to 512 IDs. It validates ownership and group membership and returns `Email.id` as an opaque locator and `Email.size` as a stored-size estimate. When the agent requests a batch of selected bodies, the adapter uses `Email/get` to fetch the complete text and rechecks ownership, group, key, and predecessor. See [saving and restoration](#saving-and-restoration).
 
-Get and set batches contain at most 32 objects and obey the session's `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest`. Encoded bodies and protocol fields count toward the request size. Each complete model/tool round occupies one record, including its retained image and file bytes. If even one record exceeds the request limit on its own, saving fails with `HistoryRecordTooLarge` before checkpoint publication.
+Get and set batches split at record boundaries. Each batch can contain up to 32 objects, subject to the session's `maxObjectsInGet`, `maxObjectsInSet`, and `maxSizeRequest`. The size limit applies to the whole encoded JMAP request. If creating a single record would exceed it, the adapter returns `HistoryRecordTooLarge` before checkpoint publication.
 
-Preparing the checkpoint takes one `Email/set` create request. If that encoded request exceeds `maxSizeRequest`, the adapter returns `HistoryCheckpointTooLarge` before sending it and preserves the confirmed selection. See [working history limits](running.md#working-history) for recovery after a size rejection.
+Preparing the checkpoint takes one `Email/set` create request. If that encoded request exceeds `maxSizeRequest`, the adapter returns `HistoryCheckpointTooLarge` before sending it and preserves the confirmed selection. See [working history limits](running.md#working-history-limits) for recovery after a size rejection.
 
 ### Mail retention
 

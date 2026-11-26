@@ -10,7 +10,9 @@ The core and activities can read regular files and list directories wherever the
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
-The application uses the Responses adapter with DeepSeek as the default model service. Supply its API key, or configure a Responses-compatible endpoint and model through `LLM_BASE_URL` and `LLM_MODEL`. [File input](content.md#complete-files) additionally requires DeepSeek-compatible Files API parsing and `input_file` references; the default `deepseek-flash` supports them. The kernel also needs access to the [mail service](#mail-service) and [memory service](#memory-service). The mail receiving boundary needs access to the kernel's [reception status](#service-status-and-reception).
+Set `LLM_API_KEY` to a DeepSeek API key. The kernel uses the DeepSeek Responses API for inference and the Files API for [file input](content.md#complete-files).
+
+The kernel also needs access to the [mail service](#mail-service) and [memory service](#memory-service). The mail receiving boundary needs access to the kernel's [reception status](#service-status-and-reception).
 
 ## Configuration
 
@@ -20,9 +22,9 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 
 | Variable | Purpose | Default when unset |
 | --- | --- | --- |
-| `LLM_API_KEY` | Model API key | Required |
-| `LLM_BASE_URL` | Model API base URL | `https://api.deepseek.com` |
-| `LLM_MODEL` | Model name | `deepseek-flash` |
+| `LLM_API_KEY` | DeepSeek API key for inference and file uploads | Required |
+| `LLM_BASE_URL` | API base URL for inference and file uploads | `https://api.deepseek.com` |
+| `LLM_MODEL` | DeepSeek model name | `deepseek-flash` |
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `65536` |
 | `LLM_REQUEST_TIMEOUT_MS` | Time limit for one inference attempt or one file upload, including upload negotiation | `600000` (10 minutes) |
 | `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
@@ -53,7 +55,7 @@ Numeric kernel settings must be positive. Relative `DATA_DIR` and `MEMORY_SSH_CO
 
 ### Web page access
 
-Set `DEEPSEEK_API_KEY` to let `read_resource` fetch web pages as Markdown. DeepSeek receives the full page URL, including its query string, whichever service handles inference. If one DeepSeek key serves both purposes, assign it to both `DEEPSEEK_API_KEY` and `LLM_API_KEY`.
+Set `DEEPSEEK_API_KEY` to let `read_resource` fetch web pages as Markdown. DeepSeek receives the full page URL, including its query string. If one DeepSeek key serves both purposes, assign it to both `DEEPSEEK_API_KEY` and `LLM_API_KEY`.
 
 Opening the original URL again starts a new Fetch request. DeepSeek charges for each successful request that returns page content. To read another passage from the same copy, use the returned snapshot URI. See [web page snapshots](resources.md#web-pages) and [DeepSeek's billing terms](https://api-docs.deepseek.com/guides/search/#billing).
 
@@ -61,7 +63,9 @@ Ivenna sends supported image references to the configured model service for retr
 
 ### Model requests
 
-The configured model service receives the focus's working history and any observations admitted for the current turn. An activity's history can include correspondence, model output, and tool results inherited from the core. A handover request sends the history to summarize and a dated sample of runtime state, which can include channel and subscription descriptions, pending wakeups, and outgoing correspondent IDs. Tool results can include images or references to files uploaded to the model service. See [inference turns](input.md#inference-turns), [sampled state](input.md#sampled-state), and [tool content](content.md).
+An ordinary inference request sends the selected working history and newly admitted observations. An activity's request can include correspondence and tool results inherited from the core. See [inference turns](input.md#inference-turns) and [retained tool content](content.md#context-and-continuity).
+
+A handover request sends the history to summarize and a dated sample of runtime state, which can include channel and subscription descriptions, pending wakeups, and outgoing correspondent IDs. See [sampled state](input.md#sampled-state).
 
 Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments.
 
@@ -89,7 +93,7 @@ If a focus pauses at a request limit, check the logs for the limit it hit. The h
 
 ## Changing the model
 
-Retained history can include native model output and reasoning data supplied by the model adapter, plus file identifiers supplied by the model service. A replacement service and model must accept those items as well as the configured tools and reasoning settings. File identifiers also require access to the account that owns the uploads. The runtime does not translate retained model output, transfer uploaded files between services, or verify in advance that a replacement model can consume them. Establish compatibility before resuming retained work with the replacement model.
+Choose a DeepSeek model that supports the configured tools and reasoning efforts and can read the reasoning items and media in the history you plan to resume. For history with uploaded documents, check which models accept file IDs and keep access to the account that owns those files. See the [DeepSeek Files API](https://api-docs.deepseek.com/guides/files_api/) and [uploaded model files](#uploaded-model-files).
 
 Stop the kernel, update `LLM_MODEL` and any changed service settings, then restart with the same instance data. A change to the model name or service endpoint makes the saved input token count unavailable to [soft compaction](#context-budgets). See [stopping and restarting](#stopping-and-restarting).
 
@@ -105,7 +109,24 @@ Wakeup and host completion callbacks are created directly through JMAP in `Ivenn
 
 Configure automatic Trash expiry and cleanup of unreferenced storage in the mail service. These processes must continue independently of the kernel. Choose retention with the provider's full policy scope in mind: Trash and Junk policies can also remove ordinary mail. The [local Stalwart setup](../dev/README.md#configuring-mail) provides a concrete configuration.
 
-The [intake rules](#mail-intake) also apply to existing correspondence in the account. Working history shares the account's storage capacity; [data and retention](#data-and-retention) explains its folder lifecycle and backup requirements.
+Allow for correspondence, history from all focuses, pending records, and mail awaiting expiry in Trash when setting the account quota. See [data and retention](#data-and-retention) for folder lifetimes and [mail intake](#mail-intake) for how the kernel handles existing correspondence.
+
+### Working history limits
+
+Set the mail service's advertised `maxSizeRequest` high enough for the JMAP request that writes your largest history record or checkpoint. Allow for the JSON envelope, any HTTP body limit at the mail endpoint or proxy, and the mail store's message limits. See [sizing the supplied Stalwart instance](../dev/README.md#sizing-stalwart-for-working-history) and [history storage](architecture.md#history-storage).
+
+A model response and all of its tool results share one history record. Estimate space for everything that can arrive in one round. Base64 uses about four bytes for every three bytes of inline image data. Two 32 MiB images contribute about 85 MiB before the rest of the round and the JMAP envelope. The model service applies its own [inference request limits](content.md#model-request-checks).
+
+| Error | What to check |
+| --- | --- |
+| `HistoryRecordTooLarge` | A single history record exceeds `maxSizeRequest` with its request envelope. For a tool round, check the combined size of its results. |
+| `HistoryCheckpointTooLarge` | The checkpoint request exceeds `maxSizeRequest`. Check the number of registered focuses, open channels, and pending wakeups. |
+| HTTP 413 on `Email/set` | Check HTTP body limits at the proxy and mail endpoint. |
+| `MailObjectFailed` on `Email/set` | Check the mail server's rejection details, including message limits and account quota. |
+
+`HistoryRecordTooLarge` and `HistoryCheckpointTooLarge` stop the kernel before it sends the oversized request. Restart resumes from the previously published checkpoint. If the failed save included a tool round, that checkpoint has no saved results for the round. Check for effects such as a file upload or a host command before restarting, since the focus may act again when it resumes.
+
+Raise the applicable mail service or proxy limit and restart with the same mailbox and instance database. If channel registrations contributed to the checkpoint size, close unused channels once reception opens.
 
 ### Outgoing correspondents
 
@@ -216,7 +237,7 @@ Look for `JMAP` on the kernel's standard error. A failed request logs its method
 
 Reception can stay open even if Ivenna loses confirmation while sending a reply. Check the reply's `send` result in [working history](#working-history) to see whether Ivenna confirmed submission. Trash can contain both submitted messages and abandoned drafts. See [correspondence outcomes](communication.md#writing-to-a-correspondent).
 
-If the kernel cannot read or confirm required mailbox state, it closes reception and exits. Even a duplicate delivery requires a confirmed acknowledgement. For a `connect` failure, check whether the kernel can reach the mail endpoint. For HTTP 401, check the credentials configured for the [mail account](#mail-service).
+If the kernel cannot read or confirm required mailbox state, it closes reception and exits. Even a duplicate delivery requires a confirmed acknowledgement. For a `connect` failure, check whether the kernel can reach the mail endpoint. For HTTP 401, check the credentials configured for the [mail account](#mail-service). For a history size error, see [working history limits](#working-history-limits).
 
 ### When model work stalls
 
@@ -226,7 +247,9 @@ For inference HTTP errors, the adapter logs the status and the service's request
 
 - **Temporary outage.** The kernel retries ordinary inference and summaries needed to resolve a hard limit. During soft compaction, a temporary failure returns control to the ordinary request. The first retry wait is 250–500 milliseconds. The range doubles after each failure up to 2.5–5 minutes. A longer delay requested by the service in `Retry-After` takes precedence. Retries reuse completed tool results. A lost model response can still incur charges.
 - **Interrupted focus.** A rejected request or an unusable response pauses the focus with its history intact. This includes letters saved and acknowledged before inference, even if the model service rejects the request for exceeding its token window. Another observation can resume the focus, and the core receives a notice if an activity was interrupted. If HTTP 403 or 404 recurs across focuses, check model access and `LLM_BASE_URL`.
-- **Kernel exit.** A shared failure on the inference endpoint, such as HTTP 401, exhausted account quota, or an incompatible protocol, closes reception and stops the kernel. Correct the reported problem before restarting. When the file service returns 401, the kernel records the rejected upload in the tool result and can continue to the next inference. See [model transport](architecture.md#model-transport) and [file outcomes](content.md#complete-files).
+- **Kernel exit.** A shared failure on the inference endpoint, such as HTTP 401, exhausted account quota, or an incompatible protocol, closes reception and stops the kernel. Correct the reported problem before restarting. See [model transport](architecture.md#model-transport).
+
+For a file upload rejection, look for `model file endpoint returned HTTP` in the kernel log. Ivenna records the rejection in the tool result and can continue with the next inference, including when the file endpoint returns HTTP 401. See [file upload outcomes](content.md#complete-files).
 
 ### Recovering from an admission failure
 
@@ -262,7 +285,7 @@ See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
 
 ## Data and retention
 
-The deployment chooses storage for the mail account, the memory workspace, and the kernel's local data directory independently. File input also creates uploads in the configured model-service account:
+The deployment chooses storage for the mail account, memory workspace, and kernel data directory independently. Uploaded files live in the DeepSeek account.
 
 | Location | Contents |
 | --- | --- |
@@ -270,7 +293,7 @@ The deployment chooses storage for the mail account, the memory workspace, and t
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
 | `<DATA_DIR>/state.sqlite3` | Subscription state and queued reports. See the [instance database](architecture.md#instance-database). |
-| Configured model-service account | Uploaded files and their service-side parsing results |
+| DeepSeek account | [Uploaded files](#uploaded-model-files) and their parsing results |
 
 Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).
 
@@ -305,10 +328,6 @@ Ivenna cleans up the history folder at startup and periodically while it runs. U
 
 Forks store independent copies of inherited history. Include these copies when sizing runtime memory and the mailbox. Compaction replaces older records with a handover and carries forward selected recent records. Previous records can then move to Trash while other sessions keep their own copies.
 
-The mail service's advertised `maxSizeRequest` applies to requests that store history records or prepare a checkpoint. Image bytes, file bytes, and encoding overhead count toward the history request, so a result within the [model request limits](content.md#model-request-checks) can still exceed the mailbox limit. If a single history record exceeds the limit, the kernel stops with `HistoryRecordTooLarge`. Files already uploaded for the round follow the service's [remote-file lifecycle](#uploaded-model-files). See the [JMAP Session capabilities](https://www.rfc-editor.org/rfc/rfc8620.html#section-2) and the [history storage protocol](architecture.md#history-storage) for request sizing and batching.
-
-A checkpoint can exceed `maxSizeRequest` as focus and channel registrations or pending wakeups accumulate. The kernel stops with `HistoryCheckpointTooLarge` and leaves the previous checkpoint selected. Restart with the same mailbox to resume from that checkpoint. If startup reports the same error, raise the JMAP request size limit before retrying if your mail service allows it. Once reception opens, you can ask Ivenna to close unused channels if their registrations contribute to checkpoint size.
-
 A sleeping activity retains its history even when its context is unloaded. When the activity ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. The activity's messages and ending remain available to the core until they enter the core's history. Shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
 Unread activity expressions retain each text in order with its original observation time. Ending times are also retained. The core admits reports that fit its ordinary request. Unread reference metadata grows with the backlog, and all unread bodies occupy mailbox storage. Activity messages and endings are outside `MAX_PENDING_EVENTS`, so size runtime memory and mailbox capacity for work that can accumulate before the core next reads it. See [activity reports](architecture.md#activity-reports) for reading and admission behavior.
@@ -319,11 +338,9 @@ Pending subscription reports can accumulate on disk while the kernel is stopped 
 
 ### Uploaded model files
 
-When an upload returns a usable reference, saved working history includes the original bytes and the service identifier. Later inferences reuse that identifier, including after restart. The [working-history limits](#working-history) apply to the bytes. If an upload may have reached the service but returned no usable reference, the service account can also contain a file whose identifier Ivenna never received. See [file outcomes](content.md#complete-files).
+Uploads belong to the DeepSeek account authenticated by `LLM_API_KEY`. Ivenna leaves expiration unset, so DeepSeek keeps the files until deletion, even after Ivenna retires the history that referred to them. Deleting an upload invalidates its ID in every focus or mailbox backup that refers to it. See the [DeepSeek Files API](https://api-docs.deepseek.com/guides/files_api/#upload-a-file).
 
-Uploads live at `LLM_BASE_URL` in the account authenticated by `LLM_API_KEY`. Ivenna does not request an upload expiration or delete uploads during compaction or history retirement. Manage them separately under the service's retention policy; see DeepSeek's [Files API](https://api-docs.deepseek.com/guides/files_api/). Deleting an upload still referenced by retained contexts prevents later requests from using that identifier; retained originals are not automatically reuploaded.
-
-Preserve the host artifact or memory entry when it needs to outlive selected working history. See DeepSeek's [file parsing guide](https://api-docs.deepseek.com/guides/document_parsing/) for service behavior and billing.
+DeepSeek can finish parsing and store a file after the connection closes. Use the account's file list to inspect uploads after an unconfirmed result. Keep the original host file or memory entry for access to the original bytes. See [listing uploads](https://api-docs.deepseek.com/guides/files_api/#list-files) and [file upload outcomes and charges](content.md#complete-files).
 
 ### Backups and transfers
 
@@ -349,7 +366,7 @@ Native `Email.id` values may change because restoration uses checkpoint markers 
 
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 
-A mailbox backup carries saved channel registrations, stored callbacks, and wakeup arrangements. Preserve [host artifacts](#host-output-and-deployment-files) and memory data separately when continued work needs them. See [stopping and restarting](#stopping-and-restarting) for what requires a fresh command or receive request.
+A mailbox backup carries saved channel registrations, stored callbacks, and wakeup arrangements. Keep access to any [uploaded files](#uploaded-model-files) referenced by the backup. Preserve host artifacts and memory data separately when continued work needs them. See [host output and deployment files](#host-output-and-deployment-files) and [stopping and restarting](#stopping-and-restarting) for what survives a restart.
 
 ### Host output and deployment files
 

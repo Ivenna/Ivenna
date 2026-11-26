@@ -1,5 +1,6 @@
 const std = @import("std");
 const contracts = @import("agent_contracts");
+const Model = contracts.Model;
 const Input = @import("input.zig");
 const Stream = @import("work.zig").Stream;
 const Codec = @import("record_codec.zig");
@@ -15,13 +16,101 @@ pub const Scope = struct { session_id: u64, epoch: u64 };
 
 pub const Entry = union(enum) {
     record: Input.Record,
-    exchange: []const contracts.Model.Item,
+    exchange: []const Model.Item,
 };
 
 const Source = union(enum) {
-    entry: struct { previous: ?Key, value: Entry },
+    entry: struct { previous: ?Key, value: StoredEntry },
     observations: []const Input.Event,
 };
+
+const StoredEntry = union(enum) {
+    record: Input.Record,
+    exchange: []const Item,
+
+    const Item = union(enum) {
+        message: @FieldType(Model.Item, "message"),
+        continuation: []const u8,
+        tool_result: struct { call_id: []const u8, content: struct { parts: []const StoredPart } },
+    };
+};
+
+const InlineImage = @FieldType(@FieldType(Model.Content.Part, "image"), "data");
+const Base64Image = struct {
+    format: @FieldType(InlineImage, "format"),
+    encoded: []const u8,
+};
+
+const StoredPart = union(enum) {
+    text: []const u8,
+    image: union(enum) { url: []const u8, base64: Base64Image, data: InlineImage },
+    file_reference: []const u8,
+    // Earlier records stored both a file's original bytes and its upload ID.
+    file: struct { bytes: []const u8, reference: []const u8 },
+
+    fn restore(self: StoredPart, a: Allocator) !Model.Content.Part {
+        return switch (self) {
+            .text => |value| .{ .text = try a.dupe(u8, value) },
+            .image => |image| .{ .image = switch (image) {
+                .url => |url| .{ .url = try a.dupe(u8, url) },
+                .data => |data| .{ .data = .{ .format = data.format, .bytes = try a.dupe(u8, data.bytes) } },
+                .base64 => |data| blk: {
+                    const decoder = std.base64.standard.Decoder;
+                    const length = decoder.calcSizeForSlice(data.encoded) catch return error.InvalidHistory;
+                    const bytes = try a.alloc(u8, length);
+                    decoder.decode(bytes, data.encoded) catch return error.InvalidHistory;
+                    break :blk .{ .data = .{ .format = data.format, .bytes = bytes } };
+                },
+            } },
+            .file => |old| .{ .file_reference = try a.dupe(u8, old.reference) },
+            .file_reference => |id| .{ .file_reference = try a.dupe(u8, id) },
+        };
+    }
+};
+
+fn storeEntry(a: Allocator, entry: Entry) !StoredEntry {
+    if (entry == .record) return .{ .record = entry.record };
+    const items = try a.alloc(StoredEntry.Item, entry.exchange.len);
+    for (entry.exchange, items) |item, *stored| stored.* = switch (item) {
+        .tool_result => |result| blk: {
+            const parts = try a.alloc(StoredPart, result.content.parts.len);
+            for (result.content.parts, parts) |part, *stored_part| stored_part.* = switch (part) {
+                .text => |value| .{ .text = value },
+                .image => |image| .{ .image = switch (image) {
+                    .url => |url| .{ .url = url },
+                    .data => |data| image: {
+                        const encoder = std.base64.standard.Encoder;
+                        const encoded = try a.alloc(u8, encoder.calcSize(data.bytes.len));
+                        break :image .{ .base64 = .{ .format = data.format, .encoded = encoder.encode(encoded, data.bytes) } };
+                    },
+                } },
+                .file_reference => |id| .{ .file_reference = id },
+            };
+            break :blk .{ .tool_result = .{ .call_id = result.call_id, .content = .{ .parts = parts } } };
+        },
+        inline else => |value, tag| @unionInit(StoredEntry.Item, @tagName(tag), value),
+    };
+    return .{ .exchange = items };
+}
+
+fn restoreEntry(a: Allocator, temporary: Allocator, value: StoredEntry) !Entry {
+    if (value == .record) {
+        var record = value.record;
+        if (record == .handover) try record.handover.state.restoreLegacyFields(temporary);
+        return .{ .record = try Input.cloneRecord(a, record) };
+    }
+    const items = try a.alloc(Model.Item, value.exchange.len);
+    for (value.exchange, items) |stored, *item| item.* = switch (stored) {
+        .message => |message| .{ .message = .{ .role = message.role, .text = try a.dupe(u8, message.text) } },
+        .continuation => |value_bytes| .{ .continuation = try a.dupe(u8, value_bytes) },
+        .tool_result => |result| blk: {
+            const parts = try a.alloc(Model.Content.Part, result.content.parts.len);
+            for (result.content.parts, parts) |part, *restored| restored.* = try part.restore(a);
+            break :blk .{ .tool_result = .{ .call_id = try a.dupe(u8, result.call_id), .content = .{ .parts = parts } } };
+        },
+    };
+    return .{ .exchange = items };
+}
 
 pub const History = struct {
     pub const Wakeup = struct {
@@ -337,31 +426,27 @@ pub const Persistence = struct {
         defer scratch.deinit();
         var offset: usize = 0;
         while (offset < selections.len) {
-            const count = @min(source_batch_count, selections.len - offset);
+            const count = readBatchCount(selections[offset..]);
             const batch = selections[offset..][0..count];
             var references: [source_batch_count]Store.Reference = undefined;
             for (batch, references[0..count]) |selected, *reference| reference.* = selected.reference;
-            const bodies = try self.store.read(scratch.allocator(), references[0..count]);
+            const temporary = scratch.allocator();
+            const bodies = try self.store.read(temporary, references[0..count]);
             for (batch, bodies) |selected, body| {
                 if (!equalKey(Codec.digest(body), selected.reference.key)) return error.InvalidHistory;
-                const source = try Codec.decode(Source, a, body);
+                const source = try Codec.decode(Source, temporary, body);
                 switch (source) {
                     .entry => |entry| {
                         if (!equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
                         switch (selected.destination) {
-                            .entry => |destination| {
-                                var value = entry.value;
-                                if (value == .record and value.record == .handover)
-                                    try value.record.handover.state.restoreLegacyFields(a);
-                                destination.* = value;
-                            },
+                            .entry => |destination| destination.* = try restoreEntry(a, temporary, entry.value),
                             else => return error.InvalidHistory,
                         }
                     },
                     .observations => |events| {
                         if (events.len == 0 or selected.reference.previous != null) return error.InvalidHistory;
                         switch (selected.destination) {
-                            .observations => |destination| destination.* = events,
+                            .observations => |destination| destination.* = try Input.cloneEvents(a, events),
                             else => return error.InvalidHistory,
                         }
                     },
@@ -494,6 +579,19 @@ const Selection = struct {
     const Destination = union(enum) { entry: *Entry, observations: *[]const Input.Event };
 };
 
+/// Give one record its full size, then group further records while their
+/// estimated sizes keep temporary decoding work bounded.
+fn readBatchCount(selections: []const Selection) usize {
+    var count: usize = 1;
+    var bytes = selections[0].reference.stored_bytes;
+    while (count < @min(source_batch_count, selections.len) and bytes < source_batch_bytes) : (count += 1) {
+        const size = selections[count].reference.stored_bytes;
+        if (size > source_batch_bytes - bytes) break;
+        bytes += size;
+    }
+    return count;
+}
+
 fn select(a: Allocator, selections: *std.ArrayList(Selection), reference: Store.Reference, destination: Selection.Destination) !void {
     try selections.append(a, .{
         .reference = .{
@@ -501,6 +599,7 @@ fn select(a: Allocator, selections: *std.ArrayList(Selection), reference: Store.
             .key = reference.key,
             .previous = reference.previous,
             .locator = try a.dupe(u8, reference.locator),
+            .stored_bytes = reference.stored_bytes,
         },
         .destination = destination,
     });
@@ -530,7 +629,8 @@ const Builder = struct {
 
     fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
-        const body = try Codec.encode(self.encoding.allocator(), Source{ .entry = .{ .previous = previous, .value = value } });
+        const a = self.encoding.allocator();
+        const body = try Codec.encode(a, Source{ .entry = .{ .previous = previous, .value = try storeEntry(a, value) } });
         const key = Codec.digest(body);
         try self.add(group, key, previous, body);
         return key;
@@ -577,7 +677,19 @@ fn equalPrevious(left: ?Key, right: ?Key) bool {
     return right == null;
 }
 
-test "working history can append after restoring an older checkpoint and handover" {
+test "history reads group small records and fetch large records alone" {
+    const small: Selection = .{
+        .reference = .{ .group = "group", .key = @splat(0), .previous = null, .locator = "record", .stored_bytes = source_batch_bytes / 2 },
+        .destination = undefined,
+    };
+    var large = small;
+    large.reference.stored_bytes = source_batch_bytes + 1;
+    try std.testing.expectEqual(2, readBatchCount(&.{ small, small, large }));
+    try std.testing.expectEqual(1, readBatchCount(&.{ small, large }));
+    try std.testing.expectEqual(1, readBatchCount(&.{ large, small }));
+}
+
+test "forking history rewrites legacy files and raw images" {
     const t = std.testing;
     const TestStore = @import("test_history.zig").TestStore;
     var store: TestStore = .{};
@@ -593,7 +705,23 @@ test "working history can append after restoring an older checkpoint and handove
         "}}}}}";
     const group = try persistence.store.allocateGroup(a);
     const key = Codec.digest(body);
-    try persistence.store.create(a, &.{.{ .group = group, .key = key, .previous = null, .body = body }});
+    const exchange = try std.mem.concat(a, u8, &.{
+        ".{.entry=.{.previous=", try Codec.encode(a, key),
+        \\, .value = .{ .exchange = .{
+        \\    .{ .tool_result = .{ .call_id = "read-file", .content = .{ .parts = .{
+        \\        .{ .text = "file:///source.pdf" },
+        \\        .{ .file = .{ .bytes = "Original PDF bytes\x00\xff", .reference = "file-123" } },
+        \\        .{ .image = .{ .data = .{ .format = .png, .bytes = "\x00\xff\x89\"\\\n" } } },
+        \\        .{ .image = .{ .url = "https://example.test/image.png" } },
+        \\    } } } }
+        \\} } } }
+        ,
+    });
+    const exchange_key = Codec.digest(exchange);
+    try persistence.store.create(a, &.{
+        .{ .group = group, .key = key, .previous = null, .body = body },
+        .{ .group = group, .key = exchange_key, .previous = key, .body = exchange },
+    });
     try persistence.store.save(try Codec.encode(a, Checkpoint{
         .subscription_catalog = @splat(0),
         .next_session_id = 2,
@@ -607,8 +735,8 @@ test "working history can append after restoring an older checkpoint and handove
             .subscription_through = 0,
             .epoch = 1,
             .group = group,
-            .head = key,
-            .count = 1,
+            .head = exchange_key,
+            .count = 2,
             .observations = null,
         }},
         .wakeups = &.{},
@@ -626,15 +754,42 @@ test "working history can append after restoring an older checkpoint and handove
     try t.expectEqualStrings("Keep investigating.", handover.summary);
     try t.expectEqualStrings("watch-1", handover.state.subscription_registrations[0].subscription_id);
     try t.expectEqual(null, handover.state.subscription_registrations[0].listener);
-    core.entries = &.{ core.entries.?[0], .{ .exchange = &.{.{ .continuation = "Continuing." }} } };
-    history.sessions = &.{core};
+    const parts = core.entries.?[1].exchange[0].tool_result.content.parts;
+    try t.expectEqualStrings("file:///source.pdf", parts[0].text);
+    try t.expectEqualStrings("file-123", parts[1].file_reference);
+    try t.expectEqual(.png, parts[2].image.data.format);
+    try t.expectEqualSlices(u8, &.{ 0, 0xff, 0x89, '"', '\\', '\n' }, parts[2].image.data.bytes);
+    try t.expectEqualStrings("https://example.test/image.png", parts[3].image.url);
+    const fork: History.Session = .{
+        .session_id = 2,
+        .focus_id = "review-2",
+        .role = .activity,
+        .was_running = false,
+        .subscription_through = 0,
+        .epoch = 0,
+        .entries = core.entries,
+        .observations = &.{},
+    };
+    const next: Entry = .{ .exchange = &.{.{ .continuation = "Continuing." }} };
+    core.entries = try std.mem.concat(a, Entry, &.{ core.entries.?, &.{next} });
+    history.next_session_id = 3;
+    history.sessions = &.{ core, fork };
+    const confirmed = store.records.items.len;
     try persistence.save(a, history);
 
-    try t.expectEqual(2, store.records.items.len);
-    try t.expectEqual(key, store.records.items[1].previous.?);
-    const continued = (try persistence.load(a, 1)).?.sessions[0].entries.?;
-    try t.expectEqualStrings("Keep investigating.", continued[0].record.handover.summary);
-    try t.expectEqualStrings("Continuing.", continued[1].exchange[0].continuation);
+    // The fork writes new records using the current format.
+    const added = store.records.items[confirmed..];
+    try t.expectEqual(fork.entries.?.len + 1, added.len);
+    for (added) |record| {
+        if (std.mem.eql(u8, group, record.group)) try t.expectEqual(exchange_key, record.previous.?);
+        try t.expect(std.mem.indexOf(u8, record.body, "Original PDF bytes") == null);
+    }
+    const fork_exchange = try Codec.decode(Source, a, added[2].body);
+    const stored_parts = fork_exchange.entry.value.exchange[0].tool_result.content.parts;
+    try t.expectEqualStrings("AP+JIlwK", stored_parts[2].image.base64.encoded);
+    const continued = (try persistence.load(a, 2)).?.sessions;
+    try t.expectEqualDeep(core.entries.?, continued[0].entries.?);
+    try t.expectEqualDeep(fork.entries.?, continued[1].entries.?);
 }
 
 test "earlier channel registrations can omit descriptions" {

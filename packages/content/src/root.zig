@@ -1,15 +1,16 @@
 const std = @import("std");
 const zignal = @import("zignal");
 
-/// One tool's model-facing result. Parts and their payloads belong to
-/// the current turn; classification of one source does not remove sibling parts.
+/// One tool's result before the model adapter prepares it for history.
+/// Parts and their payloads belong to the current turn.
 pub const Content = struct {
     parts: []const Part,
 
     pub const Part = union(enum) {
         text: []const u8,
         image: ImageContent,
-        file: File,
+        /// Complete opaque file bytes for the model adapter to upload.
+        file: []const u8,
     };
 
     pub fn fromText(allocator: std.mem.Allocator, text: []const u8) !Content {
@@ -29,12 +30,6 @@ pub const ImageContent = union(enum) {
 pub const Image = @import("image.zig").Image;
 pub const LocalFile = @import("local_file.zig");
 
-/// Complete opaque file bytes. The model service owns format recognition.
-pub const File = struct {
-    bytes: []const u8,
-    reference: ?[]const u8 = null,
-};
-
 pub const image_size_limit = 32 * 1024 * 1024;
 pub const file_size_limit = 32 * 1024 * 1024;
 pub const reference_size_limit = 16 * 1024;
@@ -49,12 +44,6 @@ pub const Interpretation = enum { image_url };
 pub const Unavailable = struct {
     byte_length: u64,
     reason: enum { image_too_large, file_too_large, reference_too_large },
-};
-
-pub const Classified = union(enum) {
-    text: []const u8,
-    image: ImageContent,
-    file: File,
 };
 
 /// Recognize encoded image signatures without decoding pixels.
@@ -80,17 +69,17 @@ pub fn hasPdfHeader(bytes: []const u8) bool {
 }
 
 /// Preserve ordinary text and images; pass other complete sources as files.
-pub fn classify(bytes: []const u8) Classified {
+pub fn classify(bytes: []const u8) Content.Part {
     if (detectFormat(bytes)) |format|
         return .{ .image = .{ .data = .{ .format = format, .bytes = bytes } } };
     if (hasPdfHeader(bytes) or !isText(bytes))
-        return .{ .file = .{ .bytes = bytes } };
+        return .{ .file = bytes };
     return .{ .text = bytes };
 }
 
 /// Present a caller-declared image reference without fetching or validating it.
 /// Recognized media keep their data representation; empty text stays text.
-pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Classified {
+pub fn interpret(bytes: []const u8, interpretation: ?Interpretation) Content.Part {
     const classified = classify(bytes);
     if (interpretation == .image_url and classified == .text) {
         const url = withoutLineEnding(bytes);
@@ -147,9 +136,8 @@ test "explicit image references accept a trailing line ending" {
 test "complete binary files pass through without local format recognition" {
     for ([_][]const u8{ "%PDF-1.7\nall ASCII", "\x00\xff\x01", "PK\x03\x04\x00unknown package" }) |bytes| {
         const file = classify(bytes).file;
-        try std.testing.expectEqualSlices(u8, bytes, file.bytes);
-        try std.testing.expectEqual(null, file.reference);
-        try std.testing.expectEqualSlices(u8, bytes, interpret(bytes, .image_url).file.bytes);
+        try std.testing.expectEqualSlices(u8, bytes, file);
+        try std.testing.expectEqualSlices(u8, bytes, interpret(bytes, .image_url).file);
     }
     try std.testing.expectEqualStrings("ordinary text", classify("ordinary text").text);
     try std.testing.expect(!requiresCompleteSource("UTF-8 \xf0\x9f", false));

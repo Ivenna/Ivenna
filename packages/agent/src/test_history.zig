@@ -41,7 +41,13 @@ pub const TestStore = struct {
         for (self.records.items) |record| {
             for (groups) |group| {
                 if (!std.mem.eql(u8, group, record.group)) continue;
-                try references.append(a, .{ .group = try a.dupe(u8, record.group), .key = record.key, .previous = record.previous, .locator = "" });
+                try references.append(a, .{
+                    .group = try a.dupe(u8, record.group),
+                    .key = record.key,
+                    .previous = record.previous,
+                    .locator = "",
+                    .stored_bytes = record.body.len,
+                });
                 break;
             }
         }

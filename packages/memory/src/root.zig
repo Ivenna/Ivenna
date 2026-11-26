@@ -183,16 +183,16 @@ pub const Memory = struct {
                     .file => |source| readSourceFile(self.io, scratch, source.path.bytes),
                 }) catch |err| switch (err) {
                     error.Canceled, error.OutOfMemory => return err,
-                    error.StreamTooLong => return .{ .@"error" = .{ .code = "entry_too_large", .message = "A memory write can transfer at most 33554432 bytes (32 MiB). No write was sent." } },
+                    error.StreamTooLong => return .{ .@"error" = .{ .code = "entry_too_large", .message = "The supplied content exceeds the 32 MiB limit for one memory." } },
                     else => {
                         std.log.debug("could not read a memory write source: {s}", .{@errorName(err)});
                         return .{ .@"error" = .{
                             .code = "source_unavailable",
                             .message = switch (err) {
-                                error.FileNotFound, error.NotDir => "The source file could not be found. No memory write was sent.",
-                                error.AccessDenied, error.PermissionDenied => "Permission to read the source file was denied. No memory write was sent.",
-                                error.NotRegularFile => "Use a regular file as the source. No memory write was sent.",
-                                else => "The source file could not be read. No memory write was sent.",
+                                error.FileNotFound, error.NotDir => "The source file could not be found. Nothing was saved.",
+                                error.AccessDenied, error.PermissionDenied => "Permission to read the source file was denied. Nothing was saved.",
+                                error.NotRegularFile => "The source must be a regular file. Nothing was saved.",
+                                else => "The source file could not be read. Nothing was saved.",
                             },
                         } };
                     },
@@ -378,7 +378,7 @@ const Read = struct {
         return Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = self.address, .content = .{ .unavailable = diagnostic } } }, .{}));
     }
 
-    fn classified(self: Read, a: Allocator, value: content.Classified) !Content {
+    fn classified(self: Read, a: Allocator, value: Content.Part) !Content {
         return switch (value) {
             .text => |text| Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{ .result = .{ .address = self.address, .content = text, .byte_length = self.byte_length, .offset = self.offset, .next_offset = @as(?u64, null) } }, .{})),
             .image => |image| switch (image) {
@@ -388,7 +388,7 @@ const Read = struct {
                 } } }),
                 .url => |url| self.attachment(a, .image_url, null, .{ .image = .{ .url = try a.dupe(u8, url) } }),
             },
-            .file => |file| self.attachment(a, .file, null, .{ .file = .{ .bytes = try a.dupe(u8, file.bytes) } }),
+            .file => |file| self.attachment(a, .file, null, .{ .file = try a.dupe(u8, file) }),
         };
     }
 
@@ -480,8 +480,7 @@ test "memory supplies complete opaque files with owned bytes" {
         try std.testing.expectEqualStrings("file", description.get("kind").?.string);
         try std.testing.expectEqual(@as(i64, @intCast(source.len)), description.get("byte_length").?.integer);
         const file = result.parts[1].file;
-        try std.testing.expectEqualSlices(u8, source, file.bytes);
-        try std.testing.expectEqual(null, file.reference);
+        try std.testing.expectEqualSlices(u8, source, file);
     }
     const incomplete = try std.json.parseFromSliceLeaky(Value, a, "{\"address\":\"files/partial\",\"data\":\"JVBERg==\",\"header\":\"JVBERi0xLjc=\",\"byte_length\":8,\"offset\":0}", .{});
     try std.testing.expectError(error.InvalidMemoryReply, Read.parse(a, incomplete, .{ .address = .{ .bytes = "files/partial" }, .max_bytes = entry_size_limit }));
@@ -565,7 +564,7 @@ test "an image address stays paged text until interpreted as an image" {
     const invalid = prefix ++ "\xff";
     const damaged: Read = .{ .address = address.bytes, .bytes = invalid, .header = invalid, .byte_length = invalid.len, .offset = 0 };
     const file = try damaged.render(a, image_args);
-    try t.expectEqualSlices(u8, invalid, file.parts[1].file.bytes);
+    try t.expectEqualSlices(u8, invalid, file.parts[1].file);
 }
 
 test "binary discovered on a later page is fetched from zero and source replacement is reprojected" {
@@ -582,11 +581,11 @@ test "binary discovered on a later page is fetched from zero and source replacem
     try std.testing.expectEqual(entry_size_limit, complete.max_bytes);
     const snapshot: Read = .{ .address = args.address.bytes, .bytes = source, .header = source[0..32], .byte_length = source.len, .offset = 0 };
     const result = try snapshot.render(a, args);
-    try std.testing.expectEqualSlices(u8, source, result.parts[1].file.bytes);
+    try std.testing.expectEqualSlices(u8, source, result.parts[1].file);
 
     const shorter_file: Read = .{ .address = args.address.bytes, .bytes = "\x00", .header = "\x00", .byte_length = 1, .offset = 0 };
     const attachment = try shorter_file.render(a, args);
-    try std.testing.expectEqualSlices(u8, shorter_file.bytes, attachment.parts[1].file.bytes);
+    try std.testing.expectEqualSlices(u8, shorter_file.bytes, attachment.parts[1].file);
 
     const replacement: Read = .{ .address = args.address.bytes, .bytes = "new", .header = "new", .byte_length = 3, .offset = 0 };
     const invalid = try replacement.render(a, args);
