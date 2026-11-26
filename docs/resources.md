@@ -14,9 +14,9 @@ Starting exactly at the end of the text or listing returns an empty window. An o
 
 Pass a [command log's path](host.md#output-and-results) directly as `location`. The reader follows symbolic links when opening a path. Each read sees the current filesystem, so edits between reads can shift offsets.
 
-Opening a text file in the default view returns a passage in `result.content`, with `byte_length` when known. For an image, PDF, or binary file within the size limit, the preview gives its `uri`, `byte_length`, and the `view` to use. To receive the media, pass that URI as `location` with the suggested view. See [source limits](content.md#content-and-results).
+Opening a text file in the default view returns a passage in `result.content`, with `byte_length` when known. For an image, PDF, or binary file within the size limit, the preview gives its `uri`, `byte_length`, and the `view` to use. To receive the media, pass that URI as `location` with the suggested view. See [source size limits](content.md#source-size-limits).
 
-You can also request the view directly. For example, this call attaches a complete local file for the model service to parse.
+You can request either media view directly. The `file` view sends the entire local file to DeepSeek for parsing, as in this PDF example. See [file results and parsing charges](content.md#complete-files).
 
 ```json
 {"location":"/srv/report.pdf","view":"file"}

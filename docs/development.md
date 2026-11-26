@@ -42,9 +42,9 @@ Keep native mail record IDs, headers, folders, and thread grouping in the email 
 
 `Input` defines and renders the runtime's user messages. Include the complete ID when an observation or result supplies a reference. Keep the state needed for delivery and resumption in runtime records through persistence and compaction. See the [input contract](input.md) and the [input renderer](../packages/agent/src/input.zig).
 
-Preserve native [model output and tool replies](../packages/agent_contracts/src/model.zig), copying opaque continuation bytes without interpreting their protocol. Tool results use [Content](content.md) parts.
+Implement and test inference against DeepSeek's Responses API and file uploads against its Files API. Tools can return file bytes in `Content`. The adapter prepares `Model.Content` for working history, replacing those bytes with a file ID or an error. The agent preserves the model's continuation items, including reasoning, as opaque bytes. See the [DeepSeek Responses guide](https://api-docs.deepseek.com/guides/responses_api/), [model contract](../packages/agent_contracts/src/model.zig), and [tool result preparation](architecture.md#tool-results).
 
-The agent chooses tools and reasoning for each request and decides which history and observations to include. The model adapter prepares tool replies for retention, including file uploads. It also reports request measurements and limits, and checks the encoded payload before sending it. Share an encoder between measurement and inference and keep request-specific encoding separate from retained history and shared provider settings. See [bounded model context](architecture.md#bounded-model-context).
+The agent selects the history, observations, tools, and reasoning effort for each request. The adapter measures the request and checks its limits before sending it. Use the same encoder for measurement and inference. Keep request-specific encoding separate from retained history and shared adapter settings. See [bounded model context](architecture.md#bounded-model-context).
 
 ### Model-facing resources
 
@@ -55,11 +55,11 @@ Review model-facing text in the request the focus will receive. Read the shared 
 | [system.md](../packages/agent/src/system.md) | Shared orientation to focuses, observations, communication, and resumption |
 | [Agent tools](../packages/agent/src/tools.json) | Send messages, manage channels and subscriptions, open focuses, and schedule wakeups |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
-| [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. The configured [web reader](../packages/resources/src/web.zig) supplies the service and billing notice. |
+| [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. When web access is enabled, the [DeepSeek Fetch client](../packages/resources/src/deepseek.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 | [compaction.md](../packages/agent/src/compaction.md) | Instructions for writing the summary in a handover |
 
-Use the shared prompt for orientation across focuses and turns. Explain a tool's destination, cost, or effects in its declaration when they matter before the call. For example, `open_focus` tells the core that the new activity will inherit the results of other tools called in the same round. Express allowed values and bounds in the schema and match defaults to runtime behavior.
+Use the shared prompt for orientation across focuses and turns. Describe a tool from the focus's point of view. For a memory read, describe what Ivenna can revisit in its rooms. When a focus chooses to send a host file to a service, the destination and potential charge matter to that choice. The [tool content guide](content.md) covers how files reach the model and what stays in history. Express allowed values and bounds in the schema and match defaults to runtime behavior.
 
 Use observations and tool results to convey what happened, which effects are confirmed, and what remains uncertain. When asking for a revision, say what the focus can change. If a handover leaves too little room to continue, ask for a shorter summary and leave the choice of content to Ivenna. Keep the measured size and limit in operator logs with other runtime diagnostics.
 

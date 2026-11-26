@@ -12,7 +12,7 @@ Work can continue between letters. The core can schedule a wakeup, and an activi
 
 ## Getting started
 
-Ivenna needs a model endpoint, a mail account for correspondence and working history, and SSH access to a workspace for its shared memory. The deployment user owns the records, memory, and artifacts. See [runtime requirements](docs/running.md#runtime-requirements).
+To run Ivenna, you need a DeepSeek API key for the Responses API, a mail account for correspondence and working history, and SSH access to a workspace for shared memory. See [runtime requirements](docs/running.md#runtime-requirements).
 
 - Use the [local development guide](dev/README.md) to prepare the supplied mail and memory services and run from source.
 - Use the [running guide](docs/running.md) to configure a deployment, start the executable, and manage retained data.

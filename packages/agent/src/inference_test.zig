@@ -1,4 +1,5 @@
 const std = @import("std");
+const Content = @import("content").Content;
 const Model = @import("agent_contracts").Model;
 const Engine = @import("engine.zig").Engine;
 const Allocator = std.mem.Allocator;
@@ -32,7 +33,7 @@ const Fixture = struct {
         return error.UnexpectedMeasurement;
     }
 
-    fn prepareToolReplies(_: *anyopaque, _: Allocator, _: []Model.Item) anyerror!void {
+    fn prepareToolResult(_: *anyopaque, _: Allocator, _: Content) anyerror!Model.Content {
         return error.UnexpectedToolBatch;
     }
 
@@ -55,7 +56,7 @@ test "inference honors the model's recovery delay and resumes the original reque
             .model = .{ .context = &fixture, .vtable = &.{
                 .next = Fixture.next,
                 .measure = Fixture.measure,
-                .prepareToolReplies = Fixture.prepareToolReplies,
+                .prepareToolResult = Fixture.prepareToolResult,
             } },
             .shared_tools = &.{},
             .activity_tools = &.{},

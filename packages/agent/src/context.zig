@@ -3,7 +3,6 @@ const Input = @import("input.zig");
 const Entry = @import("history.zig").Entry;
 const Scope = @import("history.zig").Scope;
 const Model = @import("agent_contracts").Model;
-const Content = @import("content").Content;
 const Allocator = std.mem.Allocator;
 
 /// Owned working history and its model-message view. Registry synchronizes
@@ -218,14 +217,14 @@ pub const Context = struct {
         var replaced = false;
         for (messages) |*item| {
             if (item.* != .tool_result) continue;
-            var copy: ?[]Content.Part = null;
+            var copy: ?[]Model.Content.Part = null;
             for (item.tool_result.content.parts, 0..) |part, index| {
                 const note = switch (part) {
                     .text => continue,
                     .image => "[Image omitted from this summary input.]",
-                    .file => "[File omitted from this summary input.]",
+                    .file_reference => "[File omitted from this summary input.]",
                 };
-                if (copy == null) copy = try a.dupe(Content.Part, item.tool_result.content.parts);
+                if (copy == null) copy = try a.dupe(Model.Content.Part, item.tool_result.content.parts);
                 copy.?[index] = .{ .text = note };
             }
             if (copy) |parts| {
@@ -290,17 +289,14 @@ fn cloneItem(a: Allocator, item: Model.Item) !Model.Item {
         .message => |message| .{ .message = .{ .role = message.role, .text = try a.dupe(u8, message.text) } },
         .continuation => |bytes| .{ .continuation = try a.dupe(u8, bytes) },
         .tool_result => |result| blk: {
-            const parts = try a.alloc(Content.Part, result.content.parts.len);
+            const parts = try a.alloc(Model.Content.Part, result.content.parts.len);
             for (result.content.parts, parts) |part, *copy| copy.* = switch (part) {
                 .text => |text| .{ .text = try a.dupe(u8, text) },
                 .image => |image| .{ .image = switch (image) {
                     .url => |url| .{ .url = try a.dupe(u8, url) },
                     .data => |data| .{ .data = .{ .format = data.format, .bytes = try a.dupe(u8, data.bytes) } },
                 } },
-                .file => |file| .{ .file = .{
-                    .bytes = try a.dupe(u8, file.bytes),
-                    .reference = if (file.reference) |reference| try a.dupe(u8, reference) else null,
-                } },
+                .file_reference => |reference| .{ .file_reference = try a.dupe(u8, reference) },
             };
             break :blk .{ .tool_result = .{ .call_id = try a.dupe(u8, result.call_id), .content = .{ .parts = parts } } };
         },
@@ -339,20 +335,18 @@ test "encoded native exchanges restore independently of their source buffers" {
         var continuation = [_]u8{ 0, 255, '"', '\\', '\n' };
         var result_text = "observed".*;
         var image_bytes = [_]u8{ 137, 'P', 'N', 'G', 0, 255 };
-        var file_bytes = [_]u8{ '%', 'P', 'D', 'F', 0, 255 };
-        var file_reference = [_]u8{ 0, 255, '"', '\\', '\n' };
+        var file_reference = "file-1234".*;
         try source.appendBatch(&.{.{ .continuation = &continuation }}, &.{.{ .tool_result = .{
             .call_id = "inspect-1",
             .content = .{ .parts = &.{
                 .{ .text = &result_text },
                 .{ .image = .{ .data = .{ .format = .png, .bytes = &image_bytes } } },
-                .{ .file = .{ .bytes = &file_bytes, .reference = &file_reference } },
+                .{ .file_reference = &file_reference },
             } },
         } }});
         @memset(&continuation, 0);
         @memset(&result_text, 0);
         @memset(&image_bytes, 0);
-        @memset(&file_bytes, 0);
         @memset(&file_reference, 0);
 
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -374,9 +368,7 @@ test "encoded native exchanges restore independently of their source buffers" {
     try std.testing.expectEqualStrings("observed", reply.content.parts[0].text);
     try std.testing.expectEqual(.png, reply.content.parts[1].image.data.format);
     try std.testing.expectEqualSlices(u8, &.{ 137, 'P', 'N', 'G', 0, 255 }, reply.content.parts[1].image.data.bytes);
-    const file = reply.content.parts[2].file;
-    try std.testing.expectEqualSlices(u8, &.{ '%', 'P', 'D', 'F', 0, 255 }, file.bytes);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 255, '"', '\\', '\n' }, file.reference.?);
+    try std.testing.expectEqualStrings("file-1234", reply.content.parts[2].file_reference);
 }
 
 test "candidate handover retains sampled references and leaves earlier history available" {
@@ -457,7 +449,7 @@ test "compaction summarizes older entries and carries forward the complete lates
         .{ .tool_result = .{ .call_id = "older", .content = .{ .parts = &.{
             .{ .text = "file:///old-image-url.txt" },
             .{ .image = .{ .url = image_url } },
-            .{ .file = .{ .bytes = "PDF bytes" } },
+            .{ .file_reference = "older-pdf" },
         } } } },
     };
     const latest: []const Model.Item = &.{

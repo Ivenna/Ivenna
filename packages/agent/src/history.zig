@@ -1,5 +1,6 @@
 const std = @import("std");
 const contracts = @import("agent_contracts");
+const Model = contracts.Model;
 const Input = @import("input.zig");
 const Stream = @import("work.zig").Stream;
 const Codec = @import("record_codec.zig");
@@ -15,12 +16,58 @@ pub const Scope = struct { session_id: u64, epoch: u64 };
 
 pub const Entry = union(enum) {
     record: Input.Record,
-    exchange: []const contracts.Model.Item,
+    exchange: []const Model.Item,
 };
 
-const Source = union(enum) {
-    entry: struct { previous: ?Key, value: Entry },
-    observations: []const Input.Event,
+fn Source(comptime EntryValue: type) type {
+    return union(enum) {
+        entry: struct { previous: ?Key, value: EntryValue },
+        observations: []const Input.Event,
+    };
+}
+
+// Earlier releases stored an uploaded file's bytes and reference together.
+// Only the reference is needed to restore the tool result.
+const ReadableEntry = union(enum) {
+    record: Input.Record,
+    exchange: []const Item,
+
+    const Item = union(enum) {
+        message: @FieldType(Model.Item, "message"),
+        continuation: []const u8,
+        tool_result: struct { call_id: []const u8, content: struct { parts: []const Part } },
+    };
+
+    const Part = union(enum) {
+        text: []const u8,
+        image: @FieldType(Model.Content.Part, "image"),
+        file_reference: []const u8,
+        file: struct { bytes: []const u8, reference: []const u8 },
+
+        fn restore(self: Part) !Model.Content.Part {
+            const reference = switch (self) {
+                .file => |old| old.reference,
+                .file_reference => |id| id,
+                inline else => |value, tag| return @unionInit(Model.Content.Part, @tagName(tag), value),
+            };
+            if (reference.len == 0) return error.InvalidHistory;
+            return .{ .file_reference = reference };
+        }
+    };
+
+    fn restore(self: ReadableEntry, a: Allocator) !Entry {
+        if (self == .record) return .{ .record = self.record };
+        const items = try a.alloc(Model.Item, self.exchange.len);
+        for (self.exchange, items) |stored, *item| item.* = switch (stored) {
+            .tool_result => |result| blk: {
+                const parts = try a.alloc(Model.Content.Part, result.content.parts.len);
+                for (result.content.parts, parts) |part, *restored| restored.* = try part.restore();
+                break :blk .{ .tool_result = .{ .call_id = result.call_id, .content = .{ .parts = parts } } };
+            },
+            inline else => |value, tag| @unionInit(Model.Item, @tagName(tag), value),
+        };
+        return .{ .exchange = items };
+    }
 };
 
 pub const History = struct {
@@ -344,13 +391,13 @@ pub const Persistence = struct {
             const bodies = try self.store.read(scratch.allocator(), references[0..count]);
             for (batch, bodies) |selected, body| {
                 if (!equalKey(Codec.digest(body), selected.reference.key)) return error.InvalidHistory;
-                const source = try Codec.decode(Source, a, body);
+                const source = try Codec.decode(Source(ReadableEntry), a, body);
                 switch (source) {
                     .entry => |entry| {
                         if (!equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
                         switch (selected.destination) {
                             .entry => |destination| {
-                                var value = entry.value;
+                                var value = try entry.value.restore(a);
                                 if (value == .record and value.record == .handover)
                                     try value.record.handover.state.restoreLegacyFields(a);
                                 destination.* = value;
@@ -530,7 +577,7 @@ const Builder = struct {
 
     fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
-        const body = try Codec.encode(self.encoding.allocator(), Source{ .entry = .{ .previous = previous, .value = value } });
+        const body = try Codec.encode(self.encoding.allocator(), Source(Entry){ .entry = .{ .previous = previous, .value = value } });
         const key = Codec.digest(body);
         try self.add(group, key, previous, body);
         return key;
@@ -538,7 +585,7 @@ const Builder = struct {
 
     fn observations(self: *Builder, group: []const u8, events: []const Input.Event, confirmed: ?Key) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
-        const body = try Codec.encode(self.encoding.allocator(), Source{ .observations = events });
+        const body = try Codec.encode(self.encoding.allocator(), Source(Entry){ .observations = events });
         const key = Codec.digest(body);
         if (confirmed) |known| if (equalKey(known, key)) return key;
         try self.add(group, key, null, body);
@@ -577,7 +624,7 @@ fn equalPrevious(left: ?Key, right: ?Key) bool {
     return right == null;
 }
 
-test "working history can append after restoring an older checkpoint and handover" {
+test "restored history can append and fork a legacy file as a reference" {
     const t = std.testing;
     const TestStore = @import("test_history.zig").TestStore;
     var store: TestStore = .{};
@@ -593,7 +640,21 @@ test "working history can append after restoring an older checkpoint and handove
         "}}}}}";
     const group = try persistence.store.allocateGroup(a);
     const key = Codec.digest(body);
-    try persistence.store.create(a, &.{.{ .group = group, .key = key, .previous = null, .body = body }});
+    const exchange = try std.mem.concat(a, u8, &.{
+        ".{.entry=.{.previous=", try Codec.encode(a, key),
+        \\, .value = .{ .exchange = .{
+        \\    .{ .tool_result = .{ .call_id = "read-file", .content = .{ .parts = .{
+        \\        .{ .text = "file:///source.pdf" },
+        \\        .{ .file = .{ .bytes = "Original PDF bytes\x00\xff", .reference = "file-123" } },
+        \\    } } } }
+        \\} } } }
+        ,
+    });
+    const exchange_key = Codec.digest(exchange);
+    try persistence.store.create(a, &.{
+        .{ .group = group, .key = key, .previous = null, .body = body },
+        .{ .group = group, .key = exchange_key, .previous = key, .body = exchange },
+    });
     try persistence.store.save(try Codec.encode(a, Checkpoint{
         .subscription_catalog = @splat(0),
         .next_session_id = 2,
@@ -607,8 +668,8 @@ test "working history can append after restoring an older checkpoint and handove
             .subscription_through = 0,
             .epoch = 1,
             .group = group,
-            .head = key,
-            .count = 1,
+            .head = exchange_key,
+            .count = 2,
             .observations = null,
         }},
         .wakeups = &.{},
@@ -626,15 +687,36 @@ test "working history can append after restoring an older checkpoint and handove
     try t.expectEqualStrings("Keep investigating.", handover.summary);
     try t.expectEqualStrings("watch-1", handover.state.subscription_registrations[0].subscription_id);
     try t.expectEqual(null, handover.state.subscription_registrations[0].listener);
-    core.entries = &.{ core.entries.?[0], .{ .exchange = &.{.{ .continuation = "Continuing." }} } };
-    history.sessions = &.{core};
+    const parts = core.entries.?[1].exchange[0].tool_result.content.parts;
+    try t.expectEqualStrings("file:///source.pdf", parts[0].text);
+    try t.expectEqualStrings("file-123", parts[1].file_reference);
+    const fork: History.Session = .{
+        .session_id = 2,
+        .focus_id = "review-2",
+        .role = .activity,
+        .was_running = false,
+        .subscription_through = 0,
+        .epoch = 0,
+        .entries = core.entries,
+        .observations = &.{},
+    };
+    const next: Entry = .{ .exchange = &.{.{ .continuation = "Continuing." }} };
+    core.entries = try std.mem.concat(a, Entry, &.{ core.entries.?, &.{next} });
+    history.next_session_id = 3;
+    history.sessions = &.{ core, fork };
+    const confirmed = store.records.items.len;
     try persistence.save(a, history);
 
-    try t.expectEqual(2, store.records.items.len);
-    try t.expectEqual(key, store.records.items[1].previous.?);
-    const continued = (try persistence.load(a, 1)).?.sessions[0].entries.?;
-    try t.expectEqualStrings("Keep investigating.", continued[0].record.handover.summary);
-    try t.expectEqualStrings("Continuing.", continued[1].exchange[0].continuation);
+    // Only the continuation is new in the core. The fork writes its own copies.
+    const added = store.records.items[confirmed..];
+    try t.expectEqual(fork.entries.?.len + 1, added.len);
+    for (added) |record| {
+        if (std.mem.eql(u8, group, record.group)) try t.expectEqual(exchange_key, record.previous.?);
+        try t.expect(std.mem.indexOf(u8, record.body, "Original PDF bytes") == null);
+    }
+    const continued = (try persistence.load(a, 2)).?.sessions;
+    try t.expectEqualDeep(core.entries.?, continued[0].entries.?);
+    try t.expectEqualDeep(fork.entries.?, continued[1].entries.?);
 }
 
 test "earlier channel registrations can omit descriptions" {

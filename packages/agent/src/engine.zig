@@ -118,9 +118,10 @@ pub const Engine = struct {
     /// Execute and prepare the decoded batch in order. Replies belong to a.
     pub fn executeTools(self: *Engine, a: Allocator, invocation: Tools.Invocation, round: *const Round, runtime_tools: ?RuntimeTools) ![]const Model.Item {
         const response = round.inference.response;
+        const results = try a.alloc(Content, response.calls.len);
         const replies = try a.alloc(Model.Item, response.calls.len);
-        for (response.calls, replies) |call, *reply| {
-            const content = self.invoke(a, invocation, call.name, call.arguments, runtime_tools, round.role) catch |err| switch (err) {
+        for (response.calls, results) |call, *result| {
+            result.* = self.invoke(a, invocation, call.name, call.arguments, runtime_tools, round.role) catch |err| switch (err) {
                 error.InvalidToolArguments, error.UnknownTool => try Content.fromText(a, try std.json.Stringify.valueAlloc(a, .{
                     .@"error" = .{
                         .code = if (err == error.UnknownTool) "unknown_tool" else "invalid_arguments",
@@ -129,9 +130,10 @@ pub const Engine = struct {
                 }, .{})),
                 else => return err,
             };
-            reply.* = .{ .tool_result = .{ .call_id = call.call_id, .content = content } };
         }
-        try self.model.prepareToolReplies(a, replies);
+        for (response.calls, results, replies) |call, result, *reply| {
+            reply.* = .{ .tool_result = .{ .call_id = call.call_id, .content = try self.model.prepareToolResult(a, result) } };
+        }
         return replies;
     }
 

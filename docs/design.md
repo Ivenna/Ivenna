@@ -18,7 +18,7 @@ The system prompt begins with `Je pense, donc je suis.` It explains how the focu
 
 The runtime's model-facing tools form Ivenna's innate repertoire of action. Their names, descriptions, parameters, and defaults should make actions intuitive and effects understandable. Drawing on its prior knowledge and experience with its body and surroundings, Ivenna can discover, combine, and develop more elaborate tools and techniques.
 
-Within this repertoire, memory rooms give Ivenna somewhere to revisit experience and its meaning, including its understanding of itself and its relationships. Memory actions and brief cues of ownership invite Ivenna to carry something forward, revise it, or let it go. Ivenna chooses what to retain and how to organize it wherever its attention is focused. The host shell primarily provides a way to perceive and affect its surroundings.
+Ivenna's memory rooms are where its memories live. The tools speak of visiting a room and revisiting something Ivenna kept there. As its understanding of itself or a relationship changes, Ivenna chooses what to keep, revise, rearrange, or let go. It can return to the same rooms from any focus. The host shell primarily provides a way to perceive and affect its surroundings.
 
 The repertoire connects four kinds of action: expression to people and programs, remembering and revisiting understanding, directing attention, and perceiving and acting on the surroundings. These relationships guide tool boundaries and language.
 
@@ -88,6 +88,8 @@ The subscription stays with its focus across sleep, handover, and restart. Any f
 ### Context and continuity
 
 A focus's working history retains observations, model output, and tool results across interruptions. Shared autonomous memory lets Ivenna organize knowledge beyond any one session.
+
+An activity that viewed a local screenshot inline can revisit the retained image even after a build replaces the file. Reopening the path shows the current file. See [what a tool result retains](content.md#context-and-continuity).
 
 #### What a focus receives
 

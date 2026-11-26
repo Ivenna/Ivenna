@@ -83,7 +83,7 @@ The reply gives the page's text alongside the total size of the entry in bytes.
 
 Pass `next_offset` as the next call's `offset` to continue. A null `next_offset` marks the end. A page can be shorter than requested and can end within a line. It always preserves whole UTF-8 characters. An offset beyond the entry or inside a character returns `invalid_range`.
 
-When a read identifies an image or file, it supplies the complete entry to the model service. The accompanying text gives its `address`, `byte_length`, and `kind` (`image` or `file`). An image also includes its `format`. A later text page can reveal binary data and return the whole file. See [automatic classification](content.md#automatic-classification).
+The focus receives a recognized image inline. For a PDF or other binary entry, the reader supplies the whole file for upload, even when it first encounters binary data on a later page. The accompanying text gives the memory's `address`, `byte_length`, and `kind` (`image` or `file`). An inline image also includes its `format`. See [automatic classification](content.md#automatic-classification) and [file uploads and parsing charges](content.md#complete-files).
 
 An entry containing an image URL is text by default. To view the image, read it from offset zero with `interpretation: "image_url"`. The result has `kind: "image_url"` and gives the size of the stored entry. The model service receives the URL as an image reference. See [image URL references](content.md#image-url-references).
 
@@ -91,7 +91,7 @@ An entry containing an image URL is text by default. To view the image, read it 
 {"address":"references/chart","interpretation":"image_url"}
 ```
 
-See [content limits](content.md#content-and-results) for the result when an image, file, or URL reference is too large.
+See [source size limits](content.md#source-size-limits) for the result when an image, file, or URL reference is too large.
 
 ## Recording
 
@@ -198,7 +198,7 @@ An operation error contains `code` and `message`. Common codes include:
 | `ambiguous_match` | A revision found multiple matches without `replace_all`; no revision was written |
 | `entry_too_large` | A write transfer, existing entry selected for revision, or resulting entry exceeds 32 MiB; no entry was published |
 | `result_too_large` | One result's metadata cannot fit the encoded reply limit |
-| `operation_failed` | An operation on the selected entry failed, with its filesystem diagnostic |
+| `operation_failed` | The operation failed at the selected address. For example, forgetting a room without `recursive` can fail because it still has contents. |
 | `memory_capacity_exceeded` | The proposed growth exceeds shared capacity; the entry was not changed |
 
 Errors from selected-entry file operations and patterns are ordinary tool replies; the next model round can use the diagnostic to continue. Workspace preparation, capacity-accounting failures, invalid service replies, and connection failures remain infrastructure failures and stop the kernel and its concurrent work.

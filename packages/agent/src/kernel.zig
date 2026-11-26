@@ -450,7 +450,7 @@ pub const Kernel = struct {
             if (item != .tool_result) continue;
             for (item.tool_result.content.parts) |part| {
                 // The provider expands files, whose IDs do not represent their input cost.
-                if (part == .file) return .keep_latest_tool_round;
+                if (part == .file_reference) return .keep_latest_tool_round;
             }
         }
         const measured = try self.engine.model.measure(a, .{ .history = additional, .tools = &.{}, .reasoning_effort = "none" });
@@ -565,7 +565,7 @@ const SubscriptionFixture = struct {
             .io = testing.io,
             .model = .{
                 .context = self,
-                .vtable = &.{ .measure = measure, .next = undefined, .prepareToolReplies = undefined },
+                .vtable = &.{ .measure = measure, .next = undefined, .prepareToolResult = undefined },
                 .usage_scope = self.usage_scope,
             },
             .shared_tools = &.{},
@@ -665,7 +665,7 @@ const SubscriptionFixture = struct {
     fn appendChannelReply(a: Allocator, history: *Context, reply: std.json.Value) !void {
         const text = try std.json.Stringify.valueAlloc(a, reply, .{});
         try history.appendBatch(&.{.{ .continuation = "Call open_channel" }}, &.{.{
-            .tool_result = .{ .call_id = "open-channel", .content = try Content.fromText(a, text) },
+            .tool_result = .{ .call_id = "open-channel", .content = .{ .parts = &.{.{ .text = text }} } },
         }});
     }
 
@@ -1138,7 +1138,7 @@ test "restart uses saved input-token counts only for a matching model scope" {
         fixture.usage_scope = case.after;
         var kernel = try fixture.kernel(&engine, &store);
         defer kernel.deinit();
-        engine.model.vtable = &.{ .next = Budget.next, .measure = Budget.measure, .prepareToolReplies = undefined };
+        engine.model.vtable = &.{ .next = Budget.next, .measure = Budget.measure, .prepareToolResult = undefined };
         kernel.limits.compact_at_bytes = 50;
         kernel.limits.compact_at_tokens = 8;
         const startup = try SubscriptionFixture.takeWork(&kernel, a);
@@ -1307,7 +1307,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             .handover_bytes = case.handover_bytes,
             .summary = case.summary,
         };
-        engine.model = .{ .context = &model, .vtable = &.{ .next = BudgetModel.next, .measure = BudgetModel.measure, .prepareToolReplies = undefined } };
+        engine.model = .{ .context = &model, .vtable = &.{ .next = BudgetModel.next, .measure = BudgetModel.measure, .prepareToolResult = undefined } };
         kernel.limits.compact_at_bytes = case.compact_at_bytes;
         kernel.limits.compact_at_tokens = 8;
         const input = (try kernel.prepareRequest(a, work, &history)).ready;
@@ -1365,7 +1365,7 @@ test "an empty completion closes admitted work before retrying an oversized wait
     } } }));
 
     var stub: Stub = .{};
-    engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolReplies = undefined } };
+    engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolResult = undefined } };
     try testing.expect(try kernel.respond(work) != null);
     try testing.expectEqual(@as(usize, 1), stub.inferences);
     try testing.expectEqual(@as(usize, 1), work.activation.deliveries.items.len);
@@ -1412,7 +1412,7 @@ test "a lone handover is shortened only if needed to fit the next observation" {
         var kernel = try fixture.kernel(&engine, &store);
         defer kernel.deinit();
         var stub: Stub = .{ .limit = limit };
-        engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolReplies = undefined } };
+        engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolResult = undefined } };
         kernel.limits.compact_at_bytes = 8;
 
         const startup = try SubscriptionFixture.takeWork(&kernel, a);
@@ -1506,7 +1506,7 @@ test "a fork continues with its first assignment and applies the ordinary compac
         var kernel = try fixture.kernel(&engine, &store);
         defer kernel.deinit();
         var stub: Stub = .{ .limit = case.limit };
-        engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolReplies = undefined } };
+        engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolResult = undefined } };
         engine.reasoning.compaction = "provider-effort";
         kernel.limits.compact_at_bytes = case.threshold;
 
@@ -1577,7 +1577,7 @@ test "the first inference after a handover checkpoint receives the original obse
     var store = try Subscriptions.Store.openInMemory(a);
     defer store.close();
     var stub: Stub = .{};
-    const port: Model.Port = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolReplies = undefined } };
+    const port: Model.Port = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolResult = undefined } };
     var engine: Engine = undefined;
     {
         var kernel = try fixture.kernel(&engine, &store);
@@ -1626,9 +1626,9 @@ test "a pending document can accompany completed exchanges across a handover" {
     var engine: Engine = undefined;
     var kernel = try fixture.kernel(&engine, &store);
     defer kernel.deinit();
-    engine.model.vtable = &.{ .next = undefined, .measure = probe.measure, .prepareToolReplies = undefined };
+    engine.model.vtable = &.{ .next = undefined, .measure = probe.measure, .prepareToolResult = undefined };
 
-    const pdf: Content.Part = .{ .file = .{ .bytes = "%PDF", .reference = "file-ref" } };
+    const pdf: Model.Content.Part = .{ .file_reference = "file-ref" };
     const pending: []const Model.Item = &.{
         .{ .continuation = "Pending call" },
         .{ .tool_result = .{ .call_id = "pending", .content = .{ .parts = &.{pdf} } } },
@@ -1636,7 +1636,7 @@ test "a pending document can accompany completed exchanges across a handover" {
     for ([_]bool{ false, true }) |completed_has_pdf| {
         var history = try Context.init(testing.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
         defer history.deinit();
-        const completed: Content.Part = if (completed_has_pdf) pdf else .{ .text = "Completed result" };
+        const completed: Model.Content.Part = if (completed_has_pdf) pdf else .{ .text = "Completed result" };
         try history.appendBatch(&.{.{ .continuation = "Old exchange" }}, &.{});
         try history.appendBatch(&.{.{ .continuation = "Recent response" }}, &.{});
         try history.appendBatch(&.{.{ .continuation = "Completed call" }}, &.{.{ .tool_result = .{ .call_id = "completed", .content = .{ .parts = &.{completed} } } }});
@@ -1749,8 +1749,8 @@ test "restart selects a tool round, its tokens, channel and fork together after 
             const channel_reply = try std.json.Stringify.valueAlloc(a, opened, .{});
             const focus_reply = try std.json.Stringify.valueAlloc(a, forked, .{});
             try history.appendBatch(&.{.{ .continuation = "Call open_channel and open_focus" }}, &.{
-                .{ .tool_result = .{ .call_id = "open-channel", .content = try Content.fromText(a, channel_reply) } },
-                .{ .tool_result = .{ .call_id = "open-focus", .content = try Content.fromText(a, focus_reply) } },
+                .{ .tool_result = .{ .call_id = "open-channel", .content = .{ .parts = &.{.{ .text = channel_reply }} } } },
+                .{ .tool_result = .{ .call_id = "open-focus", .content = .{ .parts = &.{.{ .text = focus_reply }} } } },
             });
 
             fixture.storage.fail_save = failure;

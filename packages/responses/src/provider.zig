@@ -3,7 +3,6 @@ const zdt = @import("zdt");
 const Model = @import("agent_contracts").Model;
 const JsonString = @import("agent_contracts").JsonString;
 const Content = @import("content").Content;
-const File = @import("content").File;
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
@@ -42,7 +41,7 @@ pub const Provider = struct {
             .vtable = &.{
                 .next = next,
                 .measure = measure,
-                .prepareToolReplies = prepareToolReplies,
+                .prepareToolResult = prepareToolResult,
             },
             .usage_scope = scope.finalResult(),
         };
@@ -73,22 +72,18 @@ pub const Provider = struct {
         return null;
     }
 
-    fn prepareToolReplies(context: *anyopaque, arena: Allocator, replies: []Model.Item) anyerror!void {
+    fn prepareToolResult(context: *anyopaque, arena: Allocator, result: Content) anyerror!Model.Content {
         const self: *Provider = @ptrCast(@alignCast(context));
-        for (replies) |*reply| {
-            const parts = try arena.dupe(Content.Part, reply.tool_result.content.parts);
-            reply.tool_result.content.parts = parts;
-            for (parts) |*part| switch (part.*) {
-                .text, .image => {},
-                .file => |*file| {
-                    if (file.reference != null) continue;
-                    switch (try self.uploadFile(arena, file.*)) {
-                        .reference => |reference| file.reference = reference,
-                        .failure => |failure| part.* = try failure.part(arena, file.*),
-                    }
-                },
-            };
-        }
+        const parts = try arena.alloc(Model.Content.Part, result.parts.len);
+        for (result.parts, parts) |part, *prepared| prepared.* = switch (part) {
+            .text => |text| .{ .text = text },
+            .image => |image| .{ .image = image },
+            .file => |file| switch (try self.uploadFile(arena, file)) {
+                .reference => |reference| .{ .file_reference = reference },
+                .failure => |failure| try failure.part(arena, file.len),
+            },
+        };
+        return .{ .parts = parts };
     }
 
     const WireTool = struct {
@@ -131,7 +126,7 @@ pub const Provider = struct {
             var files: std.ArrayList(Value) = .empty;
             defer files.deinit(arena);
             for (item.tool_result.content.parts) |part| {
-                if (part != .file) continue;
+                if (part != .file_reference) continue;
                 if (files.items.len == 0) {
                     try files.append(arena, try encodeContentPart(arena, .{
                         .text = try std.json.Stringify.valueAlloc(arena, .{ .source = .{ .tool_call_id = item.tool_result.call_id } }, .{}),
@@ -139,7 +134,7 @@ pub const Provider = struct {
                 }
                 var fields: std.json.ObjectMap = .empty;
                 try fields.put(arena, "type", .{ .string = "input_file" });
-                try fields.put(arena, "file_id", .{ .string = part.file.reference orelse return error.UnpreparedModelFile });
+                try fields.put(arena, "file_id", .{ .string = part.file_reference });
                 try files.append(arena, .{ .object = fields });
                 file_count += 1;
             }
@@ -178,26 +173,26 @@ pub const Provider = struct {
         not_sent,
         uncertain,
 
-        fn part(self: UploadFailure, arena: Allocator, file: File) !Content.Part {
+        fn part(self: UploadFailure, arena: Allocator, byte_length: usize) !Model.Content.Part {
             return .{ .text = try std.json.Stringify.valueAlloc(arena, .{
-                .file = .{ .byte_length = file.bytes.len },
+                .file = .{ .byte_length = byte_length },
                 .@"error" = .{
                     .code = if (self == .uncertain) "file_upload_uncertain" else "file_upload_failed",
                     .message = switch (self) {
                         .not_sent => "The upload attempt ended before sending the file.",
                         .rejected => |status| switch (status) {
                             .payload_too_large => "The file exceeds the upload service's size limit.",
-                            .too_many_requests => "The file service is limiting uploads. Try again later.",
+                            .too_many_requests => "The file service is limiting uploads.",
                             else => "The file service rejected the upload.",
                         },
-                        .uncertain => "No file reference was confirmed. The service may have stored the file.",
+                        .uncertain => "The file is unavailable in this result. The service may have stored a copy.",
                     },
                 },
             }, .{}) };
         }
     };
 
-    fn uploadFile(self: Provider, arena: Allocator, file: File) !Upload {
+    fn uploadFile(self: Provider, arena: Allocator, file: []const u8) !Upload {
         const io = self.client.io;
         try io.checkCancel();
         const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
@@ -213,7 +208,7 @@ pub const Provider = struct {
         return upload orelse .{ .failure = failure };
     }
 
-    fn uploadFileNegotiated(self: Provider, arena: Allocator, file: File, failure: *UploadFailure) !Upload {
+    fn uploadFileNegotiated(self: Provider, arena: Allocator, file: []const u8, failure: *UploadFailure) !Upload {
         const result = try self.uploadFileOnce(arena, file, "rich_layout_recognition", failure);
         // The service rejects some formats for one purpose and accepts them
         // for the other. A definite 400 is a failed upload, which the service
@@ -223,7 +218,7 @@ pub const Provider = struct {
         return result;
     }
 
-    fn uploadFileOnce(self: Provider, arena: Allocator, file: File, purpose: []const u8, failure: *UploadFailure) !Upload {
+    fn uploadFileOnce(self: Provider, arena: Allocator, file: []const u8, purpose: []const u8, failure: *UploadFailure) !Upload {
         failure.* = .not_sent;
         var scratch = std.heap.ArenaAllocator.init(self.client.allocator);
         defer scratch.deinit();
@@ -236,7 +231,7 @@ pub const Provider = struct {
             "--{s}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"document.bin\"\r\n" ++
             "Content-Type: application/octet-stream\r\n\r\n", .{ boundary, purpose, boundary });
         const suffix = try std.fmt.allocPrint(temporary, "\r\n--{s}--\r\n", .{boundary});
-        var payload = [_][]const u8{ prefix, file.bytes, suffix };
+        var payload = [_][]const u8{ prefix, file, suffix };
         const base_url = std.mem.trimEnd(u8, self.base_url, "/");
         const url = try std.fmt.allocPrint(temporary, "{s}/files", .{base_url});
         const authorization = try std.fmt.allocPrint(temporary, "Bearer {s}", .{self.api_key});
@@ -483,7 +478,7 @@ fn encodeItem(arena: Allocator, item: Model.Item, image_count: *u64) !Value {
     }
 }
 
-fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
+fn encodeContentPart(arena: Allocator, part: Model.Content.Part) !Value {
     var encoded: std.json.ObjectMap = .empty;
     switch (part) {
         .text => |text| {
@@ -506,7 +501,7 @@ fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
             try encoded.put(arena, "type", .{ .string = "input_image" });
             try encoded.put(arena, "image_url", .{ .string = url });
         },
-        .file => {
+        .file_reference => {
             try encoded.put(arena, "type", .{ .string = "input_text" });
             try encoded.put(arena, "text", .{ .string = "File attached." });
         },
@@ -514,7 +509,7 @@ fn encodeContentPart(arena: Allocator, part: Content.Part) !Value {
     return .{ .object = encoded };
 }
 
-fn projectToolPart(arena: Allocator, part: Content.Part) !Content.Part {
+fn projectToolPart(arena: Allocator, part: Model.Content.Part) !Model.Content.Part {
     const maximum = 8192;
     if (part != .image or part.image != .url) return part;
     const url = part.image.url;

@@ -2,7 +2,7 @@
 
 Observations, handovers, and the current inference turn appear as YAML messages with the `user` role. See the [input definitions and renderers](../packages/agent/src/input.zig).
 
-The message order and role-specific tool selection are described in [message assembly](architecture.md#working-history-and-user-messages). Tool results have a separate [content contract](content.md). The Responses adapter associates uploaded files carried in user messages with the tool calls that supplied them. See [tool result encoding](architecture.md#tool-results).
+An uploaded file also appears in a user-role message. That message identifies the tool call that supplied the file and carries its file ID. See [tool result encoding](architecture.md#tool-results).
 
 ## Records and turns
 

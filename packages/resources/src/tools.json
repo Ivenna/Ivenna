@@ -12,7 +12,7 @@
         },
         "view": {
           "default": {},
-          "description": "When a preview suggests a media view, use `result.uri` as `location` and `result.view` as `view`.",
+          "description": "The default view previews local media with a URI and a suggested view.",
           "anyOf": [
             {
               "type": "object",
@@ -41,7 +41,7 @@
             {
               "type": "string",
               "enum": ["image", "file"],
-              "description": "The image view supplies an image or an image URL to the model service. A local file can hold the URL. The file view sends a whole local file to the model service for parsing."
+              "description": "The image view opens a local image or an image at a URL. The URL can come from a local file. The file view sends the whole local file to the model service for parsing, which may incur a charge."
             }
           ]
         }

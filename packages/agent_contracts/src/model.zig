@@ -1,6 +1,18 @@
 const std = @import("std");
-const Content = @import("content").Content;
+const tool_content = @import("content");
 const Allocator = std.mem.Allocator;
+
+/// Tool content ready for retention and inference. Uploaded files are addressed
+/// by the service reference returned by the adapter.
+pub const Content = struct {
+    parts: []const Part,
+
+    pub const Part = union(enum) {
+        text: []const u8,
+        image: tool_content.ImageContent,
+        file_reference: []const u8,
+    };
+};
 
 /// Retained history has native messages and tool results. Continuation bytes
 /// are private to the model adapter that produced them, including reasoning;
@@ -82,7 +94,7 @@ pub const Port = struct {
     pub const VTable = struct {
         next: *const fn (*anyopaque, Allocator, Request) anyerror!Outcome,
         measure: *const fn (*anyopaque, Allocator, Request) anyerror!Measurement,
-        prepareToolReplies: *const fn (*anyopaque, Allocator, []Item) anyerror!void,
+        prepareToolResult: *const fn (*anyopaque, Allocator, tool_content.Content) anyerror!Content,
     };
 
     /// Returned output, calls, and text belong to a.
@@ -95,9 +107,9 @@ pub const Port = struct {
         return self.vtable.measure(self.context, a, request);
     }
 
-    /// Prepare individual tool_result items for retention and inference.
-    /// Aggregate limits are checked on each assembled request.
-    pub fn prepareToolReplies(self: Port, a: Allocator, replies: []Item) !void {
-        return self.vtable.prepareToolReplies(self.context, a, replies);
+    /// Prepare one tool result for retention and inference. Parts can borrow
+    /// from the tool result until the caller copies them into its context.
+    pub fn prepareToolResult(self: Port, a: Allocator, result: tool_content.Content) !Content {
+        return self.vtable.prepareToolResult(self.context, a, result);
     }
 };
