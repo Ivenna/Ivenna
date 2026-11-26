@@ -42,16 +42,35 @@ const ReadableEntry = union(enum) {
         text: []const u8,
         image: @FieldType(Model.Content.Part, "image"),
         file_reference: []const u8,
-        file: struct { bytes: []const u8, reference: []const u8 },
+        /// Older records stored the bytes with an optional reference. When
+        /// that reference is absent, only an unavailable-file description can
+        /// be restored.
+        file: struct { bytes: []const u8, reference: ?[]const u8 = null },
 
-        fn restore(self: Part) !Model.Content.Part {
-            const reference = switch (self) {
-                .file => |old| old.reference,
-                .file_reference => |id| id,
-                inline else => |value, tag| return @unionInit(Model.Content.Part, @tagName(tag), value),
+        fn missingFile(a: Allocator, byte_length: usize) !Model.Content.Part {
+            std.log.warn("older history record has a file part without a reference; restoring an unavailable-file description (code=file_reference_missing, byte_length={d})", .{byte_length});
+            return .{ .text = try std.json.Stringify.valueAlloc(a, .{
+                .file = .{ .byte_length = byte_length },
+                .@"error" = .{
+                    .code = "file_reference_missing",
+                    .message = "The file from this older history record can no longer be retrieved.",
+                },
+            }, .{}) };
+        }
+
+        fn restore(self: Part, a: Allocator) !Model.Content.Part {
+            return switch (self) {
+                .file => |old| blk: {
+                    const reference = old.reference orelse break :blk try missingFile(a, old.bytes.len);
+                    if (reference.len == 0) break :blk try missingFile(a, old.bytes.len);
+                    break :blk .{ .file_reference = reference };
+                },
+                .file_reference => |id| blk: {
+                    if (id.len == 0) return error.InvalidHistory;
+                    break :blk .{ .file_reference = id };
+                },
+                inline else => |value, tag| @unionInit(Model.Content.Part, @tagName(tag), value),
             };
-            if (reference.len == 0) return error.InvalidHistory;
-            return .{ .file_reference = reference };
         }
     };
 
@@ -61,7 +80,7 @@ const ReadableEntry = union(enum) {
         for (self.exchange, items) |stored, *item| item.* = switch (stored) {
             .tool_result => |result| blk: {
                 const parts = try a.alloc(Model.Content.Part, result.content.parts.len);
-                for (result.content.parts, parts) |part, *restored| restored.* = try part.restore();
+                for (result.content.parts, parts) |part, *restored| restored.* = try part.restore(a);
                 break :blk .{ .tool_result = .{ .call_id = result.call_id, .content = .{ .parts = parts } } };
             },
             inline else => |value, tag| @unionInit(Model.Item, @tagName(tag), value),
@@ -717,6 +736,78 @@ test "restored history can append and fork a legacy file as a reference" {
     const continued = (try persistence.load(a, 2)).?.sessions;
     try t.expectEqualDeep(core.entries.?, continued[0].entries.?);
     try t.expectEqualDeep(fork.entries.?, continued[1].entries.?);
+}
+
+test "older file parts without a reference load as an unavailable-file description" {
+    const t = std.testing;
+    const TestStore = @import("test_history.zig").TestStore;
+    var store: TestStore = .{};
+    defer store.arena.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var persistence = Persistence.init(t.allocator, store.port());
+    defer persistence.deinit();
+    const body = ".{.entry=.{.previous=null,.value=.{.record=.{.handover=.{" ++
+        ".focus_id=\"core-1\",.observed_at_unix_ms=0,.summary=\"Keep investigating.\"," ++
+        ".state=.{.activities=.{},.callbacks=.{},.subscriptions=.{\"watch-1\"},.feeds=.{\"old-1\"},.correspondents=null}" ++
+        "}}}}}";
+    const group = try persistence.store.allocateGroup(a);
+    const key = Codec.digest(body);
+    const exchange = try std.mem.concat(a, u8, &.{
+        ".{.entry=.{.previous=", try Codec.encode(a, key),
+        \\, .value = .{ .exchange = .{
+        \\    .{ .tool_result = .{ .call_id = "read-old", .content = .{ .parts = .{
+        \\        .{ .text = "file:///old.pdf" },
+        \\        .{ .file = .{ .bytes = "Old PDF bytes\x00\xff" } },
+        \\    } } } },
+        \\    .{ .tool_result = .{ .call_id = "read-new", .content = .{ .parts = .{
+        \\        .{ .file = .{ .bytes = "New PDF bytes", .reference = "file-456" } },
+        \\    } } } }
+        \\} } } }
+        ,
+    });
+    const exchange_key = Codec.digest(exchange);
+    try persistence.store.create(a, &.{
+        .{ .group = group, .key = key, .previous = null, .body = body },
+        .{ .group = group, .key = exchange_key, .previous = key, .body = exchange },
+    });
+    try persistence.store.save(try Codec.encode(a, Checkpoint{
+        .subscription_catalog = @splat(0),
+        .next_session_id = 2,
+        .next_callback_id = 1,
+        .next_command_id = 7,
+        .sessions = &.{.{
+            .session_id = 1,
+            .focus_id = "core-1",
+            .role = .core,
+            .was_running = true,
+            .subscription_through = 0,
+            .epoch = 1,
+            .group = group,
+            .head = exchange_key,
+            .count = 2,
+            .observations = null,
+        }},
+        .wakeups = &.{},
+        .callbacks = &.{},
+        .activity_reports = null,
+    }));
+
+    const history = (try persistence.load(a, 1)).?;
+    const parts = history.sessions[0].entries.?[1].exchange[0].tool_result.content.parts;
+    try t.expectEqualStrings("file:///old.pdf", parts[0].text);
+    const diagnostic = try std.json.parseFromSliceLeaky(std.json.Value, a, parts[1].text, .{});
+    try t.expectEqualStrings("file_reference_missing", diagnostic.object.get("error").?.object.get("code").?.string);
+    try t.expectEqual(@as(i64, 15), diagnostic.object.get("file").?.object.get("byte_length").?.integer);
+    const newer = history.sessions[0].entries.?[1].exchange[1].tool_result.content.parts;
+    try t.expectEqualStrings("file-456", newer[0].file_reference);
+
+    // Re-encoding writes the diagnostic as text and leaves the new reference intact.
+    try persistence.save(a, history);
+    const reloaded = (try persistence.load(a, 2)).?.sessions[0].entries.?[1].exchange;
+    try t.expect(std.mem.indexOf(u8, reloaded[0].tool_result.content.parts[1].text, "file_reference_missing") != null);
+    try t.expectEqualStrings("file-456", reloaded[1].tool_result.content.parts[0].file_reference);
 }
 
 test "earlier channel registrations can omit descriptions" {

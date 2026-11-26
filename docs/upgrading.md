@@ -4,7 +4,7 @@
 
 To keep the option of rolling back, back up the mailbox and instance database as a pair before upgrading. Older kernels cannot read a history record containing the new `file_reference` part. See [backups and transfers](running.md#backups-and-transfers).
 
-Start the updated kernel with the existing mailbox and its paired instance database. It reads the DeepSeek file ID from earlier file results. New records refer to an uploaded file by its ID, including when a fork or compaction copies an older result. The original bytes in older mailbox records remain until those records are retired to Trash and expire under the mail service's retention policy.
+Start the updated kernel with the existing mailbox and its paired instance database. It reads the DeepSeek file ID from earlier file results. If an older record has a file part without a reference, it loads as a text description with the original byte length and a `file_reference_missing` error instead of failing the whole history. New records refer to an uploaded file by its ID, including when a fork or compaction copies an older result. The original bytes in older mailbox records remain until those records are retired to Trash and expire under the mail service's retention policy.
 
 ## Adopting the new reasoning defaults
 
