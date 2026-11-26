@@ -83,7 +83,7 @@ The reply gives the page's text alongside the total size of the entry in bytes.
 
 Pass `next_offset` as the next call's `offset` to continue. A null `next_offset` marks the end. A page can be shorter than requested and can end within a line. It always preserves whole UTF-8 characters. An offset beyond the entry or inside a character returns `invalid_range`.
 
-The focus receives a recognized image inline. For a PDF or other binary entry, the reader supplies the whole file for upload, even when it first encounters binary data on a later page. The accompanying text gives the memory's `address`, `byte_length`, and `kind` (`image` or `file`). An inline image also includes its `format`. See [automatic classification](content.md#automatic-classification) and [file uploads and parsing charges](content.md#complete-files).
+The focus receives a recognized image inline. Reading a PDF or other non-image binary entry within the source size limit uploads the complete entry to DeepSeek, even if an earlier page returned text. The source description gives the memory's `address`, `byte_length`, and `kind` (`image` or `file`). For an inline image it also gives the `format`. See [source size limits](content.md#source-size-limits) and [file uploads and parsing charges](content.md#complete-files).
 
 An entry containing an image URL is text by default. To view the image, read it from offset zero with `interpretation: "image_url"`. The result has `kind: "image_url"` and gives the size of the stored entry. The model service receives the URL as an image reference. See [image URL references](content.md#image-url-references).
 
@@ -198,7 +198,7 @@ An operation error contains `code` and `message`. Common codes include:
 | `ambiguous_match` | A revision found multiple matches without `replace_all`; no revision was written |
 | `entry_too_large` | A write transfer, existing entry selected for revision, or resulting entry exceeds 32 MiB; no entry was published |
 | `result_too_large` | One result's metadata cannot fit the encoded reply limit |
-| `operation_failed` | The operation failed at the selected address. For example, forgetting a room without `recursive` can fail because it still has contents. |
+| `operation_failed` | The operation failed at the selected address. Read the message for details. |
 | `memory_capacity_exceeded` | The proposed growth exceeds shared capacity; the entry was not changed |
 
 Errors from selected-entry file operations and patterns are ordinary tool replies; the next model round can use the diagnostic to continue. Workspace preparation, capacity-accounting failures, invalid service replies, and connection failures remain infrastructure failures and stop the kernel and its concurrent work.

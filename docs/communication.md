@@ -68,9 +68,9 @@ Any focus can call `open_channel` with a name and a nonempty description of the 
 {"result":{"channel_id":"task-input-18"}}
 ```
 
-Once the runtime confirms that the registration and tool result are saved together, the channel is available for reads and sends. Give the receiving program the complete `channel_id`. Use the same ID to send or close the channel. The description identifies its purpose in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
+The channel becomes available when the runtime confirms the checkpoint that saves its registration and tool result. Give the receiving program the complete `channel_id`. Use the same ID to send or close the channel. The description identifies its purpose in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
 
-If saving the checkpoint fails, the runtime stops before opening the channel. A size rejection leaves the previous checkpoint in effect. If publication was uncertain, restart restores the channel only if the selected checkpoint includes it. See [recovering from a size rejection](running.md#working-history-limits) and [checkpoint selection on restart](architecture.md#saving-and-restoration).
+If saving the checkpoint fails, the runtime stops with the channel inactive. On restart it restores the channel and its tool result together if the selected checkpoint includes them. See [recovering from a size rejection](running.md#working-history-limits) and [checkpoint selection on restart](architecture.md#saving-and-restoration).
 
 ### Receiving from a channel
 

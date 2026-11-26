@@ -2,7 +2,7 @@
 
 Observations, handovers, and the current inference turn appear as YAML messages with the `user` role. See the [input definitions and renderers](../packages/agent/src/input.zig).
 
-An uploaded file also appears in a user-role message. That message identifies the tool call that supplied the file and carries its file ID. See [tool result encoding](architecture.md#tool-results).
+When a tool result includes uploaded files, the inference input includes a user-role message with the tool call ID and the file IDs. See [tool result encoding](architecture.md#tool-results).
 
 ## Records and turns
 
@@ -235,7 +235,7 @@ events:
 
 A compaction request presents the history to summarize and a turn with `current` and `summarize` under the shared system prompt. It offers no tools and asks for a plain-text summary. On a revision request, `summarize.instructions` says what to correct. See the [handover instructions](../packages/agent/src/compaction.md).
 
-The summary request can substitute short omission notices for tool attachments. Tool result text and source descriptions stay in the request. See [summary request preparation](architecture.md#sampling-state-and-preparing-the-request).
+When a summary request exceeds an adapter limit, the runtime can substitute short notices for images and file references in that request. The request still includes the tool result text and source descriptions. See [summary request preparation](architecture.md#sampling-state-and-preparing-the-request).
 
 The next ordinary request begins its retained history with the accepted handover, followed by any records and complete exchanges carried forward. Observations already in history and still awaiting inference remain intact. Observations admitted for this turn appear in its `events` field. An activity whose inherited history was summarized before its first ordinary inference still sees its original [assignment](#assignments-and-reports).
 

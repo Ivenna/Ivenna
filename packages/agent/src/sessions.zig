@@ -459,7 +459,6 @@ pub const Registry = struct {
         const session = work.session;
         for (changes.forks.items) |fork| {
             fork.context = try Context.inherit(self.allocator, .{ .session_id = fork.session_id, .epoch = 0 }, fork.focus_id, completed.records());
-            fork.context.?.inline_image_limit_bytes = completed.inline_image_limit_bytes;
         }
         try self.sessions.ensureUnusedCapacity(self.allocator, @intCast(changes.forks.items.len));
         try self.channels.ensureUnusedCapacity(self.allocator, changes.channels.items.len);

@@ -14,15 +14,15 @@ Starting exactly at the end of the text or listing returns an empty window. An o
 
 Pass a [command log's path](host.md#output-and-results) directly as `location`. The reader follows symbolic links when opening a path. Each read sees the current filesystem, so edits between reads can shift offsets.
 
-Opening a text file in the default view returns a passage in `result.content`, with `byte_length` when known. For an image, PDF, or binary file within the size limit, the preview gives its `uri`, `byte_length`, and the `view` to use. To receive the media, pass that URI as `location` with the suggested view. See [source size limits](content.md#source-size-limits).
+The default view returns a passage from a text file in `result.content`, with `byte_length` when known. For an image, PDF, or other binary file within the size limit, the preview returns its `uri`, `byte_length`, and suggested `view`. Call `read_resource` with that URI as `location` and the suggested view to get the media. See [source size limits](content.md#source-size-limits).
 
-You can request either media view directly. The `file` view sends the entire local file to DeepSeek for parsing, as in this PDF example. See [file results and parsing charges](content.md#complete-files).
+You can request a media view directly. The `file` view uploads the complete local file to DeepSeek. DeepSeek may charge to parse it. See [file results and parsing charges](content.md#complete-files).
 
 ```json
 {"location":"/srv/report.pdf","view":"file"}
 ```
 
-Use `"image"` to open a recognized image file. If a file contains only a direct HTTP(S) image URL or an image data URL, the default view reads the address as text. The image view reads the complete address as an image reference and accepts a single trailing LF or CRLF.
+Use the `image` view to receive a recognized image file inline or open a local file containing only an HTTP(S) image URL or an image data URL. The URL can end in a single LF or CRLF. See [image URL references](content.md#image-url-references).
 
 Opening a directory lists its entries in filename byte order. Each entry has a reusable `uri`, a `name` when it is valid UTF-8, and a `kind` when known. Long paths can shorten a page. To include modification times (`metadata.modified_ms`, milliseconds since the Unix epoch) and regular-file sizes (`metadata.byte_length`) when available, request `{"view":{"metadata":true}}`.
 

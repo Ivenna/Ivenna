@@ -254,7 +254,7 @@
         },
         "replace_all": {
           "type": "boolean",
-          "description": "Replace every non-overlapping match; otherwise require one unique match.",
+          "description": "Replace every non-overlapping match. By default, multiple matches return an error.",
           "default": false
         },
         "match_mode": {

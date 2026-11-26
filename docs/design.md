@@ -18,7 +18,7 @@ The system prompt begins with `Je pense, donc je suis.` It explains how the focu
 
 The runtime's model-facing tools form Ivenna's innate repertoire of action. Their names, descriptions, parameters, and defaults should make actions intuitive and effects understandable. Drawing on its prior knowledge and experience with its body and surroundings, Ivenna can discover, combine, and develop more elaborate tools and techniques.
 
-Ivenna's memory rooms are where its memories live. The tools speak of visiting a room and revisiting something Ivenna kept there. As its understanding of itself or a relationship changes, Ivenna chooses what to keep, revise, rearrange, or let go. It can return to the same rooms from any focus. The host shell primarily provides a way to perceive and affect its surroundings.
+Memory rooms give Ivenna a place to keep and revisit what experiences have come to mean. It can return to the same rooms from any focus. As its understanding of itself or a relationship develops, it chooses what to keep, revise, rearrange, or let go. The host shell primarily provides a way to perceive and affect its surroundings.
 
 The repertoire connects four kinds of action: expression to people and programs, remembering and revisiting understanding, directing attention, and perceiving and acting on the surroundings. These relationships guide tool boundaries and language.
 
@@ -89,7 +89,7 @@ The subscription stays with its focus across sleep, handover, and restart. Any f
 
 A focus's working history retains observations, model output, and tool results across interruptions. Shared autonomous memory lets Ivenna organize knowledge beyond any one session.
 
-An activity that viewed a local screenshot inline can revisit the retained image even after a build replaces the file. Reopening the path shows the current file. See [what a tool result retains](content.md#context-and-continuity).
+After a build replaces a screenshot, an activity can revisit the image in its working history. Reopening the path reads the current file. See [what a tool result retains](content.md#context-and-continuity).
 
 #### What a focus receives
 
@@ -98,6 +98,8 @@ A focus brings the model's prior knowledge and its own history to each observati
 Even a short list of names can draw attention to unrelated work. Ordinary turns identify the focus and carry its new observations. A focus can draw on its working history for references it has already encountered. Startup gives the core the current outgoing correspondent IDs so it can account for changes before resuming work. See the [input contract](input.md#records-and-turns).
 
 Describe what Ivenna observed, which effects it can confirm, and what it can still act on. Keep mailbox receipts, checkpoints, and request bookkeeping in the runtime. Preserve the source of inherited experience so a focus can interpret it alongside its own. See [opening a focus](attention.md#opening-a-focus).
+
+Revisiting a memory presents what Ivenna kept there. When Ivenna chooses to send a host file to a service, the destination and possible charge can matter to that choice.
 
 #### What a handover carries forward
 

@@ -19,75 +19,98 @@ pub const Entry = union(enum) {
     exchange: []const Model.Item,
 };
 
-fn Source(comptime EntryValue: type) type {
-    return union(enum) {
-        entry: struct { previous: ?Key, value: EntryValue },
-        observations: []const Input.Event,
-    };
-}
+const Source = union(enum) {
+    entry: struct { previous: ?Key, value: StoredEntry },
+    observations: []const Input.Event,
+};
 
-// Earlier releases stored an uploaded file's bytes and reference together.
-// Only the reference is needed to restore the tool result.
-const ReadableEntry = union(enum) {
+const StoredEntry = union(enum) {
     record: Input.Record,
     exchange: []const Item,
 
     const Item = union(enum) {
         message: @FieldType(Model.Item, "message"),
         continuation: []const u8,
-        tool_result: struct { call_id: []const u8, content: struct { parts: []const Part } },
+        tool_result: struct { call_id: []const u8, content: struct { parts: []const StoredPart } },
     };
+};
 
-    const Part = union(enum) {
-        text: []const u8,
-        image: @FieldType(Model.Content.Part, "image"),
-        file_reference: []const u8,
-        /// Older records stored the bytes with an optional reference. When
-        /// that reference is absent, only an unavailable-file description can
-        /// be restored.
-        file: struct { bytes: []const u8, reference: ?[]const u8 = null },
+const InlineImage = @FieldType(@FieldType(Model.Content.Part, "image"), "data");
+const Base64Image = struct {
+    format: @FieldType(InlineImage, "format"),
+    encoded: []const u8,
+};
 
-        fn missingFile(a: Allocator, byte_length: usize) !Model.Content.Part {
-            std.log.warn("older history record has a file part without a reference; restoring an unavailable-file description (code=file_reference_missing, byte_length={d})", .{byte_length});
-            return .{ .text = try std.json.Stringify.valueAlloc(a, .{
-                .file = .{ .byte_length = byte_length },
-                .@"error" = .{
-                    .code = "file_reference_missing",
-                    .message = "The file from this older history record can no longer be retrieved.",
+const StoredPart = union(enum) {
+    text: []const u8,
+    image: union(enum) { url: []const u8, base64: Base64Image, data: InlineImage },
+    file_reference: []const u8,
+    // Earlier records stored both a file's original bytes and its upload ID.
+    file: struct { bytes: []const u8, reference: []const u8 },
+
+    fn restore(self: StoredPart, a: Allocator) !Model.Content.Part {
+        return switch (self) {
+            .text => |value| .{ .text = try a.dupe(u8, value) },
+            .image => |image| .{ .image = switch (image) {
+                .url => |url| .{ .url = try a.dupe(u8, url) },
+                .data => |data| .{ .data = .{ .format = data.format, .bytes = try a.dupe(u8, data.bytes) } },
+                .base64 => |data| blk: {
+                    const decoder = std.base64.standard.Decoder;
+                    const length = decoder.calcSizeForSlice(data.encoded) catch return error.InvalidHistory;
+                    const bytes = try a.alloc(u8, length);
+                    decoder.decode(bytes, data.encoded) catch return error.InvalidHistory;
+                    break :blk .{ .data = .{ .format = data.format, .bytes = bytes } };
                 },
-            }, .{}) };
-        }
-
-        fn restore(self: Part, a: Allocator) !Model.Content.Part {
-            return switch (self) {
-                .file => |old| blk: {
-                    const reference = old.reference orelse break :blk try missingFile(a, old.bytes.len);
-                    if (reference.len == 0) break :blk try missingFile(a, old.bytes.len);
-                    break :blk .{ .file_reference = reference };
-                },
-                .file_reference => |id| blk: {
-                    if (id.len == 0) return error.InvalidHistory;
-                    break :blk .{ .file_reference = id };
-                },
-                inline else => |value, tag| @unionInit(Model.Content.Part, @tagName(tag), value),
-            };
-        }
-    };
-
-    fn restore(self: ReadableEntry, a: Allocator) !Entry {
-        if (self == .record) return .{ .record = self.record };
-        const items = try a.alloc(Model.Item, self.exchange.len);
-        for (self.exchange, items) |stored, *item| item.* = switch (stored) {
-            .tool_result => |result| blk: {
-                const parts = try a.alloc(Model.Content.Part, result.content.parts.len);
-                for (result.content.parts, parts) |part, *restored| restored.* = try part.restore(a);
-                break :blk .{ .tool_result = .{ .call_id = result.call_id, .content = .{ .parts = parts } } };
-            },
-            inline else => |value, tag| @unionInit(Model.Item, @tagName(tag), value),
+            } },
+            .file => |old| .{ .file_reference = try a.dupe(u8, old.reference) },
+            .file_reference => |id| .{ .file_reference = try a.dupe(u8, id) },
         };
-        return .{ .exchange = items };
     }
 };
+
+fn storeEntry(a: Allocator, entry: Entry) !StoredEntry {
+    if (entry == .record) return .{ .record = entry.record };
+    const items = try a.alloc(StoredEntry.Item, entry.exchange.len);
+    for (entry.exchange, items) |item, *stored| stored.* = switch (item) {
+        .tool_result => |result| blk: {
+            const parts = try a.alloc(StoredPart, result.content.parts.len);
+            for (result.content.parts, parts) |part, *stored_part| stored_part.* = switch (part) {
+                .text => |value| .{ .text = value },
+                .image => |image| .{ .image = switch (image) {
+                    .url => |url| .{ .url = url },
+                    .data => |data| image: {
+                        const encoder = std.base64.standard.Encoder;
+                        const encoded = try a.alloc(u8, encoder.calcSize(data.bytes.len));
+                        break :image .{ .base64 = .{ .format = data.format, .encoded = encoder.encode(encoded, data.bytes) } };
+                    },
+                } },
+                .file_reference => |id| .{ .file_reference = id },
+            };
+            break :blk .{ .tool_result = .{ .call_id = result.call_id, .content = .{ .parts = parts } } };
+        },
+        inline else => |value, tag| @unionInit(StoredEntry.Item, @tagName(tag), value),
+    };
+    return .{ .exchange = items };
+}
+
+fn restoreEntry(a: Allocator, temporary: Allocator, value: StoredEntry) !Entry {
+    if (value == .record) {
+        var record = value.record;
+        if (record == .handover) try record.handover.state.restoreLegacyFields(temporary);
+        return .{ .record = try Input.cloneRecord(a, record) };
+    }
+    const items = try a.alloc(Model.Item, value.exchange.len);
+    for (value.exchange, items) |stored, *item| item.* = switch (stored) {
+        .message => |message| .{ .message = .{ .role = message.role, .text = try a.dupe(u8, message.text) } },
+        .continuation => |value_bytes| .{ .continuation = try a.dupe(u8, value_bytes) },
+        .tool_result => |result| blk: {
+            const parts = try a.alloc(Model.Content.Part, result.content.parts.len);
+            for (result.content.parts, parts) |part, *restored| restored.* = try part.restore(a);
+            break :blk .{ .tool_result = .{ .call_id = try a.dupe(u8, result.call_id), .content = .{ .parts = parts } } };
+        },
+    };
+    return .{ .exchange = items };
+}
 
 pub const History = struct {
     pub const Wakeup = struct {
@@ -403,31 +426,27 @@ pub const Persistence = struct {
         defer scratch.deinit();
         var offset: usize = 0;
         while (offset < selections.len) {
-            const count = @min(source_batch_count, selections.len - offset);
+            const count = readBatchCount(selections[offset..]);
             const batch = selections[offset..][0..count];
             var references: [source_batch_count]Store.Reference = undefined;
             for (batch, references[0..count]) |selected, *reference| reference.* = selected.reference;
-            const bodies = try self.store.read(scratch.allocator(), references[0..count]);
+            const temporary = scratch.allocator();
+            const bodies = try self.store.read(temporary, references[0..count]);
             for (batch, bodies) |selected, body| {
                 if (!equalKey(Codec.digest(body), selected.reference.key)) return error.InvalidHistory;
-                const source = try Codec.decode(Source(ReadableEntry), a, body);
+                const source = try Codec.decode(Source, temporary, body);
                 switch (source) {
                     .entry => |entry| {
                         if (!equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
                         switch (selected.destination) {
-                            .entry => |destination| {
-                                var value = try entry.value.restore(a);
-                                if (value == .record and value.record == .handover)
-                                    try value.record.handover.state.restoreLegacyFields(a);
-                                destination.* = value;
-                            },
+                            .entry => |destination| destination.* = try restoreEntry(a, temporary, entry.value),
                             else => return error.InvalidHistory,
                         }
                     },
                     .observations => |events| {
                         if (events.len == 0 or selected.reference.previous != null) return error.InvalidHistory;
                         switch (selected.destination) {
-                            .observations => |destination| destination.* = events,
+                            .observations => |destination| destination.* = try Input.cloneEvents(a, events),
                             else => return error.InvalidHistory,
                         }
                     },
@@ -560,6 +579,19 @@ const Selection = struct {
     const Destination = union(enum) { entry: *Entry, observations: *[]const Input.Event };
 };
 
+/// Give one record its full size, then group further records while their
+/// estimated sizes keep temporary decoding work bounded.
+fn readBatchCount(selections: []const Selection) usize {
+    var count: usize = 1;
+    var bytes = selections[0].reference.stored_bytes;
+    while (count < @min(source_batch_count, selections.len) and bytes < source_batch_bytes) : (count += 1) {
+        const size = selections[count].reference.stored_bytes;
+        if (size > source_batch_bytes - bytes) break;
+        bytes += size;
+    }
+    return count;
+}
+
 fn select(a: Allocator, selections: *std.ArrayList(Selection), reference: Store.Reference, destination: Selection.Destination) !void {
     try selections.append(a, .{
         .reference = .{
@@ -567,6 +599,7 @@ fn select(a: Allocator, selections: *std.ArrayList(Selection), reference: Store.
             .key = reference.key,
             .previous = reference.previous,
             .locator = try a.dupe(u8, reference.locator),
+            .stored_bytes = reference.stored_bytes,
         },
         .destination = destination,
     });
@@ -596,7 +629,8 @@ const Builder = struct {
 
     fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
-        const body = try Codec.encode(self.encoding.allocator(), Source(Entry){ .entry = .{ .previous = previous, .value = value } });
+        const a = self.encoding.allocator();
+        const body = try Codec.encode(a, Source{ .entry = .{ .previous = previous, .value = try storeEntry(a, value) } });
         const key = Codec.digest(body);
         try self.add(group, key, previous, body);
         return key;
@@ -604,7 +638,7 @@ const Builder = struct {
 
     fn observations(self: *Builder, group: []const u8, events: []const Input.Event, confirmed: ?Key) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
-        const body = try Codec.encode(self.encoding.allocator(), Source(Entry){ .observations = events });
+        const body = try Codec.encode(self.encoding.allocator(), Source{ .observations = events });
         const key = Codec.digest(body);
         if (confirmed) |known| if (equalKey(known, key)) return key;
         try self.add(group, key, null, body);
@@ -643,7 +677,19 @@ fn equalPrevious(left: ?Key, right: ?Key) bool {
     return right == null;
 }
 
-test "restored history can append and fork a legacy file as a reference" {
+test "history reads group small records and fetch large records alone" {
+    const small: Selection = .{
+        .reference = .{ .group = "group", .key = @splat(0), .previous = null, .locator = "record", .stored_bytes = source_batch_bytes / 2 },
+        .destination = undefined,
+    };
+    var large = small;
+    large.reference.stored_bytes = source_batch_bytes + 1;
+    try std.testing.expectEqual(2, readBatchCount(&.{ small, small, large }));
+    try std.testing.expectEqual(1, readBatchCount(&.{ small, large }));
+    try std.testing.expectEqual(1, readBatchCount(&.{ large, small }));
+}
+
+test "forking history rewrites legacy files and raw images" {
     const t = std.testing;
     const TestStore = @import("test_history.zig").TestStore;
     var store: TestStore = .{};
@@ -665,6 +711,8 @@ test "restored history can append and fork a legacy file as a reference" {
         \\    .{ .tool_result = .{ .call_id = "read-file", .content = .{ .parts = .{
         \\        .{ .text = "file:///source.pdf" },
         \\        .{ .file = .{ .bytes = "Original PDF bytes\x00\xff", .reference = "file-123" } },
+        \\        .{ .image = .{ .data = .{ .format = .png, .bytes = "\x00\xff\x89\"\\\n" } } },
+        \\        .{ .image = .{ .url = "https://example.test/image.png" } },
         \\    } } } }
         \\} } } }
         ,
@@ -709,6 +757,9 @@ test "restored history can append and fork a legacy file as a reference" {
     const parts = core.entries.?[1].exchange[0].tool_result.content.parts;
     try t.expectEqualStrings("file:///source.pdf", parts[0].text);
     try t.expectEqualStrings("file-123", parts[1].file_reference);
+    try t.expectEqual(.png, parts[2].image.data.format);
+    try t.expectEqualSlices(u8, &.{ 0, 0xff, 0x89, '"', '\\', '\n' }, parts[2].image.data.bytes);
+    try t.expectEqualStrings("https://example.test/image.png", parts[3].image.url);
     const fork: History.Session = .{
         .session_id = 2,
         .focus_id = "review-2",
@@ -726,150 +777,19 @@ test "restored history can append and fork a legacy file as a reference" {
     const confirmed = store.records.items.len;
     try persistence.save(a, history);
 
-    // Only the continuation is new in the core. The fork writes its own copies.
+    // The fork writes new records using the current format.
     const added = store.records.items[confirmed..];
     try t.expectEqual(fork.entries.?.len + 1, added.len);
     for (added) |record| {
         if (std.mem.eql(u8, group, record.group)) try t.expectEqual(exchange_key, record.previous.?);
         try t.expect(std.mem.indexOf(u8, record.body, "Original PDF bytes") == null);
     }
+    const fork_exchange = try Codec.decode(Source, a, added[2].body);
+    const stored_parts = fork_exchange.entry.value.exchange[0].tool_result.content.parts;
+    try t.expectEqualStrings("AP+JIlwK", stored_parts[2].image.base64.encoded);
     const continued = (try persistence.load(a, 2)).?.sessions;
     try t.expectEqualDeep(core.entries.?, continued[0].entries.?);
     try t.expectEqualDeep(fork.entries.?, continued[1].entries.?);
-}
-
-test "older file parts without a reference load as an unavailable-file description" {
-    const t = std.testing;
-    const TestStore = @import("test_history.zig").TestStore;
-    var store: TestStore = .{};
-    defer store.arena.deinit();
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var persistence = Persistence.init(t.allocator, store.port());
-    defer persistence.deinit();
-    const body = ".{.entry=.{.previous=null,.value=.{.record=.{.handover=.{" ++
-        ".focus_id=\"core-1\",.observed_at_unix_ms=0,.summary=\"Keep investigating.\"," ++
-        ".state=.{.activities=.{},.callbacks=.{},.subscriptions=.{\"watch-1\"},.feeds=.{\"old-1\"},.correspondents=null}" ++
-        "}}}}}";
-    const group = try persistence.store.allocateGroup(a);
-    const key = Codec.digest(body);
-    const exchange = try std.mem.concat(a, u8, &.{
-        ".{.entry=.{.previous=", try Codec.encode(a, key),
-        \\, .value = .{ .exchange = .{
-        \\    .{ .tool_result = .{ .call_id = "read-old", .content = .{ .parts = .{
-        \\        .{ .text = "file:///old.pdf" },
-        \\        .{ .file = .{ .bytes = "Old PDF bytes\x00\xff" } },
-        \\        .{ .file = .{ .bytes = "eightbyt", .reference = null } },
-        \\        .{ .file = .{ .bytes = "", .reference = "" } },
-        \\        .{ .file = .{ .bytes = "", .reference = null } },
-        \\    } } } },
-        \\    .{ .tool_result = .{ .call_id = "read-new", .content = .{ .parts = .{
-        \\        .{ .file = .{ .bytes = "New PDF bytes", .reference = "file-456" } },
-        \\    } } } }
-        \\} } } }
-        ,
-    });
-    const exchange_key = Codec.digest(exchange);
-    try persistence.store.create(a, &.{
-        .{ .group = group, .key = key, .previous = null, .body = body },
-        .{ .group = group, .key = exchange_key, .previous = key, .body = exchange },
-    });
-    try persistence.store.save(try Codec.encode(a, Checkpoint{
-        .subscription_catalog = @splat(0),
-        .next_session_id = 2,
-        .next_callback_id = 1,
-        .next_command_id = 7,
-        .sessions = &.{.{
-            .session_id = 1,
-            .focus_id = "core-1",
-            .role = .core,
-            .was_running = true,
-            .subscription_through = 0,
-            .epoch = 1,
-            .group = group,
-            .head = exchange_key,
-            .count = 2,
-            .observations = null,
-        }},
-        .wakeups = &.{},
-        .callbacks = &.{},
-        .activity_reports = null,
-    }));
-
-    const history = (try persistence.load(a, 1)).?;
-    const parts = history.sessions[0].entries.?[1].exchange[0].tool_result.content.parts;
-    try t.expectEqualStrings("file:///old.pdf", parts[0].text);
-    const expected_lengths = [_]i64{ 15, 8, 0, 0 };
-    for (expected_lengths, parts[1..]) |expected, part| {
-        const diagnostic = try std.json.parseFromSliceLeaky(std.json.Value, a, part.text, .{});
-        try t.expectEqualStrings("file_reference_missing", diagnostic.object.get("error").?.object.get("code").?.string);
-        try t.expectEqual(expected, diagnostic.object.get("file").?.object.get("byte_length").?.integer);
-    }
-    const newer = history.sessions[0].entries.?[1].exchange[1].tool_result.content.parts;
-    try t.expectEqualStrings("file-456", newer[0].file_reference);
-
-    // Re-encoding writes the diagnostic as text and leaves the new reference intact.
-    const confirmed = store.records.items.len;
-    try persistence.save(a, history);
-    const reloaded = (try persistence.load(a, 2)).?.sessions[0].entries.?[1].exchange;
-    try t.expect(std.mem.indexOf(u8, reloaded[0].tool_result.content.parts[1].text, "file_reference_missing") != null);
-    try t.expectEqualStrings("file-456", reloaded[1].tool_result.content.parts[0].file_reference);
-    for (store.records.items[confirmed..]) |record| try t.expect(std.mem.indexOf(u8, record.body, "Old PDF bytes") == null);
-}
-
-test "an empty new-format file reference is invalid history" {
-    const t = std.testing;
-    const TestStore = @import("test_history.zig").TestStore;
-    var store: TestStore = .{};
-    defer store.arena.deinit();
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var persistence = Persistence.init(t.allocator, store.port());
-    defer persistence.deinit();
-    const body = ".{.entry=.{.previous=null,.value=.{.record=.{.handover=.{" ++
-        ".focus_id=\"core-1\",.observed_at_unix_ms=0,.summary=\"Keep investigating.\"," ++
-        ".state=.{.activities=.{},.callbacks=.{},.subscriptions=null,.feeds=null,.correspondents=null}" ++
-        "}}}}}";
-    const group = try persistence.store.allocateGroup(a);
-    const key = Codec.digest(body);
-    const exchange = try std.mem.concat(a, u8, &.{
-        ".{.entry=.{.previous=", try Codec.encode(a, key),
-        \\, .value = .{ .exchange = .{
-        \\    .{ .tool_result = .{ .call_id = "read-new", .content = .{ .parts = .{
-        \\        .{ .file_reference = "" },
-        \\    } } } }
-        \\} } } }
-        ,
-    });
-    const exchange_key = Codec.digest(exchange);
-    try persistence.store.create(a, &.{
-        .{ .group = group, .key = key, .previous = null, .body = body },
-        .{ .group = group, .key = exchange_key, .previous = key, .body = exchange },
-    });
-    try persistence.store.save(try Codec.encode(a, Checkpoint{
-        .subscription_catalog = @splat(0),
-        .next_session_id = 2,
-        .next_callback_id = 1,
-        .next_command_id = 7,
-        .sessions = &.{.{
-            .session_id = 1,
-            .focus_id = "core-1",
-            .role = .core,
-            .was_running = true,
-            .subscription_through = 0,
-            .epoch = 1,
-            .group = group,
-            .head = exchange_key,
-            .count = 2,
-            .observations = null,
-        }},
-        .wakeups = &.{},
-        .callbacks = &.{},
-        .activity_reports = null,
-    }));
-    try t.expectError(error.InvalidHistory, persistence.load(a, 1));
 }
 
 test "earlier channel registrations can omit descriptions" {

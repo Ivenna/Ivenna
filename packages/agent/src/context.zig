@@ -15,15 +15,7 @@ pub const Context = struct {
     entries: std.ArrayList(Entry) = .empty,
     messages: std.ArrayList(Model.Item) = .empty,
     inherited_through: usize = 0,
-    /// Inline image bytes one history record may hold. A record also includes
-    /// text and uploaded-file references, so this leaves room below the mail
-    /// service's request limit.
-    inline_image_limit_bytes: u64 = default_inline_image_limit_bytes,
 
-    /// Worst-case expansion in stored history text is four bytes per image
-    /// byte, and JSON escaping for the JMAP request takes a fifth. One MiB
-    /// therefore needs at most 5 MiB of a default 10,000,000-byte request.
-    pub const default_inline_image_limit_bytes: u64 = 1024 * 1024;
     pub const CompactionScope = enum { keep_latest_tool_round, keep_recent_rounds, keep_pending_observations };
     const recent_completed_rounds = 2;
 
@@ -76,9 +68,7 @@ pub const Context = struct {
     }
 
     pub fn clone(self: *const Context, allocator: Allocator) !Context {
-        var copy = try copyEntries(allocator, self.scope, self.focus_id, self.entries.items, self.inherited_through);
-        copy.inline_image_limit_bytes = self.inline_image_limit_bytes;
-        return copy;
+        return copyEntries(allocator, self.scope, self.focus_id, self.entries.items, self.inherited_through);
     }
 
     pub fn appendRecord(self: *Context, record: Input.Record) !void {
@@ -86,89 +76,14 @@ pub const Context = struct {
     }
 
     /// Preserve the native exchange. An empty response still closes input
-    /// that was waiting for inference, without adding a model message. When
-    /// the round exceeds the inline image budget, each inline image becomes a
-    /// text placeholder and the rest of the round is recorded. The tools have
-    /// already run by this point, so dropping the whole round would lose their
-    /// results; a placeholder keeps the text and file references and tells the
-    /// model why the image is unavailable.
+    /// that was waiting for inference, without adding a model message.
     pub fn appendBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
-        const image_bytes = inlineImageBytes(output, replies);
-        if (image_bytes > self.inline_image_limit_bytes) {
-            std.log.warn("history record for {s} would hold {d} inline image bytes, exceeding the {d} byte limit; replacing inline images with text and saving the rest of the round", .{
-                self.focus_id, image_bytes, self.inline_image_limit_bytes,
-            });
-            return self.appendDegradedBatch(output, replies);
-        }
-        return self.appendNativeBatch(output, replies);
-    }
-
-    fn appendNativeBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
         if (output.len == 0 and replies.len == 0 and !self.hasPendingContinuation()) return;
         const batch = try self.allocator.alloc(Model.Item, output.len + replies.len);
         defer self.allocator.free(batch);
         @memcpy(batch[0..output.len], output);
         @memcpy(batch[output.len..], replies);
         try self.append(.{ .exchange = batch });
-    }
-
-    fn appendDegradedBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
-        var arena: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const batch = try a.alloc(Model.Item, output.len + replies.len);
-        for (output, batch[0..output.len]) |item, *copy| copy.* = try self.degradeInlineImages(a, item);
-        for (replies, batch[output.len..]) |item, *copy| copy.* = try self.degradeInlineImages(a, item);
-        try self.append(.{ .exchange = batch });
-    }
-
-    fn degradeInlineImages(self: *const Context, a: Allocator, item: Model.Item) !Model.Item {
-        if (item != .tool_result) return item;
-        const result = item.tool_result;
-        var parts: ?[]Model.Content.Part = null;
-        for (result.content.parts, 0..) |part, index| {
-            if (partInlineImageBytes(part) == 0) continue;
-            if (parts == null) parts = try a.dupe(Model.Content.Part, result.content.parts);
-            parts.?[index] = .{ .text = try std.fmt.allocPrint(a, "[Inline image omitted from history: {d} bytes exceed the configured {d}-byte inline image budget. Other content in this tool result is unchanged.]", .{
-                partInlineImageBytes(part), self.inline_image_limit_bytes,
-            }) };
-        }
-        if (parts) |replaced| return .{ .tool_result = .{ .call_id = result.call_id, .content = .{ .parts = replaced } } };
-        return item;
-    }
-
-    fn inlineImageBytes(output: []const Model.Item, replies: []const Model.Item) u64 {
-        var total: u64 = 0;
-        for (output) |item| total +|= itemInlineImageBytes(item);
-        for (replies) |item| total +|= itemInlineImageBytes(item);
-        return total;
-    }
-
-    fn itemInlineImageBytes(item: Model.Item) u64 {
-        return switch (item) {
-            .tool_result => |result| blk: {
-                var total: u64 = 0;
-                for (result.content.parts) |part| total +|= partInlineImageBytes(part);
-                break :blk total;
-            },
-            else => 0,
-        };
-    }
-
-    fn partInlineImageBytes(part: Model.Content.Part) u64 {
-        return switch (part) {
-            .image => |image| switch (image) {
-                .data => |data| @intCast(data.bytes.len),
-                // A data URL carries its encoded image in the record itself.
-                // The URI scheme is case-insensitive.
-                .url => |url| if (isDataUrl(url)) @intCast(url.len) else 0,
-            },
-            else => 0,
-        };
-    }
-
-    fn isDataUrl(value: []const u8) bool {
-        return value.len >= "data:".len and std.ascii.eqlIgnoreCase(value[0.."data:".len], "data:");
     }
 
     /// Present new observations once alongside the retained history. The
@@ -306,8 +221,8 @@ pub const Context = struct {
             for (item.tool_result.content.parts, 0..) |part, index| {
                 const note = switch (part) {
                     .text => continue,
-                    .image => "[Image omitted from this summary input.]",
-                    .file_reference => "[File omitted from this summary input.]",
+                    .image => "[Image unavailable for this handover.]",
+                    .file_reference => "[File unavailable for this handover.]",
                 };
                 if (copy == null) copy = try a.dupe(Model.Content.Part, item.tool_result.content.parts);
                 copy.?[index] = .{ .text = note };
@@ -333,7 +248,6 @@ pub const Context = struct {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
         var replacement = try init(allocator, scope, self.focus_id);
         errdefer replacement.deinit();
-        replacement.inline_image_limit_bytes = self.inline_image_limit_bytes;
         try replacement.appendRecord(.{ .handover = handover });
         const count = self.summaryEntryCount(compaction_scope);
         for (self.entries.items[count..]) |entry| try replacement.append(entry);
@@ -346,15 +260,7 @@ pub const Context = struct {
         switch (entry) {
             .record => |record| {
                 try self.messages.ensureUnusedCapacity(self.allocator, 1);
-                const copy: Input.Record = switch (record) {
-                    .events => |group| .{ .events = .{ .focus_id = try a.dupe(u8, group.focus_id), .items = try Input.cloneEvents(a, group.items) } },
-                    .handover => |handover| .{ .handover = .{
-                        .focus_id = try a.dupe(u8, handover.focus_id),
-                        .observed_at_unix_ms = handover.observed_at_unix_ms,
-                        .summary = try a.dupe(u8, handover.summary),
-                        .state = try Input.cloneState(a, handover.state),
-                    } },
-                };
+                const copy = try Input.cloneRecord(a, record);
                 const text = try Input.renderRecord(a, copy);
                 self.entries.appendAssumeCapacity(.{ .record = copy });
                 self.messages.appendAssumeCapacity(.{ .message = .{ .role = .user, .text = text } });
@@ -414,7 +320,7 @@ test "candidate requests leave history intact and latest observations appear onc
     try std.testing.expectEqual(@as(usize, 2), context.records().len);
 }
 
-test "encoded native exchanges restore independently of their source buffers" {
+test "retained exchanges own their source buffers" {
     const restored = blk: {
         var source = try Context.init(std.testing.allocator, .{ .session_id = 2, .epoch = 0 }, "practice-2");
         defer source.deinit();
@@ -435,12 +341,7 @@ test "encoded native exchanges restore independently of their source buffers" {
         @memset(&image_bytes, 0);
         @memset(&file_reference, 0);
 
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const codec = @import("record_codec.zig");
-        const encoded = try codec.encode(arena.allocator(), source.records());
-        const entries = try codec.decode([]const Entry, arena.allocator(), encoded);
-        break :blk try Context.restore(std.testing.allocator, source.scope, source.focus_id, entries);
+        break :blk try Context.restore(std.testing.allocator, source.scope, source.focus_id, source.records());
     };
     var context = restored;
     defer context.deinit();
@@ -634,147 +535,4 @@ test "recent retention carries complete exchanges and their observations across 
     var replacement = try original.withHandover(testing.allocator, handover, .keep_recent_rounds);
     defer replacement.deinit();
     try testing.expectEqualDeep(entries[2..], replacement.records()[1..]);
-}
-
-test "oversized inline images degrade to text and keep the rest of the round" {
-    const t = std.testing;
-    var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
-    defer context.deinit();
-    const bytes = [_]u8{ 137, 'P', 'N', 'G', 0, 255, 1, 2 };
-    const image: Model.Content.Part = .{ .image = .{ .data = .{ .format = .png, .bytes = &bytes } } };
-    const text: Model.Content.Part = .{ .text = "visible output" };
-    const reference: Model.Content.Part = .{ .file_reference = "file-123" };
-    const replies: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "view", .content = .{ .parts = &.{ text, image, reference } } } }};
-
-    // One byte over the budget replaces the image but keeps every other part.
-    context.inline_image_limit_bytes = bytes.len - 1;
-    try context.appendBatch(&.{}, replies);
-    try t.expectEqual(@as(usize, 1), context.entries.items.len);
-    var parts = context.entries.items[0].exchange[0].tool_result.content.parts;
-    try t.expectEqualStrings("visible output", parts[0].text);
-    try t.expect(parts[1] == .text);
-    try t.expect(std.mem.indexOf(u8, parts[1].text, "8 bytes") != null);
-    try t.expect(std.mem.indexOf(u8, parts[1].text, "7-byte") != null);
-    try t.expectEqualStrings("file-123", parts[2].file_reference);
-
-    // A record at the limit keeps the image, and raising the limit at runtime works.
-    context.inline_image_limit_bytes = bytes.len;
-    try context.appendBatch(&.{}, replies);
-    parts = context.entries.items[1].exchange[0].tool_result.content.parts;
-    try t.expect(parts[1] == .image);
-    try t.expectEqualSlices(u8, &bytes, parts[1].image.data.bytes);
-    context.inline_image_limit_bytes = bytes.len + 1;
-    try context.appendBatch(&.{}, replies);
-    try t.expectEqual(@as(usize, 3), context.entries.items.len);
-
-    // Zero disables inline images without rejecting text and file references.
-    context.inline_image_limit_bytes = 0;
-    try context.appendBatch(&.{}, replies);
-    parts = context.entries.items[3].exchange[0].tool_result.content.parts;
-    try t.expectEqualStrings("visible output", parts[0].text);
-    try t.expect(parts[1] == .text);
-    try t.expectEqualStrings("file-123", parts[2].file_reference);
-
-    // Rewriting the same round does not change entries that were already saved.
-    try t.expectEqual(@as(usize, 4), context.entries.items.len);
-}
-
-test "data URL scheme matching is ASCII case-insensitive" {
-    const t = std.testing;
-    const urls = [_][]const u8{
-        "data:image/png;base64,AAAA",
-        "DATA:image/png;base64,AAAA",
-        "Data:image/png;base64,AAAA",
-        "dAtA:image/png;base64,AAAA",
-    };
-    for (urls) |url| {
-        var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
-        defer context.deinit();
-        const image: Model.Content.Part = .{ .image = .{ .url = url } };
-        const replies: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{image} } } }};
-
-        context.inline_image_limit_bytes = url.len - 1;
-        try context.appendBatch(&.{}, replies);
-        try t.expect(context.entries.items[0].exchange[0].tool_result.content.parts[0] == .text);
-
-        context.inline_image_limit_bytes = url.len;
-        try context.appendBatch(&.{}, replies);
-        try t.expect(context.entries.items[1].exchange[0].tool_result.content.parts[0] == .image);
-    }
-
-    // A remote URL is not stored in the record and does not count toward the budget.
-    var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
-    defer context.deinit();
-    const remote: Model.Content.Part = .{ .image = .{ .url = "https://example.test/large.png" } };
-    context.inline_image_limit_bytes = 0;
-    try context.appendBatch(&.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{remote} } } }}, &.{});
-    try t.expect(context.entries.items[0].exchange[0].tool_result.content.parts[0] == .image);
-}
-
-test "derived contexts preserve the configured inline image budget" {
-    const t = std.testing;
-    var original = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
-    defer original.deinit();
-    try original.appendBatch(&.{.{ .continuation = "Working." }}, &.{});
-    const handover: Input.Handover = .{
-        .focus_id = "core-1",
-        .observed_at_unix_ms = 100,
-        .summary = "Working.",
-        .state = .{ .activities = &.{}, .callbacks = &.{} },
-    };
-    for ([_]u64{ 32 * 1024 * 1024, 8, 0 }) |limit| {
-        original.inline_image_limit_bytes = limit;
-        var compacted = try original.withHandover(t.allocator, handover, .keep_latest_tool_round);
-        defer compacted.deinit();
-        try t.expectEqual(limit, compacted.inline_image_limit_bytes);
-        var copy = try original.clone(t.allocator);
-        defer copy.deinit();
-        try t.expectEqual(limit, copy.inline_image_limit_bytes);
-    }
-}
-
-test "inline image budget sums images across output and replies" {
-    const t = std.testing;
-    var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
-    defer context.deinit();
-    const bytes = [_]u8{ 137, 'P', 'N', 'G', 1, 2 };
-    const image: Model.Content.Part = .{ .image = .{ .data = .{ .format = .png, .bytes = &bytes } } };
-    const output: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "view", .content = .{ .parts = &.{ image, image } } } }};
-    const replies: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "inspect", .content = .{ .parts = &.{ image, .{ .text = "kept" } } } } }};
-    const total = 3 * bytes.len;
-
-    // All three images count together, including across output and replies.
-    context.inline_image_limit_bytes = total;
-    try context.appendBatch(output, replies);
-    for (context.entries.items[0].exchange) |item| {
-        for (item.tool_result.content.parts) |part| {
-            if (part != .image) try t.expectEqualStrings("kept", part.text);
-        }
-    }
-    try t.expectEqual(@as(usize, 1), context.entries.items.len);
-
-    // One byte over the combined limit replaces every inline image.
-    context.inline_image_limit_bytes = total - 1;
-    try context.appendBatch(output, replies);
-    const exchange = context.entries.items[1].exchange;
-    try t.expectEqual(@as(usize, 2), exchange[0].tool_result.content.parts.len);
-    for (exchange[0].tool_result.content.parts) |part| try t.expect(part == .text);
-    try t.expect(exchange[1].tool_result.content.parts[0] == .text);
-    try t.expectEqualStrings("kept", exchange[1].tool_result.content.parts[1].text);
-    try t.expectEqual(@as(usize, 2), context.entries.items.len);
-}
-
-test "a failed append leaves entries and messages unchanged" {
-    const t = std.testing;
-    var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
-    defer context.deinit();
-    try context.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .startup = .{ .observed_at_unix_ms = 0 } }} } });
-    const entries = context.entries.items.len;
-    const messages = context.messages.items.len;
-    const allocator = context.allocator;
-    context.allocator = std.testing.failing_allocator;
-    defer context.allocator = allocator;
-    try t.expectError(error.OutOfMemory, context.appendBatch(&.{.{ .continuation = "not saved" }}, &.{}));
-    try t.expectEqual(entries, context.entries.items.len);
-    try t.expectEqual(messages, context.messages.items.len);
 }

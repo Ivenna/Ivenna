@@ -60,12 +60,11 @@ const key_property = "header:X-Ivenna-History-Key:asText";
 const previous_property = "header:X-Ivenna-History-Previous:asText";
 const history_query_limit = 512;
 const history_query_groups = 32;
-const state_properties: []const []const u8 = &.{
+const state_common_properties = [_][]const u8{
     "id", "mailboxIds", "keywords", "from", "to", kind_property, revision_property, key_property, previous_property,
 };
-const state_data_properties: []const []const u8 = &.{
-    "id", "mailboxIds", "keywords", "from", "to", kind_property, revision_property, key_property, previous_property, "textBody", "bodyValues",
-};
+const state_properties = state_common_properties ++ [_][]const u8{"size"};
+const state_data_properties = state_common_properties ++ [_][]const u8{ "textBody", "bodyValues" };
 const message_properties: []const []const u8 = &.{
     "id", "mailboxIds", "keywords", "receivedAt", "from", "to", "subject", callback_property, "textBody", "htmlBody", "bodyValues",
 };
@@ -479,12 +478,19 @@ pub const Mailbox = struct {
                 while (offset < ids.len) {
                     const batch_count = try self.historyGetCount(ids[offset..], false);
                     for (try self.getHistoryRecords(temporary, ids[offset..][0..batch_count], false)) |record| {
-                        const reference = try self.historyReference(a, record);
+                        const metadata = try self.historyMetadata(a, record);
+                        const locator = try a.dupe(u8, try textField(record, "id"));
                         const requested_group = for (selected_groups) |group| {
-                            if (std.mem.eql(u8, group, reference.group)) break true;
+                            if (std.mem.eql(u8, group, metadata.record.group)) break true;
                         } else false;
-                        if (!requested_group or (try seen.getOrPut(a, reference.locator)).found_existing) return error.InvalidHistory;
-                        try references.append(a, reference);
+                        if (!requested_group or (try seen.getOrPut(a, locator)).found_existing) return error.InvalidHistory;
+                        try references.append(a, .{
+                            .group = metadata.record.group,
+                            .key = metadata.record.key,
+                            .previous = metadata.previous,
+                            .locator = locator,
+                            .stored_bytes = try objectLimit(record, "size"),
+                        });
                     }
                     offset += batch_count;
                 }
@@ -511,9 +517,9 @@ pub const Mailbox = struct {
             const count = try self.historyGetCount(ids[offset..], true);
             const fetched = try self.getHistoryRecords(temporary, ids[offset..][0..count], true);
             for (fetched, references[offset..][0..count], data[offset..][0..count]) |record, expected, *body| {
-                const actual = try self.historyReference(temporary, record);
-                if (!std.mem.eql(u8, actual.group, expected.group) or
-                    !std.mem.eql(u8, &actual.key, &expected.key) or
+                const actual = try self.historyMetadata(temporary, record);
+                if (!std.mem.eql(u8, actual.record.group, expected.group) or
+                    !std.mem.eql(u8, &actual.record.key, &expected.key) or
                     !std.meta.eql(actual.previous, expected.previous)) return error.InvalidHistory;
                 body.* = try a.dupe(u8, try historyBody(record));
             }
@@ -592,8 +598,8 @@ pub const Mailbox = struct {
                         .record => blk: {
                             if (boolean(keywords, current_keyword) or boolean(keywords, prepared_keyword) or
                                 optionalField(record, revision_property) != null) return error.InvalidHistory;
-                            const reference = try historyRecordReference(a, record);
-                            break :blk .{ .record = .{ .group = reference.group, .key = reference.key } };
+                            const metadata = try historyRecordMetadata(a, record);
+                            break :blk .{ .record = metadata.record };
                         },
                         .checkpoint => .{ .checkpoint = checkpointState(keywords) },
                     };
@@ -792,12 +798,17 @@ pub const Mailbox = struct {
         return strings(a, try field(result, "ids"));
     }
 
-    fn historyReference(self: Mailbox, a: Allocator, record: Value) !HistoryStore.Reference {
+    const HistoryRecordMetadata = struct {
+        record: HistoryStore.RecordId,
+        previous: ?HistoryStore.Key,
+    };
+
+    fn historyMetadata(self: Mailbox, a: Allocator, record: Value) !HistoryRecordMetadata {
         if (!try self.validateHistoryRecord(a, record, .record)) return error.InvalidHistory;
-        return historyRecordReference(a, record);
+        return historyRecordMetadata(a, record);
     }
 
-    fn historyRecordReference(a: Allocator, record: Value) !HistoryStore.Reference {
+    fn historyRecordMetadata(a: Allocator, record: Value) !HistoryRecordMetadata {
         const keywords = try field(record, "keywords");
         var group: ?[]const u8 = null;
         for (keywords.object.keys(), keywords.object.values()) |keyword, enabled| {
@@ -812,10 +823,11 @@ pub const Mailbox = struct {
             break :blk try historyKey(item.string);
         } else null;
         return .{
-            .group = try a.dupe(u8, group orelse return error.InvalidHistory),
-            .key = try historyKey(optionalText(record, key_property) orelse return error.InvalidHistory),
+            .record = .{
+                .group = try a.dupe(u8, group orelse return error.InvalidHistory),
+                .key = try historyKey(optionalText(record, key_property) orelse return error.InvalidHistory),
+            },
             .previous = previous,
-            .locator = try a.dupe(u8, try textField(record, "id")),
         };
     }
 
@@ -832,7 +844,7 @@ pub const Mailbox = struct {
         return .{
             .accountId = self.account_id,
             .ids = ids,
-            .properties = if (body) state_data_properties else state_properties,
+            .properties = if (body) &state_data_properties else &state_properties,
             .fetchTextBodyValues = body,
         };
     }

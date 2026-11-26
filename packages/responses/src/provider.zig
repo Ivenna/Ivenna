@@ -179,13 +179,13 @@ pub const Provider = struct {
                 .@"error" = .{
                     .code = if (self == .uncertain) "file_upload_uncertain" else "file_upload_failed",
                     .message = switch (self) {
-                        .not_sent => "The upload attempt ended before sending the file.",
+                        .not_sent => "Opening the file failed before it could be sent.",
                         .rejected => |status| switch (status) {
                             .payload_too_large => "The file exceeds the upload service's size limit.",
                             .too_many_requests => "The file service is limiting uploads.",
                             else => "The file service rejected the upload.",
                         },
-                        .uncertain => "The file is unavailable in this result. The service may have stored a copy.",
+                        .uncertain => "Could not open the file. The service may have stored a copy.",
                     },
                 },
             }, .{}) };

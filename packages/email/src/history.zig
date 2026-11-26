@@ -205,7 +205,7 @@ test "history requires every immutable record in an unconfirmed batch" {
     // SHA-256 of "first" and "second", as supplied by the history writer.
     const first_key = "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e".*;
     const second_key = "16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4".*;
-    const common = "\"mailboxIds\":{\"history\":true},\"keywords\":{\"ivenna-state\":true,\"ivenna-history-" ++ group ++ "\":true}," ++
+    const common = "\"size\":450,\"mailboxIds\":{\"history\":true},\"keywords\":{\"ivenna-state\":true,\"ivenna-history-" ++ group ++ "\":true}," ++
         "\"from\":[{\"email\":\"ivenna@example.com\"}],\"to\":[{\"email\":\"ivenna@example.com\"}]," ++
         "\"header:X-Ivenna-History-Kind:asText\":\"record\",\"header:X-Ivenna-History-Key:asText\":\"";
     const first = "{\"id\":\"first\"," ++ common ++ first_key ++ "\"}";

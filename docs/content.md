@@ -1,28 +1,27 @@
 # Tool content
 
-One tool result can contain several parts, such as a source description and the image it identifies. The calling focus receives them together. For observations delivered as events, see the [input contract](input.md#retained-records).
+A tool result can contain several parts. When it supplies media, the accompanying text identifies the source, such as a resource URI or memory address. For observations delivered as events, see the [input contract](input.md#retained-records).
 
 ## Automatic classification
 
 Readers recognize JPEG, PNG, GIF, and WebP by signature and PDF by its header. Other bytes qualify as text when they are valid UTF-8 and contain no NULs. A window can show text before a later window encounters binary data.
 
-- A local resource preview returns a passage of text or the URI and suggested view for an image or file. Open that view to receive the media. See [resource views](resources.md#local-files-and-directories).
-- A host command returns complete short text inline. Partial text and binary output include a path to the full log. See [command output](host.md#output-and-results).
-- A memory read returns a passage of text or opens the image or document stored at that address. See [memory reads](memory.md#reading).
+A local resource preview can direct the focus to an image or file view. A memory read can open media directly. A host command gives the focus a path to read partial text or binary output. See [resource views](resources.md#local-files-and-directories), [memory reads](memory.md#reading), and [command output](host.md#output-and-results).
 
 ## Context and continuity
 
-Working history keeps the text a tool returns. When the tool supplies media, that text identifies its source, such as a resource URI or memory address. What a later turn can use, including after a restart, depends on how the media arrived.
+While a tool result remains in working history, later turns can use its text, including any source description, and the retained media data. This applies across restarts.
 
 | Media in the tool result | What working history retains |
 | --- | --- |
 | Inline image | The image bytes as read, even if the source later changes. |
-| Image URL | The original address. A data URL contains the image itself. An HTTP(S) URL can later serve a different image or become unavailable. |
-| Uploaded file | The file ID returned by DeepSeek. Later turns can use it while the file is available in the same account. |
+| Image data URL | The URL, including the encoded image. |
+| HTTP(S) image URL | The URL. It can later serve a different image or become unavailable. |
+| Uploaded file | The DeepSeek file ID. Using it requires access to the account that still holds the file. |
 
-Inline image bytes count toward the record's `HISTORY_INLINE_IMAGE_BYTES` budget. See [working history limits](running.md#working-history-limits) for how the kernel replaces an oversized inline image with a text placeholder before writing the record.
+The runtime saves the complete tool round before the next inference. See [working history limits](running.md#working-history-limits).
 
-Compaction can replace a tool result with a handover. If the handover keeps the host path or memory address, the focus can reopen the source to see its current contents. Uploaded files have a separate lifetime in the DeepSeek account. See [handovers](input.md#handover-generation-and-replacement) and [uploaded model files](running.md#uploaded-model-files).
+Compaction can summarize the exchange that contains a tool result. If the handover records the host path or memory address, the focus can reopen the source to see its current contents. See [handovers](input.md#handover-generation-and-replacement) and [uploaded file retention](running.md#uploaded-model-files).
 
 ## Source size limits
 
@@ -31,27 +30,27 @@ When a resource or memory read identifies an oversized source, `result.content.u
 | Reason | Meaning |
 | --- | --- |
 | `image_too_large` | Image data exceeds 32 MiB |
-| `reference_too_large` | A source opened as an image URL exceeds 16 KiB |
+| `reference_too_large` | A local file or memory entry opened as an image URL exceeds 16 KiB |
 | `file_too_large` | A file attachment exceeds 32 MiB |
 
 ## Complete files
 
-Opening a file as an attachment uploads its current contents to DeepSeek. Later requests that include the same tool result reuse the saved `file_id`. Opening the source again as an attachment starts another upload. For a PDF, DeepSeek parses the document during upload and charges by the page when parsing succeeds. See DeepSeek's [file parsing and billing guide](https://api-docs.deepseek.com/guides/document_parsing/).
+Opening a file as an attachment uploads its current contents to DeepSeek. Later requests that include the tool result reuse the saved file ID. Reopening the source as an attachment starts another upload.
 
-When the adapter reports a failed or unconfirmed upload, a text part replaces the attachment. It gives the original `file.byte_length` and an `error` with a code and message. The rest of the tool result is still available.
+DeepSeek charges by the page when document parsing succeeds during upload. Later inference that references the file incurs model input charges. See [DeepSeek's file parsing charges](https://api-docs.deepseek.com/guides/document_parsing/#billing).
+
+For a failed or unconfirmed upload, the result includes the source description and a text part with the original `file.byte_length` and an `error` containing a code and message.
 
 | Code | What happened |
 | --- | --- |
 | `file_upload_failed` | The upload stopped before sending the file, or the file service rejected it. The message distinguishes these outcomes and identifies a size or rate limit when reported. |
 | `file_upload_uncertain` | The adapter could not confirm whether the service stored the file. A new upload could create another copy. |
 
-For an HTTP rejection, check the `model file endpoint returned HTTP` entry in the kernel log. See [upload handling](architecture.md#tool-results).
-
 ## Image URL references
 
-An HTTP(S) image reference asks the model service to retrieve the image during inference. A data URL opened from a file or memory counts toward both the [source size limit](#source-size-limits) and the encoded request size. See [remote images](resources.md#remote-images), [local file views](resources.md#local-files-and-directories), and [image addresses in memory](memory.md#reading).
+An HTTP(S) image reference asks the model service to retrieve the image during inference. For a data URL stored in a local file or memory entry, the reader checks the source size, and the URL contributes to the encoded request size. See [source size limits](#source-size-limits), [local file views](resources.md#local-files-and-directories), and [image addresses in memory](memory.md#reading).
 
-For each HTTP(S) image URL longer than 8192 Unicode code points, the adapter sends a JSON text part in place of the image. Its `error` object contains `code: "content_limit"`, a `message`, `omitted_images: 1`, the measured length in `actual`, the allowed length in `maximum`, and `unit: "unicode_code_points"`. The tool's source description stays alongside the notice, and working history retains the original URL.
+For each HTTP(S) image URL longer than 8192 Unicode code points, the adapter sends a JSON text part in place of the image. Its `error` object contains `code: "content_limit"`, a `message`, `omitted_images: 1`, the measured length in `actual`, the allowed length in `maximum`, and `unit: "unicode_code_points"`. The request still includes the source description, and history keeps the URL.
 
 ## Model request checks
 
