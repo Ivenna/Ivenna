@@ -115,18 +115,18 @@ Allow for correspondence, history from all focuses, pending records, and mail aw
 
 Set the mail service's advertised `maxSizeRequest` high enough for the JMAP request that writes your largest history record or checkpoint. Allow for the JSON envelope, any HTTP body limit at the mail endpoint or proxy, and the mail store's message limits. See [sizing the supplied Stalwart instance](../dev/README.md#sizing-stalwart-for-working-history) and [history storage](architecture.md#history-storage).
 
-A model response and all of its tool results share one history record. Estimate space for everything that can arrive in one round. Base64 uses about four bytes for every three bytes of inline image data. The model service applies its own [inference request limits](content.md#model-request-checks).
+A model response and all of its tool results share one history record. Estimate space for everything that can arrive in one round. Base64 uses about four bytes for every three bytes of inline image data. Two 32 MiB images contribute about 85 MiB before the rest of the round and the JMAP envelope. The model service applies its own [inference request limits](content.md#model-request-checks).
 
 | Error | What to check |
 | --- | --- |
-| `HistoryRecordTooLarge` | A single history record exceeds `maxSizeRequest` with its request envelope. Check the size of the round's results. |
+| `HistoryRecordTooLarge` | A single history record exceeds `maxSizeRequest` with its request envelope. For a tool round, check the combined size of its results. |
 | `HistoryCheckpointTooLarge` | The checkpoint request exceeds `maxSizeRequest`. Check the number of registered focuses, open channels, and pending wakeups. |
 | HTTP 413 on `Email/set` | Check HTTP body limits at the proxy and mail endpoint. |
 | `MailObjectFailed` on `Email/set` | Check the mail server's rejection details, including message limits and account quota. |
 
-`HistoryRecordTooLarge` and `HistoryCheckpointTooLarge` stop the kernel before it sends the oversized request. A failed record leaves the round uncommitted; a failed checkpoint leaves the previous checkpoint selected. In either case, the saved history remains valid. Tool calls from an uncommitted round may already have produced effects, and restart cannot replay them from history. Check the outcome of each such action, including a file upload or host command, before repeating it.
+`HistoryRecordTooLarge` and `HistoryCheckpointTooLarge` stop the kernel before it sends the oversized request. Restart resumes from the previously published checkpoint. If the failed save included a tool round, that checkpoint has no saved results for the round. Check for effects such as a file upload or a host command before restarting, since the focus may act again when it resumes.
 
-To resume, raise the mail service's advertised `maxSizeRequest` and any HTTP body or message limit that applies, then restart with the same mailbox and instance database. For a record, you can also reduce the space the round needs: the content layer caps one image at 32 MiB, so lowering that cap (`image_size_limit` in `packages/content/src/root.zig`) or keeping fewer or smaller images in one round reduces the record. If channel registrations contributed to the checkpoint size, close unused channels once reception opens.
+Raise the applicable mail service or proxy limit and restart with the same mailbox and instance database. If channel registrations contributed to the checkpoint size, close unused channels once reception opens.
 
 ### Outgoing correspondents
 

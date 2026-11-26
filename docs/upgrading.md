@@ -2,15 +2,13 @@
 
 ## Working history encoding
 
-The updated kernel reads existing history, with the exception described below. Newly written records store uploaded files by ID and encode inline images losslessly in Base64. This also applies when a fork or handover copies an older record. Older records keep their original bodies until the mail service expires them from Trash.
+The updated kernel restores image bytes and upload IDs from records selected by the saved checkpoint. Newly written records store uploaded files by ID and encode inline images losslessly in Base64. This also applies when a fork or handover copies an older record. Older records keep their original bodies until the mail service expires them from Trash.
 
-A `.file` part in an earlier record must carry a `reference` to its uploaded file. If the reference is missing or null, decoding that record makes `Persistence.load` return `InvalidHistory`; the kernel exits instead of starting. This is a deliberate boundary rather than a defect: the loader does not invent a file ID or silently replace the part with text. Before upgrading, inspect the plain-text bodies in `Ivenna History` for `.file` parts without a reference. For example, query the folder with JMAP `Email/query` and fetch the bodies with `Email/get` using `fetchTextBodyValues: true`; every `.file=.{` object must also contain `.reference=`. If a record lacks one, keep the previous executable and its backup rather than starting the updated kernel against that mailbox.
-
-1. Stop the kernel. Keep the previous executable and make a [matched backup of the mailbox and instance database](running.md#backups-and-transfers). Rollback after records use the new encoding requires that backup.
-2. Apply the [updated development mail plan](../dev/README.md#mail) if you use the supplied Stalwart setup. For other deployments, check the [working history limits](running.md#working-history-limits) against the largest round you expect to retain.
+1. Stop the kernel. Keep the previous executable and make a [matched backup of the mailbox and instance database](running.md#backups-and-transfers).
+2. If you use the supplied Stalwart setup, [update and apply your mail plan](../dev/README.md#mail). Check the [working history limits](running.md#working-history-limits) against the largest rounds you expect to save, including retained exchanges that a fork or handover can rewrite in the new encoding.
 3. Start the updated executable with the existing mailbox and its paired instance database.
 
-`HISTORY_INLINE_IMAGE_BYTES` from earlier builds is no longer read. If a deployment set it, remove the variable; the kernel ignores it. Inline images in working history no longer have a per-record byte budget. Each source image is still limited to 32 MiB by the content layer, and the complete record must still fit the mail service's `maxSizeRequest`. See [working history limits](running.md#working-history-limits).
+To roll back after the update writes records in the new encoding, stop the kernel, restore the matched backup, and start the previous executable.
 
 ## Adopting the new reasoning defaults
 
