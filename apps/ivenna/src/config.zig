@@ -61,7 +61,7 @@ pub const Config = struct {
                 .compact_at_tokens = try number(u64, env, "CONTEXT_COMPACT_AT_TOKENS", default_limits.compact_at_tokens),
                 .compact_at_bytes = try number(u64, env, "CONTEXT_COMPACT_AT_BYTES", default_limits.compact_at_bytes),
                 .observation_batch_bytes = try number(u64, env, "CONTEXT_OBSERVATION_BATCH_BYTES", default_limits.observation_batch_bytes),
-                .history_inline_image_bytes = try number(u64, env, "HISTORY_INLINE_IMAGE_BYTES", default_limits.history_inline_image_bytes),
+                .history_inline_image_bytes = try numberAllowingZero(u64, env, "HISTORY_INLINE_IMAGE_BYTES", default_limits.history_inline_image_bytes),
             },
             .llm_base_url = try nonempty(env, "LLM_BASE_URL", responses.Provider.default_base_url),
             .llm_api_key = try nonempty(env, "LLM_API_KEY", ""),
@@ -116,8 +116,14 @@ fn mailCorrespondents(a: std.mem.Allocator, env: *const std.process.Environ.Map)
 }
 
 fn number(comptime T: type, env: *const std.process.Environ.Map, key: []const u8, default: T) !T {
-    const text = env.get(key) orelse return default;
-    const value = std.fmt.parseInt(T, text, 10) catch return error.InvalidConfiguration;
+    const value = try numberAllowingZero(T, env, key, default);
     if (value == 0) return error.InvalidConfiguration;
     return value;
+}
+
+/// Zero can be meaningful for a limit: for example, it disables inline images
+/// in working history while still allowing text and file references.
+fn numberAllowingZero(comptime T: type, env: *const std.process.Environ.Map, key: []const u8, default: T) !T {
+    const text = env.get(key) orelse return default;
+    return std.fmt.parseInt(T, text, 10) catch return error.InvalidConfiguration;
 }

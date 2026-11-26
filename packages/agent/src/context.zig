@@ -86,15 +86,24 @@ pub const Context = struct {
     }
 
     /// Preserve the native exchange. An empty response still closes input
-    /// that was waiting for inference, without adding a model message.
+    /// that was waiting for inference, without adding a model message. When
+    /// the round exceeds the inline image budget, each inline image becomes a
+    /// text placeholder and the rest of the round is recorded. The tools have
+    /// already run by this point, so dropping the whole round would lose their
+    /// results; a placeholder keeps the text and file references and tells the
+    /// model why the image is unavailable.
     pub fn appendBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
         const image_bytes = inlineImageBytes(output, replies);
         if (image_bytes > self.inline_image_limit_bytes) {
-            std.log.warn("history record for {s} would hold {d} inline image bytes, exceeding the {d} byte limit; the round was not saved", .{
+            std.log.warn("history record for {s} would hold {d} inline image bytes, exceeding the {d} byte limit; replacing inline images with text and saving the rest of the round", .{
                 self.focus_id, image_bytes, self.inline_image_limit_bytes,
             });
-            return error.HistoryRecordTooLarge;
+            return self.appendDegradedBatch(output, replies);
         }
+        return self.appendNativeBatch(output, replies);
+    }
+
+    fn appendNativeBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
         if (output.len == 0 and replies.len == 0 and !self.hasPendingContinuation()) return;
         const batch = try self.allocator.alloc(Model.Item, output.len + replies.len);
         defer self.allocator.free(batch);
@@ -103,10 +112,35 @@ pub const Context = struct {
         try self.append(.{ .exchange = batch });
     }
 
+    fn appendDegradedBatch(self: *Context, output: []const Model.Item, replies: []const Model.Item) !void {
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const batch = try a.alloc(Model.Item, output.len + replies.len);
+        for (output, batch[0..output.len]) |item, *copy| copy.* = try self.degradeInlineImages(a, item);
+        for (replies, batch[output.len..]) |item, *copy| copy.* = try self.degradeInlineImages(a, item);
+        try self.append(.{ .exchange = batch });
+    }
+
+    fn degradeInlineImages(self: *const Context, a: Allocator, item: Model.Item) !Model.Item {
+        if (item != .tool_result) return item;
+        const result = item.tool_result;
+        var parts: ?[]Model.Content.Part = null;
+        for (result.content.parts, 0..) |part, index| {
+            if (partInlineImageBytes(part) == 0) continue;
+            if (parts == null) parts = try a.dupe(Model.Content.Part, result.content.parts);
+            parts.?[index] = .{ .text = try std.fmt.allocPrint(a, "[Inline image omitted from history: {d} bytes exceed the configured {d}-byte inline image budget. Other content in this tool result is unchanged.]", .{
+                partInlineImageBytes(part), self.inline_image_limit_bytes,
+            }) };
+        }
+        if (parts) |replaced| return .{ .tool_result = .{ .call_id = result.call_id, .content = .{ .parts = replaced } } };
+        return item;
+    }
+
     fn inlineImageBytes(output: []const Model.Item, replies: []const Model.Item) u64 {
         var total: u64 = 0;
-        for (output) |item| total += itemInlineImageBytes(item);
-        for (replies) |item| total += itemInlineImageBytes(item);
+        for (output) |item| total +|= itemInlineImageBytes(item);
+        for (replies) |item| total +|= itemInlineImageBytes(item);
         return total;
     }
 
@@ -114,7 +148,7 @@ pub const Context = struct {
         return switch (item) {
             .tool_result => |result| blk: {
                 var total: u64 = 0;
-                for (result.content.parts) |part| total += partInlineImageBytes(part);
+                for (result.content.parts) |part| total +|= partInlineImageBytes(part);
                 break :blk total;
             },
             else => 0,
@@ -126,10 +160,15 @@ pub const Context = struct {
             .image => |image| switch (image) {
                 .data => |data| @intCast(data.bytes.len),
                 // A data URL carries its encoded image in the record itself.
-                .url => |url| if (std.mem.startsWith(u8, url, "data:")) @intCast(url.len) else 0,
+                // The URI scheme is case-insensitive.
+                .url => |url| if (isDataUrl(url)) @intCast(url.len) else 0,
             },
             else => 0,
         };
+    }
+
+    fn isDataUrl(value: []const u8) bool {
+        return value.len >= "data:".len and std.ascii.eqlIgnoreCase(value[0.."data:".len], "data:");
     }
 
     /// Present new observations once alongside the retained history. The
@@ -597,35 +636,79 @@ test "recent retention carries complete exchanges and their observations across 
     try testing.expectEqualDeep(entries[2..], replacement.records()[1..]);
 }
 
-test "inline image budget rejects an oversized record before history changes" {
+test "oversized inline images degrade to text and keep the rest of the round" {
     const t = std.testing;
     var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
     defer context.deinit();
     const bytes = [_]u8{ 137, 'P', 'N', 'G', 0, 255, 1, 2 };
     const image: Model.Content.Part = .{ .image = .{ .data = .{ .format = .png, .bytes = &bytes } } };
-    const replies: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "view", .content = .{ .parts = &.{image} } } }};
-    const before = context.entries.items.len;
+    const text: Model.Content.Part = .{ .text = "visible output" };
+    const reference: Model.Content.Part = .{ .file_reference = "file-123" };
+    const replies: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "view", .content = .{ .parts = &.{ text, image, reference } } } }};
 
-    // The configured limit is enforced before the batch is appended.
+    // One byte over the budget replaces the image but keeps every other part.
     context.inline_image_limit_bytes = bytes.len - 1;
-    try t.expectError(error.HistoryRecordTooLarge, context.appendBatch(&.{}, replies));
-    try t.expectEqual(before, context.entries.items.len);
+    try context.appendBatch(&.{}, replies);
+    try t.expectEqual(@as(usize, 1), context.entries.items.len);
+    var parts = context.entries.items[0].exchange[0].tool_result.content.parts;
+    try t.expectEqualStrings("visible output", parts[0].text);
+    try t.expect(parts[1] == .text);
+    try t.expect(std.mem.indexOf(u8, parts[1].text, "8 bytes") != null);
+    try t.expect(std.mem.indexOf(u8, parts[1].text, "7-byte") != null);
+    try t.expectEqualStrings("file-123", parts[2].file_reference);
 
-    // A record at the limit passes, and the field can be raised at runtime.
+    // A record at the limit keeps the image, and raising the limit at runtime works.
     context.inline_image_limit_bytes = bytes.len;
     try context.appendBatch(&.{}, replies);
-    try t.expectEqual(before + 1, context.entries.items.len);
+    parts = context.entries.items[1].exchange[0].tool_result.content.parts;
+    try t.expect(parts[1] == .image);
+    try t.expectEqualSlices(u8, &bytes, parts[1].image.data.bytes);
     context.inline_image_limit_bytes = bytes.len + 1;
     try context.appendBatch(&.{}, replies);
-    try t.expectEqual(before + 2, context.entries.items.len);
+    try t.expectEqual(@as(usize, 3), context.entries.items.len);
 
-    // A data URL carries its encoded image in the record too.
-    const data_url: Model.Content.Part = .{ .image = .{ .url = "data:image/png;base64,AAAA" } };
-    context.inline_image_limit_bytes = "data:image/png;base64,AAAA".len - 1;
-    try t.expectError(error.HistoryRecordTooLarge, context.appendBatch(&.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{data_url} } } }}, &.{}));
-    context.inline_image_limit_bytes = "data:image/png;base64,AAAA".len;
-    try context.appendBatch(&.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{data_url} } } }}, &.{});
-    try t.expectEqual(before + 3, context.entries.items.len);
+    // Zero disables inline images without rejecting text and file references.
+    context.inline_image_limit_bytes = 0;
+    try context.appendBatch(&.{}, replies);
+    parts = context.entries.items[3].exchange[0].tool_result.content.parts;
+    try t.expectEqualStrings("visible output", parts[0].text);
+    try t.expect(parts[1] == .text);
+    try t.expectEqualStrings("file-123", parts[2].file_reference);
+
+    // Rewriting the same round does not change entries that were already saved.
+    try t.expectEqual(@as(usize, 4), context.entries.items.len);
+}
+
+test "data URL scheme matching is ASCII case-insensitive" {
+    const t = std.testing;
+    const urls = [_][]const u8{
+        "data:image/png;base64,AAAA",
+        "DATA:image/png;base64,AAAA",
+        "Data:image/png;base64,AAAA",
+        "dAtA:image/png;base64,AAAA",
+    };
+    for (urls) |url| {
+        var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+        defer context.deinit();
+        const image: Model.Content.Part = .{ .image = .{ .url = url } };
+        const replies: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{image} } } }};
+
+        context.inline_image_limit_bytes = url.len - 1;
+        try context.appendBatch(&.{}, replies);
+        try t.expect(context.entries.items[0].exchange[0].tool_result.content.parts[0] == .text);
+
+        context.inline_image_limit_bytes = url.len;
+        try context.appendBatch(&.{}, replies);
+        try t.expect(context.entries.items[1].exchange[0].tool_result.content.parts[0] == .image);
+    }
+
+    // A remote URL is not stored in the record and does not count toward the budget.
+    var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+    defer context.deinit();
+    const remote: Model.Content.Part = .{ .image = .{ .url = "https://example.test/large.png" } };
+    context.inline_image_limit_bytes = 0;
+    try context.appendBatch(&.{.{ .tool_result = .{ .call_id = "remote", .content = .{ .parts = &.{remote} } } }}, &.{});
+    try t.expect(context.entries.items[0].exchange[0].tool_result.content.parts[0] == .image);
 }
 
 test "derived contexts preserve the configured inline image budget" {
