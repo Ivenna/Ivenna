@@ -83,6 +83,27 @@ test "reasoning settings load defaults and provider-specific effort names" {
     try testing.expectError(error.MissingConfiguration, Config.load(a, &env));
 }
 
+test "history inline image budget loads defaults, custom values, zero, and rejects invalid values" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = std.process.Environ.Map.init(a);
+    try env.put("DATA_DIR", "/unused");
+    try env.put("LLM_API_KEY", "test-key");
+    try env.put("MAIL_ADDRESS", "ivenna@example.test");
+    try env.put("MAIL_AUTHORIZATION", "Bearer test-key");
+
+    try testing.expectEqual(@as(u64, 1024 * 1024), (try Config.load(a, &env)).context_limits.history_inline_image_bytes);
+    try env.put("HISTORY_INLINE_IMAGE_BYTES", "33554432");
+    try testing.expectEqual(@as(u64, 33554432), (try Config.load(a, &env)).context_limits.history_inline_image_bytes);
+    try env.put("HISTORY_INLINE_IMAGE_BYTES", "0");
+    try testing.expectEqual(@as(u64, 0), (try Config.load(a, &env)).context_limits.history_inline_image_bytes);
+    try env.put("HISTORY_INLINE_IMAGE_BYTES", "-1");
+    try testing.expectError(error.InvalidConfiguration, Config.load(a, &env));
+    try env.put("HISTORY_INLINE_IMAGE_BYTES", "12x");
+    try testing.expectError(error.InvalidConfiguration, Config.load(a, &env));
+}
+
 test "command help and argument errors work without instance or service settings" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

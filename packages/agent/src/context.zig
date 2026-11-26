@@ -732,3 +732,49 @@ test "derived contexts preserve the configured inline image budget" {
         try t.expectEqual(limit, copy.inline_image_limit_bytes);
     }
 }
+
+test "inline image budget sums images across output and replies" {
+    const t = std.testing;
+    var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+    defer context.deinit();
+    const bytes = [_]u8{ 137, 'P', 'N', 'G', 1, 2 };
+    const image: Model.Content.Part = .{ .image = .{ .data = .{ .format = .png, .bytes = &bytes } } };
+    const output: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "view", .content = .{ .parts = &.{ image, image } } } }};
+    const replies: []const Model.Item = &.{.{ .tool_result = .{ .call_id = "inspect", .content = .{ .parts = &.{ image, .{ .text = "kept" } } } } }};
+    const total = 3 * bytes.len;
+
+    // All three images count together, including across output and replies.
+    context.inline_image_limit_bytes = total;
+    try context.appendBatch(output, replies);
+    for (context.entries.items[0].exchange) |item| {
+        for (item.tool_result.content.parts) |part| {
+            if (part != .image) try t.expectEqualStrings("kept", part.text);
+        }
+    }
+    try t.expectEqual(@as(usize, 1), context.entries.items.len);
+
+    // One byte over the combined limit replaces every inline image.
+    context.inline_image_limit_bytes = total - 1;
+    try context.appendBatch(output, replies);
+    const exchange = context.entries.items[1].exchange;
+    try t.expectEqual(@as(usize, 2), exchange[0].tool_result.content.parts.len);
+    for (exchange[0].tool_result.content.parts) |part| try t.expect(part == .text);
+    try t.expect(exchange[1].tool_result.content.parts[0] == .text);
+    try t.expectEqualStrings("kept", exchange[1].tool_result.content.parts[1].text);
+    try t.expectEqual(@as(usize, 2), context.entries.items.len);
+}
+
+test "a failed append leaves entries and messages unchanged" {
+    const t = std.testing;
+    var context = try Context.init(t.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
+    defer context.deinit();
+    try context.appendRecord(.{ .events = .{ .focus_id = "core-1", .items = &.{.{ .startup = .{ .observed_at_unix_ms = 0 } }} } });
+    const entries = context.entries.items.len;
+    const messages = context.messages.items.len;
+    const allocator = context.allocator;
+    context.allocator = std.testing.failing_allocator;
+    defer context.allocator = allocator;
+    try t.expectError(error.OutOfMemory, context.appendBatch(&.{.{ .continuation = "not saved" }}, &.{}));
+    try t.expectEqual(entries, context.entries.items.len);
+    try t.expectEqual(messages, context.messages.items.len);
+}

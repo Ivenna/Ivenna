@@ -760,6 +760,9 @@ test "older file parts without a reference load as an unavailable-file descripti
         \\    .{ .tool_result = .{ .call_id = "read-old", .content = .{ .parts = .{
         \\        .{ .text = "file:///old.pdf" },
         \\        .{ .file = .{ .bytes = "Old PDF bytes\x00\xff" } },
+        \\        .{ .file = .{ .bytes = "eightbyt", .reference = null } },
+        \\        .{ .file = .{ .bytes = "", .reference = "" } },
+        \\        .{ .file = .{ .bytes = "", .reference = null } },
         \\    } } } },
         \\    .{ .tool_result = .{ .call_id = "read-new", .content = .{ .parts = .{
         \\        .{ .file = .{ .bytes = "New PDF bytes", .reference = "file-456" } },
@@ -797,17 +800,76 @@ test "older file parts without a reference load as an unavailable-file descripti
     const history = (try persistence.load(a, 1)).?;
     const parts = history.sessions[0].entries.?[1].exchange[0].tool_result.content.parts;
     try t.expectEqualStrings("file:///old.pdf", parts[0].text);
-    const diagnostic = try std.json.parseFromSliceLeaky(std.json.Value, a, parts[1].text, .{});
-    try t.expectEqualStrings("file_reference_missing", diagnostic.object.get("error").?.object.get("code").?.string);
-    try t.expectEqual(@as(i64, 15), diagnostic.object.get("file").?.object.get("byte_length").?.integer);
+    const expected_lengths = [_]i64{ 15, 8, 0, 0 };
+    for (expected_lengths, parts[1..]) |expected, part| {
+        const diagnostic = try std.json.parseFromSliceLeaky(std.json.Value, a, part.text, .{});
+        try t.expectEqualStrings("file_reference_missing", diagnostic.object.get("error").?.object.get("code").?.string);
+        try t.expectEqual(expected, diagnostic.object.get("file").?.object.get("byte_length").?.integer);
+    }
     const newer = history.sessions[0].entries.?[1].exchange[1].tool_result.content.parts;
     try t.expectEqualStrings("file-456", newer[0].file_reference);
 
     // Re-encoding writes the diagnostic as text and leaves the new reference intact.
+    const confirmed = store.records.items.len;
     try persistence.save(a, history);
     const reloaded = (try persistence.load(a, 2)).?.sessions[0].entries.?[1].exchange;
     try t.expect(std.mem.indexOf(u8, reloaded[0].tool_result.content.parts[1].text, "file_reference_missing") != null);
     try t.expectEqualStrings("file-456", reloaded[1].tool_result.content.parts[0].file_reference);
+    for (store.records.items[confirmed..]) |record| try t.expect(std.mem.indexOf(u8, record.body, "Old PDF bytes") == null);
+}
+
+test "an empty new-format file reference is invalid history" {
+    const t = std.testing;
+    const TestStore = @import("test_history.zig").TestStore;
+    var store: TestStore = .{};
+    defer store.arena.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var persistence = Persistence.init(t.allocator, store.port());
+    defer persistence.deinit();
+    const body = ".{.entry=.{.previous=null,.value=.{.record=.{.handover=.{" ++
+        ".focus_id=\"core-1\",.observed_at_unix_ms=0,.summary=\"Keep investigating.\"," ++
+        ".state=.{.activities=.{},.callbacks=.{},.subscriptions=null,.feeds=null,.correspondents=null}" ++
+        "}}}}}";
+    const group = try persistence.store.allocateGroup(a);
+    const key = Codec.digest(body);
+    const exchange = try std.mem.concat(a, u8, &.{
+        ".{.entry=.{.previous=", try Codec.encode(a, key),
+        \\, .value = .{ .exchange = .{
+        \\    .{ .tool_result = .{ .call_id = "read-new", .content = .{ .parts = .{
+        \\        .{ .file_reference = "" },
+        \\    } } } }
+        \\} } } }
+        ,
+    });
+    const exchange_key = Codec.digest(exchange);
+    try persistence.store.create(a, &.{
+        .{ .group = group, .key = key, .previous = null, .body = body },
+        .{ .group = group, .key = exchange_key, .previous = key, .body = exchange },
+    });
+    try persistence.store.save(try Codec.encode(a, Checkpoint{
+        .subscription_catalog = @splat(0),
+        .next_session_id = 2,
+        .next_callback_id = 1,
+        .next_command_id = 7,
+        .sessions = &.{.{
+            .session_id = 1,
+            .focus_id = "core-1",
+            .role = .core,
+            .was_running = true,
+            .subscription_through = 0,
+            .epoch = 1,
+            .group = group,
+            .head = exchange_key,
+            .count = 2,
+            .observations = null,
+        }},
+        .wakeups = &.{},
+        .callbacks = &.{},
+        .activity_reports = null,
+    }));
+    try t.expectError(error.InvalidHistory, persistence.load(a, 1));
 }
 
 test "earlier channel registrations can omit descriptions" {
