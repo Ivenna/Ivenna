@@ -17,7 +17,7 @@
 
 | Task | Guide |
 | --- | --- |
-| Download, verify, and install a packaged executable | [Installing the executable](running.md#installing-the-executable) |
+| Install the kernel from a package | [Installing the executable](running.md#installing-the-executable) |
 | Run Ivenna from source with the supplied mail and memory services | [Local development](../dev/README.md) |
 | Configure a deployment, diagnose stalled work, and manage retained data | [Running guide](running.md) |
 | Set mail request limits or recover from a history size error | [Working history limits](running.md#working-history-limits) |

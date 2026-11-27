@@ -8,10 +8,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: release-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   package:
     runs-on: ubuntu-24.04
@@ -26,13 +22,6 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ steps.zig-version.outputs.version }}
-      - name: Check Zig formatting
-        run: git ls-files -z '*.zig' '*.zig.zon' | xargs -0 zig fmt --check
-      - uses: hustcer/setup-nu@v3
-        with:
-          version: '0.116.1' # Match apps/memory/Containerfile.
-      - name: Run memory protocol tests
-        run: nu --no-config-file --no-history apps/memory/tests.nu
       - name: Test and package Ivenna
         id: package
         shell: bash
@@ -55,6 +44,7 @@ jobs:
   publish:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: package
+    concurrency: release-${{ github.ref }}
     permissions:
       contents: write
     runs-on: ubuntu-24.04
@@ -69,58 +59,52 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          require_tag_commit() {
+            local tag_commit
+            tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$version" --jq .sha)
+            if [[ "$tag_commit" != "$package_commit" ]]; then
+              printf 'Tag %s points to %s. The package was built from %s.\n' \
+                "$version" "$tag_commit" "$package_commit" >&2
+              exit 1
+            fi
+          }
+
           version="$GITHUB_REF_NAME"
           cd dist
-          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$version" --jq .sha)
-          package_commit=$(jq -er .commit ./*.json)
-          if [[ "$package_commit" != "$commit" ]]; then
-            printf 'Cannot publish tag %s. It points to %s. The package was built from %s.\n' \
-              "$version" "$commit" "$package_commit" >&2
+          records=(./ivenna-*-"$version.json")
+          if [[ ${#records[@]} != 1 || ! -f "${records[0]}" ]]; then
+            printf 'Expected one package build record for %s.\n' "$version" >&2
             exit 1
           fi
-          package_version=$(jq -c '.version' ./*.json)
-          if [[ "$package_version" != "\"$version\"" ]]; then
-            printf 'Cannot publish tag %s. Expected build record version "%s", found %s.\n' \
-              "$version" "$version" "$package_version" >&2
-            exit 1
-          fi
-          package_dirty=$(jq -c '.dirty' ./*.json)
-          if [[ "$package_dirty" != false ]]; then
-            printf 'Cannot publish tag %s. Expected build record dirty to be false, found %s.\n' \
-              "$version" "$package_dirty" >&2
-            exit 1
-          fi
+          record=${records[0]}
+          package_commit=$(jq -er .commit "$record")
+          base=${record%.json}
+          require_tag_commit
 
           prerelease=false
           if [[ "$version" == *-* ]]; then
             prerelease=true
           fi
 
-          err_file=$(mktemp)
-          trap 'rm -f -- "$err_file"' EXIT
-          if release=$(gh release view "$version" --repo "$GITHUB_REPOSITORY" --json isDraft 2>"$err_file"); then
-            is_draft=$(jq -c '.isDraft' <<< "$release")
-            case "$is_draft" in
-              true)
-                gh release upload "$version" ./* --repo "$GITHUB_REPOSITORY" --clobber
-                gh release edit "$version" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --prerelease="$prerelease"
-                ;;
-              false)
-                printf 'Cannot publish tag %s. Its release is already published.\n' "$version" >&2
-                exit 1
-                ;;
-              *)
-                printf 'Cannot publish tag %s. Expected a boolean draft status, found %s.\n' "$version" "$is_draft" >&2
-                exit 1
-                ;;
-            esac
-          elif grep -Fxq 'release not found' "$err_file"; then
-            flags=(--verify-tag --generate-notes)
-            if [[ "$prerelease" == true ]]; then
-              flags+=(--prerelease)
-            fi
-            gh release create "$version" ./* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
-          else
-            printf 'Cannot look up release %s: %s\n' "$version" "$(cat "$err_file")" >&2
+          endpoint="repos/$GITHUB_REPOSITORY/releases"
+          existing=$(gh api --paginate --slurp "$endpoint" |
+            jq -r --arg tag "$version" '.[][] | select(.tag_name == $tag) | .html_url')
+          if [[ -n "$existing" ]]; then
+            printf 'A GitHub release or draft already exists for %s.\n%s\n' "$version" "$existing" >&2
             exit 1
           fi
+
+          release=$(gh api --method POST "$endpoint" -f tag_name="$version" \
+            -f target_commitish="$package_commit" -F draft=true -F prerelease="$prerelease" \
+            -F generate_release_notes=true)
+          printf 'Created a draft for %s at %s\n' "$version" "$(jq -r .html_url <<< "$release")"
+          release_endpoint="$endpoint/$(jq -er '.id' <<< "$release")"
+          upload_url=$(jq -er '.upload_url | split("{")[0]' <<< "$release")
+          for file in "$base.tar.gz" "$base.sha256" "$record"; do
+            gh api --method POST "$upload_url" --header 'Content-Type: application/octet-stream' \
+              --input "$file" --raw-field name="${file#./}" --silent
+          done
+
+          require_tag_commit
+          gh api --method PATCH "$release_endpoint" -f tag_name="$version" \
+            -f target_commitish="$package_commit" -F draft=false --jq .html_url

@@ -95,11 +95,11 @@ zig build
 
 The [root build](../build.zig) and the [application build](../apps/ivenna/build.zig) both install `zig-out/bin/ivenna`. From either build directory, run `zig build run -- --help` to see the available commands before configuring services. The [local development guide](../dev/README.md#starting-the-kernel) covers service preparation and startup from source.
 
+For release packages, Actions snapshots, and local packages, see [Releasing Ivenna](releasing.md).
+
 Each application owns its entry point. The [memory app](../apps/memory) has a Nushell entry point and a Containerfile. Shared Zig libraries in `packages/` expose their modules through `src/root.zig` and declare dependencies in `build.zig` and `build.zig.zon`. When adding or moving a unit, update its consumers' build declarations, the [root package's exported paths](../build.zig.zon) and the [architecture map](architecture.md#responsibilities).
 
 The CLI provides command summaries and embeds detailed local command help. Rebuild `ivenna` after editing help or model-facing resources. See [cli.zig](../apps/ivenna/src/cli.zig), [local command help](../apps/ivenna/src/help), and [model-facing resources](#model-facing-resources).
-
-For publishing releases, building snapshots, and packaging source locally, see [releasing Ivenna](releasing.md).
 
 ## Validation
 

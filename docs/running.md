@@ -16,16 +16,22 @@ The kernel also needs access to the [mail service](#mail-service) and [memory se
 
 ## Installing the executable
 
-Download the `.tar.gz` archive and its matching `.sha256` file from [GitHub Releases](https://github.com/Ivenna/Ivenna/releases). Use the matching `.json` build record to check the target and minimum glibc version. On the host, run `getconf GNU_LIBC_VERSION` to check the installed version. [Release package contents](releasing.md#release-packages)
+Use the `.tar.gz` archive, `.sha256` checksum, and `.json` build record with the same base name. For a tagged release, download these files from [GitHub Releases](https://github.com/Ivenna/Ivenna/releases).
 
-In the directory containing the archive and checksum file, set `archive` to your archive's filename. Verify its checksum before extracting it.
+Check that the architecture in the build record's `target` matches `uname -m` on the host. Use `getconf GNU_LIBC_VERSION` to check that the installed glibc is at least `glibc_min`. [Release package format](releasing.md#release-packages)
+
+From the directory containing the package files, set `package` to their shared base name. Verify the checksum before extracting the archive.
 
 ```sh
-archive=ivenna-x86_64-linux-gnu-v0.1.0.tar.gz
-sha256sum -c "${archive%.tar.gz}.sha256" && tar -xzf "$archive"
+package=ivenna-x86_64-linux-gnu-v0.1.0
+sha256sum -c "$package.sha256" && tar -xzf "$package.tar.gz"
 ```
 
-For an existing instance, follow the [executable update steps](#updating-the-executable) before replacing the binary. Use `install -m 755` to place the extracted `ivenna` at the path your launcher uses.
+Before replacing an existing binary, follow the [executable update steps](#updating-the-executable). Install the extracted `ivenna` at the path your launcher uses.
+
+```sh
+install -m 755 ivenna /path/to/ivenna
+```
 
 To build the executable from source, follow the [build instructions](development.md#repository-and-build).
 

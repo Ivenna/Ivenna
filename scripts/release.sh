@@ -3,9 +3,10 @@ set -eu
 
 usage() {
   printf '%s\n' 'Usage: scripts/release.sh VERSION' \
-    'Test and package Ivenna for the host architecture on GNU/Linux.' \
-    'The archive, checksum, and build record are written to dist/VERSION/.' \
-    'Start VERSION with an ASCII letter or digit. The rest may also include periods, underscores, and hyphens.'
+    'Run Zig regression tests and package Ivenna for the host architecture on GNU/Linux.' \
+    'Write the archive, checksum, and build record to dist/VERSION/.' \
+    'VERSION is a filename label. Use ASCII letters, digits, periods, underscores, and hyphens.' \
+    'Start with a letter or digit.'
 }
 
 fail() {
@@ -36,11 +37,10 @@ if [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$root" ]; then
   fi
 fi
 
-[ "$(uname -s)" = Linux ] || fail 'Building a release requires Linux.'
+[ "$(uname -s)" = Linux ] || fail 'Packaging Ivenna requires a Linux host.'
 target="$(uname -m)-linux-gnu"
 glibc_min=2.28
-target_flag="-Dtarget=native-linux-gnu.$glibc_min"
-cpu_flag=-Dcpu=baseline
+set -- "-Dtarget=native-linux-gnu.$glibc_min" -Dcpu=baseline -Doptimize=safe
 expected_zig=$(cat .zig-version)
 zig_version=$(zig version)
 [ "$zig_version" = "$expected_zig" ] || fail "Expected Zig $expected_zig, found $zig_version."
@@ -52,8 +52,7 @@ stage=$(mktemp -d "$root/dist/.release.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
 trap 'exit 1' HUP INT TERM
 
-zig build test "$target_flag" "$cpu_flag" -Doptimize=safe --summary all
-zig build release "$target_flag" "$cpu_flag" -Doptimize=fast --prefix "$stage/build"
+zig build test release "$@" --summary all --prefix "$stage/build"
 
 asset="ivenna-$target-$version"
 mkdir "$stage/package"

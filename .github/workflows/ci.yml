@@ -38,22 +38,3 @@ jobs:
           version: '0.116.1' # Match apps/memory/Containerfile.
       - name: Run memory protocol tests
         run: nu --no-config-file --no-history apps/memory/tests.nu
-
-  package:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Read Zig version
-        id: zig-version
-        run: echo "version=$(cat .zig-version)" >> "$GITHUB_OUTPUT"
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ steps.zig-version.outputs.version }}
-      - name: Test and package Ivenna
-        shell: bash
-        run: |
-          scripts/release.sh "ci-${GITHUB_SHA::12}"
-          test -f "dist/ci-${GITHUB_SHA::12}"/ivenna-*.tar.gz
