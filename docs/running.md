@@ -283,6 +283,12 @@ If `ivenna` reports `IncompatibleStateSchema`, check that `DATA_DIR` points to t
 
 See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
 
+### Releasing
+
+Push a `v*` tag to build a release. The [release workflow](../.github/workflows/release.yml) runs the same format, build, and test steps as CI, builds with `ReleaseFast`, and attaches the binary, its SHA-256, and a `buildinfo.json` (version, commit, Zig version, build time, runner) to a GitHub release. Run the workflow manually to label a build that is not tied to a tag.
+
+`scripts/release.sh [VERSION] [--skip-tests] [--deploy]` produces the same artifacts under `dist/` without GitHub, for a host that builds from source. It is a fallback: a cold build needs the dependencies in `build.zig.zon`, and `--deploy` keeps the previous executable in `/srv/ivenna/backups/releases/<timestamp>/` before replacing `/usr/local/bin/ivenna`.
+
 ## Data and retention
 
 The deployment chooses storage for the mail account, memory workspace, and kernel data directory independently. Uploaded files live in the DeepSeek account.
