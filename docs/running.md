@@ -1,10 +1,10 @@
 # Running Ivenna
 
-The Ivenna kernel connects to a model service, a mail service, and an SSH workspace for autonomous memory. This guide covers runtime requirements, configuration, startup, and data retention. For the supplied local environment, follow the [local development guide](../dev/README.md).
+The Ivenna kernel connects to a model service, a mail service, and an SSH workspace for autonomous memory. This guide covers installation, configuration, startup, and data retention. For the supplied local environment, follow the [local development guide](../dev/README.md).
 
 ## Runtime requirements
 
-Run `ivenna` on Linux with abstract Unix socket support. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+Run `ivenna` on Linux with abstract Unix socket support. The kernel's execution environment needs `/bin/sh` and an OpenSSH client.
 
 The core and activities can read regular files and list directories wherever the kernel's OS account has access. Choose the account and filesystem mounts accordingly. Host commands run as the same account.
 
@@ -13,6 +13,27 @@ Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd
 Set `LLM_API_KEY` to a DeepSeek API key. The kernel uses the DeepSeek Responses API for inference and the Files API for [file input](content.md#complete-files).
 
 The kernel also needs access to the [mail service](#mail-service) and [memory service](#memory-service). The mail receiving boundary needs access to the kernel's [reception status](#service-status-and-reception).
+
+## Installing the executable
+
+Use the `.tar.gz` archive, `.sha256` checksum, and `.json` build record with the same base name. For a tagged release, download these files from [GitHub Releases](https://github.com/Ivenna/Ivenna/releases).
+
+Check that the architecture in the build record's `target` matches `uname -m` on the host. Use `getconf GNU_LIBC_VERSION` to check that the installed glibc is at least `glibc_min`. [Release package format](releasing.md#release-packages)
+
+From the directory containing the package files, set `package` to their shared base name. Verify the checksum before extracting the archive.
+
+```sh
+package=ivenna-x86_64-linux-gnu-v0.1.0
+sha256sum -c "$package.sha256" && tar -xzf "$package.tar.gz"
+```
+
+Before replacing an existing binary, follow the [executable update steps](#updating-the-executable). Install the extracted `ivenna` at the path your launcher uses.
+
+```sh
+install -m 755 ivenna /path/to/ivenna
+```
+
+To build the executable from source, follow the [build instructions](development.md#repository-and-build).
 
 ## Configuration
 

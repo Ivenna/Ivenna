@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Read Zig version
+        id: zig-version
+        run: echo "version=$(cat .zig-version)" >> "$GITHUB_OUTPUT"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+      - name: Test and package Ivenna
+        id: package
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="snapshot-$GITHUB_SHA"
+          fi
+          scripts/release.sh "$version"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ivenna-package
+          path: dist/${{ steps.package.outputs.version }}/
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: package
+    concurrency: release-${{ github.ref }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ivenna-package
+          path: dist
+      - name: Publish the tagged release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          require_tag_commit() {
+            local tag_commit
+            tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$version" --jq .sha)
+            if [[ "$tag_commit" != "$package_commit" ]]; then
+              printf 'Tag %s points to %s. The package was built from %s.\n' \
+                "$version" "$tag_commit" "$package_commit" >&2
+              exit 1
+            fi
+          }
+
+          version="$GITHUB_REF_NAME"
+          cd dist
+          records=(./ivenna-*-"$version.json")
+          if [[ ${#records[@]} != 1 || ! -f "${records[0]}" ]]; then
+            printf 'Expected one package build record for %s.\n' "$version" >&2
+            exit 1
+          fi
+          record=${records[0]}
+          package_commit=$(jq -er .commit "$record")
+          base=${record%.json}
+          require_tag_commit
+
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          endpoint="repos/$GITHUB_REPOSITORY/releases"
+          existing=$(gh api --paginate --slurp "$endpoint" |
+            jq -r --arg tag "$version" '.[][] | select(.tag_name == $tag) | .html_url')
+          if [[ -n "$existing" ]]; then
+            printf 'A GitHub release or draft already exists for %s.\n%s\n' "$version" "$existing" >&2
+            exit 1
+          fi
+
+          release=$(gh api --method POST "$endpoint" -f tag_name="$version" \
+            -f target_commitish="$package_commit" -F draft=true -F prerelease="$prerelease" \
+            -F generate_release_notes=true)
+          printf 'Created a draft for %s at %s\n' "$version" "$(jq -r .html_url <<< "$release")"
+          release_endpoint="$endpoint/$(jq -er '.id' <<< "$release")"
+          upload_url=$(jq -er '.upload_url | split("{")[0]' <<< "$release")
+          for file in "$base.tar.gz" "$base.sha256" "$record"; do
+            gh api --method POST "$upload_url" --header 'Content-Type: application/octet-stream' \
+              --input "$file" --raw-field name="${file#./}" --silent
+          done
+
+          require_tag_commit
+          gh api --method PATCH "$release_endpoint" -f tag_name="$version" \
+            -f target_commitish="$package_commit" -F draft=false --jq .html_url

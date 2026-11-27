@@ -7,6 +7,24 @@ pub fn build(b: *std.Build) void {
     const options = .{ .target = target, .optimize = optimize };
     const app = b.dependency("ivenna", options);
     b.installArtifact(app.artifact("ivenna"));
+
+    const release = b.step("release", "Stage the GNU/Linux executable and its license notices");
+    if (target.result.os.tag == .linux and target.result.isGnuLibC()) {
+        release.dependOn(b.getInstallStep());
+        const notices = .{
+            .{ b.path("LICENSE"), "LICENSE" },
+            .{ b.graph.path(.zig_lib, "../LICENSE"), "licenses/zig.txt" },
+            .{ b.dependency("agent", options).namedLazyPath("yaml-license"), "licenses/yaml-zig.txt" },
+            .{ b.dependency("content", options).namedLazyPath("zignal-license"), "licenses/zignal.txt" },
+            .{ b.dependency("sqlite", options).namedLazyPath("zqlite-license"), "licenses/zqlite.txt" },
+        };
+        inline for (notices) |notice| {
+            release.dependOn(&b.addInstallFile(notice[0], notice[1]).step);
+        }
+    } else {
+        release.dependOn(&b.addFail("Release staging requires a GNU/Linux target with glibc.").step);
+    }
+
     const run = b.addRunFile(.{ .relative = .{ .base = .install_bin, .sub_path = "ivenna" } });
     run.step.dependOn(b.getInstallStep());
     run.addPassthruArgs();

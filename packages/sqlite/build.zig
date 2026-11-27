@@ -9,8 +9,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }).createModule();
+    const zqlite_dep = b.dependency("zqlite", .{});
+    b.addNamedLazyPath("zqlite-license", zqlite_dep.path("LICENSE"));
     const zqlite = b.createModule(.{
-        .root_source_file = b.dependency("zqlite", .{}).module("zqlite").root_source_file,
+        .root_source_file = zqlite_dep.module("zqlite").root_source_file,
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "c", .module = bindings }},
