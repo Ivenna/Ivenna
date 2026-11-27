@@ -39,7 +39,8 @@ fi
 [ "$(uname -s)" = Linux ] || fail 'Building a release requires Linux.'
 target="$(uname -m)-linux-gnu"
 glibc_min=2.28
-set -- "-Dtarget=native-linux-gnu.$glibc_min" -Dcpu=baseline -Doptimize=safe
+target_flag="-Dtarget=native-linux-gnu.$glibc_min"
+cpu_flag=-Dcpu=baseline
 expected_zig=$(cat .zig-version)
 zig_version=$(zig version)
 [ "$zig_version" = "$expected_zig" ] || fail "Expected Zig $expected_zig, found $zig_version."
@@ -51,8 +52,8 @@ stage=$(mktemp -d "$root/dist/.release.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
 trap 'exit 1' HUP INT TERM
 
-zig build test "$@" --summary all
-zig build release "$@" --prefix "$stage/build"
+zig build test "$target_flag" "$cpu_flag" -Doptimize=safe --summary all
+zig build release "$target_flag" "$cpu_flag" -Doptimize=fast --prefix "$stage/build"
 
 asset="ivenna-$target-$version"
 mkdir "$stage/package"

@@ -16,7 +16,7 @@ GitHub release packages target x86-64 GNU/Linux. Use the matching build record t
 
 Push a `v*` tag on the commit you intend to publish. The [Release workflow](../.github/workflows/release.yml) tests and packages that commit, then checks that the tag still points to it before creating the GitHub release. Use a tag such as `v0.1.0` for a regular release. A hyphen in the tag, as in `v0.1.0-rc.1`, marks it as a prerelease.
 
-Once a release is published, use a new tag for a new build. The GitHub CLI uploads release assets to a draft before publishing. If an upload is interrupted, check for a draft for that tag before rerunning the publish job. [GitHub CLI release creation](https://cli.github.com/manual/gh_release_create#immutable-releases)
+Once a release is published, use a new tag for a new build. The GitHub CLI uploads release assets to a draft before publishing. If an upload is interrupted, rerun the publish job to resume the existing draft. The job refuses to overwrite a published release. [GitHub CLI release creation](https://cli.github.com/manual/gh_release_create#immutable-releases)
 
 ## Building a snapshot
 
@@ -30,4 +30,4 @@ On GNU/Linux, use the upstream Zig distribution for the version in [`.zig-versio
 scripts/release.sh v0.1.0
 ```
 
-The script runs the Zig regression tests with the same build settings it uses for the executable, then writes the package to `dist/<version>/`. For label syntax, run `scripts/release.sh --help`.
+The script runs the Zig regression tests in `ReleaseSafe`, builds the executable in `ReleaseFast`, and writes the package to `dist/<version>/`. For label syntax, run `scripts/release.sh --help`.

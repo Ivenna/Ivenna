@@ -26,6 +26,13 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ steps.zig-version.outputs.version }}
+      - name: Check Zig formatting
+        run: git ls-files -z '*.zig' '*.zig.zon' | xargs -0 zig fmt --check
+      - uses: hustcer/setup-nu@v3
+        with:
+          version: '0.116.1' # Match apps/memory/Containerfile.
+      - name: Run memory protocol tests
+        run: nu --no-config-file --no-history apps/memory/tests.nu
       - name: Test and package Ivenna
         id: package
         shell: bash
@@ -71,9 +78,49 @@ jobs:
               "$version" "$commit" "$package_commit" >&2
             exit 1
           fi
-
-          flags=(--verify-tag --generate-notes)
-          if [[ "$version" == *-* ]]; then
-            flags+=(--prerelease)
+          package_version=$(jq -c '.version' ./*.json)
+          if [[ "$package_version" != "\"$version\"" ]]; then
+            printf 'Cannot publish tag %s. Expected build record version "%s", found %s.\n' \
+              "$version" "$version" "$package_version" >&2
+            exit 1
           fi
-          gh release create "$version" ./* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
+          package_dirty=$(jq -c '.dirty' ./*.json)
+          if [[ "$package_dirty" != false ]]; then
+            printf 'Cannot publish tag %s. Expected build record dirty to be false, found %s.\n' \
+              "$version" "$package_dirty" >&2
+            exit 1
+          fi
+
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          err_file=$(mktemp)
+          trap 'rm -f -- "$err_file"' EXIT
+          if release=$(gh release view "$version" --repo "$GITHUB_REPOSITORY" --json isDraft 2>"$err_file"); then
+            is_draft=$(jq -c '.isDraft' <<< "$release")
+            case "$is_draft" in
+              true)
+                gh release upload "$version" ./* --repo "$GITHUB_REPOSITORY" --clobber
+                gh release edit "$version" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --prerelease="$prerelease"
+                ;;
+              false)
+                printf 'Cannot publish tag %s. Its release is already published.\n' "$version" >&2
+                exit 1
+                ;;
+              *)
+                printf 'Cannot publish tag %s. Expected a boolean draft status, found %s.\n' "$version" "$is_draft" >&2
+                exit 1
+                ;;
+            esac
+          elif grep -Fxq 'release not found' "$err_file"; then
+            flags=(--verify-tag --generate-notes)
+            if [[ "$prerelease" == true ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$version" ./* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
+          else
+            printf 'Cannot look up release %s: %s\n' "$version" "$(cat "$err_file")" >&2
+            exit 1
+          fi
