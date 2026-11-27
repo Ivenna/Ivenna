@@ -6,6 +6,7 @@
     .dependencies = .{
         .ivenna = .{ .path = "apps/ivenna" },
         .instance_state = .{ .path = "packages/instance_state" },
+        .sqlite = .{ .path = "packages/sqlite" },
         .agent = .{ .path = "packages/agent" },
         .email = .{ .path = "packages/email" },
         .content = .{ .path = "packages/content" },
@@ -16,6 +17,7 @@
     },
     .paths = .{
         ".zig-version",
+        "LICENSE",
         "build.zig",
         "build.zig.zon",
         "tests",

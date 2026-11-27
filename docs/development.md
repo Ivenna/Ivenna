@@ -99,6 +99,8 @@ Each application owns its entry point. The [memory app](../apps/memory) has a Nu
 
 The CLI provides command summaries and embeds detailed local command help. Rebuild `ivenna` after editing help or model-facing resources. See [cli.zig](../apps/ivenna/src/cli.zig), [local command help](../apps/ivenna/src/help), and [model-facing resources](#model-facing-resources).
 
+For publishing releases, building snapshots, and packaging source locally, see [releasing Ivenna](releasing.md).
+
 ## Validation
 
 Build the application and select automated checks for the changed contract. For a change across runtime boundaries, exercise the affected behavior through communication and model/tool work in the local development environment. Start with what Ivenna or its correspondents should observe. Follow the outcome through the components that produce, deliver, and retain it. See the [testing guide](testing.md) and [local development environment](../dev/README.md).

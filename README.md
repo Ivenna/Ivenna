@@ -15,7 +15,7 @@ Work can continue between letters. The core can schedule a wakeup, and an activi
 Ivenna uses a DeepSeek API key, a mail account for correspondence and working history, and SSH access to a shared memory workspace.
 
 - Use the [local development guide](dev/README.md) to prepare the supplied mail and memory services and run from source.
-- Check the [runtime requirements](docs/running.md#runtime-requirements) and use the running guide to configure a deployment, start the executable, and manage retained data.
+- For a deployment, check the [runtime requirements](docs/running.md#runtime-requirements) and [install the executable](docs/running.md#installing-the-executable). The running guide covers configuration, startup, and retained data.
 - When updating an existing instance, check the [upgrade guide](docs/upgrading.md) for changes to settings, stored data, and programs that use Ivenna.
 
 ## Development

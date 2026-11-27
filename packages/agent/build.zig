@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const yaml = b.dependency("yaml", .{ .target = target, .optimize = optimize });
+    b.addNamedLazyPath("yaml-license", yaml.path("LICENSE"));
     const zdt = b.dependency("zdt", .{ .target = target, .optimize = optimize });
     const content = b.dependency("content", .{ .target = target, .optimize = optimize });
     const instance_state = b.dependency("instance_state", .{ .target = target, .optimize = optimize }).module("instance_state");

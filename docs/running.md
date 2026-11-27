@@ -1,10 +1,10 @@
 # Running Ivenna
 
-The Ivenna kernel connects to a model service, a mail service, and an SSH workspace for autonomous memory. This guide covers runtime requirements, configuration, startup, and data retention. For the supplied local environment, follow the [local development guide](../dev/README.md).
+The Ivenna kernel connects to a model service, a mail service, and an SSH workspace for autonomous memory. This guide covers installation, configuration, startup, and data retention. For the supplied local environment, follow the [local development guide](../dev/README.md).
 
 ## Runtime requirements
 
-Run `ivenna` on Linux with abstract Unix socket support. The kernel's execution environment needs `/bin/sh` and an OpenSSH client. See the [build instructions](development.md#repository-and-build).
+Run `ivenna` on Linux with abstract Unix socket support. The kernel's execution environment needs `/bin/sh` and an OpenSSH client.
 
 The core and activities can read regular files and list directories wherever the kernel's OS account has access. Choose the account and filesystem mounts accordingly. Host commands run as the same account.
 
@@ -13,6 +13,21 @@ Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd
 Set `LLM_API_KEY` to a DeepSeek API key. The kernel uses the DeepSeek Responses API for inference and the Files API for [file input](content.md#complete-files).
 
 The kernel also needs access to the [mail service](#mail-service) and [memory service](#memory-service). The mail receiving boundary needs access to the kernel's [reception status](#service-status-and-reception).
+
+## Installing the executable
+
+Download the `.tar.gz` archive and its matching `.sha256` file from [GitHub Releases](https://github.com/Ivenna/Ivenna/releases). Use the matching `.json` build record to check the target and minimum glibc version. On the host, run `getconf GNU_LIBC_VERSION` to check the installed version. [Release package contents](releasing.md#release-packages)
+
+In the directory containing the archive and checksum file, set `archive` to your archive's filename. Verify its checksum before extracting it.
+
+```sh
+archive=ivenna-x86_64-linux-gnu-v0.1.0.tar.gz
+sha256sum -c "${archive%.tar.gz}.sha256" && tar -xzf "$archive"
+```
+
+For an existing instance, follow the [executable update steps](#updating-the-executable) before replacing the binary. Use `install -m 755` to place the extracted `ivenna` at the path your launcher uses.
+
+To build the executable from source, follow the [build instructions](development.md#repository-and-build).
 
 ## Configuration
 
@@ -282,12 +297,6 @@ Before updating across a change in storage format, make a [matched backup](#back
 If `ivenna` reports `IncompatibleStateSchema`, check that `DATA_DIR` points to the intended instance and that the executable supports its database format.
 
 See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
-
-### Releasing
-
-Push a `v*` tag to build a release. The [release workflow](../.github/workflows/release.yml) runs the same format, build, and test steps as CI, builds with `ReleaseFast`, and attaches the binary, its SHA-256, and a `buildinfo.json` (version, commit, Zig version, build time, runner) to a GitHub release. Run the workflow manually to label a build that is not tied to a tag.
-
-`scripts/release.sh [VERSION] [--skip-tests] [--deploy]` produces the same artifacts under `dist/` without GitHub, for a host that builds from source. It is a fallback: a cold build needs the dependencies in `build.zig.zon`, and `--deploy` keeps the previous executable in `/srv/ivenna/backups/releases/<timestamp>/` before replacing `/usr/local/bin/ivenna`.
 
 ## Data and retention
 

@@ -17,6 +17,7 @@
 
 | Task | Guide |
 | --- | --- |
+| Download, verify, and install a packaged executable | [Installing the executable](running.md#installing-the-executable) |
 | Run Ivenna from source with the supplied mail and memory services | [Local development](../dev/README.md) |
 | Configure a deployment, diagnose stalled work, and manage retained data | [Running guide](running.md) |
 | Set mail request limits or recover from a history size error | [Working history limits](running.md#working-history-limits) |
@@ -36,3 +37,4 @@
 | Understand component ownership and how execution fits together | [Architecture guide](architecture.md) |
 | Change implementation and documentation, build from source, and validate work | [Development guide](development.md) |
 | Run automated checks and validate behavior with running services | [Testing guide](testing.md) |
+| Publish a tagged release, build a snapshot, or package source locally | [Releasing Ivenna](releasing.md) |
