@@ -99,9 +99,22 @@ pub const FocusInterrupted = struct {
     }
 };
 
+pub const CallbackSource = union(enum) {
+    /// Retained observations and handover samples may refer to old wakeups.
+    wakeup,
+    host: struct { command_id: []const u8 },
+
+    fn clone(self: CallbackSource, a: Allocator) !CallbackSource {
+        return switch (self) {
+            .wakeup => .wakeup,
+            .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
+        };
+    }
+};
+
 pub const PendingCallback = struct {
     callback_id: []const u8,
-    source: contracts.Callback.Source,
+    source: CallbackSource,
     scheduled_for_unix_ms: ?i64 = null,
 
     pub fn jsonStringify(self: PendingCallback, writer: anytype) !void {
@@ -113,7 +126,7 @@ pub const PendingCallback = struct {
 
 pub const Callback = struct {
     callback_id: []const u8,
-    source: contracts.Callback.Source,
+    source: CallbackSource,
     observed_at_unix_ms: i64,
     text: []const u8,
     scheduled_for_unix_ms: ?i64 = null,
@@ -129,7 +142,7 @@ pub const Callback = struct {
     }
 };
 
-fn writeCallbackFields(writer: anytype, id: []const u8, source: contracts.Callback.Source, scheduled_for: ?i64) !void {
+fn writeCallbackFields(writer: anytype, id: []const u8, source: CallbackSource, scheduled_for: ?i64) !void {
     try writer.objectField("callback_id");
     try writer.write(id);
     try writer.objectField("source");
@@ -290,10 +303,7 @@ fn cloneCallbacks(a: Allocator, values: []const PendingCallback) ![]const Pendin
     const owned = try a.dupe(PendingCallback, values);
     for (owned) |*callback| {
         callback.callback_id = try a.dupe(u8, callback.callback_id);
-        callback.source = switch (callback.source) {
-            .wakeup => .wakeup,
-            .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
-        };
+        callback.source = try callback.source.clone(a);
     }
     return owned;
 }
@@ -363,10 +373,7 @@ pub fn cloneEvent(a: Allocator, event: Event) !Event {
         } },
         .callback => |callback| .{ .callback = .{
             .callback_id = try a.dupe(u8, callback.callback_id),
-            .source = switch (callback.source) {
-                .wakeup => .wakeup,
-                .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
-            },
+            .source = try callback.source.clone(a),
             .observed_at_unix_ms = callback.observed_at_unix_ms,
             .text = try a.dupe(u8, callback.text),
             .scheduled_for_unix_ms = callback.scheduled_for_unix_ms,

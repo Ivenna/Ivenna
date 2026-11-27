@@ -53,7 +53,7 @@ Review model-facing text in the request the focus will receive. Read the shared 
 | Resource | Purpose |
 | --- | --- |
 | [system.md](../packages/agent/src/system.md) | Shared orientation to focuses, observations, communication, and resumption |
-| [Agent tools](../packages/agent/src/tools.json) | Send messages, manage channels and subscriptions, open focuses, and schedule wakeups |
+| [Agent tools](../packages/agent/src/tools.json) | Send messages, manage channels and subscriptions, and open focuses |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. When web access is enabled, the [DeepSeek Fetch client](../packages/resources/src/deepseek.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
@@ -71,7 +71,7 @@ Execution owns session state and the boundaries at which new observations can af
 
 Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values and cancel and join tasks before releasing their dependencies. The capability manages those resources and publishes their outcomes. The agent manages session lifetimes and routes observations.
 
-Persist the receiving focus before returning a callback or subscription reference. Capabilities register callbacks through the invoking session's registrar. A report can outlive its subscription, so its destination must remain available after withdrawal. See [callback registration](architecture.md#event-sources-and-callback-admission) and [subscription delivery](architecture.md#subscription-delivery).
+Persist the receiving focus before returning a callback or subscription reference. Host registers command completions through the invoking session's registrar. A report can outlive its subscription, so its destination must remain available after withdrawal. See [callback registration](architecture.md#event-sources-and-callback-admission) and [subscription delivery](architecture.md#subscription-delivery).
 
 Keep a session's identity independent of context residency, and retain its history for as long as it can resume. When handling a failure, consider what repeating the operation would do. A fresh inference can revise an unusable summary. A command that already ran has an outcome to preserve. See [runtime availability](design.md#runtime-availability).
 

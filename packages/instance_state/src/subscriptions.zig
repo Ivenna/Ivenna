@@ -39,7 +39,6 @@ pub const Listener = struct {
         errdefer store.close();
         const id = try store.registrationId(reference);
         try store.listener_presence.?.attach(id);
-        try store.requireRegistration(id);
         return .{ .store = store, .registration_id = id };
     }
 
@@ -184,8 +183,8 @@ pub const Store = struct {
                 \\INSERT INTO subscription_reports(reference,focus_id,text,source_time,received)
                 \\SELECT reference,focus_id,?,?,? FROM subscriptions WHERE id=?
             , .{ report.text, report.source_time_unix_ms, received_unix_ms, id });
-        } else {
-            try self.requireRegistration(id);
+        } else if (try sql.integer(self.db, "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id=?)", .{id}) == 0) {
+            return error.SubscriptionWithdrawn;
         }
         try sql.exec(self.db, "COMMIT");
     }
@@ -194,11 +193,6 @@ pub const Store = struct {
         if (!@import("builtin").is_test) @compileError("only tests can publish to an in-memory store");
         std.debug.assert(self.listener_presence == null);
         try self.publish(try self.registrationId(reference), report, received_unix_ms);
-    }
-
-    fn requireRegistration(self: *Store, id: i64) !void {
-        if (try sql.integer(self.db, "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id=?)", .{id}) == 0)
-            return error.SubscriptionWithdrawn;
     }
 
     pub fn pending(self: *Store, a: Allocator, focus_id: []const u8, after: u64, through: u64, limit: usize) ![]const Report {

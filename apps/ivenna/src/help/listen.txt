@@ -1,19 +1,20 @@
 ivenna subscription listen SUBSCRIPTION_ID
 
-Pass the complete ID returned by subscribe. Wait for the JSON string "ready"
-on stdout, then write one report per line to stdin.
+Set DATA_DIR to the instance data directory and pass the complete ID returned
+by subscribe. Wait for the JSON string "ready" on stdout. Then send one JSON
+report per line on stdin and read one JSON receipt per report on stdout.
 
   {"key":"release-17","text":"Release 17 is available"}
 
-Give each report a stable, nonempty key. If the source supplies an event
-time, add source_time_unix_ms in whole Unix milliseconds.
+Use a stable, nonempty key per report. To include the time of the reported
+event, set source_time_unix_ms in whole Unix milliseconds.
 
 Wait for "accepted" before advancing your saved source position past the
 report. If a receipt is missing, reconnect if needed and retry with the
 same subscription ID and report key.
 
-Keep the process open while watching the source. Set DATA_DIR to the instance
-data directory. The command can accept reports while the kernel is stopped.
+Use a session for a single report or keep it open between reports. An
+independent listener can submit reports while the kernel is stopped.
 
 Close stdin for a normal exit with status 0. A withdrawn subscription, an
 oversized line, or a failed receipt write ends the session with status 1.

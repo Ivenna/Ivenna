@@ -5,7 +5,7 @@
 This update changes the receiver and listener commands. The kernel upgrades the instance database on startup, even for an instance with no receivers or listeners.
 
 1. Stop the kernel and every receiver and listener for the instance, including independently run clients. Keep the old executable and take a matched backup of the mailbox, instance database, and any listener progress. [Backups and transfers](running.md#backups-and-transfers)
-2. Install the same updated build for the kernel and its clients. Update the client programs and import any positions Ivenna stored into the listeners' own state. [Subscription listeners](#update-subscription-listeners) · [Channel receivers](#update-older-channel-receivers)
+2. Install the same updated build for the kernel and its clients. Update the client programs and import any positions Ivenna stored into the listeners' own state. Use the backup to recover any old reminders you want to carry forward. [Subscription listeners](#update-subscription-listeners) · [Channel receivers](#update-older-channel-receivers) · [Removing scheduled attention](#removing-scheduled-attention)
 3. Start `ivenna serve` with the existing mailbox and `DATA_DIR`. Startup removes the old cursor column if present and preserves the mailbox binding, subscription IDs, accepted report keys, and queued reports. Then start the updated clients with their saved IDs.
 
 To return to the old executable after migration, restore the pre-upgrade mailbox, database, and listener progress before restarting it. [Restore an instance](running.md#backups-and-transfers)
@@ -27,6 +27,17 @@ The listener owns later source progress. [Resuming at the source](subscriptions.
 
 - Replace `ivenna receive` and its options with `ivenna channel receive CHANNEL_ID`. Read the `text` field from each JSON line and use the process exit status to interpret the end of the stream. [Receiver sessions](communication.md#receiving-from-a-channel)
 - Update senders to handle `channel_no_receiver` and `channel_would_block`. [Channel send outcomes](communication.md#sending-to-a-channel)
+
+## Removing scheduled attention
+
+The first startup without `schedule_attention` retires wakeups that have yet to enter working history, including copies already in `Ivenna Callbacks`. Admitted wakeup observations and dated handover samples remain readable. Host completion callbacks and queued subscription reports still go to their original focuses.
+
+To carry old reminders forward or retain a rollback point, use the matched backup from the [session upgrade](#moving-receivers-and-listeners-to-sessions). If your database and clients are already on the session format, take a matched backup with the old kernel stopped before starting the updated build. Keep the previous executable if you want to roll back. [Backups and transfers](running.md#backups-and-transfers)
+
+1. In the backup, find the selected checkpoint in `Ivenna History`. For each reminder you want to recreate, record its `.at_unix_ms` and `.text` from `.wakeups` in the checkpoint's ZON body. The entry in `.callbacks` with the same `.id` gives its named reference. If `.text` is null, look for the reminder body in `Ivenna Callbacks` with the matching `X-Ivenna-Callback-Id`. [Finding the selected checkpoint](architecture.md#history-storage) · [Callback mail](architecture.md#callback-delivery)
+2. After startup, register a subscription in the focus that should receive the reminder. Configure an independent timer listener with the returned ID, the original scheduled time, and the reminder text. [Reports from a schedule](subscriptions.md#reporting-from-a-schedule)
+
+To roll back, restore the matched pre-upgrade backup and start the previous executable. [Restoring a backup](running.md#backups-and-transfers)
 
 ## Working history encoding
 

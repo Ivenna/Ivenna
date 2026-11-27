@@ -63,7 +63,7 @@ The plan's `ivenna-ready` script runs during SMTP `RCPT` handling through its `M
 
 The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
 
-Use the SMTP submission path for correspondence. Direct JMAP imports into the kernel account bypass the receiving checks. Wakeup and host completion callbacks use direct JMAP writes to their dedicated folder; see the [mail-service requirements](../docs/running.md#mail-service).
+Use the SMTP submission path for correspondence. Direct JMAP imports into the kernel account bypass the receiving checks. Host completion callbacks use direct JMAP writes to their dedicated folder. See the [mail-service requirements](../docs/running.md#mail-service).
 
 For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days), applying to Trash and Junk across all accounts. See Stalwart's [mail retention](https://stalw.art/docs/email/settings/maintenance/) and [storage maintenance](https://stalw.art/docs/storage/maintenance/) documentation for policy and space reclamation.
 
@@ -180,22 +180,26 @@ The initial send should return `channel_no_receiver`. The two successful sends s
 
 ## Trying a subscription listener
 
-Ask Ivenna to register a subscription for the check and give you its complete ID. In a second terminal at the repository root, load the instance environment and start an independent listener. Replace `release-watch-1` with the ID you received. [Registering a subscription](../docs/attention.md#subscriptions) · [Loading the instance environment](#configuration)
+Use the [mail example](#sending-a-message) to ask Ivenna for a subscription check.
+
+> Register a test subscription in the core and send me its complete ID. When a report arrives, tell me what you received.
+
+In a second terminal at the repository root, load the instance environment and start an independent listener. Replace `release-watch-1` with the ID you received. [Registering a subscription](../docs/attention.md#subscriptions) · [Loading the instance environment](#configuration)
 
 ```sh
 subscription_id='release-watch-1'
 ./zig-out/bin/ivenna subscription listen "$subscription_id"
 ```
 
-After `"ready"`, enter the following line twice. Both writes return `"accepted"`. The focus receives one observation for the key.
+After `"ready"`, enter the following line twice. Expect two `"accepted"` receipts and one observation in Ivenna's reply.
 
 ```json
 {"key":"listen-check-1","text":"A test observation from the open listener session."}
 ```
 
-To check delivery across a restart, leave the listener open. [Stop the kernel](#stopping-and-restarting) and enter a report with a new key. Expect `"accepted"` while the kernel is stopped. Start it again and check that the focus receives the queued report.
+To check delivery across a restart, leave the listener open. Stop the kernel and enter a report with a new key and different text. Expect `"accepted"` while the kernel is stopped. Start it again and look for the new report in Ivenna's reply. [Stopping and restarting](#stopping-and-restarting)
 
-Press `Ctrl+D` on a new line when you are done. See [listener receipts](../docs/subscriptions.md#write-receipts-and-recovery) and [independent listener deployment](../docs/running.md#subscription-listeners).
+Press `Ctrl+D` on a new line to close the listener. If you only created the subscription for this check, ask Ivenna to withdraw it after checking delivery. [Listener receipts](../docs/subscriptions.md#write-receipts-and-recovery) · [Independent listener deployment](../docs/running.md#subscription-listeners)
 
 ## Stopping and restarting
 

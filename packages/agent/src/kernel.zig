@@ -126,10 +126,6 @@ pub const Kernel = struct {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            for (try self.sessions.dueWakeups(a)) |wakeup| {
-                try self.callbacks.send(a, wakeup);
-                try self.sessions.markWakeupPublished(wakeup.id);
-            }
             const waiting = try self.inbox.poll(a, try self.sessions.pollRequest());
             try self.sessions.reconcile(waiting);
             for (waiting) |incoming| switch (try self.sessions.accept(incoming)) {
@@ -150,13 +146,13 @@ pub const Kernel = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const pending = try self.sessions.pendingHostCallbacks(a);
+        const pending = try self.sessions.pendingCallbackIds(a);
         if (pending.len == 0) return;
         const text = try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{
             .code = "host_interrupted",
             .message = "The command's outcome is unknown after restart. It may already have had effects. Its command ID is no longer valid for shell control.",
         } }, .{});
-        for (pending) |callback| try self.callbacks.send(a, .{ .id = callback.id, .text = text });
+        for (pending) |id| try self.callbacks.send(a, .{ .id = id, .text = text });
     }
 
     fn dispatch(self: *Kernel, tasks: *Tasks) !void {
@@ -197,9 +193,9 @@ pub const Kernel = struct {
             try self.kernel.sessions.commitToolRound(self.work, completed, &self.changes, input_tokens);
         }
 
-        fn registerCallback(context: *anyopaque, a: Allocator, name: []const u8, source: contracts.Callback.Source) anyerror!contracts.Callback.Registration {
+        fn registerCallback(context: *anyopaque, a: Allocator, name: []const u8, command_id: []const u8) anyerror!contracts.Callback.Registration {
             const self: *RuntimeRound = @ptrCast(@alignCast(context));
-            return self.kernel.sessions.registerCallback(a, self.work, name, source);
+            return self.kernel.sessions.registerCallback(a, self.work, name, command_id);
         }
 
         fn issueCommandReference(context: *anyopaque, a: Allocator, name: []const u8) anyerror![]const u8 {
@@ -218,10 +214,6 @@ pub const Kernel = struct {
                 .close_channel => |args| blk: {
                     const changed = try self.kernel.sessions.closeChannel(self.kernel.channels, args.channel_id);
                     break :blk try runtimeResult(a, .{ .channel_id = args.channel_id, .changed = changed });
-                },
-                .schedule_attention => |args| blk: {
-                    const id = try self.kernel.sessions.scheduleWakeup(a, self.work, args.name, args.at.unix_ms, args.text);
-                    break :blk try runtimeResult(a, .{ .callback_id = id });
                 },
                 .subscribe => |args| blk: {
                     const subscription = self.kernel.sessions.subscribe(a, self.work, args.name, args.listener) catch |err| switch (err) {
@@ -725,11 +717,11 @@ test "intake closes reception if it cannot acknowledge a new copy of a consumed 
     const startup = try SubscriptionFixture.takeWork(&kernel, a);
     var history = try SubscriptionFixture.admit(&kernel, a, startup);
     defer history.deinit();
-    const callback = try kernel.sessions.registerCallback(a, startup, "wake", .wakeup);
+    const callback = try kernel.sessions.registerCallback(a, startup, "build", "build-1");
     try SubscriptionFixture.finish(&kernel, startup, &history);
 
     var replay: Replay = .{ .copy = .{
-        .content = .{ .callback = .{ .id = callback.id, .text = "Wake up", .observed_at_unix_ms = 100 } },
+        .content = .{ .callback = .{ .id = callback.id, .text = "Build finished", .observed_at_unix_ms = 100 } },
         .receipt = "original",
     } };
     kernel.inbox = .{ .context = &replay, .vtable = &.{ .poll = Replay.poll, .acknowledge = Replay.acknowledge } };
@@ -1097,7 +1089,6 @@ test "a subscription backlog leaves another focus schedulable and each source ge
     const core = try SubscriptionFixture.takeWork(&kernel, a);
     var history = try SubscriptionFixture.admit(&kernel, a, core);
     defer history.deinit();
-    const wakeup = try kernel.sessions.registerCallback(a, core, "wake", .wakeup);
     const stream = try kernel.sessions.subscribe(a, core, "stream", "listener");
     const build = try SubscriptionFixture.watchingActivity(&kernel, a, core, &history, "budget-marker");
     try SubscriptionFixture.finish(&kernel, core, &history);
@@ -1110,11 +1101,7 @@ test "a subscription backlog leaves another focus schedulable and each source ge
         .key = "done",
         .text = "ready",
     }, 90);
-    const callback: contracts.Inbox.Incoming = .{
-        .content = .{ .callback = .{ .id = wakeup.id, .text = "budget-marker", .observed_at_unix_ms = 100 } },
-    };
-    try testing.expectEqual(.accepted, try kernel.sessions.accept(callback));
-    for (0..2) |_| try testing.expectEqual(.accepted, try kernel.sessions.accept(.{
+    try testing.expectEqual(.accepted, try kernel.sessions.accept(.{
         .content = .{ .message = .{ .from = &.{"operator"}, .text = "budget-marker", .observed_at_unix_ms = 100 } },
     }));
     kernel.limits.observation_batch_bytes = 1;
@@ -1140,8 +1127,7 @@ test "a subscription backlog leaves another focus schedulable and each source ge
         served.insert(std.meta.activeTag(events[0]));
         try testing.expect(!try kernel.sessions.commitResponse(resumed, &admitted, SubscriptionFixture.empty_response));
     }
-    try testing.expect(served.contains(.callback) and served.contains(.subscription) and served.contains(.activity));
-    try testing.expectEqual(.duplicate, try kernel.sessions.accept(callback));
+    try testing.expect(served.contains(.input) and served.contains(.subscription) and served.contains(.activity));
 }
 
 test "restart resumes observation source rotation after the startup observation" {

@@ -108,37 +108,8 @@
     }
   },
   {
-    "name": "schedule_attention",
-    "description": "Schedule a wakeup to return to something later. The core receives the supplied text in a callback identified by the returned `callback_id`. The wakeup survives restart.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 32
-        },
-        "at": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Use a date and time with `Z` or an explicit UTC offset. Past times are already due."
-        },
-        "text": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "required": [
-        "name",
-        "at",
-        "text"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "subscribe",
-    "description": "Subscribe this focus to reports from a program you arrange to watch a source. New reports can wake this focus. A host command can open a listener session with `\"$IVENNA\" subscription listen SUBSCRIPTION_ID` using the returned `subscription_id`.",
+    "description": "Register this focus to receive reports that can wake it. Give the returned `subscription_id` to a listener you arrange. A host program can connect with `\"$IVENNA\" subscription listen SUBSCRIPTION_ID`.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -150,7 +121,7 @@
         "listener": {
           "type": "string",
           "minLength": 1,
-          "description": "Briefly describe what the listener watches and when it should report."
+          "description": "Saved description of what to report and when."
         }
       },
       "required": ["name", "listener"],

@@ -46,7 +46,7 @@ next door. The library itself has scaffolding up now.
 
 ## Ongoing work and memory
 
-Ivenna can keep following a subject between letters. It can schedule a time to return to it or subscribe to updates from a listener. See [returning later](attention.md#returning-later) and [subscriptions](attention.md#subscriptions).
+Ivenna can keep following a subject between letters by subscribing to observations from a listener. See [subscriptions](attention.md#subscriptions).
 
 Ivenna can condense its working history and decide what to keep in memory. Keep your own mail copies if you need to retrieve or quote a letter later. See [autonomous memory](memory.md) and [mail retention](running.md#communication-copies).
 

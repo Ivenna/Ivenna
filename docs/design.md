@@ -24,7 +24,7 @@ The repertoire connects four kinds of action: expression to people and programs,
 
 Correspondence and autonomous activity are ways Ivenna encounters the world. A letter or a piece of work can change what Ivenna understands and what matters to it. Retained conversations, handovers, and shared memory let it bring those changes to later encounters.
 
-Model-facing inputs identify the current focus and bring it the observations that can guide its next decision. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect choices with their effects and later observations. When Ivenna names something it creates, the runtime adds a numeric suffix so the complete reference identifies the item. See [names and references](input.md#names-and-references).
+Model-facing inputs identify the current focus and bring it the observations that can guide its next decision. Calendar dates in UTC make observation times directly readable. References connect choices with their effects and later observations. When Ivenna names something it creates, the runtime adds a numeric suffix so the complete reference identifies the item. See [names and references](input.md#names-and-references).
 
 Ivenna can forget details, confuse references, or choose actions that fail. Observations and operation results give it evidence to reconsider its choices. Command handles let it revisit ongoing host work. See [continuing a command](host.md#continuing-and-controlling-a-command).
 
@@ -45,7 +45,6 @@ Core and activity focuses use the same system prompt. Each receives observations
 | Open a channel, send to it, or close it | Yes | Yes |
 | Remember, revisit, revise, arrange, and forget | Yes | Yes |
 | Open an activity focus | Yes | — |
-| Schedule a wakeup | Yes | — |
 | Subscribe to observations for the current focus | Yes | Yes |
 | Withdraw a subscription by its complete reference | Yes | Yes |
 | [Read a local or web resource](resources.md) | Yes | Yes |
@@ -75,17 +74,15 @@ The core remains available between activations. An activity can wait for a callb
 
 The runtime delivers observations to their receiving focus, preserving their sources. Ivenna considers what each observation means in light of what it already knows.
 
-The core can schedule a wakeup for a particular time. A host command that outlives its initial tool call arranges a completion observation for the calling activity. Each callback binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [returning later](attention.md#returning-later) and [callback observations](attention.md#callback-observations).
+A host command that outlives its initial tool call arranges a completion observation for the calling activity. The activity can resume when the result arrives without checking the command repeatedly. [Command lifetimes](host.md#command-lifetimes)
 
 Activities choose how long to wait for host work before continuing their own reasoning. A bounded default gives brief commands time to return their results in the same exchange, while returning attention from longer commands for further work and coordination. An activity can shorten that wait to regain control sooner, or extend it when obtaining the result is more useful than proceeding immediately. The core and other activities continue while it waits.
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
 
-A focus can subscribe to a source it wants to follow over time. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. Ivenna describes what to watch and gives the listener the subscription ID. The listener keeps a session open while it watches the source. A report can bring a sleeping focus back to its work, and a working focus can consider several reports together after its current round.
+A subscription brings observations back to the focus with the history to make sense of them. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. A report can wake a sleeping focus or join other observations after a working focus finishes its current round. [Subscriptions](attention.md#subscriptions)
 
-The subscription stays with its focus across sleep, handover, and restart. Any focus with its reference can withdraw it when the source no longer needs attention. Observations already accepted still belong to the focus that subscribed. See [subscriptions](attention.md#subscriptions).
-
-The listener owns filtering, polling, source progress, and retry timing. It can resume using the source's own conventions, such as a file offset or a position in a partitioned stream. See [listener recovery](subscriptions.md#resume-at-the-source), [OpenTelemetry file offsets](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/filelogreceiver/README.md#offset-tracking), and [Kafka manual offset control](https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#manualoffsetcontrol).
+The listener chooses what to report and when. It can track its progress using the source's own conventions, such as a file offset or a position in a partitioned stream. [Listener recovery](subscriptions.md#resume-at-the-source) · [OpenTelemetry file offsets](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/filelogreceiver/README.md#offset-tracking) · [Kafka manual offset control](https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#manualoffsetcontrol)
 
 Ivenna retains accepted reports for delivery across interruptions. A listener can safely replay a report after losing a receipt or before saving its own progress. Ivenna recognizes the report key within its subscription, like CloudEvents identifies repeated events by source and ID. See [report receipts](subscriptions.md#write-receipts-and-recovery), [NATS JetStream persistence](https://docs.nats.io/concepts/jetstream), and [CloudEvents event ID](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md#id).
 
@@ -111,7 +108,7 @@ Revisiting a memory presents what Ivenna kept there. When Ivenna chooses to send
 
 When a focus needs room for its next inference, compaction asks Ivenna to summarize earlier exchanges in a handover. Ivenna chooses what to carry forward about its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. The focus can consider fresh observations in their original form alongside the handover. See [handover generation and replacement](input.md#handover-generation-and-replacement).
 
-A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending wakeups to the absolute times the focus chose for returning. See [sampled state](input.md#sampled-state).
+A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending host callbacks to their commands. See [sampled state](input.md#sampled-state).
 
 The runtime delivers pending observations from its own records. It keeps the original history until it can continue with the handover. Carrying a complete exchange alongside the summary lets the focus revisit an exact reply or work directly with a recent tool result. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
 

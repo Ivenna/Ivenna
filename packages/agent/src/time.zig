@@ -11,13 +11,7 @@ pub const Instant = struct {
     }
 };
 
-pub fn parse(text: []const u8) error{InvalidTimestamp}!Instant {
-    const date = zdt.Datetime.fromISO8601(text) catch return error.InvalidTimestamp;
-    if (!date.isAware()) return error.InvalidTimestamp;
-    return .{ .unix_ms = @intCast(date.toUnix(.millisecond)) };
-}
-
-pub fn format(unix_ms: i64) [24]u8 {
+fn format(unix_ms: i64) [24]u8 {
     const date = zdt.Datetime.fromUnix(unix_ms, .millisecond, .{ .tz = &zdt.Timezone.UTC }) catch unreachable;
     var text: [24]u8 = undefined;
     _ = std.fmt.bufPrint(&text, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{

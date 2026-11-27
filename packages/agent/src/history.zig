@@ -113,13 +113,12 @@ fn restoreEntry(a: Allocator, temporary: Allocator, value: StoredEntry) !Entry {
 }
 
 pub const History = struct {
-    pub const Wakeup = struct {
+    pub const CallbackRegistration = struct {
         id: u64,
-        at_unix_ms: i64,
-        /// Null after publication. The original time stays until admission.
-        text: ?[]const u8,
+        reference: []const u8,
+        session_id: u64,
+        command_id: []const u8,
     };
-    pub const CallbackRegistration = struct { id: u64, reference: []const u8, session_id: u64, source: contracts.Callback.Source };
 
     subscription_catalog: [32]u8,
     usage_scope: ?[32]u8 = null,
@@ -127,7 +126,6 @@ pub const History = struct {
     next_callback_id: u64,
     next_runtime_reference_id: u64,
     sessions: []const Session,
-    wakeups: []const Wakeup,
     callbacks: []const CallbackRegistration,
     /// Open channel registrations. The opening focus may have ended.
     channels: []const Channel,
@@ -192,19 +190,13 @@ pub const History = struct {
         }
         if (cores != 1) return error.InvalidHistory;
         if (self.activity_reports) |reports| try reports.validate();
-        var callbacks: std.AutoHashMapUnmanaged(u64, std.meta.Tag(contracts.Callback.Source)) = .empty;
+        var callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
             if (callback.id == 0 or callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
             if (contracts.Reference.sequence(callback.reference) != callback.id) return error.InvalidHistory;
-            if (callback.source == .host and contracts.Reference.sequence(callback.source.host.command_id) == null) return error.InvalidHistory;
-            const entry = try callbacks.getOrPut(a, callback.id);
-            if (entry.found_existing) return error.InvalidHistory;
-            entry.value_ptr.* = std.meta.activeTag(callback.source);
-        }
-        for (self.wakeups) |wakeup| {
-            const registration = callbacks.fetchRemove(wakeup.id) orelse return error.InvalidHistory;
-            if (registration.value != .wakeup) return error.InvalidHistory;
+            if (contracts.Reference.sequence(callback.command_id) == null) return error.InvalidHistory;
+            if ((try callbacks.getOrPut(a, callback.id)).found_existing) return error.InvalidHistory;
         }
         var channel_ids: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer channel_ids.deinit(a);
@@ -230,11 +222,19 @@ const Checkpoint = struct {
     /// The stored field name for the next command or channel reference.
     next_command_id: u64,
     sessions: []const Session,
-    wakeups: []const History.Wakeup,
-    callbacks: []const History.CallbackRegistration,
+    /// Read older checkpoints that still contain unadmitted wakeups.
+    wakeups: ?[]const struct { id: u64, at_unix_ms: i64, text: ?[]const u8 } = null,
+    callbacks: []const Callback,
     /// Absent from checkpoints written before a restart restored channels.
     channels: []const History.Channel = &.{},
     activity_reports: ?Reports.Checkpoint,
+
+    const Callback = struct {
+        id: u64,
+        reference: []const u8,
+        session_id: u64,
+        source: Input.CallbackSource,
+    };
 
     const Session = struct {
         session_id: u64,
@@ -376,6 +376,18 @@ pub const Persistence = struct {
             offset += count;
         }
         try self.readSelections(a, selections.items);
+        // Retire legacy wakeups while keeping their issued IDs below the
+        // counter, so inbox intake can acknowledge any already published copy.
+        var callbacks: std.ArrayList(History.CallbackRegistration) = .empty;
+        for (checkpoint.callbacks) |callback| switch (callback.source) {
+            .wakeup => {},
+            .host => |host| try callbacks.append(a, .{
+                .id = callback.id,
+                .reference = callback.reference,
+                .session_id = callback.session_id,
+                .command_id = host.command_id,
+            }),
+        };
         const history: History = .{
             .subscription_catalog = checkpoint.subscription_catalog,
             .usage_scope = checkpoint.usage_scope,
@@ -383,8 +395,7 @@ pub const Persistence = struct {
             .next_callback_id = checkpoint.next_callback_id,
             .next_runtime_reference_id = checkpoint.next_command_id,
             .sessions = sessions,
-            .wakeups = checkpoint.wakeups,
-            .callbacks = checkpoint.callbacks,
+            .callbacks = callbacks.items,
             .channels = checkpoint.channels,
             .activity_reports = checkpoint.activity_reports,
         };
@@ -510,6 +521,13 @@ pub const Persistence = struct {
             cached.checkpoint = saved.*;
         }
         try builder.flush();
+        const callbacks = try a.alloc(Checkpoint.Callback, history.callbacks.len);
+        for (history.callbacks, callbacks) |callback, *stored| stored.* = .{
+            .id = callback.id,
+            .reference = callback.reference,
+            .session_id = callback.session_id,
+            .source = .{ .host = .{ .command_id = callback.command_id } },
+        };
         const document = try Codec.encode(a, Checkpoint{
             .subscription_catalog = history.subscription_catalog,
             .usage_scope = history.usage_scope,
@@ -517,8 +535,7 @@ pub const Persistence = struct {
             .next_callback_id = history.next_callback_id,
             .next_command_id = history.next_runtime_reference_id,
             .sessions = sessions,
-            .wakeups = history.wakeups,
-            .callbacks = history.callbacks,
+            .callbacks = callbacks,
             .channels = history.channels,
             .activity_reports = history.activity_reports,
         });
@@ -701,7 +718,8 @@ test "forking history rewrites legacy files and raw images" {
     defer persistence.deinit();
     const body = ".{.entry=.{.previous=null,.value=.{.record=.{.handover=.{" ++
         ".focus_id=\"core-1\",.observed_at_unix_ms=0,.summary=\"Keep investigating.\"," ++
-        ".state=.{.activities=.{},.callbacks=.{},.subscriptions=.{\"watch-1\"},.feeds=.{\"old-1\"},.correspondents=null}" ++
+        ".state=.{.activities=.{},.callbacks=.{.{.callback_id=\"review-1\",.source=.wakeup,.scheduled_for_unix_ms=1000}}," ++
+        ".subscriptions=.{\"watch-1\"},.feeds=.{\"old-1\"},.correspondents=null}" ++
         "}}}}}";
     const group = try persistence.store.allocateGroup(a);
     const key = Codec.digest(body);
@@ -739,7 +757,6 @@ test "forking history rewrites legacy files and raw images" {
             .count = 2,
             .observations = null,
         }},
-        .wakeups = &.{},
         .callbacks = &.{},
         .activity_reports = null,
     }));
@@ -752,6 +769,8 @@ test "forking history rewrites legacy files and raw images" {
     try t.expectEqualDeep(History.Progress{}, core.progress);
     const handover = core.entries.?[0].record.handover;
     try t.expectEqualStrings("Keep investigating.", handover.summary);
+    try t.expectEqual(.wakeup, handover.state.callbacks[0].source);
+    try t.expectEqual(@as(?i64, 1000), handover.state.callbacks[0].scheduled_for_unix_ms);
     try t.expectEqualStrings("watch-1", handover.state.subscription_registrations[0].subscription_id);
     try t.expectEqual(null, handover.state.subscription_registrations[0].listener);
     const parts = core.entries.?[1].exchange[0].tool_result.content.parts;
@@ -823,7 +842,6 @@ test "channel opener validation allows ended focuses and checks retained identit
             .entries = &.{},
             .observations = &.{},
         }},
-        .wakeups = &.{},
         .callbacks = &.{},
         .channels = &channels,
         .activity_reports = null,

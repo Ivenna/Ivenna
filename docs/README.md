@@ -7,7 +7,7 @@
 | Write to Ivenna by email, share material to read, or follow up | [Corresponding with Ivenna](usage.md) |
 | Send to a correspondent, focus, or channel | [Sending a message](communication.md#sending-a-message) |
 | Open or close a channel | [Channels](communication.md#channels) |
-| Coordinate focuses or schedule wakeups | [Attention](attention.md) |
+| Open an activity and follow its work | [Attention](attention.md) |
 | Register or withdraw a subscription | [Subscriptions](attention.md#subscriptions) |
 | Record, find, or revise something in shared memory | [Memory rooms](memory.md) |
 | Read a local file, retrieve a web page, or open an image | [Reading resources](resources.md) |
@@ -18,7 +18,7 @@
 | Task | Guide |
 | --- | --- |
 | Connect a receiver and read channel messages | [Channel receiver interface](communication.md#receiving-from-a-channel) |
-| Report observations and resume watching a source | [Subscription listener protocol](subscriptions.md) |
+| Send reports to a subscribed focus | [Subscription listener protocol](subscriptions.md) |
 
 ## Running an instance
 

@@ -77,7 +77,7 @@ const overview =
     \\
     \\  serve                                Run the kernel.
     \\  channel receive CHANNEL_ID           Read channel messages.
-    \\  subscription listen SUBSCRIPTION_ID  Report subscription observations.
+    \\  subscription listen SUBSCRIPTION_ID  Send reports to a subscription.
     \\
     \\Run ivenna COMMAND --help for command usage.
     \\

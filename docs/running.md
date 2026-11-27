@@ -110,7 +110,7 @@ If a focus pauses at a request limit, check the logs for the limit it hit. The h
 
 `MAX_SESSIONS` counts the core and all registered activities, including those asleep. Startup fails if saved identities exceed it; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a slot. Ready sessions can advance concurrently. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes). The session and command defaults are tuning starting points; size them for the workload and resources available.
 
-`MAX_PENDING_EVENTS` counts correspondence, callbacks, assignments, and focus messages buffered for a session. Subscription reports wait in SQLite until they fit an ordinary request. Startup observations, activity expressions, endings, and notices of activity interruption are exempt from the queue limit. Correspondence and callback mail have independent intake allowances and stay in their mailboxes when their destination is full. A focus message returns `focus_queue_full` when the recipient cannot accept it. Capacity and polling can delay scheduled work.
+`MAX_PENDING_EVENTS` counts correspondence, callbacks, assignments, and focus messages buffered for a session. Subscription reports wait in SQLite until they fit an ordinary request. Startup observations, activity expressions, endings, and notices of activity interruption are exempt from the queue limit. Correspondence and callback mail have independent intake allowances and stay in their mailboxes when their destination is full. A focus message returns `focus_queue_full` when the recipient cannot accept it.
 
 ## Changing the model
 
@@ -126,7 +126,7 @@ Set `MAIL_ADDRESS` and authentication settings for the kernel account. Set `MAIL
 
 For correspondence, require authenticated submission and From addresses the submitting account is authorized to use. Ivenna relies on these checks to attribute each message to its correspondent. Apply them and the [reception-readiness policy](#service-status-and-reception) to every receiving path used for correspondence. The [local mail setup](../dev/README.md#configuring-mail) supplies an SMTP configuration.
 
-Wakeup and host completion callbacks are created directly through JMAP in `Ivenna Callbacks`. The existing account and receiving policy need no additional alias, account, or SMTP exception. Keep pending callback mail in this folder with its private metadata intact: moving it elsewhere removes it from callback intake, and the runtime does not move it back. Stored callbacks remain available while the kernel is stopped. See [callback observations](attention.md#callback-observations) for the delivery contract.
+Host completion callbacks are stored directly through JMAP in `Ivenna Callbacks` under the kernel's existing mail account. Keep pending callback mail in this folder with its private metadata intact so intake can find it. Stored callbacks remain available while the kernel is stopped. [Command lifetimes](host.md#command-lifetimes)
 
 Configure automatic Trash expiry and cleanup of unreferenced storage in the mail service. These processes must continue independently of the kernel. Choose retention with the provider's full policy scope in mind: Trash and Junk policies can also remove ordinary mail. The [local Stalwart setup](../dev/README.md#configuring-mail) provides a concrete configuration.
 
@@ -141,7 +141,7 @@ A model response and all of its tool results share one history record. Estimate 
 | Error | What to check |
 | --- | --- |
 | `HistoryRecordTooLarge` | A single history record exceeds `maxSizeRequest` with its request envelope. For a tool round, check the combined size of its results. |
-| `HistoryCheckpointTooLarge` | The checkpoint request exceeds `maxSizeRequest`. Check the number of registered focuses, open channels, and pending wakeups. |
+| `HistoryCheckpointTooLarge` | The checkpoint request exceeds `maxSizeRequest`. Check the number of registered focuses, open channels, and pending host callbacks. |
 | HTTP 413 on `Email/set` | Check HTTP body limits at the proxy and mail endpoint. |
 | `MailObjectFailed` on `Email/set` | Check the mail server's rejection details, including message limits and account quota. |
 
@@ -227,13 +227,13 @@ If `channel receive` reports that the channel service is unavailable, check that
 
 ## Subscription listeners
 
-Run subscription listeners on the kernel host. Set `DATA_DIR` to the instance's data directory. Use an absolute path for an independently launched listener that may start from a different working directory. Ivenna's host commands inherit absolute paths in `IVENNA` and `DATA_DIR`. [Host command environment](host.md#command-environment) · [Listener protocol](subscriptions.md#keep-a-listener-session-open)
+Run subscription listeners on the kernel host. Set `DATA_DIR` to the instance's data directory. Use an absolute path for an independently launched listener that may start from a different working directory. Ivenna's host commands inherit absolute paths in `IVENNA` and `DATA_DIR`. [Host command environment](host.md#command-environment) · [Listener protocol](subscriptions.md#open-a-listener-session)
 
 The listener needs write access to the database, its SQLite sidecar files, and their directory. The kernel and listeners also need read access to the same `<DATA_DIR>/subscription-listeners.lock` on a filesystem that supports Linux open-file-description locks. The first process creates it with owner-only permissions. If the kernel and listener run as different users, give both users read access to the file.
 
 Keep the existing lock file in place while the kernel or a listener is running. Replacing it leaves existing processes holding the old file while new processes open the replacement. See [listener connections](architecture.md#listener-connections).
 
-Run the listener independently when it needs to keep collecting through a kernel stop or restart. Its session can stay open and save reports to the instance database while the kernel is stopped. Those reports wait there for delivery after restart. Listeners launched as Ivenna host commands stop with the kernel. See [host command lifetimes](host.md#command-lifetimes).
+Run the listener independently when it needs to collect or submit reports while the kernel is stopped. Accepted reports wait in the instance database for delivery after restart. Listeners launched as managed host commands stop with the kernel. [Host command lifetimes](host.md#command-lifetimes)
 
 ## Service status and reception
 
@@ -292,7 +292,7 @@ A checkpoint whose publication was unconfirmed can still be selected on restart.
 
 At restart the core sees the current outgoing correspondent IDs, including changes to [`MAIL_CORRESPONDENTS`](#outgoing-correspondents). An activity with unfinished work can also resume on startup. See the [startup observation contract](input.md#startup-and-restart) for delivery timing. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
-Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose scheduled times passed while the kernel was unavailable become due. For a host completion, Ivenna uses the stored result when available and reports an interruption with unknown effects otherwise.
+Registered host completions keep their original receiving sessions across restart. Ivenna uses the stored result when available and reports an interruption with unknown effects otherwise.
 
 Stopping the kernel cleans up its host commands and disconnects channel receivers. After restart, receivers can reconnect to restored channel IDs, including channels whose opening activity ended. Independently run subscription listeners can keep their sessions open. See [channel lifetimes](communication.md#channel-lifetimes) and [subscription listener deployment](#subscription-listeners).
 
@@ -372,11 +372,11 @@ Back up the mailbox and instance database as a pair. Startup checks the database
 
 If taking the mailbox and database backups separately, stop the kernel before either backup begins and leave it stopped until both finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners too and include any SQLite sidecar files with the database.
 
-Save listener progress before taking the database backup so the saved positions are covered by that backup. Include buffered reports the source cannot replay. [Source progress](subscriptions.md#resume-at-the-source)
+Save listener progress before taking the database backup so the saved positions are covered by that backup. Keep listener schedules and buffered reports the source cannot replay with the backup. [Source progress](subscriptions.md#resume-at-the-source)
 
 To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup.
 
-Resume listeners using their restored subscription IDs. Restore their source progress from the corresponding backup or replay from an earlier position using the original report keys. Reuse restored channel IDs when they still identify the intended channels. If the backup predates a channel registration, open a replacement channel and give its ID to the receiver. See [channel lifetimes](communication.md#channel-lifetimes).
+Resume listeners using their restored subscription IDs. Restore their schedules and source progress from the corresponding backup. Listeners that can replay from an earlier position can use the original report keys. Reuse restored channel IDs when they still identify the intended channels. If the backup predates a channel registration, open a replacement channel and give its ID to the receiver. See [channel lifetimes](communication.md#channel-lifetimes).
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the selected checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`.
 
@@ -394,7 +394,7 @@ Native `Email.id` values may change because restoration uses checkpoint markers 
 
 Earlier checkpoints are retired through Trash and do not provide rollback. Preserve a complete backup separately if it is needed after the mail service's retention period.
 
-A mailbox backup carries saved channel registrations, stored callbacks, and wakeup arrangements. Keep access to any [uploaded files](#uploaded-model-files) referenced by the backup. Preserve host artifacts and memory data separately when continued work needs them. See [host output and deployment files](#host-output-and-deployment-files) and [stopping and restarting](#stopping-and-restarting) for what survives a restart.
+Keep access to any uploaded files referenced by the backup. Preserve host artifacts and memory data separately when continued work needs them. [Uploaded files](#uploaded-model-files) · [Host output and deployment files](#host-output-and-deployment-files) · [Stopping and restarting](#stopping-and-restarting)
 
 ### Host output and deployment files
 

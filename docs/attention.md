@@ -6,8 +6,7 @@ The core and activities are focuses of one Ivenna. Each has a working history, a
 | --- | --- |
 | [Open another focus](#opening-a-focus) | `open_focus` |
 | [Reach an existing focus](#reaching-an-existing-focus) | `send` |
-| [Return to something later](#returning-later) | `schedule_attention` |
-| [Receive recurring observations in this focus](#subscriptions) | `subscribe` |
+| [Register to receive reports in this focus](#subscriptions) | `subscribe` |
 | [Withdraw a subscription](#withdrawing-a-subscription) | `withdraw_subscription` |
 
 See [names and references](input.md#names-and-references) for the `name` argument and the [tool schema](../packages/agent/src/tools.json) for the declarations.
@@ -28,7 +27,7 @@ The result gives the activity's `focus_id`. The activity can receive messages on
 
 The activity inherits the core's retained history through the end of the opening round, including results from tools called after `open_focus` in that round. The history can include earlier correspondence, work, and a handover. The supplied `task` arrives as the activity's first new observation. If the runtime summarizes the inherited history before the activity starts reasoning, the activity receives the handover and its original assignment together. See [assignment fields](input.md#assignments-and-reports) and [how an activity starts](architecture.md#activity-forks).
 
-The activity reasons with its own focus ID, tools, and working history. The core keeps its queued observations and continues to receive its callbacks and subscription reports. It can also read [what the activity says](#activity-expressions).
+The activity reasons with its own focus ID, tools, and working history. The core keeps its queued observations and continues to receive subscription reports. It can also read [what the activity says](#activity-expressions).
 
 Opening an activity once the focus limit is reached returns `focus_unavailable`. See [session capacity](running.md#session-and-command-capacity).
 
@@ -48,29 +47,9 @@ A successful call saves the message in the recipient's queue and returns its foc
 
 The observation identifies the sending focus. When relaying someone else's words, attribute them in the text. The message makes a sleeping or interrupted recipient ready. An active recipient can read it between complete model/tool rounds. Focus messages count toward the recipient's event queue limit. See [focus message fields](input.md#focus-messages) and [session capacity](running.md#session-and-command-capacity).
 
-## Returning later
-
-The core calls `schedule_attention` with a short `name`, an absolute wakeup time in `at`, and nonempty `text` describing what to return to. Pass `at` as an RFC 3339 date and time with `Z` for UTC or an explicit offset such as `+08:00`.
-
-```json
-{"name":"revisit-practice","at":"2026-11-10T18:00:00Z","text":"See how French practice has been going."}
-```
-
-The wakeup survives restart. The result gives its `callback_id`.
-
-```json
-{"result":{"callback_id":"revisit-practice-5"}}
-```
-
-A past `at` makes the wakeup eligible at the next intake poll. The core can keep working until the callback arrives. The observation carries the supplied text and the scheduled instant in `scheduled_for`, rendered in UTC. Cancellation is unavailable. See [wakeup and callback fields](input.md#callback-observations).
-
-### Callback observations
-
-A scheduled wakeup or a host command that outlasts its initial call arranges one callback. The observation returns to the focus that arranged it, with the same callback ID, even after sleep or restart. The focus admits at most one observation per callback ID. See [command lifetimes](host.md#command-lifetimes), [observation fields](input.md#callback-observations), and [callback delivery](architecture.md#callback-delivery).
-
 ## Subscriptions
 
-Call `subscribe` in the focus that should receive the reports. In `listener`, record what the program watches and when it should report. You can include where to find the program or its configuration. In this example, the core follows release announcements across assignments.
+Call `subscribe` in the focus that should receive the reports. The call saves `listener` as a description of what to report and when. In this example, the core follows release announcements across assignments.
 
 ```json
 {
@@ -85,7 +64,7 @@ Each successful call creates a subscription with a new `subscription_id`, even i
 {"result":{"subscription_id":"release-watch-1"}}
 ```
 
-Start or configure the program that watches the source and give it the `subscription_id`. Reports go to the focus that called `subscribe`, even when another focus runs the listener. [Listener protocol](subscriptions.md)
+Arrange the listener and give it the `subscription_id`. Reports go to the focus that registered the subscription even if another focus runs the listener. [Listener protocol](subscriptions.md)
 
 A newly queued report can wake a sleeping focus. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. [Subscription observations](input.md#subscription-observations)
 
@@ -125,7 +104,7 @@ If a waiting observation makes a request too large, the runtime can continue pen
 
 ## Activity completion
 
-An activity with a pending callback or an active subscription can sleep with its identity and history intact. If its last subscription is withdrawn with reports still queued, the activity remains available to receive them.
+An activity with a pending host callback or an active subscription can sleep with its identity and history intact. If its last subscription is withdrawn with reports still queued, the activity remains available to receive them. [Command lifetimes](host.md#command-lifetimes)
 
 The runtime ends the activity and frees its capacity slot once it has no work, pending callbacks, or active subscriptions left. The core can still receive unread messages under the activity's original focus ID. It also receives the ending, even if the activity produced no text. See [report fields](input.md#assignments-and-reports).
 
