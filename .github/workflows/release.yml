@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release label (e.g. v0.1.0-rc1)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Read Zig version
+        id: zig-version
+        run: echo "version=$(cat .zig-version)" >> "$GITHUB_OUTPUT"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+      - name: Check Zig formatting
+        run: git ls-files -z '*.zig' '*.zig.zon' | xargs -0 zig fmt --check
+      - name: Build Ivenna
+        run: zig build
+      - name: Run Zig regression tests
+        run: zig build test --summary all
+      - uses: hustcer/setup-nu@v3
+        with:
+          version: '0.116.1' # Match apps/memory/Containerfile.
+      - name: Run memory protocol tests
+        run: nu --no-config-file --no-history apps/memory/tests.nu
+      - name: Build release binary
+        run: zig build -Doptimize=ReleaseFast
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.version || github.ref_name }}"
+          target="linux-x86_64"
+          asset="ivenna-${target}-${version}"
+          mkdir -p dist
+          cp zig-out/bin/ivenna "dist/${asset}"
+          (cd dist && sha256sum "${asset}" > "${asset}.sha256")
+          cat > "dist/buildinfo-${version}.json" <<JSON
+          {
+            "version": "${version}",
+            "commit": "${GITHUB_SHA}",
+            "ref": "${GITHUB_REF_NAME}",
+            "zig": "${{ steps.zig-version.outputs.version }}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "runner": "${ImageOS:-ubuntu-24.04}",
+            "sha256": "$(sha256sum zig-out/bin/ivenna | cut -d' ' -f1)"
+          }
+          JSON
+          ls -l dist
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.version || github.ref_name }}"
+          if gh release view "$version" >/dev/null 2>&1; then
+            gh release upload "$version" dist/* --clobber
+          else
+            gh release create "$version" dist/* --title "$version" --generate-notes
+          fi
