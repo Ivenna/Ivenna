@@ -227,7 +227,7 @@ If `channel receive` reports that the channel service is unavailable, check that
 
 ## Subscription listeners
 
-Run subscription listeners on the kernel host. Set `DATA_DIR` to the instance's data directory and give the listener the complete ID returned by `subscribe`. Ivenna's [host commands](host.md#command-environment) inherit absolute paths in `IVENNA` and `DATA_DIR`. See the [listener protocol](subscriptions.md#keep-a-listener-session-open) for starting the session and sending reports.
+Run subscription listeners on the kernel host. Set `DATA_DIR` to the instance's data directory. Use an absolute path for an independently launched listener that may start from a different working directory. Ivenna's host commands inherit absolute paths in `IVENNA` and `DATA_DIR`. [Host command environment](host.md#command-environment) · [Listener protocol](subscriptions.md#keep-a-listener-session-open)
 
 The listener needs write access to the database, its SQLite sidecar files, and their directory. The kernel and listeners also need read access to the same `<DATA_DIR>/subscription-listeners.lock` on a filesystem that supports Linux open-file-description locks. The first process creates it with owner-only permissions. If the kernel and listener run as different users, give both users read access to the file.
 
@@ -302,7 +302,7 @@ An interrupted operation may have produced effects without a saved result. Inclu
 
 Before updating across a change in storage format, make a [matched backup](#backups-and-transfers) and keep the executable that can read it. Use that executable to resume the instance from the backup if needed. To start a fresh instance, use a separate mailbox and `DATA_DIR`.
 
-If `ivenna serve` reports `IncompatibleStateSchema`, check that `DATA_DIR` points to the intended instance and that the executable supports its database format. A listener opens only the current database format. Run the new kernel to complete initialization or a supported upgrade before starting new listener sessions.
+If `ivenna serve` reports `IncompatibleStateSchema`, check `DATA_DIR` and use a build that supports the instance database's schema. After installing an update, start its kernel before connecting new listeners so startup can apply any supported migration.
 
 See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
 
@@ -372,7 +372,7 @@ Back up the mailbox and instance database as a pair. Startup checks the database
 
 If taking the mailbox and database backups separately, stop the kernel before either backup begins and leave it stopped until both finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners too and include any SQLite sidecar files with the database.
 
-Keep listener progress at or before the point covered by the database backup. Include buffered reports the source cannot replay. See [source progress](subscriptions.md#resume-at-the-source).
+Save listener progress before taking the database backup so the saved positions are covered by that backup. Include buffered reports the source cannot replay. [Source progress](subscriptions.md#resume-at-the-source)
 
 To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup.
 

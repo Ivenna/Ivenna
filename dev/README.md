@@ -180,7 +180,7 @@ The initial send should return `channel_no_receiver`. The two successful sends s
 
 ## Trying a subscription listener
 
-Ask Ivenna to [register a subscription](../docs/attention.md#subscriptions) for the check and give you its complete ID. In a second terminal at the repository root, [load the instance environment](#configuration) and start an independent listener with that ID.
+Ask Ivenna to register a subscription for the check and give you its complete ID. In a second terminal at the repository root, load the instance environment and start an independent listener. Replace `release-watch-1` with the ID you received. [Registering a subscription](../docs/attention.md#subscriptions) · [Loading the instance environment](#configuration)
 
 ```sh
 subscription_id='release-watch-1'

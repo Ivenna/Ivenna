@@ -26,8 +26,7 @@ pub fn run(init: std.process.Init) !void {
     var channels = try ChannelRegistry.listen(init.gpa, io, data_directory);
     defer channels.deinit();
     const database_path = try std.fs.path.join(a, &.{ data_directory, state.filename });
-    try state.initialize(a, database_path);
-    var subscription_store = try state.subscriptions.Store.open(init.gpa, io, database_path);
+    var subscription_store = try state.subscriptions.Store.initialize(init.gpa, io, database_path);
     defer subscription_store.close();
     var mail: email.Integration = undefined;
     try mail.init(init.gpa, io, .{

@@ -85,9 +85,9 @@ Each successful call creates a subscription with a new `subscription_id`, even i
 {"result":{"subscription_id":"release-watch-1"}}
 ```
 
-Arrange the listener and give it the `subscription_id`. Reports go to the focus that called `subscribe`, even when another focus runs the listener. See the [listener protocol](subscriptions.md) for opening a session and reporting observations.
+Start or configure the program that watches the source and give it the `subscription_id`. Reports go to the focus that called `subscribe`, even when another focus runs the listener. [Listener protocol](subscriptions.md)
 
-An accepted report makes a sleeping focus ready. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. See [subscription observations](input.md#subscription-observations).
+A newly queued report can wake a sleeping focus. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. [Subscription observations](input.md#subscription-observations)
 
 Subscriptions survive sleep and restart. A handover can carry active subscription IDs and their descriptions. An ordinary turn can list subscriptions that have no open listener session when sampled. See [sampled state](input.md#sampled-state) and [listener sessions in the current turn](input.md#channel-receivers-and-subscription-listeners).
 

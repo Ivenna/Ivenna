@@ -132,8 +132,8 @@ Each `subscription` event carries one listener report to the focus that subscrib
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `subscription_id` | `Text` | ID returned by `subscribe`, shared by all reports for that subscription |
-| `observed_at` | `Time` | Time recorded by the listener session before saving the report |
-| `source_time` | `Time`, when supplied | Time the listener attributes to the upstream event |
+| `observed_at` | `Time` | Time `ivenna subscription listen` recorded before saving the report |
+| `source_time` | `Time`, when supplied | Time of the upstream event as reported by the listener |
 | `text` | `Text` | Listener's account of what it observed |
 
 The listener can include a source link, a revision, or a gap in coverage in `text`. See [subscription delivery and withdrawal](attention.md#subscriptions).
@@ -218,7 +218,7 @@ When there are no new events, an ordinary turn contains only `current`. Retained
 
 ### Channel receivers and subscription listeners
 
-The optional lists describe connections at `current.observed_at`. A receiver remains connected between reads, and a listener remains connected between reports. Delivery of a channel message requires a waiting read when the send runs. See [channel sends](communication.md#sending-to-a-channel) and [listener sessions](subscriptions.md#keep-a-listener-session-open).
+The optional lists show which registrations lacked a connection during the sample dated by `current.observed_at`. A receiver remains connected between reads, and a listener remains connected between reports. Delivery of a channel message requires a waiting read when the send runs. [Channel sends](communication.md#sending-to-a-channel) · [Listener sessions](subscriptions.md#keep-a-listener-session-open)
 
 | Field | Scope for the core | Scope for an activity |
 | --- | --- | --- |
@@ -227,7 +227,7 @@ The optional lists describe connections at `current.observed_at`. A receiver rem
 
 The runtime includes up to eight IDs per list. It omits empty lists and can omit both to fit the request. The state of unlisted IDs is unspecified. The sample belongs to this inference. Connection changes do not wake a focus.
 
-In this restart turn, the core sees a queued release report and the absence of a listener for that subscription at the later sampling time.
+In this restart turn, the core sees a queued release report. The later sample shows a channel without a receiver and the same subscription without a listener.
 
 ```yaml
 current:

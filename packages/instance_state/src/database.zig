@@ -5,15 +5,10 @@ const c = zqlite.c;
 const Allocator = std.mem.Allocator;
 
 pub const filename = "state.sqlite3";
-const application_id = std.mem.readInt(u32, "IVS3", .big);
-const cursor_session_application_id = std.mem.readInt(u32, "IVS2", .big);
-const legacy_application_id = std.mem.readInt(u32, "IVDB", .big);
-const OpenMode = enum { initialize, read_write };
-
-pub fn initialize(a: Allocator, path: []const u8) !void {
-    const conn = try open(a, path, .initialize);
-    conn.close();
-}
+const application_id = std.mem.readInt(u32, "IVST", .big);
+const schema_version = 1;
+const session_snapshot_application_id = std.mem.readInt(u32, "IVS3", .big);
+pub const OpenMode = enum { initialize, existing };
 
 pub fn open(a: Allocator, path: []const u8, mode: OpenMode) !zqlite.Conn {
     if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
@@ -21,17 +16,24 @@ pub fn open(a: Allocator, path: []const u8, mode: OpenMode) !zqlite.Conn {
     defer a.free(path_z);
     const flags = switch (mode) {
         .initialize => c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
-        .read_write => c.SQLITE_OPEN_READWRITE,
+        .existing => c.SQLITE_OPEN_READWRITE,
     };
     const conn = try connect(path_z, flags);
+    // Closing a failed startup connection rolls back any uncommitted migration.
     errdefer conn.close();
+    if (c.sqlite3_db_readonly(conn.conn, "main") == 1) {
+        std.log.err("instance database '{s}' is read-only", .{path});
+        return error.StateStorageFailed;
+    }
     try checked(conn.busyTimeout(5000));
     try exec(conn, "PRAGMA foreign_keys=ON");
     try exec(conn, "PRAGMA synchronous=FULL");
     if (mode == .initialize) {
-        try installSchema(conn);
+        try migrateSchema(conn);
         try exec(conn, "PRAGMA journal_mode=WAL");
-    } else if (try integer(conn, "PRAGMA application_id", .{}) != application_id) {
+    } else if (try integer(conn, "PRAGMA application_id", .{}) != application_id or
+        try integer(conn, "PRAGMA user_version", .{}) != schema_version)
+    {
         return error.IncompatibleStateSchema;
     }
     return conn;
@@ -57,23 +59,38 @@ fn connect(path: [:0]const u8, flags: c_int) !zqlite.Conn {
     };
 }
 
-fn installSchema(conn: zqlite.Conn) !void {
+fn migrateSchema(conn: zqlite.Conn) !void {
     try exec(conn, "BEGIN IMMEDIATE");
-    errdefer rollback(conn);
-    const format = try integer(conn, "PRAGMA application_id", .{});
-    switch (format) {
-        application_id => {},
-        // Retire the old listener protocols. Existing source positions
-        // remain available to export from these databases.
-        legacy_application_id, cursor_session_application_id => {},
-        0 => {
+    const id = try integer(conn, "PRAGMA application_id", .{});
+    const recorded_version = try integer(conn, "PRAGMA user_version", .{});
+    if (id != application_id and recorded_version != 0) return error.IncompatibleStateSchema;
+    const installed_version = switch (id) {
+        application_id => recorded_version,
+        0 => installed: {
             if (try integer(conn, "SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
                 return error.IncompatibleStateSchema;
             try exec(conn, @embedFile("schema.sql"));
+            break :installed schema_version;
+        },
+        std.mem.readInt(u32, "IVDB", .big),
+        std.mem.readInt(u32, "IVS2", .big),
+        session_snapshot_application_id,
+        => installed: {
+            // The session snapshot omitted the cursor on creation and kept it on upgrade.
+            if (id != session_snapshot_application_id or
+                try integer(conn, "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('subscriptions') WHERE name='cursor')", .{}) != 0)
+            {
+                try exec(conn, "ALTER TABLE subscriptions DROP COLUMN cursor");
+            }
+            break :installed 1;
         },
         else => return error.IncompatibleStateSchema,
+    };
+    if (installed_version != schema_version) return error.IncompatibleStateSchema;
+    if (id != application_id) {
+        try exec(conn, std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id}));
+        try exec(conn, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
     }
-    if (format != application_id) try exec(conn, std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id}));
     try exec(conn, "COMMIT");
 }
 
@@ -151,8 +168,8 @@ test "initialization and existing open preserve an incompatible database" {
     defer prior.close();
     try exec(prior, "CREATE TABLE notes(text TEXT)");
     try exec(prior, "INSERT INTO notes VALUES('keep me')");
-    try t.expectError(error.IncompatibleStateSchema, open(a, path, .read_write));
-    try t.expectError(error.IncompatibleStateSchema, initialize(a, path));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .existing));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .initialize));
     try t.expectEqual(1, try integer(prior, "SELECT count(*) FROM notes WHERE text='keep me'", .{}));
     try t.expectEqual(0, try integer(prior, "PRAGMA application_id", .{}));
 
@@ -160,12 +177,12 @@ test "initialization and existing open preserve an incompatible database" {
     try exec(prior, "DROP TABLE notes");
     const other_id = std.mem.readInt(u32, "TEST", .big);
     try exec(prior, std.fmt.comptimePrint("PRAGMA application_id={d}", .{other_id}));
-    try t.expectError(error.IncompatibleStateSchema, open(a, path, .read_write));
-    try t.expectError(error.IncompatibleStateSchema, initialize(a, path));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .existing));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .initialize));
     try t.expectEqual(other_id, try integer(prior, "PRAGMA application_id", .{}));
 }
 
-test "initialization retires both old client formats and preserves subscription data" {
+test "startup removes legacy cursors and preserves subscription state" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -173,28 +190,57 @@ test "initialization retires both old client formats and preserves subscription 
     var temporary = t.tmpDir(.{});
     defer temporary.cleanup();
     const directory = try temporary.dir.realPathFileAlloc(t.io, ".", a);
-    inline for (.{ legacy_application_id, cursor_session_application_id }) |old_format| {
-        const path = try std.fs.path.join(a, &.{ directory, std.fmt.comptimePrint("state-{d}.sqlite3", .{old_format}) });
+    const cases = .{
+        .{ "IVDB", true },
+        .{ "IVS3", true },
+        .{ "IVS3", false },
+    };
+    inline for (cases, 0..) |case, index| {
+        const old_id, const has_cursor = case;
+        const path = try std.fs.path.join(a, &.{ directory, std.fmt.comptimePrint("state-{d}.sqlite3", .{index}) });
         {
             const legacy = try connect(try a.dupeSentinel(u8, path, 0), c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE);
             defer legacy.close();
             try exec(legacy, @embedFile("schema.sql"));
-            try exec(legacy, "ALTER TABLE subscriptions ADD COLUMN cursor TEXT");
-            try exec(legacy, std.fmt.comptimePrint("PRAGMA application_id={d}", .{old_format}));
-            try exec(legacy, "UPDATE mailbox_binding SET bound=1");
-            try exec(legacy, "INSERT INTO subscriptions(name,focus_id,listener,cursor) VALUES('news','core-1','Release feed','17')");
-            try exec(legacy, "INSERT INTO subscription_reports(reference,focus_id,text,received) VALUES('news-1','core-1','New release',123)");
-            try exec(legacy, "INSERT INTO accepted_report_keys(subscription_id,key) VALUES(1,'report-17')");
+            try exec(legacy, std.fmt.comptimePrint("PRAGMA application_id={d}", .{std.mem.readInt(u32, old_id, .big)}));
+            try exec(legacy,
+                \\UPDATE mailbox_binding SET identity='0123456789abcdef0123456789abcdef', bound=1;
+                \\INSERT INTO subscriptions(id,name,focus_id,listener) VALUES(3,'news','core-1','Release feed');
+                \\INSERT INTO subscription_reports(sequence,reference,focus_id,text,source_time,received)
+                \\VALUES(7,'news-3','core-1','New release',120,123);
+                \\INSERT INTO accepted_report_keys(subscription_id,key) VALUES(3,'report-17');
+            );
+            if (has_cursor) {
+                try exec(legacy, "ALTER TABLE subscriptions ADD COLUMN cursor TEXT");
+                try exec(legacy, "UPDATE subscriptions SET cursor='17'");
+            }
         }
 
-        try t.expectError(error.IncompatibleStateSchema, open(a, path, .read_write));
-        try initialize(a, path);
-        const current = try open(a, path, .read_write);
+        (try open(a, path, .initialize)).close();
+        const current = try open(a, path, .existing);
         defer current.close();
-        try t.expectEqual(application_id, try integer(current, "PRAGMA application_id", .{}));
-        try t.expectEqual(1, try integer(current, "SELECT bound FROM mailbox_binding", .{}));
-        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM subscriptions WHERE reference='news-1' AND cursor='17'", .{}));
-        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM subscription_reports WHERE reference='news-1' AND received=123", .{}));
-        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM accepted_report_keys WHERE subscription_id=1 AND key='report-17'", .{}));
+        try t.expectEqual(0, try integer(current, "SELECT count(*) FROM pragma_table_xinfo('subscriptions') WHERE name='cursor'", .{}));
+        try t.expectEqual(1, try integer(current, "SELECT bound FROM mailbox_binding WHERE identity='0123456789abcdef0123456789abcdef'", .{}));
+        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM subscriptions WHERE reference='news-3' AND focus_id='core-1' AND listener='Release feed'", .{}));
+        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM subscription_reports WHERE sequence=7 AND reference='news-3' AND text='New release' AND source_time=120 AND received=123", .{}));
+        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM accepted_report_keys WHERE subscription_id=3 AND key='report-17'", .{}));
     }
+}
+
+test "open rejects a newer schema version without changing it" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, filename });
+    const current = try open(a, path, .initialize);
+    defer current.close();
+    const newer = schema_version + 1;
+    try exec(current, std.fmt.comptimePrint("PRAGMA user_version={d}", .{newer}));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .existing));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .initialize));
+    try t.expectEqual(newer, try integer(current, "PRAGMA user_version", .{}));
 }

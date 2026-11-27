@@ -2,29 +2,31 @@
 
 ## Moving receivers and listeners to sessions
 
-1. Stop the kernel and its receivers and listeners. Keep the old executable with a [matched backup of the mailbox and instance database](running.md#backups-and-transfers).
-2. Update the kernel and client executables together. Adapt [subscription listeners](#update-subscription-listeners) and [channel receivers](#update-older-channel-receivers) before restarting them.
-3. Start the new kernel with the existing mailbox and instance database. When it opens the database, it updates the format marker in place and preserves subscriptions, accepted report keys, and queued reports. Start the updated clients with their saved IDs.
+This update changes the receiver and listener commands. The kernel upgrades the instance database on startup, even for an instance with no receivers or listeners.
 
-The earlier executable cannot open the upgraded database. To roll back, stop the updated processes and restore the matched backup and corresponding listener progress before starting the old executable. See [backups and transfers](running.md#backups-and-transfers).
+1. Stop the kernel and every receiver and listener for the instance, including independently run clients. Keep the old executable and take a matched backup of the mailbox, instance database, and any listener progress. [Backups and transfers](running.md#backups-and-transfers)
+2. Install the same updated build for the kernel and its clients. Update the client programs and import any positions Ivenna stored into the listeners' own state. [Subscription listeners](#update-subscription-listeners) · [Channel receivers](#update-older-channel-receivers)
+3. Start `ivenna serve` with the existing mailbox and `DATA_DIR`. Startup removes the old cursor column if present and preserves the mailbox binding, subscription IDs, accepted report keys, and queued reports. Then start the updated clients with their saved IDs.
+
+To return to the old executable after migration, restore the pre-upgrade mailbox, database, and listener progress before restarting it. [Restore an instance](running.md#backups-and-transfers)
 
 ### Update subscription listeners
 
-Replace the old `subscription inspect`, `subscription publish`, and `subscription checkpoint` commands with a `subscription listen` session. For an earlier `listen` session that used request wrappers, send reports directly after `"ready"`. Keep using the same report keys. See the [listener protocol](subscriptions.md).
+Replace `subscription inspect`, `subscription publish`, and `subscription checkpoint` with a `subscription listen` session. If your listener already uses `listen` with request wrappers, send each report as a top-level JSON object after `"ready"`. Keep the same keys for reports you retry. [Listener protocol](subscriptions.md)
 
-If Ivenna stored a listener's source position, import that value into the listener's own state before resuming. Read saved positions from the old database backup.
+If Ivenna stored source positions, export them by subscription ID from the pre-upgrade database backup. Import each position into the corresponding listener's own state before starting it.
 
 ```sh
 sqlite3 -readonly -json /path/to/backup/state.sqlite3 \
   'SELECT reference, cursor FROM subscriptions WHERE cursor IS NOT NULL ORDER BY id;'
 ```
 
-Upgraded databases retain the old values for offline export. After the upgrade, the [listener owns source progress](subscriptions.md#resume-at-the-source).
+The listener owns later source progress. [Resuming at the source](subscriptions.md#resume-at-the-source)
 
 ### Update older channel receivers
 
-- Replace `ivenna receive` in all forms with `ivenna channel receive CHANNEL_ID`. Read the `text` field from each JSON line and use the process exit status to interpret the end of the stream. The updated socket protocol requires the new receiver and kernel together. See [receiver sessions](communication.md#receiving-from-a-channel).
-- Update senders to handle `channel_no_receiver` as well as `channel_would_block`. See [channel send outcomes](communication.md#sending-to-a-channel).
+- Replace `ivenna receive` and its options with `ivenna channel receive CHANNEL_ID`. Read the `text` field from each JSON line and use the process exit status to interpret the end of the stream. [Receiver sessions](communication.md#receiving-from-a-channel)
+- Update senders to handle `channel_no_receiver` and `channel_would_block`. [Channel send outcomes](communication.md#sending-to-a-channel)
 
 ## Working history encoding
 

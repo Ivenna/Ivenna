@@ -5,9 +5,8 @@ const net = std.Io.net;
 
 const max_id_bytes = 4 * contracts.Reference.max_name_characters + 21;
 const prefix = "\x00ivenna.channels.";
-// Keep the address as the instance's exclusive bind. This handshake is
-// distinct from the previous wire format: its fifth byte belongs to the
-// prefix, and a channel ID cannot start with NUL.
+// A stable socket address makes old and new kernels contend for the same bind.
+// The trailing NUL distinguishes this header from the old timeout and channel ID.
 const receive_header = "IVR\x01\x00";
 const next_request = "\x01";
 

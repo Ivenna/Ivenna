@@ -89,7 +89,9 @@ Here `handle-messages` reads one JSON object per line from the receiver's stdout
 
 The receiver flushes each line before requesting the next message. A full output pipe can delay that request while the receiver stays connected. See [send outcomes](#sending-to-a-channel).
 
-When Ivenna closes the channel, the receiver writes any message already handed off and exits with status 0. It also exits with status 0 if the output pipe closes during a wait or write. A write in progress can leave a partial line. An unknown channel ID or an unavailable channel service produces a diagnostic on stderr and exit status 1.
+When Ivenna closes the channel, the receiver writes any message already handed off and exits with status 0. Closing the receiver's output pipe also ends the process with status 0. If the pipe closes during a write, the reader may receive a partial line.
+
+An unknown channel ID, a failed connection, or a lost connection before the channel's closing reply produces an error on stderr and exit status 1. After a kernel restart, reconnect to a restored channel with the same ID. [Channel lifetimes](#channel-lifetimes)
 
 ### Sending to a channel
 

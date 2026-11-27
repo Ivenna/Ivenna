@@ -6,15 +6,16 @@ on stdout, then write one report per line to stdin.
   {"key":"release-17","text":"Release 17 is available"}
 
 Give each report a stable, nonempty key. If the source supplies an event
-time, add source_time_unix_ms as an integer.
+time, add source_time_unix_ms in whole Unix milliseconds.
 
-Read one receipt per report. Save your source position after "accepted".
-If a receipt is missing, resend the report with its original key.
+Wait for "accepted" before advancing your saved source position past the
+report. If a receipt is missing, reconnect if needed and retry with the
+same subscription ID and report key.
 
 Keep the process open while watching the source. Set DATA_DIR to the instance
 data directory. The command can accept reports while the kernel is stopped.
 
-Close stdin to finish with status 0. The command exits with status 1 after
-"withdrawn" or if stdout closes while it writes a receipt.
+Close stdin for a normal exit with status 0. A withdrawn subscription, an
+oversized line, or a failed receipt write ends the session with status 1.
 
-See docs/subscriptions.md for the full protocol.
+See docs/subscriptions.md in the Ivenna repository for the full protocol.

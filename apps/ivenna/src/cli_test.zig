@@ -74,8 +74,7 @@ test "a subscription listener streams writes without the kernel and stops after 
     defer temporary.cleanup();
     const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
     const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    try state.initialize(a, path);
-    var owner = try state.subscriptions.Store.open(a, io, path);
+    var owner = try state.subscriptions.Store.initialize(a, io, path);
     defer owner.close();
     const id = (try owner.create(a, "research-2", "-release watch", "test listener")).subscription_id;
     try testing.expectEqualDeep(@as([]const []const u8, &.{id}), try owner.subscriptionsWithoutListeners(a, "research-2", 1));
@@ -99,7 +98,6 @@ test "a subscription listener streams writes without the kernel and stops after 
     try testing.expectEqual(0, (try owner.subscriptionsWithoutListeners(a, "research-2", 1)).len);
 
     for ([_][]const u8{
-        "{\"publish\":{\"key\":\"item-17\",\"text\":\"New release\"}}\n",
         "{\"key\":\"item-17\",\"text\":\"New release\",\"cursor\":{\"to\":\"17\"}}\n",
         "{\"key\":[105,116,101,109,45,49,55],\"text\":\"New release\"}\n",
     }) |line| {

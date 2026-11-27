@@ -15,7 +15,7 @@ This guide describes how the application assembles Ivenna, how the kernel coordi
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, process interaction and cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/resources](../packages/resources/src/root.zig) | Resolve resource references, read host files and directories, retrieve web pages, and present remote images by URL |
-| [packages/instance_state](../packages/instance_state/src/root.zig) | Own the local SQLite database, subscription reports, and listener connection state |
+| [packages/instance_state](../packages/instance_state/src/root.zig) | Own the instance database and subscription store, and track open listener sessions |
 | [packages/sqlite](../packages/sqlite) | Provide the embedded SQLite build and shared bindings |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result parts, classify source bytes, interpret image references, and read local file contents within a byte limit |
 
@@ -180,13 +180,15 @@ Intake resolves the numeric ID through its registration and supplies the saved r
 
 ## Instance database
 
-`ivenna serve` initializes `<DATA_DIR>/state.sqlite3`, then opens the subscription store. Initialization installs the schema and sets SQLite's `application_id` to identify the format. For supported upgrades, it changes the marker in a transaction that preserves the data. Listener sessions require the current marker. WAL mode lets readers proceed while SQLite serializes writes. See the [schema](../packages/instance_state/src/schema.sql), [connection setup](../packages/instance_state/src/database.zig), and [upgrade procedure](upgrading.md#moving-receivers-and-listeners-to-sessions).
+`ivenna serve` opens the subscription store at `<DATA_DIR>/state.sqlite3`. Opening the store installs the embedded schema for a new database or upgrades a supported database in place. Startup commits the schema change and its markers in one transaction. WAL mode lets readers proceed while SQLite serializes writes. [Schema](../packages/instance_state/src/schema.sql) · [Upgrade procedure](upgrading.md#moving-receivers-and-listeners-to-sessions)
+
+In the versioned format, `application_id` identifies the file as an Ivenna instance database and stays fixed across schema revisions. SQLite's `user_version` records the revision. Independent listeners verify both markers on their own connections. [Connection setup](../packages/instance_state/src/database.zig)
 
 The database also has an identity unique to the instance. The registry records it in the first mailbox checkpoint before marking the database bound. A checkpoint must match the local database identity on startup, and a bound database requires its checkpoint. See the [backup and transfer procedure](running.md#backups-and-transfers).
 
 ### Subscription delivery
 
-The subscription store serializes publication and withdrawal as SQLite writes. One transaction saves a new key and its report, which carries the subscription ID and receiving focus. When the key already exists, the write confirms the first acceptance. Withdrawal deletes the registration and its keys. Queued reports keep their own copy of the destination. See the [subscription store](../packages/instance_state/src/subscriptions.zig) and [receipt protocol](subscriptions.md#write-receipts-and-recovery).
+The subscription store serializes publication and withdrawal as SQLite writes. One transaction saves a new key and its report, which carries the subscription ID and receiving focus. A report with a previously accepted key receives confirmation of its original acceptance. Withdrawal deletes the registration and its keys. Queued reports keep their own copy of the destination. [Subscription store](../packages/instance_state/src/subscriptions.zig) · [Receipt protocol](subscriptions.md#write-receipts-and-recovery)
 
 SQLite assigns report sequence numbers across all subscriptions. The kernel records the last sequence admitted to each focus's history as `subscription_through`. At startup, on each intake pass, and when a worker finishes, the dispatcher checks for work. An idle focus with a report beyond its saved sequence is ready to run. Each batch reads that focus's reports in order up to the latest sequence sampled for the batch. Later arrivals wait for the next input. See [activation admission](#activation-admission).
 

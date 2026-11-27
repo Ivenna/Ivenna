@@ -36,7 +36,7 @@ Each command starts a fresh shell. The `cwd` and `shell` arguments accept litera
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 
-Host commands receive the absolute path to the `ivenna` executable as `IVENNA` and the canonical absolute path to the instance's data directory as `DATA_DIR`. A program in any input mode can use this environment to [receive channel messages](communication.md#receiving-from-a-channel) or [publish subscription observations](subscriptions.md#publish-an-observation).
+Host commands receive the absolute path to the `ivenna` executable as `IVENNA` and the canonical absolute path to the instance's data directory as `DATA_DIR`. A program in any input mode can use this environment to receive channel messages or start a subscription listener. [Receiving from a channel](communication.md#receiving-from-a-channel) · [Opening a listener session](subscriptions.md#keep-a-listener-session-open)
 
 ## Input modes
 

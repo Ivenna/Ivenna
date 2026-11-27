@@ -32,7 +32,7 @@ fn failure(io: std.Io, err: anyerror) !u8 {
             return 1;
         },
         error.IncompatibleStateSchema => {
-            std.log.err("the instance database format is incompatible. Check DATA_DIR and use the same build for the kernel and listener. When upgrading, start the updated kernel before connecting", .{});
+            std.log.err("the listener cannot use this instance database schema. Check DATA_DIR and use the same build for the listener and kernel. After updating, start the kernel before connecting the listener", .{});
             return 1;
         },
         error.UnknownChannel => {
@@ -40,7 +40,7 @@ fn failure(io: std.Io, err: anyerror) !u8 {
             return 1;
         },
         error.ChannelServiceUnavailable => {
-            std.log.err("the channel service is unavailable. Check that 'ivenna serve' is running for the instance selected by DATA_DIR", .{});
+            std.log.err("the channel service is unavailable. Check that the kernel for DATA_DIR is running and uses the same Ivenna build as the receiver", .{});
             return 1;
         },
         error.InvalidChannelReply => {

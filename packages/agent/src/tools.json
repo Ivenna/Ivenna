@@ -53,7 +53,7 @@
   },
   {
     "name": "open_channel",
-    "description": "Open a channel for a local program. A host command can receive with `\"$IVENNA\" channel receive CHANNEL_ID` using the returned ID. An open channel keeps its ID after this focus ends or Ivenna restarts.",
+    "description": "Open a channel for local programs. A host command can receive with `\"$IVENNA\" channel receive CHANNEL_ID` using the returned `channel_id`. An open channel keeps its ID after this focus ends or Ivenna restarts.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -138,7 +138,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Subscribe this focus to reports from a listener you arrange. Its reports can wake this focus. A host command can report with `\"$IVENNA\" subscription listen SUBSCRIPTION_ID` using the returned ID.",
+    "description": "Subscribe this focus to reports from a program you arrange to watch a source. New reports can wake this focus. A host command can open a listener session with `\"$IVENNA\" subscription listen SUBSCRIPTION_ID` using the returned `subscription_id`.",
     "parameters": {
       "type": "object",
       "properties": {
