@@ -15,7 +15,7 @@ This guide describes how the application assembles Ivenna, how the kernel coordi
 | [packages/host](../packages/host/src/root.zig) | Define host tools and own command handles, process interaction and cleanup, logs, and completion output |
 | [packages/memory](../packages/memory/src/root.zig) | Define memory tools and translate their operations and results through the SSH service protocol |
 | [packages/resources](../packages/resources/src/root.zig) | Resolve resource references, read host files and directories, retrieve web pages, and present remote images by URL |
-| [packages/instance_state](../packages/instance_state/src/root.zig) | Own the local SQLite database and provide subscription operations |
+| [packages/instance_state](../packages/instance_state/src/root.zig) | Own the local SQLite database, subscription reports, and listener connection state |
 | [packages/sqlite](../packages/sqlite) | Provide the embedded SQLite build and shared bindings |
 | [packages/content](../packages/content/src/root.zig) | Define tool-result parts, classify source bytes, interpret image references, and read local file contents within a byte limit |
 
@@ -66,7 +66,7 @@ The application supplies the agent and host with capability implementations thro
 | [Callback.Registrar](../packages/agent_contracts/src/callback.zig) | Persist a future observation's source and bind its destination to the invoking session | Agent execution |
 | [Callback.Publisher](../packages/agent_contracts/src/callback.zig) | Store one observation under a registered callback ID, preserving the first stored result | Email integration |
 | [Communication.Sender](../packages/agent_contracts/src/communication.zig) | Expose registered outgoing correspondent IDs and submit messages by ID | Email integration |
-| [Channels](../packages/agent_contracts/src/channels.zig) | Reserve, activate, and close local delivery endpoints and attempt handoffs by channel ID | Application |
+| [Channels](../packages/agent_contracts/src/channels.zig) | Reserve, activate, and close local channels, observe their receiver connections, and attempt handoffs by channel ID | Application |
 | [HistoryStore](../packages/agent_contracts/src/history.zig) | Publish and load checkpoints, allocate storage groups, read and write records, and maintain retained history | Email integration |
 | [Model.Port](../packages/agent_contracts/src/model.zig) | Prepare tool results for working history, measure requests, and run inference | Responses adapter |
 | [Reference.Issuer](../packages/agent_contracts/src/reference.zig) | Allocate a named reference durably before the capability uses it | Agent execution |
@@ -119,9 +119,9 @@ The tool decoder reads the single field in `send.to` to select a destination var
 
 The session registry owns channel IDs, their opening focuses, and descriptions. The opening round owns the transport reservation through tool execution. At commit, the registry holds its lock while it saves the registration with the round's tool replies. The transport exposes the channel after confirmation. If the round exits without confirmation, it releases its reservation. Closing a channel saves its retirement before the transport ends waiting reads. See [opening a channel](communication.md#opening-a-channel) for save outcomes and [channel lifetimes](communication.md#channel-lifetimes) for what survives restart.
 
-The local transport tracks connections by channel ID. A connection handler registers each request under the transport lock. A send tries to acquire that lock once, then tries nonblocking packet writes in request order until it hands off the message or exhausts the list. Each successful write consumes one request. Closing a channel queues the terminal reply after any matched message and ends its server-side connections, including followers between requests. See the [transport implementation](../apps/ivenna/src/channels.zig) and [send outcomes](communication.md#sending-to-a-channel).
+The transport accepts connections on an abstract Unix `SOCK_SEQPACKET` socket named from the canonical instance directory and effective UID. Both peers check each other's UID. The versioned handshake registers the first pending read. After each handoff, the receiver requests its next read on the same connection and rejoins the queue. The application bounds the number of open sockets and joins the connection handlers at shutdown. See the [socket protocol](../apps/ivenna/src/channel_ipc.zig) and [receiver interface](communication.md#receiving-from-a-channel).
 
-The runtime listens on an abstract Unix `SOCK_SEQPACKET` socket with a name derived from the canonical instance directory and effective UID. Both peers check each other's effective UID. The initial handshake registers a read. A follower requests each subsequent read on the same connection. The listener bounds open sockets and handler tasks with a connection limit. At shutdown the application cancels and joins those tasks before releasing the registry and listener. See the [local socket transport](../apps/ivenna/src/channel_ipc.zig), [registry limit](../apps/ivenna/src/channels.zig), and [receive interface](communication.md#receiving-from-a-channel).
+The transport tracks receivers between reads as well as pending reads. A send tries the transport lock once. With the lock held, the transport tries nonblocking writes in read-request order, and a successful write consumes one read. If no write succeeds, it checks whether a receiver is connected. Closing queues a terminal reply after any matched message and ends the connections. See the [channel registry](../apps/ivenna/src/channels.zig) and [send outcomes](communication.md#sending-to-a-channel).
 
 ## Activation admission
 
@@ -180,17 +180,21 @@ Intake resolves the numeric ID through its registration and supplies the saved r
 
 ## Instance database
 
-`ivenna serve` initializes `<DATA_DIR>/state.sqlite3`, then opens a subscription connection. Initialization installs the instance schema and sets SQLite's `application_id` to identify its format. Subscription commands open the existing database with that marker. WAL mode lets readers proceed while SQLite serializes writers. See the [schema](../packages/instance_state/src/schema.sql) and [connection setup](../packages/instance_state/src/database.zig).
+`ivenna serve` initializes `<DATA_DIR>/state.sqlite3`, then opens the subscription store. Initialization installs the schema and sets SQLite's `application_id` to identify the format. For supported upgrades, it changes the marker in a transaction that preserves the data. Listener sessions require the current marker. WAL mode lets readers proceed while SQLite serializes writes. See the [schema](../packages/instance_state/src/schema.sql), [connection setup](../packages/instance_state/src/database.zig), and [upgrade procedure](upgrading.md#moving-receivers-and-listeners-to-sessions).
 
 The database also has an identity unique to the instance. The registry records it in the first mailbox checkpoint before marking the database bound. A checkpoint must match the local database identity on startup, and a bound database requires its checkpoint. See the [backup and transfer procedure](running.md#backups-and-transfers).
 
 ### Subscription delivery
 
-The [subscription store](../packages/instance_state/src/subscriptions.zig) serializes publication and withdrawal as SQLite writes. A publication checks the key within the subscription before applying any cursor change. A known key leaves the cursor and queue untouched. For a new key, one transaction saves the key, applies any cursor change, and queues the report with its subscription reference and receiving focus. A cursor conflict rolls back the whole write. Withdrawal deletes the registration and its cursor and keys. Queued reports keep their own copy of the destination. See the [listener protocol](subscriptions.md) for CLI requests and receipts.
+The subscription store serializes publication and withdrawal as SQLite writes. One transaction saves a new key and its report, which carries the subscription ID and receiving focus. When the key already exists, the write confirms the first acceptance. Withdrawal deletes the registration and its keys. Queued reports keep their own copy of the destination. See the [subscription store](../packages/instance_state/src/subscriptions.zig) and [receipt protocol](subscriptions.md#write-receipts-and-recovery).
 
-The listener's cursor records its position in the source. SQLite assigns report sequence numbers across all subscriptions. The kernel records the last sequence admitted to each focus's history as `subscription_through`. At startup, on each intake pass, and when a worker finishes, the dispatcher checks for work. An idle focus with a report beyond its saved sequence is ready to run. Each batch reads that focus's reports in order up to the latest sequence sampled for the batch. Later arrivals wait for the next input. See [activation admission](#activation-admission).
+SQLite assigns report sequence numbers across all subscriptions. The kernel records the last sequence admitted to each focus's history as `subscription_through`. At startup, on each intake pass, and when a worker finishes, the dispatcher checks for work. An idle focus with a report beyond its saved sequence is ready to run. Each batch reads that focus's reports in order up to the latest sequence sampled for the batch. Later arrivals wait for the next input. See [activation admission](#activation-admission).
 
 After the [startup checkpoint](#startup-and-interruption) is published, the registry deletes each focus's reports through the sequence saved in that checkpoint. This completes any acknowledgement interrupted by shutdown.
+
+#### Listener connections
+
+A `listen` process owns a SQLite connection for publication and holds a Linux open-file-description read lock for the session. The registration's numeric ID selects a byte in `<DATA_DIR>/subscription-listeners.lock`. Multiple listeners can hold shared locks on the same byte. The kernel checks those locks when it samples subscriptions for an ordinary turn. Closing a session's file description releases its lock. An independent listener that stays running across a kernel restart keeps its lock. See the [lock implementation](../packages/instance_state/src/listener_presence.zig) and [listener deployment](running.md#subscription-listeners).
 
 ## Working history and user messages
 
@@ -198,7 +202,9 @@ After the [startup checkpoint](#startup-and-interruption) is published, the regi
 
 Context puts the same embedded [system prompt](../packages/agent/src/system.md) before the selected history and current turn for every focus. The turn identifies the focus and its role. Engine selects tools separately. Request measurements include the prompt's encoded size for ordinary inference and compaction.
 
-[Input](../packages/agent/src/input.zig) renders retained `Record` values and temporary `Turn` values as YAML user messages. The session registry supplies `current` for both ordinary and compaction turns. Retained ZON records preserve numeric times and complete typed values. The [time adapter](../packages/agent/src/time.zig) uses [zdt](https://codeberg.org/FObersteiner/zdt) to format model-facing times as UTC RFC 3339 and parse scheduled wakeup times. See the [input contract](input.md) for fields and omission rules, and [tool results](#tool-results) for native exchange encoding.
+[Input](../packages/agent/src/input.zig) renders retained `Record` values and temporary `Turn` values as YAML user messages. The registry supplies `current` for both ordinary and compaction turns. Retained ZON records preserve numeric times and complete typed values. The [time adapter](../packages/agent/src/time.zig) uses [zdt](https://codeberg.org/FObersteiner/zdt) to format model-facing times as UTC RFC 3339 and parse scheduled wakeup times. See the [input contract](input.md) and [tool results](#tool-results).
+
+For an ordinary request, the kernel first selects history and observations that fit. It then samples channel receivers and subscription listeners and checks whether the same request fits with the sample in its final message. If the adapter reports a limit violation, the kernel uses the original turn. Keeping the sample in the final message lets unchanged history remain a reusable prefix. See the [connection fields](input.md#channel-receivers-and-subscription-listeners) and [DeepSeek context caching](https://api-docs.deepseek.com/guides/kv_cache/).
 
 ## Model requests and tools
 
@@ -343,7 +349,7 @@ Host effects, memory writes, mail submission, subscription changes, acknowledgem
 | Checkpoint revision and publication markers | Mailbox checkpoint metadata | [History storage](#history-storage) |
 | Published callback results | Callback mail | [Callback delivery](#callback-delivery) |
 | Unadmitted correspondence | Eligible incoming mail | [Mail intake and acknowledgement](#mail-intake-and-acknowledgement) |
-| Subscription registrations, listener cursors, accepted keys, and pending reports | Instance SQLite database | [Instance database](#instance-database) |
+| Subscription registrations, accepted keys, and pending reports | Instance SQLite database | [Instance database](#instance-database) |
 
 ## Email boundary
 

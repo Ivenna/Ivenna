@@ -1,5 +1,4 @@
 const std = @import("std");
-const state = @import("instance_state");
 const receive = @import("receive.zig");
 const cli = @import("cli.zig");
 const serve = @import("serve.zig");
@@ -8,64 +7,49 @@ const subscription = @import("subscription.zig");
 pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    const command = cli.parse(args[1..]) catch |err| return failure(init.io, err);
+    const command = cli.parse(args[1..]) catch return 1;
     switch (command) {
         .serve => try serve.run(init),
         .help => |help| try std.Io.File.stdout().writeStreamingAll(init.io, help),
-        .receive => |options| receive.run(init, options) catch |err| switch (err) {
+        .receive => |id| receive.run(init, id) catch |err| switch (err) {
             error.BrokenPipe => return 0,
             else => return failure(init.io, err),
         },
-        .subscription => |request| runSubscription(init, request) catch |err| return failure(init.io, err),
+        .listen => |id| subscription.run(init, id) catch |err| return failure(init.io, err),
     }
     return 0;
 }
 
-fn runSubscription(init: std.process.Init, request: @FieldType(cli.Command, "subscription")) !void {
-    const a = init.arena.allocator();
-    const directory = init.environ_map.get("DATA_DIR") orelse "";
-    if (directory.len == 0) {
-        std.log.err("set DATA_DIR to the instance's data directory", .{});
-        return error.MissingDataDirectory;
-    }
-    const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    var store = try state.subscriptions.Store.open(a, path);
-    defer store.close();
-    switch (request.action) {
-        .inspect => try cli.writeJson(init.io, try store.inspect(a, request.id)),
-        .publish => try cli.writeJson(init.io, try subscription.publish(a, init.io, &store, request.id)),
-        .checkpoint => {
-            try subscription.checkpoint(a, init.io, &store, request.id);
-            try cli.writeJson(init.io, "accepted");
-        },
-    }
-}
-
 fn failure(io: std.Io, err: anyerror) !u8 {
-    const reason: []const u8 = switch (err) {
-        error.InvalidArguments => "invalid_request",
-        error.SubscriptionWithdrawn => "withdrawn",
-        error.CursorConflict => "cursor_conflict",
-        error.StateStoreBusy => "busy",
-        error.StateStoreFull => "storage_full",
-        error.InvalidReceiveArguments, error.MissingDataDirectory, error.StateStorageFailed => return 1,
+    if (subscription.errorReceipt(err)) |reason| {
+        try cli.writeJson(io, reason);
+        return 1;
+    }
+    switch (err) {
+        error.MissingDataDirectory, error.StateStorageFailed => return 1,
+        error.BrokenPipe => {
+            std.log.err("the subscription output closed before a reply could be written. A report may already be stored. Retry any unconfirmed report with its original key", .{});
+            return 1;
+        },
+        error.IncompatibleStateSchema => {
+            std.log.err("the instance database format is incompatible. Check DATA_DIR and use the same build for the kernel and listener. When upgrading, start the updated kernel before connecting", .{});
+            return 1;
+        },
         error.UnknownChannel => {
             std.log.err("no open channel matches CHANNEL_ID. Check the complete ID and DATA_DIR", .{});
             return 1;
         },
         error.ChannelServiceUnavailable => {
-            std.log.err("the channel service is unavailable. Check that the kernel is running and DATA_DIR points to its data directory", .{});
+            std.log.err("the channel service is unavailable. Check that 'ivenna serve' is running for the instance selected by DATA_DIR", .{});
             return 1;
         },
         error.InvalidChannelReply => {
-            std.log.err("the channel service returned an invalid reply. Check that serve and receive use the same build", .{});
+            std.log.err("the channel service returned an invalid reply. Check that 'ivenna serve' and 'ivenna channel receive' use the same build", .{});
             return 1;
         },
         else => {
             std.log.err("{s}", .{@errorName(err)});
             return 1;
         },
-    };
-    try cli.writeJson(io, reason);
-    return 1;
+    }
 }

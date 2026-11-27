@@ -63,7 +63,7 @@ Email lets correspondents and Ivenna act on their own schedules. An accepted let
 
 An explicit send lets Ivenna choose when to speak, what to say, and whom or what to reach. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna sends and reports the outcome, so Ivenna can revise its understanding as circumstances change. See [sending a message](communication.md#sending-a-message).
 
-Any focus can open a channel with a description of its purpose and share its ID with a local program or another focus. The program chooses when to receive a message and how to act on it. A send immediately tells Ivenna whether the runtime handed the message to a waiting receiver. The channel can outlive its opening focus, and the same ID lets a replacement receiver connect or an existing receiver reconnect after restart. The program can continue its work after Ivenna closes the channel. See [channels](communication.md#channels).
+Any focus can open a channel for a local program and share its ID with that program or another focus. The program keeps a receiver connected while it needs messages and decides how to act on them. Send results distinguish a handoff from a channel without a receiver, an immediate distinction also made by NATS when a request has no responders. A channel can outlive its opening focus, and receivers can reconnect by ID after restart. Closing the channel ends the receiver session while the program remains free to continue its work. See [channels](communication.md#channels) and [NATS request replies](https://docs.nats.io/concepts/request-reply#no-responders-detection).
 
 ## Sessions and continued work
 
@@ -81,9 +81,13 @@ Activities choose how long to wait for host work before continuing their own rea
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
 
-A focus can subscribe to a source it wants to follow over time. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. Ivenna gives the subscription reference to the listener it sets up and chooses which changes the listener reports. A report can bring a sleeping focus back to its work, and a working focus can consider several reports together after its current round.
+A focus can subscribe to a source it wants to follow over time. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. Ivenna describes what to watch and gives the listener the subscription ID. The listener keeps a session open while it watches the source. A report can bring a sleeping focus back to its work, and a working focus can consider several reports together after its current round.
 
 The subscription stays with its focus across sleep, handover, and restart. Any focus with its reference can withdraw it when the source no longer needs attention. Observations already accepted still belong to the focus that subscribed. See [subscriptions](attention.md#subscriptions).
+
+The listener owns filtering, polling, source progress, and retry timing. It can resume using the source's own conventions, such as a file offset or a position in a partitioned stream. See [listener recovery](subscriptions.md#resume-at-the-source), [OpenTelemetry file offsets](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/filelogreceiver/README.md#offset-tracking), and [Kafka manual offset control](https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#manualoffsetcontrol).
+
+Ivenna retains accepted reports for delivery across interruptions. A listener can safely replay a report after losing a receipt or before saving its own progress. Ivenna recognizes the report key within its subscription, like CloudEvents identifies repeated events by source and ID. See [report receipts](subscriptions.md#write-receipts-and-recovery), [NATS JetStream persistence](https://docs.nats.io/concepts/jetstream), and [CloudEvents event ID](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md#id).
 
 ### Context and continuity
 
@@ -96,6 +100,8 @@ After a build replaces a screenshot, an activity can revisit the image in its wo
 A focus brings the model's prior knowledge and its own history to each observation. Give it the facts it still needs to interpret what happened or anticipate the effect of a choice. For example, an activity's ordinary reply reaches the core. Writing to a correspondent takes an explicit `send`. Ivenna decides what to make of a letter, whether to answer, and what to remember about the exchange.
 
 Even a short list of names can draw attention to unrelated work. Ordinary turns identify the focus and carry its new observations. A focus can draw on its working history for references it has already encountered. Startup gives the core the current outgoing correspondent IDs so it can account for changes before resuming work. See the [input contract](input.md#records-and-turns).
+
+An ordinary turn can point out channels without receivers and subscriptions without listeners. This can help Ivenna decide whether to check work that depends on those programs. The sample describes open connections at the observation time, following the distinction between a connection and longer-lived records in Firebase's presence design. See [channel receivers and subscription listeners](input.md#channel-receivers-and-subscription-listeners) and [Firebase presence](https://firebase.google.com/docs/database/web/offline-capabilities#sample-presence-app).
 
 Describe what Ivenna observed, which effects it can confirm, and what it can still act on. Keep mailbox receipts, checkpoints, and request bookkeeping in the runtime. Preserve the source of inherited experience so a focus can interpret it alongside its own. See [opening a focus](attention.md#opening-a-focus).
 

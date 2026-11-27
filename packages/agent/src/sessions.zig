@@ -555,10 +555,33 @@ pub const Registry = struct {
         });
     }
 
-    pub fn current(self: *Registry, a: Allocator, session: *Session) !Input.Current {
+    /// A worker's borrow keeps the immutable identity alive for the request.
+    pub fn current(self: *Registry, a: Allocator, session: *const Session) !Input.Current {
+        return .{
+            .focus_id = try a.dupe(u8, session.focus_id),
+            .role = session.role,
+            .observed_at_unix_ms = self.now(),
+        };
+    }
+
+    pub fn currentWithConnectionStatus(self: *Registry, a: Allocator, session: *Session, transport: contracts.Channels) !?Input.Current {
         try self.lock();
         defer self.mutex.unlock(self.io);
-        return self.currentLocked(a, session);
+        const limit = 8;
+        var channel_ids: std.ArrayList([]const u8) = .empty;
+        var index = self.channels.items.len;
+        while (index > 0 and channel_ids.items.len < limit) {
+            index -= 1;
+            const channel = self.channels.items[index];
+            if (!self.channelVisibleTo(session, channel)) continue;
+            if (!try transport.hasReceiver(channel.id)) try channel_ids.append(a, try a.dupe(u8, channel.id));
+        }
+        const subscription_ids = try self.subscriptions.subscriptionsWithoutListeners(a, session.focus_id, limit);
+        if (channel_ids.items.len == 0 and subscription_ids.len == 0) return null;
+        var sample = try self.current(a, session);
+        sample.channels_without_receivers = try channel_ids.toOwnedSlice(a);
+        sample.subscriptions_without_listeners = subscription_ids;
+        return sample;
     }
 
     pub fn compactionSnapshot(self: *Registry, a: Allocator, session: *Session) !Input.Snapshot {
@@ -586,14 +609,14 @@ pub const Registry = struct {
         };
         var channels: std.ArrayList(Input.SampledChannel) = .empty;
         for (self.channels.items) |channel| {
-            if (session != self.core and !std.mem.eql(u8, channel.opened_by, session.focus_id)) continue;
+            if (!self.channelVisibleTo(session, channel)) continue;
             try channels.append(a, .{
                 .channel_id = try a.dupe(u8, channel.id),
                 .description = if (channel.description) |text| try a.dupe(u8, text) else null,
             });
         }
         return .{
-            .current = try self.currentLocked(a, session),
+            .current = try self.current(a, session),
             .state = .{
                 .activities = activities,
                 .callbacks = try own_callbacks.toOwnedSlice(a),
@@ -603,20 +626,16 @@ pub const Registry = struct {
         };
     }
 
+    fn channelVisibleTo(self: *const Registry, session: *const Session, channel: History.Channel) bool {
+        return session == self.core or std.mem.eql(u8, channel.opened_by, session.focus_id);
+    }
+
     fn liveSessionsLocked(self: *Registry, a: Allocator) ![]*Session {
         const live = try a.alloc(*Session, self.sessions.count());
         var sessions = self.sessions.valueIterator();
         for (live) |*session| session.* = sessions.next().?.*;
         std.mem.sort(*Session, live, {}, lessSessionId);
         return live;
-    }
-
-    fn currentLocked(self: *Registry, a: Allocator, session: *Session) !Input.Current {
-        return .{
-            .focus_id = try a.dupe(u8, session.focus_id),
-            .role = session.role,
-            .observed_at_unix_ms = self.now(),
-        };
     }
 
     /// Commit the outcome of a round without tool calls. Returns true when

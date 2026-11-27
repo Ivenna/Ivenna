@@ -162,18 +162,31 @@ pub const SubscriptionReport = struct {
     }
 };
 
-/// Identity and observation time for an inference.
+/// Identity, observation time, and any connection status for an inference.
 pub const Current = struct {
     focus_id: []const u8,
     role: Role,
     observed_at_unix_ms: i64,
+    channels_without_receivers: []const []const u8 = &.{},
+    subscriptions_without_listeners: []const []const u8 = &.{},
 
     pub fn jsonStringify(self: Current, writer: anytype) !void {
-        try writer.write(.{
-            .focus_id = self.focus_id,
-            .role = self.role,
-            .observed_at = Time.Instant{ .unix_ms = self.observed_at_unix_ms },
-        });
+        try writer.beginObject();
+        try writer.objectField("focus_id");
+        try writer.write(self.focus_id);
+        try writer.objectField("role");
+        try writer.write(self.role);
+        try writer.objectField("observed_at");
+        try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
+        if (self.channels_without_receivers.len != 0) {
+            try writer.objectField("channels_without_receivers");
+            try writer.write(self.channels_without_receivers);
+        }
+        if (self.subscriptions_without_listeners.len != 0) {
+            try writer.objectField("subscriptions_without_listeners");
+            try writer.write(self.subscriptions_without_listeners);
+        }
+        try writer.endObject();
     }
 };
 

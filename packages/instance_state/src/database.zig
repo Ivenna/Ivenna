@@ -5,7 +5,9 @@ const c = zqlite.c;
 const Allocator = std.mem.Allocator;
 
 pub const filename = "state.sqlite3";
-const application_id = std.mem.readInt(u32, "IVDB", .big);
+const application_id = std.mem.readInt(u32, "IVS3", .big);
+const cursor_session_application_id = std.mem.readInt(u32, "IVS2", .big);
+const legacy_application_id = std.mem.readInt(u32, "IVDB", .big);
 const OpenMode = enum { initialize, read_write };
 
 pub fn initialize(a: Allocator, path: []const u8) !void {
@@ -56,16 +58,22 @@ fn connect(path: [:0]const u8, flags: c_int) !zqlite.Conn {
 }
 
 fn installSchema(conn: zqlite.Conn) !void {
-    // Claim an empty file with the schema and format marker together.
     try exec(conn, "BEGIN IMMEDIATE");
     errdefer rollback(conn);
     const format = try integer(conn, "PRAGMA application_id", .{});
-    if (format != application_id) {
-        if (format != 0 or try integer(conn, "SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
-            return error.IncompatibleStateSchema;
-        try exec(conn, @embedFile("schema.sql"));
-        try exec(conn, std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id}));
+    switch (format) {
+        application_id => {},
+        // Retire the old listener protocols. Existing source positions
+        // remain available to export from these databases.
+        legacy_application_id, cursor_session_application_id => {},
+        0 => {
+            if (try integer(conn, "SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
+                return error.IncompatibleStateSchema;
+            try exec(conn, @embedFile("schema.sql"));
+        },
+        else => return error.IncompatibleStateSchema,
     }
+    if (format != application_id) try exec(conn, std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id}));
     try exec(conn, "COMMIT");
 }
 
@@ -155,4 +163,38 @@ test "initialization and existing open preserve an incompatible database" {
     try t.expectError(error.IncompatibleStateSchema, open(a, path, .read_write));
     try t.expectError(error.IncompatibleStateSchema, initialize(a, path));
     try t.expectEqual(other_id, try integer(prior, "PRAGMA application_id", .{}));
+}
+
+test "initialization retires both old client formats and preserves subscription data" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    inline for (.{ legacy_application_id, cursor_session_application_id }) |old_format| {
+        const path = try std.fs.path.join(a, &.{ directory, std.fmt.comptimePrint("state-{d}.sqlite3", .{old_format}) });
+        {
+            const legacy = try connect(try a.dupeSentinel(u8, path, 0), c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE);
+            defer legacy.close();
+            try exec(legacy, @embedFile("schema.sql"));
+            try exec(legacy, "ALTER TABLE subscriptions ADD COLUMN cursor TEXT");
+            try exec(legacy, std.fmt.comptimePrint("PRAGMA application_id={d}", .{old_format}));
+            try exec(legacy, "UPDATE mailbox_binding SET bound=1");
+            try exec(legacy, "INSERT INTO subscriptions(name,focus_id,listener,cursor) VALUES('news','core-1','Release feed','17')");
+            try exec(legacy, "INSERT INTO subscription_reports(reference,focus_id,text,received) VALUES('news-1','core-1','New release',123)");
+            try exec(legacy, "INSERT INTO accepted_report_keys(subscription_id,key) VALUES(1,'report-17')");
+        }
+
+        try t.expectError(error.IncompatibleStateSchema, open(a, path, .read_write));
+        try initialize(a, path);
+        const current = try open(a, path, .read_write);
+        defer current.close();
+        try t.expectEqual(application_id, try integer(current, "PRAGMA application_id", .{}));
+        try t.expectEqual(1, try integer(current, "SELECT bound FROM mailbox_binding", .{}));
+        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM subscriptions WHERE reference='news-1' AND cursor='17'", .{}));
+        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM subscription_reports WHERE reference='news-1' AND received=123", .{}));
+        try t.expectEqual(1, try integer(current, "SELECT count(*) FROM accepted_report_keys WHERE subscription_id=1 AND key='report-17'", .{}));
+    }
 }

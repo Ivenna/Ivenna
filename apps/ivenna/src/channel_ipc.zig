@@ -5,17 +5,19 @@ const net = std.Io.net;
 
 const max_id_bytes = 4 * contracts.Reference.max_name_characters + 21;
 const prefix = "\x00ivenna.channels.";
-const timeout_header_size = @sizeOf(u32);
+// Keep the address as the instance's exclusive bind. This handshake is
+// distinct from the previous wire format: its fifth byte belongs to the
+// prefix, and a channel ID cannot start with NUL.
+const receive_header = "IVR\x01\x00";
 const next_request = "\x01";
 
 pub const handshake_time = std.Io.Clock.Duration{ .raw = .fromSeconds(2), .clock = .awake };
-pub const request_buffer_size = timeout_header_size + max_id_bytes + 1;
+pub const request_buffer_size = receive_header.len + max_id_bytes + 1;
 pub const response_buffer_size = 1 + contracts.Channels.max_message_bytes + 1;
 
 pub const Response = union(enum(u8)) {
     waiting,
     message: []const u8,
-    timeout,
     closed,
     unknown_channel,
 };
@@ -36,8 +38,8 @@ pub fn listen(io: std.Io, data_directory: []const u8) !net.Server {
     }
 }
 
-pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8, timeout_ms: ?u32) !net.Stream {
-    if (id.len > max_id_bytes) return error.UnknownChannel;
+pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8) !net.Stream {
+    if (id.len == 0 or id.len > max_id_bytes) return error.UnknownChannel;
     const socket = try openSocket(true);
     errdefer socket.close(io);
     const name = address(data_directory);
@@ -51,9 +53,7 @@ pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8, timeout_m
     }
     const connection: net.Stream = .{ .socket = socket };
     try requireSameUser(connection);
-    var header: [timeout_header_size]u8 = undefined;
-    std.mem.writeInt(u32, &header, timeout_ms orelse 0, .little);
-    writePacket(connection, &header, id) catch |err| switch (err) {
+    writePacket(connection, receive_header, id) catch |err| switch (err) {
         error.PeerDisconnected, error.WouldBlock => return error.ChannelServiceUnavailable,
         else => return err,
     };
@@ -106,16 +106,11 @@ pub fn requireSameUser(connection: net.Stream) !void {
         return error.AccessDenied;
 }
 
-pub const Request = struct { id: []const u8, timeout_ms: ?u32 };
-
-pub fn readRequest(connection: net.Stream, io: std.Io, buffer: *[request_buffer_size]u8) !Request {
+pub fn readChannelId(connection: net.Stream, io: std.Io, buffer: *[request_buffer_size]u8) ![]const u8 {
     const size = try read(connection, io, buffer, .{ .duration = handshake_time });
-    if (size <= timeout_header_size or size >= buffer.len) return error.InvalidChannelRequest;
-    const timeout = std.mem.readInt(u32, buffer[0..timeout_header_size], .little);
-    return .{
-        .id = buffer[timeout_header_size..size],
-        .timeout_ms = if (timeout == 0) null else timeout,
-    };
+    if (size <= receive_header.len or size >= buffer.len or !std.mem.startsWith(u8, buffer[0..size], receive_header))
+        return error.InvalidChannelRequest;
+    return buffer[receive_header.len..size];
 }
 
 pub fn reply(connection: net.Stream, response: Response) WriteError!void {
@@ -145,26 +140,11 @@ pub fn readResponse(connection: net.Stream, buffer: *[response_buffer_size]u8) !
     };
 }
 
-const WaitResult = enum { next, ended, timeout };
-
-pub fn waitForNext(connection: net.Stream, io: std.Io, deadline: ?std.Io.Clock.Timestamp) WaitResult {
+pub fn waitForNext(connection: net.Stream, io: std.Io) bool {
     // The extra byte lets us reject oversized requests on the packet socket.
     var packet: [next_request.len + 1]u8 = undefined;
-    const timeout: std.Io.Timeout = if (deadline) |end| .{ .deadline = end } else .none;
-    while (true) {
-        const size = read(connection, io, &packet, timeout) catch |err| switch (err) {
-            error.Timeout => {
-                const end = deadline.?;
-                const remaining = end.durationFromNow(io).raw.toNanoseconds();
-                // Threaded I/O caps long polls and rounds down to milliseconds.
-                if (remaining >= std.time.ns_per_ms) continue;
-                if (remaining > 0) end.wait(io) catch return .ended;
-                return .timeout;
-            },
-            else => return .ended,
-        };
-        return if (std.mem.eql(u8, packet[0..size], next_request)) .next else .ended;
-    }
+    const size = read(connection, io, &packet, .none) catch return false;
+    return std.mem.eql(u8, packet[0..size], next_request);
 }
 
 pub fn endRequests(connection: net.Stream) void {
@@ -209,4 +189,27 @@ fn writePacket(connection: net.Stream, header: []const u8, text: []const u8) Wri
             else => |err| return std.posix.unexpectedErrno(err),
         }
     }
+}
+
+test "channel handshake rejects old receive requests" {
+    const testing = std.testing;
+    const io = testing.io;
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(directory);
+    var server = try listen(io, directory);
+    defer server.deinit(io);
+    const name = address(directory);
+    const client: net.Stream = .{ .socket = try openSocket(false) };
+    defer client.close(io);
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.connect(client.socket.handle, &name, address_length)));
+    // Even an old timeout that matches the version prefix cannot supply its NUL.
+    const old_timeout = receive_header[0..@sizeOf(u32)];
+    try writePacket(client, old_timeout, "events-1");
+
+    const connection = try server.accept(io);
+    defer connection.close(io);
+    var buffer: [request_buffer_size]u8 = undefined;
+    try testing.expectError(error.InvalidChannelRequest, readChannelId(connection, io, &buffer));
 }

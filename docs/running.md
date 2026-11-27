@@ -84,9 +84,9 @@ Ivenna sends supported image references to the configured model service for retr
 
 ### Model requests
 
-An ordinary inference request sends the selected working history and newly admitted observations. An activity's request can include correspondence and tool results inherited from the core. See [inference turns](input.md#inference-turns) and [retained tool content](content.md#context-and-continuity).
+An ordinary inference request sends the selected working history, newly admitted observations, and any [receiver and listener observations](input.md#channel-receivers-and-subscription-listeners) sampled for that turn. An activity's request can include correspondence and tool results inherited from the core. See [inference turns](input.md#inference-turns) and [retained tool content](content.md#context-and-continuity).
 
-A handover request sends the history to summarize and a dated sample of runtime state, which can include channel and subscription descriptions, pending wakeups, and outgoing correspondent IDs. See [sampled state](input.md#sampled-state).
+A handover request sends the history to summarize and a dated [sample of runtime state](input.md#sampled-state).
 
 Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments.
 
@@ -218,20 +218,22 @@ Use the same build of `ivenna` for the kernel and the receiver. Run both in the 
 For a receiver launched independently, set `DATA_DIR` to the instance data directory and pass the complete ID returned by `open_channel`.
 
 ```sh
-DATA_DIR=/path/to/instance/data /path/to/ivenna receive 'task-input-18' --follow
+DATA_DIR=/path/to/instance/data /path/to/ivenna channel receive 'task-input-18'
 ```
 
-Ivenna's own host commands inherit the resolved `DATA_DIR` and the executable path in `IVENNA`. See the [host command environment](host.md#command-environment) and [receive options and results](communication.md#receiving-from-a-channel).
+Ivenna's own host commands inherit the resolved `DATA_DIR` and the executable path in `IVENNA`. See the [host command environment](host.md#command-environment) and [receiver session](communication.md#receiving-from-a-channel).
 
-If `receive` reports an unavailable channel service, check that the kernel is running and that the receiver uses the same directory, UID, and network namespace. The kernel can also refuse new receivers while all connection slots are in use.
+If `channel receive` reports that the channel service is unavailable, check that the kernel is running and review the requirements above. The kernel can also refuse a connection when all receiver slots are in use.
 
 ## Subscription listeners
 
-Subscription listeners call `ivenna` on the kernel host and can use the existing instance database while the kernel is stopped. For an independently launched listener, set `DATA_DIR` to the instance's data directory. Use an absolute path if programs run from different working directories. Ivenna's [host commands](host.md#command-environment) inherit absolute paths to the executable and data directory in `IVENNA` and `DATA_DIR`.
+Run subscription listeners on the kernel host. Set `DATA_DIR` to the instance's data directory and give the listener the complete ID returned by `subscribe`. Ivenna's [host commands](host.md#command-environment) inherit absolute paths in `IVENNA` and `DATA_DIR`. See the [listener protocol](subscriptions.md#keep-a-listener-session-open) for starting the session and sending reports.
 
-Give the listener the `subscription_id` returned when a focus registers the subscription. The listener needs write access to the instance database and its directory. See [subscription registration](attention.md#subscriptions).
+The listener needs write access to the database, its SQLite sidecar files, and their directory. The kernel and listeners also need read access to the same `<DATA_DIR>/subscription-listeners.lock` on a filesystem that supports Linux open-file-description locks. The first process creates it with owner-only permissions. If the kernel and listener run as different users, give both users read access to the file.
 
-Run the listener independently to keep collecting during kernel downtime. Reports accepted while the kernel is stopped wait for delivery after restart. A listener launched as a host command stops with the kernel. If the command outlasts the tool call, its completion callback lets the activity sleep until the command ends. See [host command lifetimes](host.md#command-lifetimes) and the [listener protocol](subscriptions.md).
+Keep the existing lock file in place while the kernel or a listener is running. Replacing it leaves existing processes holding the old file while new processes open the replacement. See [listener connections](architecture.md#listener-connections).
+
+Run the listener independently when it needs to keep collecting through a kernel stop or restart. Its session can stay open and save reports to the instance database while the kernel is stopped. Those reports wait there for delivery after restart. Listeners launched as Ivenna host commands stop with the kernel. See [host command lifetimes](host.md#command-lifetimes).
 
 ## Service status and reception
 
@@ -292,7 +294,7 @@ At restart the core sees the current outgoing correspondent IDs, including chang
 
 Registered wakeups and host completions keep their original receiving sessions across restart. Wakeups whose scheduled times passed while the kernel was unavailable become due. For a host completion, Ivenna uses the stored result when available and reports an interruption with unknown effects otherwise.
 
-Stopping the kernel cleans up its host commands and disconnects channel receivers. When the kernel comes back, receivers can start new reads with the restored channel IDs, including channels whose opening activity ended. See [channel lifetimes](communication.md#channel-lifetimes).
+Stopping the kernel cleans up its host commands and disconnects channel receivers. After restart, receivers can reconnect to restored channel IDs, including channels whose opening activity ended. Independently run subscription listeners can keep their sessions open. See [channel lifetimes](communication.md#channel-lifetimes) and [subscription listener deployment](#subscription-listeners).
 
 An interrupted operation may have produced effects without a saved result. Include known external changes when corresponding about interrupted work. See [after interruption](usage.md#after-interruption) and the [recovery state inventory](architecture.md#recovery-state).
 
@@ -300,7 +302,7 @@ An interrupted operation may have produced effects without a saved result. Inclu
 
 Before updating across a change in storage format, make a [matched backup](#backups-and-transfers) and keep the executable that can read it. Use that executable to resume the instance from the backup if needed. To start a fresh instance, use a separate mailbox and `DATA_DIR`.
 
-If `ivenna` reports `IncompatibleStateSchema`, check that `DATA_DIR` points to the intended instance and that the executable supports its database format.
+If `ivenna serve` reports `IncompatibleStateSchema`, check that `DATA_DIR` points to the intended instance and that the executable supports its database format. A listener opens only the current database format. Run the new kernel to complete initialization or a supported upgrade before starting new listener sessions.
 
 See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
 
@@ -313,7 +315,8 @@ The deployment chooses storage for the mail account, memory workspace, and kerne
 | Configured JMAP account | Pending and retired correspondence and callback mail, working-history records and checkpoints, and private markers |
 | Configured memory workspace | Shared memory rooms and entries |
 | `<DATA_DIR>/host/` | Full stdout and stderr from host commands |
-| `<DATA_DIR>/state.sqlite3` | Subscription state and queued reports. See the [instance database](architecture.md#instance-database). |
+| `<DATA_DIR>/state.sqlite3` | Subscription registrations, accepted keys, and queued reports. See the [instance database](architecture.md#instance-database). |
+| `<DATA_DIR>/subscription-listeners.lock` | File used to coordinate [open listener sessions](architecture.md#listener-connections). |
 | DeepSeek account | [Uploaded files](#uploaded-model-files) and their parsing results |
 
 Web page snapshots expire on eviction or kernel restart. Previously read passages remain in retained tool results. To reach a new passage after expiry, fetch the original URL again, which may now return a different version. See [web page snapshots](resources.md#web-pages).
@@ -355,7 +358,7 @@ Unread activity expressions retain each text in order with its original observat
 
 ### Subscription retention
 
-Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#command-results).
+Pending subscription reports can accumulate on disk while the kernel is stopped or a focus cannot admit them. The kernel removes each report from the queue once it confirms the observation in the focus's history. Each distinct accepted key stays in the database until withdrawal, even after the queue drains. See [listener retries](subscriptions.md#write-receipts-and-recovery).
 
 ### Uploaded model files
 
@@ -365,11 +368,15 @@ DeepSeek can finish parsing and store a file after the connection closes. Use th
 
 ### Backups and transfers
 
-Back up the mailbox and instance database as a pair. Startup checks the database identity, which stays the same across snapshots of an instance. Pairing an older mailbox with a newer database can lose a report if the database already removed it and the mailbox snapshot predates its admission.
+Back up the mailbox and instance database as a pair. Startup checks the database identity, which stays the same across snapshots of an instance. Pairing an older mailbox with a newer database can lose a report if the database removed it after the mailbox snapshot was taken.
 
-If taking the backups separately, stop the kernel before saving either store and leave it stopped until both backups finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners too and include any SQLite sidecar files with the database.
+If taking the mailbox and database backups separately, stop the kernel before either backup begins and leave it stopped until both finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners too and include any SQLite sidecar files with the database.
 
-To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup. Before resuming a listener, check its subscription ID and source position against the restored data. Before resuming a receiver, check that its channel ID still identifies the intended channel. If the backup predates that registration, open a replacement channel and give its ID to the receiver. See [channel lifetimes](communication.md#channel-lifetimes).
+Keep listener progress at or before the point covered by the database backup. Include buffered reports the source cannot replay. See [source progress](subscriptions.md#resume-at-the-source).
+
+To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup.
+
+Resume listeners using their restored subscription IDs. Restore their source progress from the corresponding backup or replay from an earlier position using the original report keys. Reuse restored channel IDs when they still identify the intended channels. If the backup predates a channel registration, open a replacement channel and give its ID to the receiver. See [channel lifetimes](communication.md#channel-lifetimes).
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the selected checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`.
 

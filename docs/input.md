@@ -132,7 +132,7 @@ Each `subscription` event carries one listener report to the focus that subscrib
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `subscription_id` | `Text` | ID returned by `subscribe`, shared by all reports for that subscription |
-| `observed_at` | `Time` | Time recorded by `ivenna subscription publish` before saving the report |
+| `observed_at` | `Time` | Time recorded by the listener session before saving the report |
 | `source_time` | `Time`, when supplied | Time the listener attributes to the upstream event |
 | `text` | `Text` | Listener's account of what it observed |
 
@@ -200,27 +200,42 @@ The last message of an inference input is the current turn.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `current` | `Current` | Identity, role, and observation time |
+| `current` | `Current` | Focus identity, role, observation time, and any channel or subscription connection notes |
 | `events` | `Event[]`, when nonempty | New events for an ordinary inference |
 | `summarize` | `instructions: Text` and optional `state: State` | Request for a handover summary with any sampled state |
 
-`current` has the same fields in ordinary and compaction turns.
+`current` describes the focus in both ordinary and compaction turns. Connection lists appear only in ordinary turns.
 
 | Field in `current` | Type | Meaning |
 | --- | --- | --- |
 | `focus_id` | `Text` | ID of the focus receiving the turn |
 | `role` | `Role` | `core` or `activity` |
 | `observed_at` | `Time` | Time the runtime sampled this turn |
+| `channels_without_receivers` | `Text[]`, when present | IDs of open channels with no connected receiver |
+| `subscriptions_without_listeners` | `Text[]`, when present | IDs of active subscriptions with no open listener session |
 
-An ordinary turn with no new events contains only `current`. Retained events and [state samples](#sampled-state) keep their own dates.
+When there are no new events, an ordinary turn contains only `current`. Retained events and [handover samples](#sampled-state) keep their own dates.
 
-In this restart turn, the core sees its outgoing registration and a release report queued before restart. See [how a listener reports observations](subscriptions.md#publish-an-observation).
+### Channel receivers and subscription listeners
+
+The optional lists describe connections at `current.observed_at`. A receiver remains connected between reads, and a listener remains connected between reports. Delivery of a channel message requires a waiting read when the send runs. See [channel sends](communication.md#sending-to-a-channel) and [listener sessions](subscriptions.md#keep-a-listener-session-open).
+
+| Field | Scope for the core | Scope for an activity |
+| --- | --- | --- |
+| `channels_without_receivers` | Channels across the instance | Channels opened by this activity |
+| `subscriptions_without_listeners` | Subscriptions registered by the core | Subscriptions registered by this activity |
+
+The runtime includes up to eight IDs per list. It omits empty lists and can omit both to fit the request. The state of unlisted IDs is unspecified. The sample belongs to this inference. Connection changes do not wake a focus.
+
+In this restart turn, the core sees a queued release report and the absence of a listener for that subscription at the later sampling time.
 
 ```yaml
 current:
   focus_id: core-1
   role: core
   observed_at: "2026-11-10T18:00:01.000Z"
+  channels_without_receivers: [task-input-18]
+  subscriptions_without_listeners: [release-watch-1]
 events:
   - startup:
       observed_at: "2026-11-10T18:00:00.000Z"

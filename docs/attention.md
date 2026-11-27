@@ -70,7 +70,7 @@ A scheduled wakeup or a host command that outlasts its initial call arranges one
 
 ## Subscriptions
 
-Call `subscribe` in the focus that should receive the reports. Describe in `listener` what to watch and when to report, such as once per release or in a daily digest. The description can include where to find the listener program or its configuration. In this example, the core follows release announcements across assignments.
+Call `subscribe` in the focus that should receive the reports. In `listener`, record what the program watches and when it should report. You can include where to find the program or its configuration. In this example, the core follows release announcements across assignments.
 
 ```json
 {
@@ -85,11 +85,11 @@ Each successful call creates a subscription with a new `subscription_id`, even i
 {"result":{"subscription_id":"release-watch-1"}}
 ```
 
-Give the returned `subscription_id` to the program that watches the source and reports observations. If the core calls `subscribe`, reports go to the core even when an activity runs the listener on the host. See the [listener protocol](subscriptions.md) for reporting and resuming from a saved position.
+Arrange the listener and give it the `subscription_id`. Reports go to the focus that called `subscribe`, even when another focus runs the listener. See the [listener protocol](subscriptions.md) for opening a session and reporting observations.
 
 An accepted report makes a sleeping focus ready. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. See [subscription observations](input.md#subscription-observations).
 
-Subscriptions survive sleep and restart. A handover can carry the active subscriptions and their descriptions. See [sampled state](input.md#sampled-state).
+Subscriptions survive sleep and restart. A handover can carry active subscription IDs and their descriptions. An ordinary turn can list subscriptions that have no open listener session when sampled. See [sampled state](input.md#sampled-state) and [listener sessions in the current turn](input.md#channel-receivers-and-subscription-listeners).
 
 ### Withdrawing a subscription
 

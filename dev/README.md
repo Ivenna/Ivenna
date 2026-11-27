@@ -168,34 +168,34 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 ## Trying a channel
 
-Send this request using the [mail example](#sending-a-message).
+Use the [mail example](#sending-a-message) to ask Ivenna for a channel check.
 
-> Delegate this check to an activity. Ask it to open a channel named `task-input` for short test messages, then send `first` before starting a receiver.
+> In an activity, open a channel named `task-input` and send `first` before starting a receiver.
 >
-> In that activity, use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" receive CHANNEL_ID --follow`, substituting the complete channel ID. Send `first` again and read the output with `continue_host_shell`. Then send and read `second`. If a send reports `channel_would_block`, check that the receiver is still running and give it time to request its next read before retrying.
+> Use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" channel receive CHANNEL_ID`, substituting the complete channel ID. Send `first` again and read the output with `continue_host_shell`. Then send and read `second`. If a send returns `channel_no_receiver` or `channel_would_block` after launch, check the receiver process and let it reach its next waiting read before retrying.
 >
-> After reading both messages, have the activity close the channel and collect the receiver's exit status. Report the send results, command output, and exit status.
+> Close the channel after both reads. Report each send result, the receiver output, and its exit status.
 
-Expect `channel_would_block` before the receiver starts, then two `accepted` results and two JSON `message` records in order. The receiver should exit with status 0 after the channel closes. See the [channel interface](../docs/communication.md#channels).
+The initial send should return `channel_no_receiver`. The two successful sends should return `accepted` and produce one JSON line each, with `first` and `second` in the `text` fields. The receiver should exit with status 0 when the channel closes. See [channel send outcomes](../docs/communication.md#sending-to-a-channel).
 
 ## Trying a subscription listener
 
-In a second terminal at the repository root, [load the same instance environment](#configuration) to set `DATA_DIR`, then point `IVENNA` at the executable built at startup.
-
-```sh
-export IVENNA="$PWD/zig-out/bin/ivenna"
-```
-
-To run the listener independently, follow the [deployment guide](../docs/running.md#subscription-listeners).
-
-Ask Ivenna to [register a subscription](../docs/attention.md#subscriptions) and give you its complete ID. Use that ID in place of the example.
+Ask Ivenna to [register a subscription](../docs/attention.md#subscriptions) for the check and give you its complete ID. In a second terminal at the repository root, [load the instance environment](#configuration) and start an independent listener with that ID.
 
 ```sh
 subscription_id='release-watch-1'
-"$IVENNA" subscription inspect "$subscription_id"
+./zig-out/bin/ivenna subscription listen "$subscription_id"
 ```
 
-The result shows the receiving focus and saved cursor. Use the same ID to [publish a test observation](../docs/subscriptions.md#publish-an-observation).
+After `"ready"`, enter the following line twice. Both writes return `"accepted"`. The focus receives one observation for the key.
+
+```json
+{"key":"listen-check-1","text":"A test observation from the open listener session."}
+```
+
+To check delivery across a restart, leave the listener open. [Stop the kernel](#stopping-and-restarting) and enter a report with a new key. Expect `"accepted"` while the kernel is stopped. Start it again and check that the focus receives the queued report.
+
+Press `Ctrl+D` on a new line when you are done. See [listener receipts](../docs/subscriptions.md#write-receipts-and-recovery) and [independent listener deployment](../docs/running.md#subscription-listeners).
 
 ## Stopping and restarting
 

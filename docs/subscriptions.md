@@ -1,64 +1,59 @@
 # Subscription listener protocol
 
-A listener uses `ivenna subscription` to report observations to the focus that subscribed and save where to resume in its source. The saved position is called a cursor. Pass the complete `subscription_id` returned by `subscribe` as one argument to each command. See [registering a subscription](attention.md#subscriptions).
+A listener watches a source and reports observations to the focus that subscribed. See [registering a subscription](attention.md#subscriptions).
 
-The examples call the executable through `IVENNA`. See the [command environment](host.md#command-environment) for listeners started by Ivenna and [listener deployment](running.md#subscription-listeners) for independent listeners. Run `"$IVENNA" subscription COMMAND --help` for the command's fields and exit statuses.
+## Keep a listener session open
+
+Start `ivenna subscription listen SUBSCRIPTION_ID` as a child process with the ID returned by `subscribe`. In an Ivenna host command, use the executable in `IVENNA`. For an independent listener, see [listener deployment](running.md#subscription-listeners).
+
+The command writes the JSON string `"ready"` to stdout when it connects. A startup failure ends the process with status 1 before `"ready"`. An unknown or withdrawn ID produces a `"withdrawn"` receipt in that case.
+
+Keep stdin and stdout open while watching the source. Several sessions may use the same subscription. Each counts as connected while open, including between reports. See [listener sessions in the current turn](input.md#channel-receivers-and-subscription-listeners).
 
 ## Publish an observation
 
-Choose a distinct, stable `key` for each observation in this subscription. A listener with no saved cursor can report item 17 and save position `"17"` in the same write.
-
-```sh
-subscription_id='release-watch-1'  # Use the ID returned by subscribe.
-printf '%s\n' '{
-  "key": "release-v2.4.0",
-  "text": "Stable release v2.4.0 is available",
-  "cursor": {"to": "17"}
-}' | "$IVENNA" subscription publish "$subscription_id"
-```
-
-The `"accepted"` receipt confirms that the report and position were saved together. Supply `source_time_unix_ms` if the listener knows when the event happened at the source. See the [publish fields and limits](../apps/ivenna/src/help/publish.txt) and the [observation delivered to the focus](input.md#subscription-observations).
-
-## Resume from a cursor
-
-Use `inspect` to recover the listener's last saved position when it starts or resumes.
-
-```sh
-"$IVENNA" subscription inspect "$subscription_id"
-```
-
-After the report for item 17 is accepted, `inspect` returns the active subscription.
+After receiving `"ready"`, write reports as JSON lines to stdin and read one JSON receipt per report from stdout.
 
 ```json
-{"subscription_id":"release-watch-1","focus_id":"core-1","listener":"Report each stable release in the project changelog.","cursor":"17"}
+{"key":"release-v2.4.0","text":"Stable release v2.4.0 is available"}
 ```
 
-With cursor `"17"`, resume after item 17. With `"cursor": null`, choose a starting position in your source. If the entire result is `null`, stop using that ID. See [inspect output and exit status](../apps/ivenna/src/help/inspect.txt).
+| Field | Meaning |
+| --- | --- |
+| `key` | Nonempty string that identifies the observation within this subscription. Use the same key for every attempt to send that observation. |
+| `text` | Observation text of 1–2,048 UTF-8 bytes. |
+| `source_time_unix_ms` | Optional event time at the source, in integer Unix milliseconds from `-62167219200000` through `253402300799000`. |
 
-## Skip an item
+Each line can contain up to 65,536 bytes before the newline. See the [observation delivered to the focus](input.md#subscription-observations).
 
-Use `checkpoint` to save a position without queuing an observation. If item 18 is a prerelease the listener filters out, pass `"17"` as the last saved position and `"18"` as the new position.
+## Write receipts and recovery
 
-```sh
-printf '%s\n' '{"from":"17","to":"18"}' | "$IVENNA" subscription checkpoint "$subscription_id"
-```
+After `"ready"`, each receipt reports the result of processing one line.
 
-A replacement listener can use the same subscription if it understands the cursor format and generates the same keys for previously reported items. See [cursor changes and write receipts](../apps/ivenna/src/help/writes.txt).
+| Receipt | Outcome |
+| --- | --- |
+| `"accepted"` | The report has been saved, either now or on an earlier attempt. Only the first acceptance of a key queues a report. |
+| `"busy"` | The instance database was busy. |
+| `"storage_full"` | The instance database was out of space. |
+| `"invalid_request"` | The line exceeds the size limit, could not be parsed as a report, or contains an invalid field. |
+| `"withdrawn"` | The subscription has been withdrawn. |
 
-## Command results
+The command exits with status 1 after `"withdrawn"` or an oversized line. After other receipts the session stays open for another report. Close stdin to finish with status 0 after the final report. The command processes a final nonempty line even without a newline.
 
-Check the exit status and JSON receipt before advancing your local cursor. On `"cursor_conflict"`, read the saved cursor again before processing more items. See [write receipts and recovery](../apps/ivenna/src/help/writes.txt) for missing receipts and other errors.
+If the output pipe closes while the command writes a receipt, it exits with status 1. A report may already have been saved when a receipt is lost. To retry, reopen the session with the same subscription ID if needed and send the observation with its original key.
 
-In the example, retrying `release-v2.4.0` after checkpointing item 18 returns `"duplicate"` and leaves the cursor at `"18"`.
+## Resume at the source
+
+The listener chooses which items to report and saves its position in its own storage or in the source's consumer state. Wait for `"accepted"` before saving progress past a reported item. If the listener stops before saving its position, it can replay that item with its original key. For a source that cannot replay items, keep the report and key in durable listener storage until acceptance.
+
+For example, a listener can report release 17 and save its position after acceptance. It can skip prerelease 18 and save that position directly. When it restarts, it resumes from the position it saved.
 
 ## Withdrawal
 
-Withdrawing a subscription removes its saved cursor and retry keys. A listener that tries to write to that ID receives `"withdrawn"`. Reports already accepted keep their destination. See [withdrawing a subscription](attention.md#withdrawing-a-subscription).
+Withdrawing a subscription removes its registration and accepted keys. An open session returns `"withdrawn"` on its next valid report. See [withdrawing a subscription](attention.md#withdrawing-a-subscription).
 
-Subscribing again to the same source gives the listener a new ID with its own cursor and retry keys. A key used on the withdrawn subscription can be accepted again on the new one.
+Subscribing again to the same source gives the listener a new ID with its own accepted keys. A key used on the withdrawn subscription can be accepted again on the new one.
 
 ## Reporting after a channel read
 
-A program can use a channel to receive work and a subscription to report its outcome. Give it the `channel_id` for reads and the `subscription_id` from the focus that should receive the reports. See [receiving a channel message](communication.md#receiving-from-a-channel) and [publishing an observation](#publish-an-observation).
-
-Keep the report and its `key` until `publish` returns `accepted` or `duplicate`. If the receipt is missing, retry publication with the same report and key. This lets the program confirm the report independently of the work it received. See [write receipts and recovery](../apps/ivenna/src/help/writes.txt).
+A program can take work from a channel and report its outcome to a subscribed focus. Give it the `channel_id` for receiving work and the `subscription_id` for sending reports. The channel confirms a message handoff, and the subscription confirms receipt of the program's report. See [sending to a channel](communication.md#sending-to-a-channel) and [write receipts](#write-receipts-and-recovery).

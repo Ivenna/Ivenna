@@ -18,17 +18,26 @@ pub const Registry = struct {
     const Channel = struct {
         receivers: std.DoublyLinkedList = .{},
         active: bool = false,
+
+        fn hasReceiver(self: *const Channel) !bool {
+            var candidate = self.receivers.first;
+            while (candidate) |node| : (candidate = node.next) {
+                const receiver: *const Receiver = @alignCast(@fieldParentPtr("node", node));
+                // A hangup can be visible before the reader task unlinks itself.
+                var descriptors = [_]std.posix.pollfd{.{
+                    .fd = receiver.connection.socket.handle,
+                    .events = 0,
+                    .revents = 0,
+                }};
+                if (try std.posix.poll(&descriptors, 0) == 0) return true;
+            }
+            return false;
+        }
     };
     const Receiver = struct {
         connection: Stream,
-        deadline: ?std.Io.Clock.Timestamp,
         node: std.DoublyLinkedList.Node = .{},
         state: enum { waiting, between_reads, finished } = .finished,
-
-        fn expired(self: *const Receiver, io: std.Io) bool {
-            const end = self.deadline orelse return false;
-            return end.durationFromNow(io).raw.toNanoseconds() <= 0;
-        }
 
         fn park(self: *Receiver, receivers: *std.DoublyLinkedList) void {
             receivers.append(&self.node);
@@ -85,28 +94,24 @@ pub const Registry = struct {
         defer _ = active.fetchSub(1, .monotonic);
         defer connection.close(self.io);
         var data: [ipc.request_buffer_size]u8 = undefined;
-        const request = ipc.readRequest(connection, self.io, &data) catch return;
-        var receiver: Receiver = .{
-            .connection = connection,
-            .deadline = if (request.timeout_ms) |ms| .fromNow(self.io, .{ .raw = .fromMilliseconds(ms), .clock = .awake }) else null,
-        };
-        if (!self.startReceive(request.id, &receiver)) return;
-        while (self.waitForNext(request.id, &receiver)) {}
+        const id = ipc.readChannelId(connection, self.io, &data) catch return;
+        var receiver: Receiver = .{ .connection = connection };
+        if (!self.startReceive(id, &receiver)) return;
+        while (self.waitForNext(id, &receiver)) {}
     }
 
     fn waitForNext(self: *Registry, id: []const u8, receiver: *Receiver) bool {
-        const result = ipc.waitForNext(receiver.connection, self.io, receiver.deadline);
+        const requested_next = ipc.waitForNext(receiver.connection, self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (receiver.state == .finished) return false;
         const channel = self.channels.getPtr(id).?;
-        if (receiver.state == .between_reads and result == .next) {
+        if (receiver.state == .between_reads and requested_next) {
             // Rejoin at the back so older pending reads get first chance.
             channel.receivers.remove(&receiver.node);
             receiver.park(&channel.receivers);
             return true;
         }
-        if (result == .timeout) ipc.reply(receiver.connection, .timeout) catch {};
         receiver.finish(&channel.receivers);
         return false;
     }
@@ -133,7 +138,17 @@ pub const Registry = struct {
             .activate = activate,
             .close = close,
             .trySend = trySend,
+            .hasReceiver = hasReceiver,
         } };
+    }
+
+    fn hasReceiver(context: *anyopaque, id: []const u8) !bool {
+        const self: *Registry = @ptrCast(@alignCast(context));
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        const channel = self.channels.getPtr(id).?;
+        std.debug.assert(channel.active);
+        return channel.hasReceiver();
     }
 
     fn reserve(context: *anyopaque, id: []const u8) !void {
@@ -163,7 +178,7 @@ pub const Registry = struct {
         var channel = removed.value;
         while (channel.receivers.first) |node| {
             const receiver: *Receiver = @alignCast(@fieldParentPtr("node", node));
-            ipc.reply(receiver.connection, if (receiver.expired(self.io)) .timeout else .closed) catch {};
+            ipc.reply(receiver.connection, .closed) catch {};
             receiver.finish(&channel.receivers);
         }
         self.allocator.free(removed.key);
@@ -184,11 +199,6 @@ pub const Registry = struct {
             candidate = node.next;
             const receiver: *Receiver = @alignCast(@fieldParentPtr("node", node));
             if (receiver.state != .waiting) continue;
-            if (receiver.expired(self.io)) {
-                ipc.reply(receiver.connection, .timeout) catch {};
-                receiver.finish(&channel.receivers);
-                continue;
-            }
             ipc.reply(receiver.connection, .{ .message = message }) catch |err| switch (err) {
                 error.PeerDisconnected => {
                     receiver.finish(&channel.receivers);
@@ -197,13 +207,9 @@ pub const Registry = struct {
                 error.WouldBlock => continue,
                 else => return err,
             };
-            if (receiver.deadline == null) {
-                receiver.state = .between_reads;
-            } else {
-                receiver.finish(&channel.receivers);
-            }
+            receiver.state = .between_reads;
             return .accepted;
         }
-        return .would_block;
+        return if (try channel.hasReceiver()) .would_block else .no_receiver;
     }
 };
