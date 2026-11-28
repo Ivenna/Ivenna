@@ -87,7 +87,7 @@ Storage failures must not silently replace history with an empty context. [Start
 
 ## Changing stored formats
 
-For instance database changes, keep `schema.sql` current for new databases. Put changes to an existing schema in a numbered SQL file under `migrations/`. Specify which installed formats take each step in the startup code and exercise the supported upgrade paths with their source schemas. [Instance database upgrades](architecture.md#instance-database)
+For the instance database, add a SQL file using the next zero-padded number and append it to the migration list. Keep the version 1 schema and released scripts fixed so fresh and existing databases apply the same later changes. Startup owns the transaction covering the SQL and zug's ledger. Test fresh installation and upgrades from the affected source schemas. [Version 1 schema](../packages/instance_state/src/migrations/baseline_v1.sql) · [Migration list](../packages/instance_state/src/migrations.zig) · [Schema upgrades](architecture.md#schema-upgrades)
 
 For mailbox history, put conversions of earlier ZON records and checkpoints in the format modules. Test with saved bodies in the earlier format and verify that new writes use the current representation. [Record format](../packages/agent/src/history/record.zig) · [Checkpoint format](../packages/agent/src/history/checkpoint.zig) · [Saving and restoration](architecture.md#saving-and-restoration)
 

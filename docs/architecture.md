@@ -36,6 +36,7 @@ flowchart TD
     Agent --> State
     State --> Contracts
     State --> SQLite[packages/sqlite]
+    State --> Zug[zug]
     Agent --> Contracts
     Email --> Contracts
     Responses --> Contracts
@@ -180,13 +181,19 @@ Intake uses the registration to route the result and attach the saved reference 
 
 ## Instance database
 
-`ivenna serve` opens the subscription store at `<DATA_DIR>/state.sqlite3`. The store identifies the installed schema and checks pairing with the selected mailbox checkpoint before applying any migration and updating the schema markers. These steps share one write transaction. WAL mode lets readers proceed while SQLite serializes writes. [Startup code](../packages/instance_state/src/database.zig) · [SQLite isolation](https://www.sqlite.org/isolation.html) · [Upgrade procedure](upgrading.md#moving-receivers-and-listeners-to-sessions)
+`<DATA_DIR>/state.sqlite3` holds subscription registrations, accepted report keys, and reports waiting for admission. `ivenna serve` opens it during startup. Independent listeners open their own connections to publish reports. [Subscription store](../packages/instance_state/src/subscriptions.zig)
 
-For a new instance, startup installs the current schema. For legacy `IVDB`, `IVS2`, and `IVS3` databases, the version 1 migration removes the saved cursor column if the legacy format has it. An `IVS3` database created without the column gets the new markers directly. Like Syncthing, Ivenna embeds the current schema and keeps the upgrade in a numbered SQL file. [Current schema](../packages/instance_state/src/schema.sql) · [Version 1 migration](../packages/instance_state/src/migrations/0001_drop_subscription_cursor.sql) · [Zig `@embedFile`](https://ziglang.org/documentation/0.17.1/#embedFile) · [Syncthing's SQLite schema and migrations](https://github.com/syncthing/syncthing/blob/main/internal/db/sqlite/sql/README.md)
+### Mailbox pairing
 
-In the versioned format, `application_id` identifies the file as an Ivenna instance database and stays fixed at `IVST` across schema revisions. SQLite's `user_version` records the revision. Independent listeners open only the current revision and leave schema changes to `ivenna serve`. [SQLite database header](https://www.sqlite.org/fileformat.html#the_database_header)
+The selected mailbox checkpoint names the database's identity. A checkpoint requires an existing database with that identity, and a database marked bound requires a matching checkpoint. On first startup the registry publishes a checkpoint with the identity before marking the database bound. If startup stops between those writes, the matching checkpoint is enough to reopen the database. [Startup and interruption](#startup-and-interruption) · [Backups and transfers](running.md#backups-and-transfers)
 
-The registry publishes its first mailbox checkpoint with the database's identity before marking the database bound. If startup stops between those writes, the kernel can reopen the database with the matching checkpoint. A bound database requires a matching checkpoint, and a selected checkpoint requires an existing database with the same identity. PostgreSQL's `pg_rewind` also checks system identity before applying the rewind. [PostgreSQL identity check](https://github.com/postgres/postgres/blob/REL_18_0/src/bin/pg_rewind/pg_rewind.c#L735-L748) · [Backup and transfer procedure](running.md#backups-and-transfers)
+### Schema upgrades
+
+Startup checks the database format and mailbox pairing before applying any changes. The checks, migration scripts, and updates to the ledger and format markers share one SQLite write transaction. [Migration entry point](../packages/instance_state/src/migrations.zig) · [SQLite transactions](https://www.sqlite.org/lang_transaction.html) · [Upgrade procedure](upgrading.md#resuming-with-continuity-notes)
+
+The executable embeds the version 1 schema and the numbered scripts. A new database is created from the version 1 schema, which already has no saved cursor column. Zug records the cursor-removal step as applied for new databases, cursorless `IVS3` databases, and `IVST` version 1 databases. It runs the step on `IVDB`, `IVS2`, and `IVS3` databases that still have the column. All paths apply remaining scripts in order. [Version 1 schema](../packages/instance_state/src/migrations/baseline_v1.sql) · [Cursor removal](../packages/instance_state/src/migrations/0001_drop_subscription_cursor.sql) · [Zig `@embedFile`](https://ziglang.org/documentation/0.17.1/#embedFile) · [Zug baselines](https://tangled.org/zzstoatzz.io/zug#baselines)
+
+The format with a ledger uses `IVST` for SQLite's `application_id` and a fixed `user_version` of `2` so earlier builds reject it. The `zug_migrations` table records which steps ran. On startup Ivenna requires the installed migration IDs to match the beginning of its plan. Zug verifies those entries and applies the rest. [SQLite database header](https://www.sqlite.org/fileformat.html#the_database_header) · [Zug migration records](https://tangled.org/zzstoatzz.io/zug#migration-records)
 
 ### Subscription delivery
 
@@ -198,7 +205,9 @@ After the [startup checkpoint](#startup-and-interruption) is published, the regi
 
 #### Listener connections
 
-A `listen` process owns a SQLite connection for publication and holds a Linux open-file-description read lock for the session. The registration's numeric ID selects a byte in `<DATA_DIR>/subscription-listeners.lock`. Several listeners can hold shared locks on that byte. Each lock lasts until its file description closes, so an independent listener can keep its lock across a kernel restart. [Lock implementation](../packages/instance_state/src/listener_presence.zig) · [Listener deployment](running.md#subscription-listeners)
+A `listen` process can open while the kernel is stopped. Before accepting reports, it checks the database format and requires the full list of migration IDs and checksums for its build, with every entry marked clean. [Compatibility check](../packages/instance_state/src/migrations.zig) · [Listener deployment](running.md#subscription-listeners)
+
+Each listener holds a Linux open-file-description read lock for its session. The registration's numeric ID selects a byte in `<DATA_DIR>/subscription-listeners.lock`. Several listeners can hold shared locks on that byte. Each lock lasts until the listener closes its file description, so an independent listener can keep its lock across a kernel restart. [Lock implementation](../packages/instance_state/src/listener_presence.zig)
 
 ## Working history and user messages
 

@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
             .{ b.dependency("agent", options).namedLazyPath("yaml-license"), "licenses/yaml-zig.txt" },
             .{ b.dependency("content", options).namedLazyPath("zignal-license"), "licenses/zignal.txt" },
             .{ b.dependency("sqlite", options).namedLazyPath("zqlite-license"), "licenses/zqlite.txt" },
+            .{ b.dependency("instance_state", options).namedLazyPath("zug-license"), "licenses/zug.txt" },
         };
         inline for (notices) |notice| {
             release.dependOn(&b.addInstallFile(notice[0], notice[1]).step);

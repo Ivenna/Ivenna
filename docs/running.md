@@ -304,7 +304,7 @@ An interrupted operation may have produced effects without a saved result. Inclu
 
 Before updating across a change in storage format, make a [matched backup](#backups-and-transfers) and keep the executable that can read it. Use that executable to resume the instance from the backup if needed. To start a fresh instance, use a separate mailbox and `DATA_DIR`.
 
-If `ivenna serve` reports `IncompatibleStateSchema`, check `DATA_DIR` and use a build that supports the instance database's schema. After installing an update, start its kernel before connecting new listeners so startup can apply any supported migration.
+If `ivenna serve` reports `IncompatibleStateSchema`, verify `DATA_DIR` and which build last opened the instance database. Use a build that supports the installed schema. If a listener reports the same error after an update, check that it uses the kernel's build. Start the updated kernel before connecting listeners so startup can apply any supported migration. [Instance database](architecture.md#instance-database)
 
 See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
 

@@ -27,6 +27,7 @@
         "apps/memory",
         "packages/instance_state/build.zig",
         "packages/instance_state/build.zig.zon",
+        "packages/instance_state/LICENSE.zug",
         "packages/instance_state/src",
         "packages/sqlite/build.zig",
         "packages/sqlite/build.zig.zon",

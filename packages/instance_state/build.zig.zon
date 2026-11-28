@@ -6,6 +6,10 @@
     .dependencies = .{
         .agent_contracts = .{ .path = "../agent_contracts" },
         .sqlite = .{ .path = "../sqlite" },
+        .zug = .{
+            .url = "https://codeload.github.com/zzstoatzz/zug/zip/d4ebb46008aed5a91d3feb24c679d4eeedda328c",
+            .hash = "zug-0.2.0-alpha.0-h4vXbRCwAAD8MKVUlLYj7aw48U06VaznoVcikwfv2x42",
+        },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src" },
+    .paths = .{ "build.zig", "build.zig.zon", "LICENSE.zug", "src" },
 }

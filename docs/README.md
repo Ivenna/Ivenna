@@ -43,6 +43,7 @@
 | Review or edit prompts and tool descriptions | [Model-facing resources](development.md#model-facing-resources) |
 | Understand what the model receives when a tool returns text, an image, or a file | [Tool content](content.md) |
 | Understand component ownership and how execution fits together | [Architecture guide](architecture.md) |
+| Change the instance database or retained history format | [Changing stored formats](development.md#changing-stored-formats) |
 | Change implementation and documentation, build from source, and validate work | [Development guide](development.md) |
 | Run automated checks and validate behavior with running services | [Testing guide](testing.md) |
 | Publish a tagged release, build a snapshot, or package source locally | [Releasing Ivenna](releasing.md) |

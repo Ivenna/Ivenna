@@ -2,13 +2,17 @@
 
 ## Resuming with continuity notes
 
-Stop the kernel, keep the previous executable with a matched backup of the mailbox and instance database, and start the updated build with the same instance data. Use the matched backup and its executable to roll back after the updated kernel saves a continuity record. [Updating the executable](running.md#updating-the-executable) · [Backups and transfers](running.md#backups-and-transfers)
+1. Stop the kernel and independent subscription listeners. Keep the previous executable with a matched backup of the mailbox and instance database. [Backups and transfers](running.md#backups-and-transfers)
+2. If you are upgrading across the move to sessions, back up listener state, update the client programs, and recover any stored source positions and pending reminders you want to carry forward. [Older receivers](#update-older-channel-receivers) · [Listeners and source positions](#update-subscription-listeners) · [Scheduled reminders](#removing-scheduled-attention)
+3. Install the updated build and run `ivenna serve` with the existing configuration, mailbox, data directory, and memory workspace. Wait for readiness, then start listeners with the updated executable. [Updating the executable](running.md#updating-the-executable) · [Checking readiness](running.md#service-status-and-reception)
 
-The updated kernel can read earlier handovers and continuity notes. In captured inference input, read their text under `continuity.text` and identify the main role as `current.role: main`. The main focus keeps its `core-1` reference. Reuse the instance's context settings and memory workspace. [Input contract](input.md#continuity-notes) · [Context budgets](running.md#context-budgets) · [Earlier history formats](architecture.md#saving-and-restoration)
+Startup moves the instance database to the new migration record format before reception opens. To roll back after that upgrade commits, restore the matched backup, including any listener state you backed up, and start the previous executable. [Instance database](architecture.md#instance-database) · [Restore an instance](running.md#backups-and-transfers)
+
+The updated kernel restores earlier handovers and continuity notes. In captured inference input, read the note under `continuity.text` and identify the main focus by `current.role` set to `main`. The focus keeps its `core-1` reference. [Input contract](input.md#continuity-notes) · [Earlier history formats](architecture.md#saving-and-restoration)
 
 ## Moving receivers and listeners to sessions
 
-This update changes the receiver and listener commands and removes `schedule_attention`. The kernel upgrades the instance database on its first start with the new build, even for an instance with no receivers or listeners.
+Use these steps when moving from individual receiver or subscription commands to sessions. This transition also retires `schedule_attention`. Startup applies the database changes even for an instance with no receivers or listeners.
 
 1. Stop the kernel and its receiver and listener processes, including independent clients. Keep the previous executable with a matched backup of the mailbox, instance database, and listener state. [Backups and transfers](running.md#backups-and-transfers)
 2. Install the same updated build for the kernel and its clients. Update your programs, carry forward any saved source positions, and recover the time and text of any pending reminders you want to keep. [Subscription listeners](#update-subscription-listeners) · [Channel receivers](#update-older-channel-receivers) · [Removing scheduled attention](#removing-scheduled-attention)
@@ -36,7 +40,7 @@ The listener owns later source progress. [Resuming at the source](subscriptions.
 
 ### Removing scheduled attention
 
-The first startup with this build retires scheduled wakeups that have yet to enter working history, including copies already in `Ivenna Callbacks`. Wakeup observations already in history and dated handover samples remain readable. Host completions and queued subscription reports still go to their original focuses.
+The session upgrade retires scheduled wakeups that have yet to enter working history, including copies already in `Ivenna Callbacks`. Wakeup observations already in history and dated handover samples remain readable. Host completions and queued subscription reports still go to their original focuses.
 
 Use the matched backup from the [session upgrade](#moving-receivers-and-listeners-to-sessions) to recover reminders. Take this backup before first startup even if your clients already use sessions.
 
