@@ -8,9 +8,7 @@ The project is exploratory. Data structures, interfaces, and module boundaries a
 
 Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided.
 
-When a design changes, remove superseded runtime interfaces and state. Keep the decoding needed to read retained history at the storage boundary.
-
-For instance database changes, keep `schema.sql` current for new databases. Put changes to an existing schema in a numbered SQL file under `migrations/`. Specify which installed formats take each step in the startup code and exercise the supported upgrade paths with their source schemas. [Instance database upgrades](architecture.md#instance-database)
+When a design changes, remove superseded runtime interfaces and state. Keep the reader for retained data at the storage boundary. [Changing stored formats](#changing-stored-formats)
 
 Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 
@@ -61,7 +59,7 @@ Review model-facing text in the request the focus will receive. Read the shared 
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. When web access is enabled, the [DeepSeek Fetch client](../packages/resources/src/deepseek.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 
-Use the shared prompt for orientation across focuses and turns. Keep instructions about writing the note in the reflection prompt. In a tool description, describe what the focus can do and what the call will change. A memory read describes what the focus can revisit in its rooms. Put the services involved in those reads and any charges in the deployment documentation. When the focus explicitly chooses to send material to a service, explain the destination and potential charge at that choice. Express allowed values and bounds in the schema and match defaults to runtime behavior. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption) · [Tool content](content.md)
+Use the shared prompt for orientation across focuses and turns. Put instructions for writing the note in the reflection prompt. Describe what each tool can do and what its call changes. Explain the destination and potential charge where the focus explicitly chooses to send material to a service. Describe service setup and charges for ordinary reads in the deployment guide. Express allowed values and bounds in the schema and match defaults to runtime behavior. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption) · [Tool content](content.md)
 
 Use observations and tool results to convey what happened, which effects are confirmed, and what remains uncertain. When asking for a revision, say what the focus can change. If a continuity note leaves too little room to continue, ask for a shorter account and leave the choice of content to Ivenna. Keep the measured size and limit in operator logs with other runtime diagnostics.
 
@@ -86,6 +84,12 @@ Trace changed state from the operation that commits it to the startup path that 
 Activity expressions are cross-session observations of what the source said, distinct from a committed model/tool round. Preserve unread reports independently of the source context. Advance their consumption in the same checkpoint that admits them to the main focus's history. Publish new activity expressions only from ordinary activity work.
 
 Storage failures must not silently replace history with an empty context. [Startup](architecture.md#startup-and-interruption) reconstructs understanding and pending work without replaying effects.
+
+## Changing stored formats
+
+For instance database changes, keep `schema.sql` current for new databases. Put changes to an existing schema in a numbered SQL file under `migrations/`. Specify which installed formats take each step in the startup code and exercise the supported upgrade paths with their source schemas. [Instance database upgrades](architecture.md#instance-database)
+
+For mailbox history, put conversions of earlier ZON records and checkpoints in the format modules. Test with saved bodies in the earlier format and verify that new writes use the current representation. [Record format](../packages/agent/src/history/record.zig) · [Checkpoint format](../packages/agent/src/history/checkpoint.zig) · [Saving and restoration](architecture.md#saving-and-restoration)
 
 ## Repository and build
 

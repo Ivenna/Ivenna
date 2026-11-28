@@ -246,7 +246,7 @@ Images travel in the function-call output as `input_image` parts. The encoder bu
 
 ## Bounded model context
 
-The kernel can make room in working history through quiet reflection before the next ordinary inference. A focus's pending continuation consists of its complete tool exchange awaiting inference, if present, and any unanswered observations already admitted to its history. Queued observations enter the ordinary request through [admission](#activation-admission).
+Quiet reflection asks the focus for a note about what it wants to carry forward. Compaction replaces an older part of working history with the accepted note. A pending continuation consists of the tool exchange awaiting inference, if any, and unanswered observations already admitted to history. Observations still in the queue enter an ordinary request through admission. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption) · [Activation admission](#activation-admission)
 
 ### When compaction runs
 
@@ -258,7 +258,7 @@ When the count is unavailable, including after a fork or history replacement, th
 
 ### History used for reflection
 
-Compaction carries admitted unanswered observations forward intact. It also preserves the pending tool exchange unless that exchange and the unanswered observations together exceed an adapter limit. In that case, the exchange can enter the reflection. During soft compaction, either role can also retain up to two of its own completed exchanges and their preceding observations when the additional history fits within 256 KiB and contains no file references. Quiet reflection considers the older prefix being replaced.
+Quiet reflection considers the history being replaced. Compaction carries admitted unanswered observations forward intact. It also carries the pending tool exchange forward when the exchange and observations fit together. If they exceed an adapter limit, the exchange can enter the reflection. During soft compaction, either focus can keep up to two of its own completed exchanges and their preceding observations if their encoded size fits within 256 KiB and they contain no file references.
 
 ### Sampling state and preparing the request
 
@@ -266,7 +266,7 @@ The session registry reads `current` and samples runtime state under its lock. T
 
 The reflection request combines the system prompt and selected history with a temporary `quiet_reflection` turn carrying the shared reflection instructions and state sample. It uses the configured reflection effort and offers no tools. See the [reflection instructions](../packages/agent/src/quiet_reflection.md) and [input contract](input.md#quiet-reflection-and-resumption).
 
-If the reflection request contains media and exceeds an adapter limit, the runtime substitutes omission notices for images and file references in that request and measures it again. The request keeps tool-call IDs and the original text, including source descriptions.
+If a reflection request exceeds an image or file limit, the runtime substitutes omission notices for that kind of media and measures the request again. A byte limit can require omitting both kinds. The request keeps tool-call IDs and the original text, including source descriptions.
 
 ### Resuming after quiet reflection
 
@@ -276,7 +276,7 @@ Soft compaction tries one reflection. The kernel tests a replacement with the ob
 
 At a hard limit, the kernel checks whether removing older history would leave room for the first queued observation. If the observation still cannot fit, it stays queued. A new activity whose assignment alone exceeds the available space pauses before requesting a reflection.
 
-If the kernel generates a continuity note, it tries the replacement with queued observations first. When only the note and pending work fit, it commits that continuation. An unusable reflection or an oversized replacement can prompt one revision with a fresh state sample. If the kernel cannot make room for the first queued observation, it can still continue pending work with the original history when that request fits. If no continuation fits, the worker interrupts the activation. See [interrupted activations](#interrupted-activations) and [inference retries](#model-transport).
+With a proposed note, the kernel first tries the replacement with queued observations. A focus with pending work can continue with the new note and that work alone if the queued observation still cannot fit. An unusable reflection or an oversized replacement can prompt one revision with a fresh state sample. If the replacement fails, pending work can continue with the original history when that request fits. Otherwise the worker interrupts the activation. [Interrupted activations](#interrupted-activations) · [Inference retries](#model-transport)
 
 ## Persistent working history
 
@@ -293,7 +293,7 @@ Each entry contains an event record, a continuity note, or a complete model/tool
 
 Working history and the activity outbox share a record codec for UTF-8 ZON bodies and SHA-256 content keys. The encoder can omit defaulted optional fields. An entry record contains the entry and its predecessor's key within the segment, or null for the first entry. The storage group and predecessor keys distinguish entries with equal payloads. Unread internal observations occupy a separate record in the session's current group. See the [record codec](../packages/agent/src/record_codec.zig).
 
-History persistence encodes inline image bytes as Base64 to avoid repeated escaping of binary data in ZON and JMAP JSON. It restores the original bytes and format on read. See [history persistence](../packages/agent/src/history.zig).
+The session record encoder stores inline image bytes as Base64 to avoid repeated escaping of binary data in ZON and JMAP JSON. The reader restores the original bytes and format. [Session record format](../packages/agent/src/history/record.zig)
 
 One checkpoint covers all registered sessions. For each session it records the internal ID, `focus_id`, role, epoch, storage group, committed head, entry count, and an optional key for unread internal observations. See [recovery state](#recovery-state) for the state used to continue execution.
 
@@ -313,9 +313,9 @@ Restoration follows the selected checkpoint's predecessor chains using record me
 
 Owners of retained event and continuity records must match the complete ID of the restoring focus or the main focus (`core-1`). A saved channel's opening focus ID must have a suffix below the next focus sequence. If the opener is still in the checkpoint, the recorded ID must match that session's complete ID.
 
-The reader restores original image bytes from either raw-byte or Base64 records. For earlier file parts it requires the saved upload ID and discards the source bytes. At the storage boundary, the reader restores text from earlier handover and continuity formats. It joins the two passages of a split continuity account in their original order. It converts old channel and subscription ID lists to sampled records with null descriptions and drops retired feed IDs. See [upgrading working history](upgrading.md#working-history-encoding).
+The history format modules convert earlier ZON bodies into the current types during restoration. The record reader restores images from raw bytes or Base64 and uses the saved upload ID for earlier file parts. It restores handovers and earlier continuity notes, joining split passages in their original order. It converts old channel and subscription ID lists to sampled records and drops retired feed IDs. Selected records keep their original bodies and keys. Newly stored records use the current representation. [Record reader](../packages/agent/src/history/record.zig) · [Upgrading working history](upgrading.md#working-history-encoding)
 
-The checkpoint reader retires pending wakeup registrations from older builds and preserves the next callback ID. Intake can then acknowledge already published wakeup mail as a duplicate. Previously admitted wakeup observations and dated samples remain readable. [Callback admission](#event-sources-and-callback-admission) · [Retained callback fields](input.md#callback-observations) · [Upgrade guide](upgrading.md#removing-scheduled-attention)
+The checkpoint reader retires pending wakeup registrations from older builds and preserves the next callback ID. Intake can then acknowledge already published wakeup mail as a duplicate. Previously admitted wakeup observations and dated samples remain readable. [Checkpoint reader](../packages/agent/src/history/checkpoint.zig) · [Callback admission](#event-sources-and-callback-admission) · [Retained callback fields](input.md#callback-observations) · [Upgrade guide](upgrading.md#removing-scheduled-attention)
 
 At startup the registry validates every selected session's history in temporary memory, then keeps a materialized context for the main focus. When it schedules an activity with no loaded context, it reads that activity's segment. The registry restores the outbox's unread metadata at startup and reads report bodies at admission. Delivery objects, receipts, worker ownership, and host process handles exist only at runtime. See [startup and interruption](#startup-and-interruption).
 

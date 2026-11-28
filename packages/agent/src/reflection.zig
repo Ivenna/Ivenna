@@ -14,7 +14,7 @@ pub const Rejection = union(enum) {
         return switch (self) {
             .empty_reflection => "Leave a brief reflection in your own words.",
             .unexpected_tool_call => "Write your reflection directly.",
-            .too_large => "Make the reflection shorter. Keep what you most need to recognize yourself and find your bearings.",
+            .too_large => "Leave yourself a shorter note.",
         };
     }
 
@@ -47,12 +47,10 @@ pub fn reflect(engine: *Engine, arena: Allocator, context: *const Context, snaps
         .tools = &.{},
         .reasoning_effort = engine.reasoning.compaction,
     };
-    var violation = (try engine.model.measure(arena, request)).violation;
-    if (violation != null and try Context.replaceReflectionMedia(arena, history)) {
-        violation = (try engine.model.measure(arena, request)).violation;
+    while ((try engine.model.measure(arena, request)).violation) |limit| {
+        if (!try Context.replaceReflectionMedia(arena, history, limit.kind))
+            return .{ .interrupted = Engine.reportRequestLimit(context.focus_id, "quiet reflection request", limit) };
     }
-    if (violation) |limit|
-        return .{ .interrupted = Engine.reportRequestLimit(context.focus_id, "quiet reflection request", limit) };
     var inference = switch (try engine.infer(context.focus_id, request, retry)) {
         .ready => |result| result,
         .interrupted => |reason| return .{ .interrupted = reason },

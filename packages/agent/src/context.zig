@@ -106,12 +106,14 @@ pub const Context = struct {
         return buildRequest(a, self.messages.items[pending.message_index..], .{ .current = current, .purpose = .{ .work = events } });
     }
 
-    /// Completed exchanges and observations before the pending continuation
-    /// that can be retained in addition to it.
-    pub fn additionalRecentItems(self: *const Context) []const Model.Item {
+    /// Recent completed exchanges are eligible to retain when their older
+    /// prefix can still be compacted at the soft threshold.
+    pub fn additionalRecentItems(self: *const Context) ?[]const Model.Item {
         const pending = self.compactionBoundary(.keep_latest_tool_round);
         const recent = self.recentRounds(pending);
-        return self.messages.items[recent.message_index..pending.message_index];
+        const items = self.messages.items[recent.message_index..pending.message_index];
+        if (items.len == 0 or !self.canCompactPrefix(recent.entry_index)) return null;
+        return items;
     }
 
     pub fn hasToolRoundToKeep(self: *const Context) bool {
@@ -127,8 +129,12 @@ pub const Context = struct {
     }
 
     /// Reconsider a lone continuity record only when the next request needs more room.
-    pub fn canCompact(self: *const Context, compaction_scope: CompactionScope) bool {
-        return switch (self.reflectionEntryCount(compaction_scope)) {
+    pub fn canSoftCompact(self: *const Context) bool {
+        return self.canCompactPrefix(self.reflectionEntryCount(.keep_latest_tool_round));
+    }
+
+    fn canCompactPrefix(self: *const Context, entry_count: usize) bool {
+        return switch (entry_count) {
             0 => false,
             1 => switch (self.entries.items[0]) {
                 .record => |record| record != .continuity,
@@ -213,9 +219,9 @@ pub const Context = struct {
         });
     }
 
-    /// Replace media in the reflection request while keeping the source descriptions.
+    /// Replace media affected by an adapter limit while keeping source descriptions.
     /// Return true when a request item changed. The retained history stays intact.
-    pub fn replaceReflectionMedia(a: Allocator, messages: []Model.Item) !bool {
+    pub fn replaceReflectionMedia(a: Allocator, messages: []Model.Item, limit: @FieldType(Model.Limit, "kind")) !bool {
         var replaced = false;
         for (messages) |*item| {
             if (item.* != .tool_result) continue;
@@ -223,8 +229,8 @@ pub const Context = struct {
             for (item.tool_result.content.parts, 0..) |part, index| {
                 const note = switch (part) {
                     .text => continue,
-                    .image => "[Image unavailable during this reflection.]",
-                    .file_reference => "[File unavailable during this reflection.]",
+                    .image => if (limit == .files) continue else "[Image unavailable during this reflection.]",
+                    .file_reference => if (limit == .images) continue else "[File unavailable during this reflection.]",
                 };
                 if (copy == null) copy = try a.dupe(Model.Content.Part, item.tool_result.content.parts);
                 copy.?[index] = .{ .text = note };
@@ -451,16 +457,28 @@ test "compaction reflects on older entries and carries forward the complete late
     try original.appendBatch(latest[0..1], latest[1..]);
 
     const snapshot: Input.Snapshot = .{ .current = current, .state = state };
-    const reflection = try original.reflectionRequest(a, snapshot, "Reflect.", .keep_latest_tool_round);
-    try testing.expectEqualDeep(earlier, reflection[1 .. reflection.len - 1]);
-    try testing.expect(try Context.replaceReflectionMedia(a, reflection));
-    try testing.expectEqualDeep(earlier[0], reflection[1]);
-    const projected_reply = reflection[2].tool_result;
-    try testing.expectEqualStrings(earlier[1].tool_result.call_id, projected_reply.call_id);
-    const parts = projected_reply.content.parts;
-    try testing.expectEqualDeep(earlier[1].tool_result.content.parts[0], parts[0]);
-    try testing.expect(parts[1] == .text and std.mem.indexOf(u8, parts[1].text, image_url) == null);
-    try testing.expect(parts[2] == .text);
+    for ([_]@FieldType(Model.Limit, "kind"){ .request_bytes, .images, .files }) |limit| {
+        const reflection = try original.reflectionRequest(a, snapshot, "Reflect.", .keep_latest_tool_round);
+        try testing.expectEqualDeep(earlier, reflection[1 .. reflection.len - 1]);
+        try testing.expect(try Context.replaceReflectionMedia(a, reflection, limit));
+        try testing.expect(!try Context.replaceReflectionMedia(a, reflection, limit));
+        try testing.expectEqualDeep(earlier[0], reflection[1]);
+        const projected_reply = reflection[2].tool_result;
+        const original_reply = earlier[1].tool_result;
+        try testing.expectEqualStrings(original_reply.call_id, projected_reply.call_id);
+        const parts = projected_reply.content.parts;
+        try testing.expectEqualDeep(original_reply.content.parts[0], parts[0]);
+        if (limit == .files) {
+            try testing.expectEqualDeep(original_reply.content.parts[1], parts[1]);
+        } else {
+            try testing.expect(parts[1] == .text and std.mem.indexOf(u8, parts[1].text, image_url) == null);
+        }
+        if (limit == .images) {
+            try testing.expectEqualDeep(original_reply.content.parts[2], parts[2]);
+        } else {
+            try testing.expect(parts[2] == .text);
+        }
+    }
     try testing.expectEqualDeep(earlier, original.records()[0].exchange);
 
     const continuity: Input.Continuity = .{

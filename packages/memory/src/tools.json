@@ -35,7 +35,7 @@
   },
   {
     "name": "recall_memory",
-    "description": "Follow a clue to something you kept. Search text within a room and its descendants and return previews of matching lines.",
+    "description": "Follow a clue to something you kept. Search text within a room and its descendants and return previews of matching lines with their memory addresses.",
     "parameters": {
       "type": "object",
       "properties": {

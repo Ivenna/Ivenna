@@ -391,7 +391,7 @@ pub const Kernel = struct {
             .ready => |ready| ready,
             .over_limit => |limit| return self.prepareLimitedRequest(a, work, history, current, limit),
         };
-        if (history.canCompact(.keep_latest_tool_round) and try self.reachedCompactionThreshold(history, current, work.session.progress.last_input_tokens)) {
+        if (history.canSoftCompact() and try self.reachedCompactionThreshold(history, current, work.session.progress.last_input_tokens)) {
             const scope = try self.softCompactionScope(a, history);
             switch (try self.compactRequest(a, work, history, current, scope, .{ .threshold = prepared })) {
                 .ready => |input| return .{ .ready = input },
@@ -462,9 +462,7 @@ pub const Kernel = struct {
     }
 
     fn softCompactionScope(self: *Kernel, a: Allocator, history: *const Context) !Context.CompactionScope {
-        if (!history.canCompact(.keep_recent_rounds)) return .keep_latest_tool_round;
-        const additional = history.additionalRecentItems();
-        if (additional.len == 0) return .keep_latest_tool_round;
+        const additional = history.additionalRecentItems() orelse return .keep_latest_tool_round;
         for (additional) |item| {
             if (item != .tool_result) continue;
             for (item.tool_result.content.parts) |part| {
