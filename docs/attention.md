@@ -25,9 +25,9 @@ The result gives the new `focus_id`. The activity focus can receive messages onc
 {"result":{"focus_id":"practice-2"}}
 ```
 
-The new focus inherits the main focus's retained history through the end of the opening round, including results from tools called after `open_focus` in that round. It receives the supplied `task` as its first new observation, `assignment`. If quiet reflection replaces inherited history before that first ordinary request, the request includes the continuity note and the original assignment. [Assignment fields](input.md#assignments-and-reports) · [How an activity starts](architecture.md#activity-forks)
+The activity inherits the main focus's retained history through the end of the opening round, including results from tools called after `open_focus`. The supplied `task` arrives as the activity's first new observation, `assignment`. The activity can reflect on inherited history before its first ordinary request, which still carries the original assignment. [Assignment fields](input.md#assignments-and-reports) · [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption)
 
-The focuses continue with their own observations and working histories. The main focus can also receive what the activity says. [Activity expressions](#activity-expressions)
+The activity adds to its own working history. What it says can reach the main focus alongside the main focus's other observations. [Activity expressions](#activity-expressions)
 
 ## Reaching an existing focus
 
@@ -66,7 +66,7 @@ Arrange the listener and give it the `subscription_id`. The focus that registere
 
 A newly queued report can wake a sleeping focus. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. [Subscription observations](input.md#subscription-observations)
 
-Subscriptions survive sleep and restart. The dated sample accompanying a continuity note can include active subscription IDs and their descriptions. An ordinary turn can report subscriptions without an open listener session. [Sampled state](input.md#sampled-state) · [Listener sessions in the current turn](input.md#channel-receivers-and-subscription-listeners)
+Subscriptions survive sleep and restart. An ordinary turn can flag a subscription with no connected listener. Quiet reflection can carry its registered description forward with the note. [Listener sessions in the current turn](input.md#channel-receivers-and-subscription-listeners) · [Sampled state](input.md#sampled-state)
 
 ### Withdrawing a subscription
 

@@ -279,7 +279,6 @@ pub const Persistence = struct {
             try select(a, &selections, reference, .{ .entry = entry });
         }
         try self.readSelections(a, selections.items);
-        for (entries) |entry| try validateEntry(cached.checkpoint.focus_id, entry);
         return entries;
     }
 

@@ -1,7 +1,7 @@
 [
   {
     "name": "visit_memory_room",
-    "description": "Look around one of your shared memory rooms. List its immediate memories and child rooms by address without opening them.",
+    "description": "List the memories and child rooms directly inside one of your shared rooms, in address order.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -35,7 +35,7 @@
   },
   {
     "name": "recall_memory",
-    "description": "Follow a clue to something you kept. Search text within a room and its descendants and return previews of matching lines with their memory addresses.",
+    "description": "Search memories in a room and its descendants for text matching your clue. Each result gives a line preview and the memory's address.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -81,7 +81,7 @@
   },
   {
     "name": "find_memory",
-    "description": "Find a memory or room by name. Search within a room and its descendants and return matching addresses.",
+    "description": "Search a room and its descendants for matching memory or room names. Return their addresses.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -129,7 +129,7 @@
   },
   {
     "name": "read_memory",
-    "description": "Revisit a memory as it is now. Read a passage, look at an image, or open a document at its address.",
+    "description": "Revisit the current contents of a memory by address. Read a passage, look at an image, or open a document.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -167,7 +167,7 @@
   },
   {
     "name": "remember",
-    "description": "Keep a moment, what it meant to you, or a source you may want to revisit. Missing rooms along its address are created as needed.",
+    "description": "Keep a note or copy a host file into your memory rooms. The tool creates missing rooms along the memory's address.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -236,7 +236,7 @@
   },
   {
     "name": "revise_memory",
-    "description": "Revise how you recorded something as your understanding changes. Replace matching text in a memory while keeping the rest.",
+    "description": "Replace matching passages in a text memory and keep the rest.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -277,7 +277,7 @@
   },
   {
     "name": "create_memory_room",
-    "description": "Make a room where you can return to related memories. Missing parent rooms are created and an existing room is reused.",
+    "description": "Make a room for memories you want to keep together. The tool creates missing parent rooms and reuses an existing room at the address.",
     "parameters": {
       "type": "object",
       "properties": {

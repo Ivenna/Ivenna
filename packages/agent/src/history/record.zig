@@ -51,43 +51,13 @@ const StoredEntry = union(enum) {
 
 const StoredRecord = union(enum) {
     events: Input.EventGroup,
-    continuity: StoredContinuity,
+    continuity: Input.Continuity,
     handover: struct {
         focus_id: []const u8,
         observed_at_unix_ms: i64,
         summary: []const u8,
         state: LegacyState,
     },
-};
-
-const StoredContinuity = struct {
-    focus_id: []const u8,
-    observed_at_unix_ms: i64,
-    text: ?[]const u8 = null,
-    account: ?union(enum) {
-        reflection: struct { self: []const u8, attention: []const u8 },
-        earlier_note: []const u8,
-    } = null,
-    state: Input.State,
-
-    fn restore(self: StoredContinuity, a: Allocator) !Input.Continuity {
-        const text = if (self.account) |account| blk: {
-            if (self.text != null) return error.InvalidHistory;
-            break :blk switch (account) {
-                .reflection => |reflection| if (reflection.attention.len == 0)
-                    reflection.self
-                else
-                    try std.mem.concat(a, u8, &.{ reflection.self, "\n\n", reflection.attention }),
-                .earlier_note => |note| note,
-            };
-        } else self.text orelse return error.InvalidHistory;
-        return .{
-            .focus_id = self.focus_id,
-            .observed_at_unix_ms = self.observed_at_unix_ms,
-            .text = text,
-            .state = self.state,
-        };
-    }
 };
 
 const LegacyState = struct {
@@ -158,12 +128,7 @@ const StoredPart = union(enum) {
 fn storeEntry(a: Allocator, entry: Entry) !StoredEntry {
     if (entry == .record) return .{ .record = switch (entry.record) {
         .events => |events| .{ .events = events },
-        .continuity => |continuity| .{ .continuity = .{
-            .focus_id = continuity.focus_id,
-            .observed_at_unix_ms = continuity.observed_at_unix_ms,
-            .text = continuity.text,
-            .state = continuity.state,
-        } },
+        .continuity => |continuity| .{ .continuity = continuity },
     } };
     const items = try a.alloc(StoredEntry.Item, entry.exchange.len);
     for (entry.exchange, items) |item, *stored| stored.* = switch (item) {
@@ -192,7 +157,7 @@ fn restoreEntry(a: Allocator, temporary: Allocator, value: StoredEntry) !Entry {
     if (value == .record) {
         const record: Input.Record = switch (value.record) {
             .events => |events| .{ .events = events },
-            .continuity => |continuity| .{ .continuity = try continuity.restore(temporary) },
+            .continuity => |continuity| .{ .continuity = continuity },
             .handover => |legacy| .{ .continuity = .{
                 .focus_id = legacy.focus_id,
                 .observed_at_unix_ms = legacy.observed_at_unix_ms,
@@ -213,44 +178,4 @@ fn restoreEntry(a: Allocator, temporary: Allocator, value: StoredEntry) !Entry {
         },
     };
     return .{ .exchange = items };
-}
-
-test "older continuity records restore and rewrite their prose as one note" {
-    const t = std.testing;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    for ([_]struct { account: []const u8, text: []const u8 }{
-        .{
-            .account = ".{.reflection=.{.self=\"I remember why I promised.\",.attention=\"Read the latest letter.\"}}",
-            .text = "I remember why I promised.\n\nRead the latest letter.",
-        },
-        .{
-            .account = ".{.reflection=.{.self=\"I remember why I promised.\",.attention=\"\"}}",
-            .text = "I remember why I promised.",
-        },
-        .{
-            .account = ".{.earlier_note=\"  Keep investigating.\\n\"}",
-            .text = "  Keep investigating.\n",
-        },
-    }) |sample| {
-        const body = try std.mem.concat(a, u8, &.{
-            ".{.entry=.{.previous=null,.value=.{.record=.{.continuity=.{" ++
-                ".focus_id=\"core-1\",.observed_at_unix_ms=900,.account=",
-            sample.account,
-            ",.state=.{.activities=.{\"review-2\"},.callbacks=.{}}}}}}}",
-        });
-        const entry = try decodeEntry(a, a, null, body);
-        const note = entry.record.continuity;
-        try t.expectEqualStrings(sample.text, note.text);
-        try t.expectEqualStrings("core-1", note.focus_id);
-        try t.expectEqual(@as(i64, 900), note.observed_at_unix_ms);
-        try t.expectEqualStrings("review-2", note.state.activities[0]);
-
-        const stored = try encodeEntry(a, null, entry);
-        try t.expect(std.mem.indexOf(u8, stored, ".text=") != null);
-        try t.expect(std.mem.indexOf(u8, stored, ".account=") == null);
-        const rewritten = try decodeEntry(a, a, null, stored);
-        try t.expectEqualDeep(note, rewritten.record.continuity);
-    }
 }

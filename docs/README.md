@@ -7,7 +7,7 @@
 | Write to an instance by email, share material to read, or follow up | [Correspondence](usage.md) |
 | Send to a correspondent, focus, or channel | [Sending a message](communication.md#sending-a-message) |
 | Open or close a channel | [Channels](communication.md#channels) |
-| Open another focus and follow its work | [Opening a focus](attention.md#opening-a-focus) |
+| Open an activity and follow its work | [Opening a focus](attention.md#opening-a-focus) |
 | Register or withdraw a subscription | [Subscriptions](attention.md#subscriptions) |
 | Record, find, or revise something in shared memory | [Memory rooms](memory.md) |
 | Read a local file, retrieve a web page, or open an image | [Reading resources](resources.md) |
@@ -26,9 +26,12 @@
 | --- | --- |
 | Install the kernel from a package | [Installing the executable](running.md#installing-the-executable) |
 | Run Ivenna from source with the supplied mail and memory services | [Local development](../dev/README.md) |
-| Configure a deployment, diagnose stalled work, and manage retained data | [Running guide](running.md) |
+| Configure the kernel and its services | [Running guide](running.md) |
+| Back up or restore an instance | [Backups and transfers](running.md#backups-and-transfers) |
+| Diagnose a mail or model failure | [Mail failures](running.md#when-a-mail-request-fails) · [Model failures](running.md#when-model-work-stalls) |
 | Set mail request limits or recover from a history size error | [Working history limits](running.md#working-history-limits) |
-| Set reasoning effort or tune when a focus pauses for quiet reflection | [Model requests](running.md#model-requests) · [Context budgets](running.md#context-budgets) |
+| Set reasoning effort for ordinary work or quiet reflection | [Model requests](running.md#model-requests) |
+| Tune when a focus pauses for quiet reflection | [Context budgets](running.md#context-budgets) |
 | Update settings, stored data, or client programs when upgrading an instance | [Upgrade guide](upgrading.md) |
 | Configure a host or container for a channel receiver | [Channel receiver deployment](running.md#channel-receivers) |
 | Run a subscription listener independently of the kernel | [Subscription listener deployment](running.md#subscription-listeners) |

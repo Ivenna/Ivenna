@@ -15,7 +15,7 @@ Newly admitted events enter working history as records. The runtime also retains
 
 `Text` denotes a string. `Time` denotes a UTC RFC 3339 string with millisecond precision, such as `2026-11-06T12:00:01.000Z`. Records, events, and callback sources are mappings with one key for the branch name and its payload as the value.
 
-The turn's `current.focus_id` identifies the focus receiving the turn. Inherited records keep their original focus IDs and observation times, so an activity can see the main focus's ID in its history.
+The turn's `current.focus_id` identifies the focus receiving the turn. Inherited records keep their original focus IDs and observation times. For example, an activity can receive a turn addressed to itself alongside history from `core-1`. [Focus roles and references](attention.md)
 
 ## Names and references
 
@@ -152,7 +152,7 @@ A `continuity` record carries the text a focus wrote during quiet reflection, at
 
 #### Sampled state
 
-The reflection turn carries the runtime sample in `quiet_reflection.state`. Its `current.observed_at` dates the turn. The accepted note keeps the sample and time alongside the focus's account. Inherited notes keep their original focus ID, time, and sample.
+The runtime gives the focus a sample in `quiet_reflection.state`, dated by the reflection turn's `current.observed_at`. The saved `continuity` record carries that time and sample alongside the note. The sample describes registrations as they stood at that time. Connection status has its own fields in the [ordinary turn](#channel-receivers-and-subscription-listeners).
 
 | Field | Type | Main focus sample | Activity focus sample |
 | --- | --- | --- | --- |
@@ -207,7 +207,7 @@ The last message of an inference input is the current turn.
 | `events` | `Event[]`, when nonempty | New events for an ordinary inference |
 | `quiet_reflection` | `instructions: Text`, optional `inherited_history: true`, and optional `state: State` | Temporary request for a continuity note from the selected history |
 
-`current` describes the focus in both ordinary and reflection turns. Connection lists appear only in ordinary turns.
+Both turns identify the receiving focus in `current`. An ordinary turn adds connection notes and events when available. A reflection turn adds `quiet_reflection`.
 
 | Field in `current` | Type | Meaning |
 | --- | --- | --- |
@@ -216,8 +216,6 @@ The last message of an inference input is the current turn.
 | `observed_at` | `Time` | Time the runtime sampled this turn |
 | `channels_without_receivers` | `Text[]`, when present | IDs of open channels with no connected receiver |
 | `subscriptions_without_listeners` | `Text[]`, when present | IDs of active subscriptions with no open listener session |
-
-When there are no new events, an ordinary turn contains only `current`. Retained events and [samples](#sampled-state) keep their own dates.
 
 ### Channel receivers and subscription listeners
 
@@ -251,10 +249,8 @@ events:
 
 ## Quiet reflection and resumption
 
-A reflection request presents the selected history and a temporary turn with `current` and `quiet_reflection` under the shared system prompt. Both roles receive the same instructions for writing a brief first-person note. When the kernel asks for a revision, it adds feedback to `quiet_reflection.instructions`. An activity receives `inherited_history: true` when the selected history precedes admission of its assignment. Observations and notes retain their original focus IDs. Tools are unavailable during reflection. [Reflection instructions](../packages/agent/src/quiet_reflection.md) · [Activity forks](architecture.md#activity-forks)
+Both roles use the shared system prompt and receive the same instructions for a brief first-person note in `quiet_reflection.instructions`. A revision request adds feedback to those instructions. An activity receives `inherited_history: true` when the reflection considers only history it inherited from the main focus. Tools are unavailable during reflection. [Reflection instructions](../packages/agent/src/quiet_reflection.md) · [Activity forks](architecture.md#activity-forks)
 
 When a reflection request exceeds the adapter's request-size or media-count limit, the runtime can substitute short notices for the affected images or file references. It keeps the tool result text, including any source descriptions. [Reflection request preparation](architecture.md#sampling-state-and-preparing-the-request)
 
-After the runtime saves the new history, the next ordinary request begins its retained history with the `continuity` record, followed by the entries carried forward. Already admitted observations awaiting inference remain in history. Newly admitted observations appear in the ordinary turn's `events`, including the original assignment when an activity reflects before its first ordinary inference. [Assignments and reports](#assignments-and-reports) · [History retention](architecture.md#history-retention)
-
-See [bounded model context](architecture.md#bounded-model-context) for which history enters the reflection and when the note replaces it.
+The reflection turn and its native model output belong to that attempt. After the runtime accepts and saves the note, the next ordinary request opens its retained history with the `continuity` record. Carried-forward history follows, including any previously admitted observations still awaiting inference. Newly admitted observations appear in the ordinary turn's `events`, including the original assignment when an activity reflects before its first ordinary inference. [Assignments and reports](#assignments-and-reports) · [Selecting and replacing history](architecture.md#bounded-model-context)

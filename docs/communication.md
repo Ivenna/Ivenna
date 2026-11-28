@@ -20,7 +20,7 @@ Tool replies contain a JSON `result` or an `error` with `code` and `message`. Ma
 
 An incoming observation's `from` field identifies who sent the email. If the operator relays Alice's words, `from` identifies the operator and the message text can attribute the words to Alice. See [correspondence observations](input.md#incoming-messages).
 
-Ivenna can write to an ID while its mailbox is registered for outgoing correspondence. This applies to replies to incoming mail and to letters Ivenna initiates. The main focus sees the registered IDs at startup and quiet reflection. See [outgoing registration](running.md#outgoing-correspondents), [startup observations](input.md#startup-and-restart), and [reflection samples](input.md#sampled-state).
+Replies and new letters both use registered outgoing IDs. The main focus sees those IDs at startup and in each reflection's runtime sample. [Outgoing registration](running.md#outgoing-correspondents) · [Startup observations](input.md#startup-and-restart) · [Reflection samples](input.md#sampled-state)
 
 ### Writing to a correspondent
 
@@ -68,7 +68,7 @@ Any focus can call `open_channel` with a name and a nonempty description of the 
 {"result":{"channel_id":"task-input-18"}}
 ```
 
-The channel becomes available when the runtime confirms the checkpoint that saves its registration and tool result. Give the receiving program the complete `channel_id`. Use the same ID to send or close the channel. Its ID and description can appear in the dated runtime sample alongside a later continuity note. [Sampled state](input.md#sampled-state)
+Give the receiving program the complete `channel_id`. Use the same ID to send or close the channel. The channel becomes available after the runtime confirms the saved opening round. Its ID and description can appear in a later reflection's runtime sample. [Sampled state](input.md#sampled-state)
 
 If saving the checkpoint fails, the runtime stops with the channel inactive. On restart it restores the channel and its tool result together if the selected checkpoint includes them. See [recovering from a size rejection](running.md#working-history-limits) and [checkpoint selection on restart](architecture.md#saving-and-restoration).
 

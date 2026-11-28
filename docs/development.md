@@ -48,7 +48,7 @@ The agent selects the history, observations, tools, and reasoning effort for eac
 
 ### Model-facing resources
 
-Review model-facing text in the request the focus will receive. Read the shared prompt together with the retained history, current turn, and tools available for that inference. Before adding an explanation, ask what the model can already infer and which fact it still needs for the decision at hand. See [what a focus receives](design.md#what-a-focus-receives) and [request assembly](architecture.md#working-history-and-user-messages).
+Review model-facing text in a complete request for the focus and turn you are changing. Read the shared prompt together with the retained history, current turn, and available tools. Give the focus the facts it needs for the decision at hand. See [what a focus receives](design.md#what-a-focus-receives) and [request assembly](architecture.md#working-history-and-user-messages).
 
 | Resource | Purpose |
 | --- | --- |
@@ -59,7 +59,7 @@ Review model-facing text in the request the focus will receive. Read the shared 
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. When web access is enabled, the [DeepSeek Fetch client](../packages/resources/src/deepseek.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
 
-Use the shared prompt for orientation across focuses and turns. Put instructions for writing the note in the reflection prompt. Describe what each tool can do and what its call changes. Explain the destination and potential charge where the focus explicitly chooses to send material to a service. Describe service setup and charges for ordinary reads in the deployment guide. Express allowed values and bounds in the schema and match defaults to runtime behavior. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption) · [Tool content](content.md)
+Keep shared orientation in the system prompt and instructions for the continuity note in the reflection prompt. Put the action and its effects in the tool description. Use the tool schema for allowed values, bounds, and defaults, with the same rules in the implementation. When a tool offers to send material to a service, explain the destination and potential charge where the focus makes that choice. Keep service setup and charges for ordinary reads in the running guide. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption) · [Tool content](content.md) · [Running guide](running.md)
 
 Use observations and tool results to convey what happened, which effects are confirmed, and what remains uncertain. When asking for a revision, say what the focus can change. If a continuity note leaves too little room to continue, ask for a shorter account and leave the choice of content to Ivenna. Keep the measured size and limit in operator logs with other runtime diagnostics.
 
@@ -87,7 +87,7 @@ Storage failures must not silently replace history with an empty context. [Start
 
 ## Changing stored formats
 
-For the instance database, add a SQL file using the next zero-padded number and append it to the migration list. Keep the version 1 schema and released scripts fixed so fresh and existing databases apply the same later changes. Startup owns the transaction covering the SQL and zug's ledger. Test fresh installation and upgrades from the affected source schemas. [Version 1 schema](../packages/instance_state/src/migrations/baseline_v1.sql) · [Migration list](../packages/instance_state/src/migrations.zig) · [Schema upgrades](architecture.md#schema-upgrades)
+For the instance database, add a SQL file using the next zero-padded number and append it to the migration list. Keep the version 1 schema and released scripts fixed so fresh and existing databases apply the same later changes. Test installation and the affected upgrade paths through the operations that use the new schema. [Version 1 schema](../packages/instance_state/src/migrations/baseline_v1.sql) · [Migration list](../packages/instance_state/src/migrations.zig) · [Schema upgrades](architecture.md#schema-upgrades)
 
 For mailbox history, put conversions of earlier ZON records and checkpoints in the format modules. Test with saved bodies in the earlier format and verify that new writes use the current representation. [Record format](../packages/agent/src/history/record.zig) · [Checkpoint format](../packages/agent/src/history/checkpoint.zig) · [Saving and restoration](architecture.md#saving-and-restoration)
 

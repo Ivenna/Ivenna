@@ -86,7 +86,7 @@
   },
   {
     "name": "open_focus",
-    "description": "Open an activity focus alongside your main focus. It inherits your working history through the end of this round, including tool results, and can run host commands. Use the returned `focus_id` to reach it after the round.",
+    "description": "Open an activity while your main focus continues. The activity inherits your history through the end of this round, including tool results, and can run host commands. Use the returned `focus_id` to reach it once the round completes.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -99,7 +99,7 @@
         "task": {
           "type": "string",
           "minLength": 1,
-          "description": "A question, line of thought, or piece of work to pursue in the new focus."
+          "description": "What you want the new focus to think through or work on."
         }
       },
       "required": [

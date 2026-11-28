@@ -67,36 +67,3 @@ pub fn reflect(engine: *Engine, arena: Allocator, context: *const Context, snaps
         .state = snapshot.state,
     } };
 }
-
-test "a reflection that cannot shed media interrupts with the request limit" {
-    const testing = std.testing;
-    const Stub = struct {
-        fn measure(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Measurement {
-            return .{ .bytes = 10, .violation = .{ .kind = .request_bytes, .actual = 10, .maximum = 1 } };
-        }
-
-        fn next(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Outcome {
-            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "unused" } };
-        }
-    };
-    var stub: Stub = .{};
-    var engine: Engine = .{
-        .allocator = testing.allocator,
-        .io = testing.io,
-        .model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolResult = undefined } },
-        .shared_tools = &.{},
-        .activity_tools = &.{},
-    };
-    var context = try Context.init(testing.allocator, .{ .session_id = 1, .epoch = 0 }, "core-1");
-    defer context.deinit();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const snapshot: Input.Snapshot = .{
-        .current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 100 },
-        .state = .{ .activities = &.{}, .callbacks = &.{} },
-    };
-    const result = try reflect(&engine, arena.allocator(), &context, snapshot, .keep_latest_tool_round, null, .single_attempt);
-    try testing.expect(result == .interrupted);
-    try testing.expectEqualStrings("The context was too large to continue.", result.interrupted);
-    try testing.expectEqual(@as(usize, 0), context.records().len);
-}

@@ -84,27 +84,21 @@ Ivenna sends supported image references to the configured model service for retr
 
 ### Model requests
 
-An ordinary inference request sends the focus's selected history and new observations. It can include a sample of channels without receivers or subscriptions without listeners. An activity's history can include correspondence and tool results inherited from the main focus. [Inference turns](input.md#inference-turns) · [Connection samples](input.md#channel-receivers-and-subscription-listeners) · [Retained tool content](content.md#context-and-continuity)
+Ordinary inference and quiet reflection use the same configured model and `LLM_MAX_OUTPUT_TOKENS`. That limit covers reasoning, assistant text, and tool-call arguments. [Inference turns](input.md#inference-turns) · [Quiet reflection](input.md#quiet-reflection-and-resumption)
 
-A quiet reflection request sends the selected older history and a dated sample of runtime state. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption)
-
-All sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments.
-
-Ordinary requests from the main focus use a lower default reasoning effort for responsive correspondence and coordination. Activities use a higher default for deeper reasoning. Quiet reflection requests in either role use `LLM_COMPACTION_REASONING_EFFORT`. To override any of the three defaults, set the corresponding variable to a nonempty effort name supported by your model. Ivenna sends that name as written. See the [configuration table](#configuration) and [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/).
+The main focus defaults to lower reasoning effort for responsive correspondence and coordination. Ordinary activity work defaults to higher effort. Set `LLM_CORE_REASONING_EFFORT` or `LLM_ACTIVITY_REASONING_EFFORT` to tune the corresponding role. `LLM_COMPACTION_REASONING_EFFORT` applies to quiet reflection in either role. Use an effort name supported by your model. Ivenna sends the value as written. [Configuration defaults](#configuration) · [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/)
 
 `LLM_REQUEST_TIMEOUT_MS` applies separately to each inference attempt, including quiet reflection. A temporary outage can therefore delay a decision beyond this timeout. For each file upload, the timeout covers the entire negotiation. [When model work stalls](#when-model-work-stalls) · [File outcomes](content.md#complete-files)
 
 ### Context budgets
 
-The kernel uses `CONTEXT_COMPACT_AT_TOKENS` to decide when a request that still fits is ready for quiet reflection. It uses the input token count from the last committed ordinary round. When that count is unavailable, as on a new activity's first request, it uses `CONTEXT_COMPACT_AT_BYTES` and measures the request with eligible older history, before adding pending work or new observations. [Compaction triggers and measurements](architecture.md#when-compaction-runs)
+The soft thresholds let a focus reflect while its ordinary request still fits. `CONTEXT_COMPACT_AT_TOKENS` uses the input token count from the last saved ordinary round. When that count is unavailable, `CONTEXT_COMPACT_AT_BYTES` uses the encoded request size with the older history eligible for reflection. [Compaction triggers and measurements](architecture.md#when-compaction-runs)
 
 `CONTEXT_OBSERVATION_BATCH_BYTES` sets the target for encoded bytes added by a batch of new observations. The first observation can exceed that target if the full request fits the adapter's limits. See [how observations are admitted](architecture.md#activation-admission).
 
 For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKENS` for output. Set the token threshold below the remaining input space to leave room for a complete tool exchange and incoming observations. Evaluate compaction frequency and continuity on representative work. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/), [evaluating quiet reflection](testing.md#evaluating-quiet-reflection), and [evaluating continuity](testing.md#evaluating-continuity-across-interruptions).
 
-The [model request limits](content.md#model-request-checks) apply to the complete encoded request. The model service checks its own limits after processing the input.
-
-If a focus pauses at a request limit, check the logs for the limit it hit. The history and queued observations remain available when the focus resumes. See [when model work stalls](#when-model-work-stalls) and [reflection outcomes](architecture.md#resuming-after-quiet-reflection).
+The adapter checks limits on the complete encoded request and can require compaction before a soft threshold is reached. The model service applies its own limits after processing the input. If either limit pauses a focus, check the kernel log for the reason. [Model request limits](content.md#model-request-checks) · [When model work stalls](#when-model-work-stalls) · [Recovering from an admission failure](#recovering-from-an-admission-failure)
 
 ### Session and command capacity
 
@@ -302,11 +296,9 @@ An interrupted operation may have produced effects without a saved result. Inclu
 
 ### Updating the executable
 
-Before updating across a change in storage format, make a [matched backup](#backups-and-transfers) and keep the executable that can read it. Use that executable to resume the instance from the backup if needed. To start a fresh instance, use a separate mailbox and `DATA_DIR`.
+Check the upgrade guide before replacing an existing executable. For a storage format change, keep a matched backup and the executable that can read it. To start a fresh instance, use a separate mailbox and `DATA_DIR`. [Upgrading Ivenna](upgrading.md) · [Backups and transfers](#backups-and-transfers)
 
-If `ivenna serve` reports `IncompatibleStateSchema`, verify `DATA_DIR` and which build last opened the instance database. Use a build that supports the installed schema. If a listener reports the same error after an update, check that it uses the kernel's build. Start the updated kernel before connecting listeners so startup can apply any supported migration. [Instance database](architecture.md#instance-database)
-
-See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
+If `ivenna serve` reports `IncompatibleStateSchema`, verify `DATA_DIR` and which build last opened the instance database. Use a build that supports the installed schema. If a listener reports this error during an update, verify its `DATA_DIR` and executable and check that the kernel has completed the upgrade. [Instance database](architecture.md#instance-database)
 
 ## Data and retention
 
@@ -378,7 +370,7 @@ Copy the listeners' saved source positions before taking the database backup. A 
 
 To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup.
 
-Restore each listener's schedule and source position from the corresponding backup before resuming it with its restored subscription ID. Listeners that can replay from an earlier position can use the original report keys. [Resuming at the source](subscriptions.md#resume-at-the-source)
+Restore each listener's schedule and source position from the corresponding backup. A listener can resume with its restored subscription ID when its executable supports the restored database. If the source can replay from an earlier position, use the original report keys. [Resuming at the source](subscriptions.md#resume-at-the-source) · [Listener deployment](#subscription-listeners)
 
 Start `ivenna serve` with the restored mailbox and database before reconnecting channel receivers. Reuse restored channel IDs when they still identify the intended channels. If the backup predates a channel registration, open a replacement channel and give its ID to the receiver. [Channel lifetimes](communication.md#channel-lifetimes)
 

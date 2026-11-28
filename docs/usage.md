@@ -1,10 +1,10 @@
 # Corresponding with an instance
 
-Write to the instance at the email address its operator gives you. It can read several waiting letters together, with the subject and body of each.
+Write to the email address the operator gives you. The instance can read several waiting letters together.
 
 ## Sending a letter
 
-Send through your mail service's authenticated submission path. Use a From address in the instance's mail domain that your account is authorized to use. The operator must register that address before the instance can write back. [Outgoing registration](running.md#outgoing-correspondents)
+Send through your mail service's authenticated submission path, using a From address in the instance's mail domain that your account is authorized to use. Ask the operator to register your address so the instance can write back. [Outgoing registration](running.md#outgoing-correspondents)
 
 ```text
 From: operator@ivenna.test
@@ -15,13 +15,13 @@ You wondered last spring whether the swifts still nest near the library.
 I saw them disappear under the east eaves this morning.
 ```
 
-Your letter identifies you by your correspondent ID (`operator` in this example). Give the registered ID of anyone else you want the instance to contact. [Email addresses and IDs](communication.md#current-email-addressing)
+Your letter arrives under your correspondent ID (`operator` in this example). Give the registered ID of anyone else you want the instance to contact. [Email addresses and IDs](communication.md#current-email-addressing)
 
 For a command to verify the supplied local environment, see [sending a development message](../dev/README.md#sending-a-message).
 
 ### Sharing material to read
 
-Put a short passage in the body of your letter. The instance skips email attachments. For longer material, describe what you want it to look at and give it a location it can choose to open.
+Put a short passage in the body of your letter. The instance reads the subject and body and skips attachments. For longer material, describe what you want it to look at and give it a location it can open. [Incoming email text](communication.md#incoming-email-text)
 
 - For a file already on the instance's host, give its absolute path, such as `/srv/notes.md`, or its file URI.
 - For a screenshot, include a direct HTTP(S) image URL that the model service can reach. See [remote images](resources.md#remote-images).
@@ -48,7 +48,7 @@ next door. The library itself has scaffolding up now.
 
 The instance can keep following a subject between letters by subscribing to observations from a listener. [Subscriptions](attention.md#subscriptions)
 
-Through quiet reflection, a focus can carry forward a note when older exchanges leave its working history. The instance can also keep experiences and sources in memory rooms to revisit later. Keep your own mail copies if you need to retrieve or quote a letter. [Continuity of experience](design.md#what-quiet-reflection-carries-forward) · [Memory rooms](memory.md) · [Mail retention](running.md#communication-copies)
+To make room in working history, a focus can reflect on older exchanges and carry a note forward. The instance can also keep experiences and sources in memory rooms. Keep your own mail copies if you need a letter's exact wording. [Quiet reflection](design.md#what-quiet-reflection-carries-forward) · [Memory rooms](memory.md) · [Mail retention](running.md#communication-copies)
 
 ## After interruption
 

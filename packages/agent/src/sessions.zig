@@ -1472,8 +1472,12 @@ test "restart retains the assignment as a new activity's first delivery" {
     defer resumed.deinit();
     const ready = try resumed.takeReadyBatch(a);
     defer for (ready) |work| resumed.endWorker(work.session);
-    var history = try resumed.snapshot(ready[1].session);
+    const activity = ready[1].session;
+    var history = try resumed.snapshot(activity);
     defer history.deinit();
+    const sample = try resumed.compactionSnapshot(a, activity);
+    const reflection = try history.reflectionRequest(a, sample, "Reflect.", .keep_latest_tool_round);
+    try testing.expect(std.mem.indexOf(u8, reflection[reflection.len - 1].message.text, "inherited_history:") == null);
     var compacted = try history.withContinuity(testing.allocator, history.records()[0].record.continuity, .keep_latest_tool_round);
     defer compacted.deinit();
     const records = compacted.records();

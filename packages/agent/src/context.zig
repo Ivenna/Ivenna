@@ -106,16 +106,6 @@ pub const Context = struct {
         return buildRequest(a, self.messages.items[pending.message_index..], .{ .current = current, .purpose = .{ .work = events } });
     }
 
-    /// Recent completed exchanges are eligible to retain when their older
-    /// prefix can still be compacted at the soft threshold.
-    pub fn additionalRecentItems(self: *const Context) ?[]const Model.Item {
-        const pending = self.compactionBoundary(.keep_latest_tool_round);
-        const recent = self.recentRounds(pending);
-        const items = self.messages.items[recent.message_index..pending.message_index];
-        if (items.len == 0 or !self.canCompactPrefix(recent.entry_index)) return null;
-        return items;
-    }
-
     pub fn hasToolRoundToKeep(self: *const Context) bool {
         return self.latestToolRound(self.pendingObservations()) != null;
     }
@@ -125,12 +115,15 @@ pub const Context = struct {
     }
 
     pub fn hasReflectionHistory(self: *const Context, compaction_scope: CompactionScope) bool {
-        return self.reflectionEntryCount(compaction_scope) != 0;
+        return self.compactionBoundary(compaction_scope).entry_index != 0;
     }
 
     /// Reconsider a lone continuity record only when the next request needs more room.
-    pub fn canSoftCompact(self: *const Context) bool {
-        return self.canCompactPrefix(self.reflectionEntryCount(.keep_latest_tool_round));
+    pub fn softCompactionScope(self: *const Context) ?CompactionScope {
+        const pending = self.compactionBoundary(.keep_latest_tool_round);
+        if (!self.canCompactPrefix(pending.entry_index)) return null;
+        const recent = self.recentRounds(pending);
+        return if (self.canCompactPrefix(recent.entry_index)) .keep_recent_rounds else .keep_latest_tool_round;
     }
 
     fn canCompactPrefix(self: *const Context, entry_count: usize) bool {
@@ -202,19 +195,20 @@ pub const Context = struct {
         return retained;
     }
 
-    fn reflectionEntryCount(self: *const Context, compaction_scope: CompactionScope) usize {
-        return self.compactionBoundary(compaction_scope).entry_index;
-    }
-
     /// Assemble the reflection request from selected history and sampled state.
     pub fn reflectionRequest(self: *const Context, a: Allocator, snapshot: Input.Snapshot, instructions: []const u8, compaction_scope: CompactionScope) ![]Model.Item {
         const boundary = self.compactionBoundary(compaction_scope);
+        const inherited_history = boundary.entry_index != 0 and boundary.entry_index <= self.inherited_through and switch (self.entries.items[0]) {
+            // An activity can have written its own note before admitting the assignment.
+            .record => |record| record != .continuity or !std.mem.eql(u8, record.continuity.focus_id, self.focus_id),
+            .exchange => true,
+        };
         return buildRequest(a, self.messages.items[0..boundary.message_index], .{
             .current = snapshot.current,
             .purpose = .{ .quiet_reflection = .{
                 .instructions = instructions,
                 .state = snapshot.state,
-                .inherited_history = boundary.entry_index != 0 and boundary.entry_index <= self.inherited_through,
+                .inherited_history = inherited_history,
             } },
         });
     }
@@ -257,7 +251,7 @@ pub const Context = struct {
         var replacement = try init(allocator, scope, self.focus_id);
         errdefer replacement.deinit();
         try replacement.appendRecord(.{ .continuity = continuity });
-        const count = self.reflectionEntryCount(compaction_scope);
+        const count = self.compactionBoundary(compaction_scope).entry_index;
         for (self.entries.items[count..]) |entry| try replacement.append(entry);
         return replacement;
     }

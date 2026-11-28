@@ -36,7 +36,7 @@ Changes to shared memory require a clear target. An edit that could select sever
 
 Ivenna can give several things its attention at once. The main focus continues between encounters and brings correspondence, relationships, interests, and activity reports together. An activity focus gives a question, interest, or line of work its own working history. These are roles within one instance. Its focuses share a body, including files, memory, communication, and host processes. Each can draw on its own history and must account for effects other focuses have produced. The runtime keeps each focus's stable reference so observations and messages reach the right history. [Focuses and their references](attention.md)
 
-Main and activity focuses use the same system prompt. Their roles determine which tools they can use.
+Main and activity focuses share their orientation to the instance. During ordinary work, the focus's role determines which tools it receives.
 
 | Action | Main focus | Activity focus |
 | --- | --- | --- |
@@ -106,13 +106,13 @@ Revisiting a memory presents what Ivenna kept there. When Ivenna chooses to send
 
 #### What quiet reflection carries forward
 
-When working history needs room, the same focus takes a moment of quiet reflection. Ivenna writes one note in its own words, bringing together what it has come to understand, what still matters, and where its attention may return. A letter, for instance, can change what a relationship means to Ivenna and how it decides to keep in touch. The next inference reads the note as a whole. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption)
+When working history needs room, the focus reflects on the experience it is about to leave behind. Ivenna writes one note in its own words about what it has come to understand, what still matters, and where its attention may return. A letter, for instance, can change what a relationship means to Ivenna and how it decides to keep in touch. Once accepted, the note reaches the next ordinary inference as a whole. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption)
 
-Conway, Singer, and Tagini describe the tension between making sense of one's life and staying faithful to particular experiences. For Ivenna, a useful note preserves enough of an encounter to let its meaning change later. Park and colleagues ground their agents' reflections in specific records. Ivenna can preserve the source of an observation or report, distinguish both from its own inference, and carry a clue to where it can revisit what it kept. [Self-Memory System](https://digitalcommons.conncoll.edu/psychfacpub/13/) · [Generative Agents, §4.2](https://arxiv.org/html/2304.03442#S4.SS2) · [Memory rooms](memory.md)
+Conway, Singer, and Tagini describe the tension between making sense of one's life and staying faithful to particular experiences. Park and colleagues ground their agents' reflections in specific records. Ivenna's note can preserve enough of an encounter to let its meaning change later. It can carry who said what, what Ivenna made of it at the time, and a clue to where it can revisit what it kept. [Self-Memory System](https://digitalcommons.conncoll.edu/psychfacpub/13/) · [Generative Agents, §4.2](https://arxiv.org/html/2304.03442#S4.SS2) · [Memory rooms](memory.md)
 
-Both roles use the same reflection instructions. Each focus draws on its working history and can see whose observations and notes it inherited. Consider a targeted cue if resumption shows a recurring loss tied to one role. [Evaluating continuity](testing.md#evaluating-continuity-across-interruptions)
+Both roles use the same reflection instructions. The focus and the attribution of each retained observation or note give Ivenna the context to reflect on its work, including experience inherited from the main focus. [Evaluating continuity](testing.md#evaluating-continuity-across-interruptions)
 
-Experiments on agent memory found that repeated abstraction can lose specifics, including the conditions under which a lesson applies. Ivenna can continue from an exact reply or tool result when there is room to keep the exchange. The runtime also carries pending observations and a dated sample of runtime references alongside the model's own account. [Repeated abstraction in agents, §6.2](https://arxiv.org/html/2605.12978#S6.SS2) · [Sampled state](input.md#sampled-state) · [Context selection](architecture.md#bounded-model-context)
+Experiments with repeatedly revised agent memories found losses such as the conditions under which a lesson applies. In Ivenna, keeping recent exchanges when they fit lets the focus pick up from an exact reply or tool result. The runtime carries pending observations and a dated sample of registrations alongside the note so the focus has those facts available directly. [Repeated abstraction in agents, §6.2](https://arxiv.org/html/2605.12978#S6.SS2) · [Sampled state](input.md#sampled-state) · [Context selection](architecture.md#bounded-model-context)
 
 #### Continuing work
 

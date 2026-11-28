@@ -2,8 +2,6 @@
 
 Memory rooms are shared by every focus. Ivenna can keep an experience, its understanding at the time, or a source it wants to revisit. It chooses how to name and arrange entries and what form each takes. It can revise them as its understanding develops. [Understanding and autonomy](design.md#understanding-and-autonomy)
 
-A continuity note can carry an address and a reason to return. Reading that address gives the current entry if it still exists. Another focus may have revised, moved, or removed it since the note was written. [What quiet reflection carries forward](design.md#what-quiet-reflection-carries-forward)
-
 This guide covers what the memory tools do and what they return. [Tool parameters](../packages/memory/src/tools.json) · [Service setup](running.md#memory-service) · [Storage and transport](architecture.md#autonomous-memory)
 
 ## Addresses and organization
@@ -71,7 +69,9 @@ Both tools default to literal, case-insensitive matching. Set `case_sensitive: t
 
 ## Reading
 
-Call `read_memory` with an entry's `address`. For text, `max_bytes` sets the page size. This call asks for the first eight bytes.
+Call `read_memory` with an entry's `address`. An address in a continuity note leads to the entry currently stored there, if any. When an entry has moved, search by its name or by a passage you remember. [Searching memory](#searching) · [What quiet reflection carries forward](design.md#what-quiet-reflection-carries-forward)
+
+For text, `max_bytes` sets the page size. This call asks for the first eight bytes.
 
 ```json
 {"address":"languages/progress.md","max_bytes":8}
