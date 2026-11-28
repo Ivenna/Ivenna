@@ -546,6 +546,10 @@ pub const Kernel = struct {
         }
 
         const pending = work.activation.deliveries.items.len != 0;
+        // Store the selected history before acknowledging delivery. A failure
+        // between the two leaves the store advanced while the candidate is
+        // dropped, which is the same boundary the earlier compaction path had;
+        // the alternative (acknowledge first) could lose an admitted observation.
         if (prepared.selected.count != 0) try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = prepared.events } });
         if (pending or compacted) try self.sessions.commitInput(work, prepared.selected.count, history);
         if (prepared.selected.count != 0) {
@@ -1607,6 +1611,77 @@ test "a lone continuity record is shortened only if needed to fit the next obser
         }
         try testing.expectEqualStrings(if (limit == 32) "Prior commitments, condensed." else continuity.text, history.records()[0].record.continuity.text);
     }
+}
+
+test "a reflection that returns a tool call is rejected without changing the history" {
+    const testing = std.testing;
+    const Stub = struct {
+        reflections: usize = 0,
+
+        fn measure(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
+            var bytes: u64 = 0;
+            for (request.history) |item| {
+                if (item != .message) continue;
+                if (std.mem.indexOf(u8, item.message.text, "Earlier commitments") != null) bytes += 24;
+                if (std.mem.indexOf(u8, item.message.text, "Incoming letter") != null) bytes += 16;
+            }
+            return .{ .bytes = bytes, .violation = if (bytes > 32)
+                .{ .kind = .request_bytes, .actual = bytes, .maximum = 32 }
+            else
+                null };
+        }
+
+        fn next(context: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.reflections += 1;
+            return .{ .response = .{ .output = &.{}, .calls = &.{.{
+                .call_id = "reflect-tool",
+                .name = "no_such_tool",
+                .arguments = "{}",
+            }}, .text = "I would rather call a tool." } };
+        }
+    };
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    var stub: Stub = .{};
+    engine.model = .{ .context = &stub, .vtable = &.{ .next = Stub.next, .measure = Stub.measure, .prepareToolResult = undefined } };
+    kernel.limits.compact_at_bytes = 8;
+
+    const startup = try SubscriptionFixture.takeWork(&kernel, a);
+    var core = try SubscriptionFixture.admit(&kernel, a, startup);
+    defer core.deinit();
+    try SubscriptionFixture.finish(&kernel, startup, &core);
+    try testing.expectEqual(.accepted, try kernel.sessions.accept(.{ .content = .{ .message = .{
+        .from = &.{"operator"},
+        .text = "Incoming letter",
+        .observed_at_unix_ms = 100,
+    } } }));
+    const work = try SubscriptionFixture.takeWork(&kernel, a);
+    defer kernel.sessions.endWorker(work.session);
+    const continuity: Input.Continuity = .{
+        .focus_id = work.session.focus_id,
+        .observed_at_unix_ms = 90,
+        .text = "Earlier commitments and open questions.",
+        .state = .{ .activities = &.{}, .callbacks = &.{} },
+    };
+    var history = try Context.restore(testing.allocator, .{ .session_id = work.session.session_id, .epoch = 0 }, work.session.focus_id, &.{
+        .{ .record = .{ .continuity = continuity } },
+    });
+    defer history.deinit();
+
+    const result = try kernel.prepareRequest(a, work, &history);
+    try testing.expect(result == .interrupted);
+    try testing.expectEqualStrings("The quiet reflection returned a tool call.", result.interrupted);
+    try testing.expectEqual(@as(usize, 2), stub.reflections);
+    try testing.expect(!work.activation.admitted);
+    try testing.expectEqual(@as(usize, 1), history.records().len);
+    try testing.expectEqualStrings("Earlier commitments and open questions.", history.records()[0].record.continuity.text);
 }
 
 test "a fork continues with its first assignment and applies the ordinary compaction rule" {

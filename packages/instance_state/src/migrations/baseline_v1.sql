@@ -1,3 +1,7 @@
+-- This baseline covers databases from the cursor-era schema onward.
+-- A database upgraded from the earlier #17 format may still carry the
+-- unused feeds and feed_messages tables; see docs/upgrading.md for the
+-- optional cleanup. They are intentionally not dropped here.
 -- Equivalent to the cursorless IVS3 schema in 19b4395 and the IVST v1 schema.
 CREATE TABLE mailbox_binding (
     singleton INTEGER PRIMARY KEY CHECK (singleton=1),

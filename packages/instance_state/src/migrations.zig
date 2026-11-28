@@ -247,6 +247,92 @@ test "startup can retry an upgrade when a reader prevents committing its changes
     try t.expectEqual(1, try sql.integer(reader, "SELECT count(*) FROM subscriptions WHERE reference='news-1'", .{}));
 }
 
+fn normalizedSql(a: Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var pending_space = false;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (quote != 0) {
+            // Keep quoted text verbatim: a doubled quote is an escape, not the
+            // end of the literal, and spaces inside it are significant.
+            try out.append(a, c);
+            if (c == quote) {
+                if (i + 1 < text.len and text[i + 1] == quote) {
+                    try out.append(a, text[i + 1]);
+                    i += 1;
+                } else quote = 0;
+            }
+            continue;
+        }
+        if (std.ascii.isWhitespace(c)) {
+            pending_space = out.items.len != 0;
+            continue;
+        }
+        if (pending_space) {
+            pending_space = false;
+            const previous = out.items[out.items.len - 1];
+            if (c != ')' and c != ',' and c != ';' and previous != '(') try out.append(a, ' ');
+        }
+        try out.append(a, c);
+        if (c == '\'' or c == '"') quote = c;
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "a fresh baseline and an upgraded legacy fixture end at the same schema" {
+    const t = std.testing;
+    const fresh = try sql.open(t.allocator, ":memory:", .{ .initialize = null });
+    defer fresh.close();
+    try initialize(t.allocator, fresh, null);
+
+    const upgraded = try sql.open(t.allocator, ":memory:", .{ .initialize = null });
+    defer upgraded.close();
+    try sql.exec(upgraded, legacy_with_cursor);
+    try sql.exec(upgraded, std.fmt.comptimePrint("PRAGMA application_id={d}", .{legacy_cursor_id}));
+    try initialize(t.allocator, upgraded, null);
+
+    // The fixture models the post-feed schema at e2879d5 (#18); it omits the
+    // retired #17 feeds/feed_messages tables, which the upgrade path leaves in
+    // place. The ledger itself is checked apart.
+    const query = "SELECT type, name, tbl_name, sql FROM sqlite_schema " ++
+        "WHERE name NOT GLOB 'sqlite_*' AND name <> '" ++ ledger_table ++ "' ORDER BY type, name";
+    const left = try sql.statement(fresh, query, .{});
+    defer left.deinit();
+    const right = try sql.statement(upgraded, query, .{});
+    defer right.deinit();
+    var count: usize = 0;
+    while (try sql.checked(left.step())) : (count += 1) {
+        try t.expect(try sql.checked(right.step()));
+        inline for (0..3) |column| {
+            try t.expectEqualStrings(try sql.requiredText(left, column), try sql.requiredText(right, column));
+        }
+        const expected_sql = try normalizedSql(t.allocator, try sql.requiredText(left, 3));
+        defer t.allocator.free(expected_sql);
+        const actual_sql = try normalizedSql(t.allocator, try sql.requiredText(right, 3));
+        defer t.allocator.free(actual_sql);
+        try t.expectEqualStrings(expected_sql, actual_sql);
+    }
+    try t.expect(!try sql.checked(right.step()));
+    try t.expect(count > 0);
+}
+
+test "startup and listener reject a dirty migration ledger and preserve the database" {
+    const t = std.testing;
+    const conn = try sql.open(t.allocator, ":memory:", .{ .initialize = null });
+    defer conn.close();
+    try initialize(t.allocator, conn, null);
+    const dirty_id = upgrades[0].id;
+    try sql.exec(conn, std.fmt.comptimePrint("UPDATE " ++ ledger_table ++ " SET dirty=1 WHERE id='{s}'", .{dirty_id}));
+    try t.expectError(error.IncompatibleStateSchema, requireCurrent(conn));
+    try t.expectError(error.IncompatibleStateSchema, initialize(t.allocator, conn, null));
+    try t.expectEqual(ledger_format, try sql.integer(conn, "PRAGMA user_version", .{}));
+    try t.expectEqual(@as(i64, upgrades.len), try sql.integer(conn, "SELECT count(*) FROM " ++ ledger_table, .{}));
+    try t.expectEqual(@as(i64, 1), try sql.integer(conn, "SELECT count(*) FROM " ++ ledger_table ++ " WHERE id='" ++ dirty_id ++ "' AND dirty=1", .{}));
+}
+
 test "startup and listener reject newer migrations while retaining the ledger" {
     const t = std.testing;
     const conn = try sql.open(t.allocator, ":memory:", .{ .initialize = null });
