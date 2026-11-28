@@ -556,6 +556,7 @@ const SubscriptionFixture = struct {
     open_channel_id: ?[]const u8 = null,
     reserved_channel_id: ?[]const u8 = null,
     receiver_connected: bool = false,
+    has_receiver_error: ?anyerror = null,
 
     fn deinit(self: *SubscriptionFixture) void {
         self.storage.arena.deinit();
@@ -603,6 +604,7 @@ const SubscriptionFixture = struct {
 
     fn hasReceiver(context: *anyopaque, id: []const u8) !bool {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
+        if (self.has_receiver_error) |err| return err;
         const open_id = self.open_channel_id orelse return false;
         return self.receiver_connected and std.mem.eql(u8, open_id, id);
     }
@@ -888,6 +890,15 @@ test "ordinary turns refresh current connection status and give observations pri
     for ([_][]const u8{ "current:\n", "\n  channels_without_receivers:", channel_id, "\n  subscriptions_without_listeners:", subscription_id }) |field| {
         try testing.expect(std.mem.indexOf(u8, disconnected_turn, field) != null);
     }
+
+    // A transient receiver probe failure drops only that sample; the prepared
+    // request still proceeds with the subscription status.
+    fixture.has_receiver_error = error.SystemResources;
+    const degraded = (try kernel.prepareRequest(a, core.work, &history)).ready;
+    const degraded_turn = degraded[degraded.len - 1].message.text;
+    try testing.expect(std.mem.indexOf(u8, degraded_turn, "channels_without_receivers:") == null);
+    try testing.expect(std.mem.indexOf(u8, degraded_turn, subscription_id) != null);
+    fixture.has_receiver_error = null;
 
     fixture.receiver_connected = true;
     const reconnected = (try kernel.prepareRequest(a, core.work, &history)).ready;

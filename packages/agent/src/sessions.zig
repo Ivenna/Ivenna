@@ -563,9 +563,18 @@ pub const Registry = struct {
             index -= 1;
             const channel = self.channels.items[index];
             if (!self.channelVisibleTo(session, channel)) continue;
-            if (!try transport.hasReceiver(channel.id)) try channel_ids.append(a, try a.dupe(u8, channel.id));
+            const has_receiver = transport.hasReceiver(channel.id) catch |err| {
+                if (fatalProbeError(err)) return err;
+                std.log.warn("channel receiver probe failed for '{s}': {s}; skipping the sample", .{ channel.id, @errorName(err) });
+                continue;
+            };
+            if (!has_receiver) try channel_ids.append(a, try a.dupe(u8, channel.id));
         }
-        const subscription_ids = try self.subscriptions.subscriptionsWithoutListeners(a, session.focus_id, limit);
+        const subscription_ids = self.subscriptions.subscriptionsWithoutListeners(a, session.focus_id, limit) catch |err| blk: {
+            if (fatalProbeError(err)) return err;
+            std.log.warn("subscription listener probe failed for '{s}': {s}; skipping the sample", .{ session.focus_id, @errorName(err) });
+            break :blk &.{};
+        };
         if (channel_ids.items.len == 0 and subscription_ids.len == 0) return null;
         var sample = try self.current(a, session);
         sample.channels_without_receivers = try channel_ids.toOwnedSlice(a);
@@ -1055,6 +1064,15 @@ pub const Registry = struct {
         return std.Io.Clock.real.now(self.io).toMilliseconds();
     }
 };
+
+/// Connection status is advisory: a probe failure must not stop a request that
+/// is otherwise ready. Cancellation and allocation failures remain fatal.
+fn fatalProbeError(err: anyerror) bool {
+    return switch (err) {
+        error.Canceled, error.OutOfMemory => true,
+        else => false,
+    };
+}
 
 fn deliveryCount(deliveries: []const *Delivery) usize {
     var count: usize = 0;
