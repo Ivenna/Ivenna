@@ -8,7 +8,9 @@ The project is exploratory. Data structures, interfaces, and module boundaries a
 
 Leave behavior that needs further design as an unavailable or explicitly limited placeholder. Describe what works and what remains undecided.
 
-When a design changes, remove superseded runtime interfaces and state. Keep the decoding needed to read retained history at the storage boundary. Avoid migration frameworks.
+When a design changes, remove superseded runtime interfaces and state. Keep the decoding needed to read retained history at the storage boundary.
+
+For instance database changes, keep `schema.sql` current for new databases. Put changes to an existing schema in a numbered SQL file under `migrations/`. Specify which installed formats take each step in the startup code and exercise the supported upgrade paths with their source schemas. [Instance database upgrades](architecture.md#instance-database)
 
 Communication and memory are operating requirements of the whole runtime. Component boundaries organize responsibilities within that contract. Keep safeguards at the boundary that owns the requirement, use the guarantees established there, and remove duplicated checks in downstream components.
 
@@ -71,7 +73,7 @@ Execution owns session state and the boundaries at which new observations can af
 
 Match ownership to lifetime. A capability can start work that outlives the invoking model round or activation. Copy or transfer retained values and cancel and join tasks before releasing their dependencies. The capability manages those resources and publishes their outcomes. The agent manages session lifetimes and routes observations.
 
-Persist the receiving focus before returning a callback or subscription reference. Host registers command completions through the invoking session's registrar. A report can outlive its subscription, so its destination must remain available after withdrawal. See [callback registration](architecture.md#event-sources-and-callback-admission) and [subscription delivery](architecture.md#subscription-delivery).
+Persist the receiving focus before returning a callback or subscription reference. The host adapter registers command completions through the calling session's registrar. A report can outlive its subscription, so its destination must remain available after withdrawal. [Callback registration](architecture.md#event-sources-and-callback-admission) · [Subscription delivery](architecture.md#subscription-delivery)
 
 Keep a session's identity independent of context residency, and retain its history for as long as it can resume. When handling a failure, consider what repeating the operation would do. A fresh inference can revise an unusable summary. A command that already ran has an outcome to preserve. See [runtime availability](design.md#runtime-availability).
 

@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send text to a correspondent, focus, or channel. For a correspondent, `reference` confirms submission for delivery. A message to a focus becomes an observation and can wake it. On a channel, `accepted` confirms a handoff to a waiting receiver.",
+    "description": "Send text to a correspondent, focus, or channel. For a correspondent, `reference` confirms submission for delivery. A focus receives the message as an observation and may wake for it. On a channel, `accepted` confirms a handoff to a waiting receiver.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -53,7 +53,7 @@
   },
   {
     "name": "open_channel",
-    "description": "Open a channel for local programs. A host command can receive with `\"$IVENNA\" channel receive CHANNEL_ID` using the returned `channel_id`. An open channel keeps its ID after this focus ends or Ivenna restarts.",
+    "description": "Open a channel for a local program. Give the returned `channel_id` to the receiver. An open channel can outlast this focus and keeps its ID across restarts. In a host command, `\"$IVENNA\" channel receive --help` shows how to connect.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -109,7 +109,7 @@
   },
   {
     "name": "subscribe",
-    "description": "Register this focus to receive reports that can wake it. Give the returned `subscription_id` to a listener you arrange. A host program can connect with `\"$IVENNA\" subscription listen SUBSCRIPTION_ID`.",
+    "description": "Subscribe this focus to reports from a listener you arrange. Give the listener the returned `subscription_id`. Its reports can wake this focus. In a host command, `\"$IVENNA\" subscription listen --help` shows how to report.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -121,7 +121,7 @@
         "listener": {
           "type": "string",
           "minLength": 1,
-          "description": "Saved description of what to report and when."
+          "description": "Describe what the listener watches and when it should report."
         }
       },
       "required": ["name", "listener"],
@@ -130,7 +130,7 @@
   },
   {
     "name": "withdraw_subscription",
-    "description": "Stop accepting reports for a subscription. Reports already accepted can still reach the subscribing focus, and the listener may keep running.",
+    "description": "Stop accepting new reports for a subscription. Reports already accepted can still reach its focus. The listener may keep running.",
     "parameters": {
       "type": "object",
       "properties": {

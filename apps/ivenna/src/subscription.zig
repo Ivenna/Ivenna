@@ -5,8 +5,24 @@ const cli = @import("cli.zig");
 const Allocator = std.mem.Allocator;
 
 const max_line_bytes = 65_536;
+const Receipt = enum { ready, accepted, invalid_request, withdrawn, busy, storage_full };
 
-pub fn run(init: std.process.Init, id: []const u8) !void {
+pub fn run(init: std.process.Init, id: []const u8) u8 {
+    runSession(init, id) catch |err| {
+        if (errorReceipt(err)) |receipt| {
+            // writeReceipt owns the diagnostic if stdout cannot take the terminal reply.
+            writeReceipt(init.io, receipt) catch {};
+        } else switch (err) {
+            error.MissingDataDirectory, error.StateStorageFailed, error.ReceiptWriteFailed => {},
+            error.IncompatibleStateSchema => std.log.err("this listener requires the instance database schema for its build. Check DATA_DIR and use the same build as the kernel. After updating, start 'ivenna serve' before connecting listeners", .{}),
+            else => std.log.err("{s}", .{@errorName(err)}),
+        }
+        return 1;
+    };
+    return 0;
+}
+
+fn runSession(init: std.process.Init, id: []const u8) !void {
     const a = init.arena.allocator();
     const directory = init.environ_map.get("DATA_DIR") orelse "";
     if (directory.len == 0) {
@@ -20,7 +36,7 @@ pub fn run(init: std.process.Init, id: []const u8) !void {
 }
 
 fn listen(a: Allocator, io: std.Io, listener: *subscriptions.Listener) !void {
-    try cli.writeJson(io, "ready");
+    try writeReceipt(io, .ready);
 
     var buffer: [max_line_bytes + 1]u8 = undefined;
     var input = std.Io.File.stdin().readerStreaming(io, &buffer);
@@ -32,10 +48,11 @@ fn listen(a: Allocator, io: std.Io, listener: *subscriptions.Listener) !void {
 
         var frame = std.heap.ArenaAllocator.init(a);
         defer frame.deinit();
-        publishLine(frame.allocator(), io, listener, line) catch |err| {
-            if (err == error.SubscriptionWithdrawn) return err;
-            try cli.writeJson(io, errorReceipt(err) orelse return err);
+        const receipt: Receipt = if (publishLine(frame.allocator(), io, listener, line)) .accepted else |err| switch (err) {
+            error.SubscriptionWithdrawn => return err,
+            else => errorReceipt(err) orelse return err,
         };
+        try writeReceipt(io, receipt);
     }
 }
 
@@ -45,16 +62,26 @@ fn publishLine(a: Allocator, io: std.Io, listener: *subscriptions.Listener, line
         else => return error.InvalidArguments,
     };
     try listener.publish(report.value(), std.Io.Clock.real.now(io).toMilliseconds());
-    try cli.writeJson(io, "accepted");
 }
 
-pub fn errorReceipt(err: anyerror) ?[]const u8 {
+fn errorReceipt(err: anyerror) ?Receipt {
     return switch (err) {
-        error.InvalidArguments => "invalid_request",
-        error.SubscriptionWithdrawn => "withdrawn",
-        error.StateStoreBusy => "busy",
-        error.StateStoreFull => "storage_full",
+        error.InvalidArguments => .invalid_request,
+        error.SubscriptionWithdrawn => .withdrawn,
+        error.StateStoreBusy => .busy,
+        error.StateStoreFull => .storage_full,
         else => null,
+    };
+}
+
+fn writeReceipt(io: std.Io, receipt: Receipt) error{ReceiptWriteFailed}!void {
+    cli.writeJson(io, @tagName(receipt)) catch |err| {
+        if (receipt == .accepted) {
+            std.log.err("the report was accepted. Its receipt could not be written ({s}). Retry with its original key to confirm", .{@errorName(err)});
+        } else {
+            std.log.err("could not write subscription reply '{t}' ({s})", .{ receipt, @errorName(err) });
+        }
+        return error.ReceiptWriteFailed;
     };
 }
 

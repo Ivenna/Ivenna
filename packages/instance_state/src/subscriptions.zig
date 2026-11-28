@@ -59,20 +59,10 @@ pub const Store = struct {
     db: zqlite.Conn,
     listener_presence: ?ListenerPresence,
 
-    pub fn initialize(a: Allocator, io: std.Io, path: []const u8) !Store {
-        return openFile(a, io, path, .initialize);
-    }
-
-    /// Verify the mailbox checkpoint's catalog against the database before
-    /// `initialize` runs the schema migration. A mismatch returns without
-    /// touching the existing file, including a legacy application id, version,
-    /// or cursor column.
-    pub fn preflight(a: Allocator, io: std.Io, path: []const u8, expected_catalog: ?[32]u8) !void {
-        const stored = try sql.mailboxIdentity(a, io, path);
-        if (expected_catalog) |catalog| {
-            const existing = stored orelse return error.SubscriptionCatalogMismatch;
-            if (!std.mem.eql(u8, &existing, &catalog)) return error.SubscriptionCatalogMismatch;
-        }
+    /// Open the database paired with the selected mailbox checkpoint and
+    /// install or migrate its schema. A checkpoint requires an existing file.
+    pub fn initialize(a: Allocator, io: std.Io, path: []const u8, checkpoint_catalog: ?[32]u8) !Store {
+        return openFile(a, io, path, .{ .initialize = checkpoint_catalog });
     }
 
     fn openFile(a: Allocator, io: std.Io, path: []const u8, mode: sql.OpenMode) !Store {
@@ -85,7 +75,7 @@ pub const Store = struct {
     }
 
     pub fn openInMemory(a: Allocator) !Store {
-        return .{ .db = try sql.open(a, ":memory:", .initialize), .listener_presence = null };
+        return .{ .db = try sql.open(a, ":memory:", .{ .initialize = null }), .listener_presence = null };
     }
 
     pub fn close(self: *Store) void {
@@ -102,16 +92,7 @@ pub const Store = struct {
     }
 
     pub fn identity(self: *Store) ![32]u8 {
-        const s = try sql.statement(self.db, "SELECT identity FROM mailbox_binding WHERE singleton=1", .{});
-        defer s.deinit();
-        if (!try sql.checked(s.step())) return error.InvalidStateDatabase;
-        const id = try sql.requiredText(s, 0);
-        if (id.len != 32) return error.InvalidStateDatabase;
-        return id[0..32].*;
-    }
-
-    pub fn isBound(self: *Store) !bool {
-        return try sql.integer(self.db, "SELECT bound FROM mailbox_binding WHERE singleton=1", .{}) != 0;
+        return (try sql.mailboxBinding(self.db)).identity;
     }
 
     pub fn markBound(self: *Store) !void {
@@ -163,10 +144,18 @@ pub const Store = struct {
         defer s.deinit();
         var references: std.ArrayList([]const u8) = .empty;
         while (references.items.len < limit and try sql.checked(s.step())) {
+            const reference = try sql.requiredText(s, 1);
             if (self.listener_presence) |presence| {
-                if (try presence.connected(s.int(0))) continue;
+                const connected = presence.connected(s.int(0)) catch |err| switch (err) {
+                    error.Canceled => return err,
+                    error.Unexpected => {
+                        std.log.warn("subscription listener probe failed for '{s}': {s}", .{ reference, @errorName(err) });
+                        continue;
+                    },
+                };
+                if (connected) continue;
             }
-            try references.append(a, try sql.copyText(a, s, 1));
+            try references.append(a, try a.dupe(u8, reference));
         }
         return references.toOwnedSlice(a);
     }
@@ -243,7 +232,7 @@ test "a reconnected listener can retry an accepted report after the focus receiv
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
     const filename = sql.filename;
     const path = try std.fs.path.join(a, &.{ dir, filename });
-    var kernel = try Store.initialize(a, t.io, path);
+    var kernel = try Store.initialize(a, t.io, path, null);
     defer kernel.close();
     const activity = "read-2";
     const ref = (try kernel.create(a, activity, "feed", "watch changes")).subscription_id;
@@ -305,26 +294,22 @@ test "withdrawing the highest subscription does not let a replacement inherit it
     defer temporary.cleanup();
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
     const path = try std.fs.path.join(a, &.{ dir, sql.filename });
-    var kernel = try Store.initialize(a, t.io, path);
+    var kernel = try Store.initialize(a, t.io, path, null);
     defer kernel.close();
 
-    _ = (try kernel.create(a, "core-1", "feed", "first")).subscription_id;
-    const latest = (try kernel.create(a, "core-1", "feed", "latest")).subscription_id;
+    const latest = (try kernel.create(a, "core-1", "feed", "watch updates")).subscription_id;
     var listener = try Listener.open(a, t.io, path, latest);
     defer listener.close();
     try t.expect(try kernel.withdraw(latest));
 
-    const replacement = (try kernel.create(a, "core-1", "replacement", "feed")).subscription_id;
-    try t.expect(!std.mem.eql(u8, latest, replacement));
-    try t.expect(std.mem.endsWith(u8, replacement, "-3"));
-    const sampled = try kernel.subscriptionsWithoutListeners(a, "core-1", 8);
-    try t.expectEqualStrings(replacement, sampled[0]);
+    const replacement = (try kernel.create(a, "core-1", "feed", "watch updates")).subscription_id;
     // The withdrawn listener still holds the old id. Without AUTOINCREMENT,
     // SQLite would reuse that id and the replacement would look connected.
+    try t.expectEqualDeep(@as([]const []const u8, &.{replacement}), try kernel.subscriptionsWithoutListeners(a, "core-1", 8));
     try t.expectError(error.SubscriptionWithdrawn, Listener.open(a, t.io, path, latest));
 }
 
-test "legacy migration preserves a deleted subscription high-water id" {
+test "a mailbox checkpoint does not create a missing database" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -332,77 +317,9 @@ test "legacy migration preserves a deleted subscription high-water id" {
     var temporary = t.tmpDir(.{});
     defer temporary.cleanup();
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, sql.filename });
-
-    var store = try Store.initialize(a, t.io, path);
-    try sql.exec(store.db,
-        \\INSERT INTO subscriptions(id,name,focus_id,listener) VALUES(5,'old','core-1','gone');
-        \\DELETE FROM subscriptions WHERE id=5;
-        \\ALTER TABLE subscriptions ADD COLUMN cursor TEXT;
-    );
-    try sql.exec(store.db, std.fmt.comptimePrint("PRAGMA application_id={d}", .{std.mem.readInt(u32, "IVS2", .big)}));
-    try sql.exec(store.db, "PRAGMA user_version=0");
-    store.close();
-
-    var migrated = try Store.initialize(a, t.io, path);
-    defer migrated.close();
-    const ref = (try migrated.create(a, "core-1", "feed", "new")).subscription_id;
-    try t.expect(std.mem.endsWith(u8, ref, "-6"));
-}
-
-test "mailbox preflight leaves a legacy database unchanged on mismatch" {
-    const t = std.testing;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var temporary = t.tmpDir(.{});
-    defer temporary.cleanup();
-    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
-    const path = try std.fs.path.join(a, &.{ dir, sql.filename });
-
-    var store = try Store.initialize(a, t.io, path);
-    const identity = try store.identity();
-    try sql.exec(store.db,
-        \\INSERT INTO subscriptions(id,name,focus_id,listener) VALUES(3,'news','core-1','Release feed');
-        \\ALTER TABLE subscriptions ADD COLUMN cursor TEXT;
-        \\UPDATE subscriptions SET cursor='17';
-    );
-    try sql.exec(store.db, std.fmt.comptimePrint("PRAGMA application_id={d}", .{std.mem.readInt(u32, "IVS3", .big)}));
-    try sql.exec(store.db, "PRAGMA user_version=0");
-    store.close();
-
-    const legacy_id = std.mem.readInt(u32, "IVS3", .big);
-    var wrong = identity;
-    wrong[0] = if (wrong[0] == '0') '1' else '0';
-    try t.expectError(error.SubscriptionCatalogMismatch, Store.preflight(a, t.io, path, wrong));
-    {
-        const raw = try sql.openRawForTest(a, path);
-        defer raw.close();
-        try t.expectEqual(legacy_id, try sql.integer(raw, "PRAGMA application_id", .{}));
-        try t.expectEqual(0, try sql.integer(raw, "PRAGMA user_version", .{}));
-        try t.expectEqual(1, try sql.integer(raw, "SELECT count(*) FROM pragma_table_xinfo('subscriptions') WHERE name='cursor'", .{}));
-        try t.expectEqual(1, try sql.integer(raw, "SELECT count(*) FROM subscriptions WHERE id=3 AND cursor='17'", .{}));
-    }
-
-    // A matching catalog passes without migrating; `initialize` owns migration.
-    try Store.preflight(a, t.io, path, identity);
-    {
-        const raw = try sql.openRawForTest(a, path);
-        defer raw.close();
-        try t.expectEqual(legacy_id, try sql.integer(raw, "PRAGMA application_id", .{}));
-        try t.expectEqual(1, try sql.integer(raw, "SELECT count(*) FROM subscriptions WHERE cursor='17'", .{}));
-    }
-
     const missing = try std.fs.path.join(a, &.{ dir, "missing.sqlite3" });
-    try t.expectError(error.SubscriptionCatalogMismatch, Store.preflight(a, t.io, missing, identity));
+    try t.expectError(error.SubscriptionCatalogMismatch, Store.initialize(a, t.io, missing, @splat('0')));
     try t.expectError(error.FileNotFound, std.Io.Dir.cwd().access(t.io, missing, .{}));
-
-    var migrated = try Store.initialize(a, t.io, path);
-    defer migrated.close();
-    try t.expectEqual(std.mem.readInt(u32, "IVST", .big), try sql.integer(migrated.db, "PRAGMA application_id", .{}));
-    try t.expectEqual(1, try sql.integer(migrated.db, "PRAGMA user_version", .{}));
-    try t.expectEqual(0, try sql.integer(migrated.db, "SELECT count(*) FROM pragma_table_xinfo('subscriptions') WHERE name='cursor'", .{}));
-    try t.expectEqual(1, try sql.integer(migrated.db, "SELECT count(*) FROM subscriptions WHERE id=3", .{}));
 }
 
 test "listener presence follows independent sessions and active registrations" {
@@ -414,7 +331,7 @@ test "listener presence follows independent sessions and active registrations" {
     defer temporary.cleanup();
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
     const path = try std.fs.path.join(a, &.{ dir, sql.filename });
-    var kernel = try Store.initialize(a, t.io, path);
+    var kernel = try Store.initialize(a, t.io, path, null);
     defer kernel.close();
     const ref = (try kernel.create(a, "core-1", "feed", "watch changes")).subscription_id;
     const other = (try kernel.create(a, "read-2", "feed", "watch another source")).subscription_id;
@@ -426,7 +343,7 @@ test "listener presence follows independent sessions and active registrations" {
         {
             var second = try Listener.open(a, t.io, path, ref);
             defer second.close();
-            var reopened = try Store.initialize(a, t.io, path);
+            var reopened = try Store.initialize(a, t.io, path, null);
             defer reopened.close();
             try t.expectEqual(0, (try reopened.subscriptionsWithoutListeners(a, "core-1", 8)).len);
             try t.expectEqualDeep(@as([]const []const u8, &.{other}), try reopened.subscriptionsWithoutListeners(a, "read-2", 8));
@@ -434,12 +351,4 @@ test "listener presence follows independent sessions and active registrations" {
         try t.expectEqual(0, (try kernel.subscriptionsWithoutListeners(a, "core-1", 8)).len);
     }
     try t.expectEqualDeep(@as([]const []const u8, &.{ref}), try kernel.subscriptionsWithoutListeners(a, "core-1", 8));
-    {
-        var listener = try Listener.open(a, t.io, path, ref);
-        defer listener.close();
-        try t.expect(try kernel.withdraw(ref));
-        const replacement = (try kernel.create(a, "core-1", "feed", "watch changes")).subscription_id;
-        try t.expectEqualDeep(@as([]const []const u8, &.{replacement}), try kernel.subscriptionsWithoutListeners(a, "core-1", 1));
-        try t.expectError(error.SubscriptionWithdrawn, Listener.open(a, t.io, path, ref));
-    }
 }

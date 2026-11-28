@@ -8,18 +8,16 @@ pub const filename = "state.sqlite3";
 const application_id = std.mem.readInt(u32, "IVST", .big);
 const schema_version = 1;
 const session_snapshot_application_id = std.mem.readInt(u32, "IVS3", .big);
-pub const OpenMode = enum { initialize, existing };
+const InstalledSchema = enum { current, empty, legacy_with_cursor, session_snapshot };
+pub const OpenMode = union(enum) { initialize: ?[32]u8, existing };
 
 pub fn open(a: Allocator, path: []const u8, mode: OpenMode) !zqlite.Conn {
     if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
     const path_z = try a.dupeSentinel(u8, path, 0);
     defer a.free(path_z);
-    const flags = switch (mode) {
-        .initialize => c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
-        .existing => c.SQLITE_OPEN_READWRITE,
-    };
-    const conn = try connect(path_z, flags);
-    // Closing a failed startup connection rolls back any uncommitted migration.
+    const has_checkpoint = mode == .initialize and mode.initialize != null;
+    const flags: c_int = c.SQLITE_OPEN_READWRITE | (if (mode == .initialize and !has_checkpoint) c.SQLITE_OPEN_CREATE else 0);
+    const conn = try connect(path_z, flags, has_checkpoint);
     errdefer conn.close();
     if (c.sqlite3_db_readonly(conn.conn, "main") == 1) {
         std.log.err("instance database '{s}' is read-only", .{path});
@@ -29,7 +27,7 @@ pub fn open(a: Allocator, path: []const u8, mode: OpenMode) !zqlite.Conn {
     try exec(conn, "PRAGMA foreign_keys=ON");
     try exec(conn, "PRAGMA synchronous=FULL");
     if (mode == .initialize) {
-        try migrateSchema(conn);
+        try migrateSchema(conn, mode.initialize);
         try exec(conn, "PRAGMA journal_mode=WAL");
     } else if (try integer(conn, "PRAGMA application_id", .{}) != application_id or
         try integer(conn, "PRAGMA user_version", .{}) != schema_version)
@@ -39,31 +37,25 @@ pub fn open(a: Allocator, path: []const u8, mode: OpenMode) !zqlite.Conn {
     return conn;
 }
 
-/// Read the mailbox binding identity without migrating or enforcing the
-/// current schema version. Startup compares it with the mailbox checkpoint
-/// before `open(.initialize)` is allowed to rewrite a legacy database.
-pub fn mailboxIdentity(a: Allocator, io: std.Io, path: []const u8) !?[32]u8 {
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
-    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
-    };
-    const path_z = try a.dupeSentinel(u8, path, 0);
-    defer a.free(path_z);
-    const conn = try connect(path_z, c.SQLITE_OPEN_READWRITE);
-    defer conn.close();
-    try checked(conn.busyTimeout(5000));
-    if (try integer(conn, "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mailbox_binding')", .{}) == 0)
-        return null;
-    const s = try statement(conn, "SELECT identity FROM mailbox_binding WHERE singleton=1", .{});
+const MailboxBinding = struct {
+    identity: [32]u8,
+    bound: bool,
+
+    fn matches(self: MailboxBinding, checkpoint: ?[32]u8) bool {
+        return if (checkpoint) |catalog| std.mem.eql(u8, &self.identity, &catalog) else !self.bound;
+    }
+};
+
+pub fn mailboxBinding(conn: zqlite.Conn) !MailboxBinding {
+    const s = try statement(conn, "SELECT identity,bound FROM mailbox_binding WHERE singleton=1", .{});
     defer s.deinit();
     if (!try checked(s.step())) return error.InvalidStateDatabase;
     const id = try requiredText(s, 0);
     if (id.len != 32) return error.InvalidStateDatabase;
-    return id[0..32].*;
+    return .{ .identity = id[0..32].*, .bound = s.int(1) != 0 };
 }
 
-fn connect(path: [:0]const u8, flags: c_int) !zqlite.Conn {
+fn connect(path: [:0]const u8, flags: c_int, has_checkpoint: bool) !zqlite.Conn {
     var handle: ?*c.sqlite3 = null;
     const rc = c.sqlite3_open_v2(path.ptr, &handle, flags, null);
     if (rc == c.SQLITE_OK) return .{ .conn = handle.? };
@@ -71,6 +63,8 @@ fn connect(path: [:0]const u8, flags: c_int) !zqlite.Conn {
     defer if (handle) |db| {
         _ = c.sqlite3_close(db);
     };
+    if (has_checkpoint and rc == c.SQLITE_CANTOPEN and c.sqlite3_system_errno(handle) == @backingInt(std.posix.E.NOENT))
+        return error.SubscriptionCatalogMismatch;
     return switch (rc) {
         c.SQLITE_BUSY, c.SQLITE_LOCKED => error.StateStoreBusy,
         c.SQLITE_FULL => error.StateStoreFull,
@@ -83,48 +77,44 @@ fn connect(path: [:0]const u8, flags: c_int) !zqlite.Conn {
     };
 }
 
-fn migrateSchema(conn: zqlite.Conn) !void {
+fn migrateSchema(conn: zqlite.Conn, checkpoint: ?[32]u8) !void {
     try exec(conn, "BEGIN IMMEDIATE");
-    const id = try integer(conn, "PRAGMA application_id", .{});
-    const recorded_version = try integer(conn, "PRAGMA user_version", .{});
-    if (id != application_id and recorded_version != 0) return error.IncompatibleStateSchema;
-    const installed_version = switch (id) {
-        application_id => recorded_version,
-        0 => installed: {
-            if (try integer(conn, "SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
-                return error.IncompatibleStateSchema;
-            try exec(conn, @embedFile("schema.sql"));
-            break :installed schema_version;
-        },
-        std.mem.readInt(u32, "IVDB", .big),
-        std.mem.readInt(u32, "IVS2", .big),
-        session_snapshot_application_id,
-        => installed: {
-            // The session snapshot omitted the cursor on creation and kept it on upgrade.
-            if (id != session_snapshot_application_id or
-                try integer(conn, "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('subscriptions') WHERE name='cursor')", .{}) != 0)
-            {
-                try exec(conn, "ALTER TABLE subscriptions DROP COLUMN cursor");
-            }
-            break :installed 1;
-        },
-        else => return error.IncompatibleStateSchema,
-    };
-    if (installed_version != schema_version) return error.IncompatibleStateSchema;
-    if (id != application_id) {
+    errdefer rollback(conn);
+    const schema = try installedSchema(conn);
+    if (schema == .empty) {
+        if (checkpoint != null) return error.SubscriptionCatalogMismatch;
+        try exec(conn, @embedFile("schema.sql"));
+    } else {
+        if (!(try mailboxBinding(conn)).matches(checkpoint)) return error.SubscriptionCatalogMismatch;
+        // The session snapshot omitted the cursor on creation and kept it on upgrade.
+        if (schema == .legacy_with_cursor or (schema == .session_snapshot and
+            try integer(conn, "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('subscriptions') WHERE name='cursor')", .{}) != 0))
+        {
+            try exec(conn, @embedFile("migrations/0001_drop_subscription_cursor.sql"));
+        }
+    }
+    if (schema != .current) {
         try exec(conn, std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id}));
         try exec(conn, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
     }
     try exec(conn, "COMMIT");
 }
 
-/// Test-only connection for inspecting a legacy database without migrating it.
-pub fn openRawForTest(a: Allocator, path: []const u8) !zqlite.Conn {
-    if (!@import("builtin").is_test) @compileError("only tests can open an unchecked database");
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
-    const path_z = try a.dupeSentinel(u8, path, 0);
-    defer a.free(path_z);
-    return connect(path_z, c.SQLITE_OPEN_READWRITE);
+fn installedSchema(conn: zqlite.Conn) !InstalledSchema {
+    const id = try integer(conn, "PRAGMA application_id", .{});
+    const recorded_version = try integer(conn, "PRAGMA user_version", .{});
+    if (id != application_id and recorded_version != 0) return error.IncompatibleStateSchema;
+    return switch (id) {
+        application_id => if (recorded_version == schema_version) .current else return error.IncompatibleStateSchema,
+        0 => schema: {
+            if (try integer(conn, "SELECT EXISTS(SELECT 1 FROM sqlite_schema)", .{}) != 0)
+                return error.IncompatibleStateSchema;
+            break :schema .empty;
+        },
+        std.mem.readInt(u32, "IVDB", .big), std.mem.readInt(u32, "IVS2", .big) => .legacy_with_cursor,
+        session_snapshot_application_id => .session_snapshot,
+        else => return error.IncompatibleStateSchema,
+    };
 }
 
 pub fn exec(conn: zqlite.Conn, query: [:0]const u8) !void {
@@ -197,12 +187,12 @@ test "initialization and existing open preserve an incompatible database" {
     defer temporary.cleanup();
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
     const path = try std.fs.path.join(a, &.{ dir, filename });
-    const prior = try connect(try a.dupeSentinel(u8, path, 0), c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE);
+    const prior = try connect(try a.dupeSentinel(u8, path, 0), c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE, false);
     defer prior.close();
     try exec(prior, "CREATE TABLE notes(text TEXT)");
     try exec(prior, "INSERT INTO notes VALUES('keep me')");
     try t.expectError(error.IncompatibleStateSchema, open(a, path, .existing));
-    try t.expectError(error.IncompatibleStateSchema, open(a, path, .initialize));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .{ .initialize = null }));
     try t.expectEqual(1, try integer(prior, "SELECT count(*) FROM notes WHERE text='keep me'", .{}));
     try t.expectEqual(0, try integer(prior, "PRAGMA application_id", .{}));
 
@@ -211,7 +201,7 @@ test "initialization and existing open preserve an incompatible database" {
     const other_id = std.mem.readInt(u32, "TEST", .big);
     try exec(prior, std.fmt.comptimePrint("PRAGMA application_id={d}", .{other_id}));
     try t.expectError(error.IncompatibleStateSchema, open(a, path, .existing));
-    try t.expectError(error.IncompatibleStateSchema, open(a, path, .initialize));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .{ .initialize = null }));
     try t.expectEqual(other_id, try integer(prior, "PRAGMA application_id", .{}));
 }
 
@@ -225,20 +215,25 @@ test "startup removes legacy cursors and preserves subscription state" {
     const directory = try temporary.dir.realPathFileAlloc(t.io, ".", a);
     const cases = .{
         .{ "IVDB", true },
+        .{ "IVS2", true },
         .{ "IVS3", true },
         .{ "IVS3", false },
     };
+    const catalog = "0123456789abcdef0123456789abcdef".*;
     inline for (cases, 0..) |case, index| {
         const old_id, const has_cursor = case;
+        const legacy_id = std.mem.readInt(u32, old_id, .big);
         const path = try std.fs.path.join(a, &.{ directory, std.fmt.comptimePrint("state-{d}.sqlite3", .{index}) });
         {
-            const legacy = try connect(try a.dupeSentinel(u8, path, 0), c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE);
+            const legacy = try connect(try a.dupeSentinel(u8, path, 0), c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE, false);
             defer legacy.close();
             try exec(legacy, @embedFile("schema.sql"));
-            try exec(legacy, std.fmt.comptimePrint("PRAGMA application_id={d}", .{std.mem.readInt(u32, old_id, .big)}));
+            try exec(legacy, std.fmt.comptimePrint("PRAGMA application_id={d}", .{legacy_id}));
             try exec(legacy,
                 \\UPDATE mailbox_binding SET identity='0123456789abcdef0123456789abcdef', bound=1;
                 \\INSERT INTO subscriptions(id,name,focus_id,listener) VALUES(3,'news','core-1','Release feed');
+                \\INSERT INTO subscriptions(id,name,focus_id,listener) VALUES(5,'old','core-1','Deleted feed');
+                \\DELETE FROM subscriptions WHERE id=5;
                 \\INSERT INTO subscription_reports(sequence,reference,focus_id,text,source_time,received)
                 \\VALUES(7,'news-3','core-1','New release',120,123);
                 \\INSERT INTO accepted_report_keys(subscription_id,key) VALUES(3,'report-17');
@@ -247,9 +242,17 @@ test "startup removes legacy cursors and preserves subscription state" {
                 try exec(legacy, "ALTER TABLE subscriptions ADD COLUMN cursor TEXT");
                 try exec(legacy, "UPDATE subscriptions SET cursor='17'");
             }
+            try t.expectError(error.IncompatibleStateSchema, open(a, path, .existing));
+            for ([_]?[32]u8{ null, @splat('0') }) |wrong| {
+                try t.expectError(error.SubscriptionCatalogMismatch, open(a, path, .{ .initialize = wrong }));
+                try t.expectEqual(legacy_id, try integer(legacy, "PRAGMA application_id", .{}));
+                try t.expectEqual(0, try integer(legacy, "PRAGMA user_version", .{}));
+                if (has_cursor) try t.expectEqual(1, try integer(legacy, "SELECT count(*) FROM subscriptions WHERE id=3 AND cursor='17'", .{}));
+            }
         }
 
-        (try open(a, path, .initialize)).close();
+        (try open(a, path, .{ .initialize = catalog })).close();
+        (try open(a, path, .{ .initialize = catalog })).close();
         const current = try open(a, path, .existing);
         defer current.close();
         try t.expectEqual(0, try integer(current, "SELECT count(*) FROM pragma_table_xinfo('subscriptions') WHERE name='cursor'", .{}));
@@ -257,6 +260,8 @@ test "startup removes legacy cursors and preserves subscription state" {
         try t.expectEqual(1, try integer(current, "SELECT count(*) FROM subscriptions WHERE reference='news-3' AND focus_id='core-1' AND listener='Release feed'", .{}));
         try t.expectEqual(1, try integer(current, "SELECT count(*) FROM subscription_reports WHERE sequence=7 AND reference='news-3' AND text='New release' AND source_time=120 AND received=123", .{}));
         try t.expectEqual(1, try integer(current, "SELECT count(*) FROM accepted_report_keys WHERE subscription_id=3 AND key='report-17'", .{}));
+        // A deleted registration's ID stays retired across the upgrade.
+        try t.expectEqual(6, try integer(current, "INSERT INTO subscriptions(name,focus_id,listener) VALUES('new','core-1','New feed') RETURNING id", .{}));
     }
 }
 
@@ -269,11 +274,29 @@ test "open rejects a newer schema version without changing it" {
     defer temporary.cleanup();
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
     const path = try std.fs.path.join(a, &.{ dir, filename });
-    const current = try open(a, path, .initialize);
+    const current = try open(a, path, .{ .initialize = null });
     defer current.close();
     const newer = schema_version + 1;
     try exec(current, std.fmt.comptimePrint("PRAGMA user_version={d}", .{newer}));
     try t.expectError(error.IncompatibleStateSchema, open(a, path, .existing));
-    try t.expectError(error.IncompatibleStateSchema, open(a, path, .initialize));
+    try t.expectError(error.IncompatibleStateSchema, open(a, path, .{ .initialize = null }));
     try t.expectEqual(newer, try integer(current, "PRAGMA user_version", .{}));
+}
+
+test "a matching checkpoint can resume before the database has been marked bound" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, filename });
+    const initial = try open(a, path, .{ .initialize = null });
+    defer initial.close();
+    const binding = try mailboxBinding(initial);
+    try t.expect(!binding.bound);
+    const resumed = try open(a, path, .{ .initialize = binding.identity });
+    defer resumed.close();
+    try t.expectEqual(binding, try mailboxBinding(resumed));
 }

@@ -34,16 +34,6 @@ pub fn run(init: std.process.Init) !void {
         .correspondent_addresses = config.mail_correspondents,
     });
     defer mail.deinit();
-    // Check the mailbox pairing against the existing database before
-    // `initialize` migrates it. Starting with the wrong mailbox must leave the
-    // other instance's schema and cursor values untouched.
-    const checkpoint_catalog: ?[32]u8 = if (try mail.history().load(a)) |document|
-        try agent.subscriptionCatalog(a, document)
-    else
-        null;
-    try state.subscriptions.Store.preflight(init.gpa, io, database_path, checkpoint_catalog);
-    var subscription_store = try state.subscriptions.Store.initialize(init.gpa, io, database_path);
-    defer subscription_store.close();
     var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
     try memory_client.checkAvailable(a);
     var host_env = try init.environ_map.clone(a);
@@ -80,20 +70,29 @@ pub fn run(init: std.process.Init) !void {
         .activity_tools = &activity_tools,
         .reasoning = config.llm_reasoning,
     };
-    var kernel = try agent.Kernel.init(init.gpa, io, .{
-        .engine = &engine,
-        .inbox = mail.inbox(),
-        .sender = mail.sender(),
-        .channels = channels.port(),
-        .history = mail.history(),
-        .callbacks = mail.callbackPublisher(),
-        .subscriptions = &subscription_store,
-    }, .{
-        .limits = config.context_limits,
-        .poll_interval_ms = config.mail_poll_interval_ms,
-        .max_sessions = config.max_sessions,
-        .max_pending_events = config.max_pending_events,
-    });
+    var subscription_store: state.subscriptions.Store = undefined;
+    var kernel = startup: {
+        var scratch = std.heap.ArenaAllocator.init(init.gpa);
+        defer scratch.deinit();
+        const history = try agent.StartupHistory.load(scratch.allocator(), mail.history());
+        subscription_store = try state.subscriptions.Store.initialize(init.gpa, io, database_path, history.subscriptionCatalog());
+        errdefer subscription_store.close();
+        break :startup try agent.Kernel.init(init.gpa, io, .{
+            .engine = &engine,
+            .inbox = mail.inbox(),
+            .sender = mail.sender(),
+            .channels = channels.port(),
+            .history = history,
+            .callbacks = mail.callbackPublisher(),
+            .subscriptions = &subscription_store,
+        }, .{
+            .limits = config.context_limits,
+            .poll_interval_ms = config.mail_poll_interval_ms,
+            .max_sessions = config.max_sessions,
+            .max_pending_events = config.max_pending_events,
+        });
+    };
+    defer subscription_store.close();
     defer kernel.deinit();
     const action: std.posix.Sigaction = .{
         .handler = .{ .handler = requestStop },

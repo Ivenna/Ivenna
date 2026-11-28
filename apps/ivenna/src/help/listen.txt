@@ -6,17 +6,17 @@ report per line on stdin and read one JSON receipt per report on stdout.
 
   {"key":"release-17","text":"Release 17 is available"}
 
-Use a stable, nonempty key per report. To include the time of the reported
+Use a distinct, nonempty key per report. To include the time of the reported
 event, set source_time_unix_ms in whole Unix milliseconds.
 
-Wait for "accepted" before advancing your saved source position past the
-report. If a receipt is missing, reconnect if needed and retry with the
-same subscription ID and report key.
+If you track source progress, wait for "accepted" before advancing past a
+report. If its receipt is missing, reconnect if needed and send the same
+report with its original subscription ID and key.
 
-Use a session for a single report or keep it open between reports. An
-independent listener can submit reports while the kernel is stopped.
+An independent listener can submit reports while the kernel is stopped.
 
-Close stdin for a normal exit with status 0. A withdrawn subscription, an
-oversized line, or a failed receipt write ends the session with status 1.
+Close stdin to exit with status 0 after processing the final report, with or
+without a trailing newline. A withdrawn subscription, an oversized line,
+or a failed receipt write ends the session with status 1.
 
 See docs/subscriptions.md in the Ivenna repository for the full protocol.

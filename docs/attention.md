@@ -6,7 +6,7 @@ The core and activities are focuses of one Ivenna. Each has a working history, a
 | --- | --- |
 | [Open another focus](#opening-a-focus) | `open_focus` |
 | [Reach an existing focus](#reaching-an-existing-focus) | `send` |
-| [Register to receive reports in this focus](#subscriptions) | `subscribe` |
+| [Register a subscription](#subscriptions) | `subscribe` |
 | [Withdraw a subscription](#withdrawing-a-subscription) | `withdraw_subscription` |
 
 See [names and references](input.md#names-and-references) for the `name` argument and the [tool schema](../packages/agent/src/tools.json) for the declarations.
@@ -27,9 +27,7 @@ The result gives the activity's `focus_id`. The activity can receive messages on
 
 The activity inherits the core's retained history through the end of the opening round, including results from tools called after `open_focus` in that round. The history can include earlier correspondence, work, and a handover. The supplied `task` arrives as the activity's first new observation. If the runtime summarizes the inherited history before the activity starts reasoning, the activity receives the handover and its original assignment together. See [assignment fields](input.md#assignments-and-reports) and [how an activity starts](architecture.md#activity-forks).
 
-The activity reasons with its own focus ID, tools, and working history. The core keeps its queued observations and continues to receive subscription reports. It can also read [what the activity says](#activity-expressions).
-
-Opening an activity once the focus limit is reached returns `focus_unavailable`. See [session capacity](running.md#session-and-command-capacity).
+The activity adds to its own history after it starts. The core keeps its queued observations and can receive subscription reports and [what the activity says](#activity-expressions).
 
 ## Reaching an existing focus
 
@@ -49,7 +47,7 @@ The observation identifies the sending focus. When relaying someone else's words
 
 ## Subscriptions
 
-Call `subscribe` in the focus that should receive the reports. The call saves `listener` as a description of what to report and when. In this example, the core follows release announcements across assignments.
+Call `subscribe` in the focus that should receive the reports. Describe in `listener` what to watch and when to report it. Ivenna saves that description with the subscription. In this example, the core follows release announcements across assignments.
 
 ```json
 {
@@ -64,7 +62,7 @@ Each successful call creates a subscription with a new `subscription_id`, even i
 {"result":{"subscription_id":"release-watch-1"}}
 ```
 
-Arrange the listener and give it the `subscription_id`. Reports go to the focus that registered the subscription even if another focus runs the listener. [Listener protocol](subscriptions.md)
+Arrange the listener and give it the `subscription_id`. The focus that registered the subscription receives the reports regardless of which focus runs the listener. A listener can also report on a schedule. [Listener protocol](subscriptions.md) · [Scheduled reports](subscriptions.md#reporting-from-a-schedule)
 
 A newly queued report can wake a sleeping focus. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. [Subscription observations](input.md#subscription-observations)
 
@@ -82,7 +80,7 @@ These actions return a JSON text part containing either `result` or an operation
 | --- | --- |
 | `invalid_arguments` | Arguments do not match the tool's declaration |
 | `unknown_tool` | The action is unavailable to the calling role or is not a current tool |
-| `focus_unavailable` | The runtime is at its configured session limit |
+| `focus_unavailable` | The runtime is at its configured [session limit](running.md#session-and-command-capacity) |
 | `unknown_focus` | The selected focus is unknown or has ended |
 | `focus_queue_full` | The recipient cannot currently accept another event |
 

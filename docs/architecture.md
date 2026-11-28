@@ -54,7 +54,7 @@ flowchart TD
     Responses --> Zdt
 ```
 
-The agent exposes `Kernel`, `Engine`, and `Input`. It keeps session scheduling, deliveries, activations, and retained context internal. `Kernel.Config` and `Kernel.Limits` govern execution. `Engine.Reasoning` supplies the reasoning settings for [model requests](#model-requests-and-tools). Capability packages define service settings and protocols, and the application loads those settings from the environment.
+The agent exposes `Kernel`, `Engine`, `Input`, and `StartupHistory`. `StartupHistory` carries the selected checkpoint through database pairing and session restoration. The agent keeps session scheduling, deliveries, activations, and retained context internal. `Kernel.Config` and `Kernel.Limits` govern execution. `Engine.Reasoning` supplies the reasoning settings for model requests. Capability packages define service settings and protocols, and the application loads those settings from the environment. [Startup and interruption](#startup-and-interruption) · [Model requests](#model-requests-and-tools)
 
 ### Shared contracts
 
@@ -119,9 +119,11 @@ The tool decoder reads the single field in `send.to` to select a destination var
 
 The session registry owns channel IDs, their opening focuses, and descriptions. The opening round owns the transport reservation through tool execution. At commit, the registry holds its lock while it saves the registration with the round's tool replies. The transport exposes the channel after confirmation. If the round exits without confirmation, it releases its reservation. Closing a channel saves its retirement before the transport ends waiting reads. See [opening a channel](communication.md#opening-a-channel) for save outcomes and [channel lifetimes](communication.md#channel-lifetimes) for what survives restart.
 
-The transport accepts connections on an abstract Unix `SOCK_SEQPACKET` socket named from the canonical instance directory and effective UID. Both peers check each other's UID. The versioned handshake registers the first pending read. After each handoff, the receiver requests its next read on the same connection and rejoins the queue. The application bounds the number of open sockets and joins the connection handlers at shutdown. See the [socket protocol](../apps/ivenna/src/channel_ipc.zig) and [receiver interface](communication.md#receiving-from-a-channel).
+The transport accepts connections on an abstract Unix `SOCK_SEQPACKET` socket named from the canonical instance directory and effective UID. Both peers check each other's UID. The versioned handshake registers the first pending read. After each handoff, the receiver requests its next read on the same connection and joins the back of the read queue. The application limits concurrent connection handlers and joins them at shutdown. [Socket protocol](../apps/ivenna/src/channel_ipc.zig) · [Receiver interface](communication.md#receiving-from-a-channel)
 
-The transport tracks receivers between reads as well as pending reads. A send tries the transport lock once. With the lock held, the transport tries nonblocking writes in read-request order, and a successful write consumes one read. If no write succeeds, it checks whether a receiver is connected. Closing queues a terminal reply after any matched message and ends the connections. See the [channel registry](../apps/ivenna/src/channels.zig) and [send outcomes](communication.md#sending-to-a-channel).
+The transport tracks receiver connections between reads. A send tries the transport lock once, then tries nonblocking writes in read-request order. A successful write consumes one read. If no write succeeds, the transport checks whether a receiver is still connected. [Channel registry](../apps/ivenna/src/channels.zig) · [Send outcomes](communication.md#sending-to-a-channel)
+
+Once the kernel confirms retirement, the transport removes the channel and wakes its connection handlers. Each handler tries to send the closing reply after any matched message. It can wait up to two seconds for socket capacity outside the registry lock, leaving other channels free to serve requests. libuv's stream shutdown similarly waits for pending writes before ending the write side. [Closing a receiver session](communication.md#receiving-from-a-channel) · [libuv stream shutdown](https://docs.libuv.org/en/v1.x/stream.html#c.uv_shutdown)
 
 ## Activation admission
 
@@ -178,11 +180,13 @@ Intake uses the registration to route the result and attach the saved reference 
 
 ## Instance database
 
-`ivenna serve` opens the subscription store at `<DATA_DIR>/state.sqlite3`. Opening the store installs the embedded schema for a new database or upgrades a supported database in place. Startup commits the schema change and its markers in one transaction. WAL mode lets readers proceed while SQLite serializes writes. [Schema](../packages/instance_state/src/schema.sql) · [Upgrade procedure](upgrading.md#moving-receivers-and-listeners-to-sessions)
+`ivenna serve` opens the subscription store at `<DATA_DIR>/state.sqlite3`. In one write transaction it reads the installed schema, verifies its pairing with the selected mailbox checkpoint, and then applies any schema change and commits the new markers. WAL mode lets readers proceed while SQLite serializes writes. [Startup code](../packages/instance_state/src/database.zig) · [SQLite isolation](https://www.sqlite.org/isolation.html) · [Upgrade procedure](upgrading.md#moving-receivers-and-listeners-to-sessions)
 
-In the versioned format, `application_id` identifies the file as an Ivenna instance database and stays fixed across schema revisions. SQLite's `user_version` records the revision. Independent listeners verify both markers on their own connections. [Connection setup](../packages/instance_state/src/database.zig)
+For a new instance, startup installs the current schema. For legacy `IVDB`, `IVS2`, and `IVS3` databases, the version 1 migration removes the saved cursor column if the legacy format has it. An `IVS3` database created without the column gets the new markers directly. Like Syncthing, Ivenna embeds the current schema and keeps the upgrade in a numbered SQL file. [Current schema](../packages/instance_state/src/schema.sql) · [Version 1 migration](../packages/instance_state/src/migrations/0001_drop_subscription_cursor.sql) · [Zig `@embedFile`](https://ziglang.org/documentation/0.17.1/#embedFile) · [Syncthing's SQLite schema and migrations](https://github.com/syncthing/syncthing/blob/main/internal/db/sqlite/sql/README.md)
 
-The database also has an identity unique to the instance. The registry records it in the first mailbox checkpoint before marking the database bound. A checkpoint must match the local database identity on startup, and a bound database requires its checkpoint. See the [backup and transfer procedure](running.md#backups-and-transfers).
+In the versioned format, `application_id` identifies the file as an Ivenna instance database and stays fixed at `IVST` across schema revisions. SQLite's `user_version` records the revision. Independent listeners open only the current revision and leave schema changes to `ivenna serve`. [SQLite database header](https://www.sqlite.org/fileformat.html#the_database_header)
+
+The database also has an identity unique to the instance. The registry records it in the first mailbox checkpoint before marking the database bound. A checkpoint must match the local database identity on startup, and a bound database requires its checkpoint. PostgreSQL's `pg_rewind` also checks system identity before applying the rewind. [PostgreSQL identity check](https://github.com/postgres/postgres/blob/REL_18_0/src/bin/pg_rewind/pg_rewind.c#L735-L748) · [Backup and transfer procedure](running.md#backups-and-transfers)
 
 ### Subscription delivery
 
@@ -194,7 +198,7 @@ After the [startup checkpoint](#startup-and-interruption) is published, the regi
 
 #### Listener connections
 
-A `listen` process owns a SQLite connection for publication and holds a Linux open-file-description read lock for the session. The registration's numeric ID selects a byte in `<DATA_DIR>/subscription-listeners.lock`. Multiple listeners can hold shared locks on the same byte. The kernel checks those locks when it samples subscriptions for an ordinary turn. Closing a session's file description releases its lock. An independent listener that stays running across a kernel restart keeps its lock. See the [lock implementation](../packages/instance_state/src/listener_presence.zig) and [listener deployment](running.md#subscription-listeners).
+A `listen` process owns a SQLite connection for publication and holds a Linux open-file-description read lock for the session. The registration's numeric ID selects a byte in `<DATA_DIR>/subscription-listeners.lock`. Several listeners can hold shared locks on that byte. Each lock lasts until its file description closes, so an independent listener can keep its lock across a kernel restart. [Lock implementation](../packages/instance_state/src/listener_presence.zig) · [Listener deployment](running.md#subscription-listeners)
 
 ## Working history and user messages
 
@@ -204,7 +208,7 @@ Context puts the same embedded [system prompt](../packages/agent/src/system.md) 
 
 [Input](../packages/agent/src/input.zig) renders retained `Record` values and temporary `Turn` values as YAML user messages. The registry supplies `current` for both ordinary and compaction turns. Retained ZON records preserve numeric times and complete typed values. The [time adapter](../packages/agent/src/time.zig) uses [zdt](https://codeberg.org/FObersteiner/zdt) to format model-facing times as UTC RFC 3339. See the [input contract](input.md) and [tool results](#tool-results).
 
-For an ordinary request, the kernel first selects history and observations that fit. It then samples channel receivers and subscription listeners and checks whether the same request fits with the sample in its final message. If the adapter reports a limit violation, the kernel uses the original turn. Keeping the sample in the final message lets unchanged history remain a reusable prefix. See the [connection fields](input.md#channel-receivers-and-subscription-listeners) and [DeepSeek context caching](https://api-docs.deepseek.com/guides/kv_cache/).
+For an ordinary request, the kernel first selects history and observations that fit. It then samples receiver sockets and listener locks. A failed socket or lock probe logs a diagnostic and omits that registration. If the SQLite registration query is busy, the turn proceeds without the subscription list. The kernel measures the request with the sample in its final message and uses the original turn if the request with the sample exceeds a limit. This placement keeps unchanged history available for prefix reuse. [Connection fields](input.md#channel-receivers-and-subscription-listeners) · [DeepSeek context caching](https://api-docs.deepseek.com/guides/kv_cache/)
 
 ## Model requests and tools
 
@@ -311,7 +315,7 @@ Owners of retained event and handover records must match the complete ID of the 
 
 The reader restores original image bytes from either raw-byte or Base64 records. For earlier file parts it requires the saved upload ID and discards the source bytes. For older handovers, it converts channel and subscription ID lists to sampled records with null descriptions and drops retired feed IDs. See [upgrading working history](upgrading.md#working-history-encoding).
 
-The checkpoint reader decodes older wakeup registrations and drops them from restored runtime state. It preserves the next callback ID so intake can acknowledge already published wakeup mail as a duplicate. [Callback admission](#event-sources-and-callback-admission) · [Upgrade guide](upgrading.md#removing-scheduled-attention)
+The checkpoint reader retires pending wakeup registrations from older builds and preserves the next callback ID. Intake can then acknowledge already published wakeup mail as a duplicate. Previously admitted wakeup observations and handover samples remain readable. [Callback admission](#event-sources-and-callback-admission) · [Retained callback fields](input.md#callback-observations) · [Upgrade guide](upgrading.md#removing-scheduled-attention)
 
 At startup the registry validates every selected session's history in temporary memory, then keeps a materialized context for the core. When it schedules an activity with no loaded context, it reads that activity's segment. The registry restores the outbox's unread metadata at startup and reads report bodies at admission. Delivery objects, receipts, worker ownership, and host process handles exist only at runtime. See [startup and interruption](#startup-and-interruption).
 
@@ -325,7 +329,7 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 ## Startup and interruption
 
-During assembly, the application opens the instance database, discovers the mail account, and checks memory with `inspect_memory_space`. The session registry validates the selected mailbox checkpoint against the instance database and restores its sessions. On first launch it creates the core. See the [durable sources used at startup](#recovery-state).
+During assembly, the application discovers the mail account and checks memory with `inspect_memory_space`. It selects the mailbox checkpoint once. The instance database verifies the pairing, and the session registry restores from the same selection. On first launch, the registry creates the core. [Instance database](#instance-database) · [Recovery state](#recovery-state)
 
 The registry restores pending internal observations before deciding whether a restored activity needs `startup`. A queued initial assignment supplies the first observation. For other activities, `was_running` or an unread internal observation triggers startup during restoration. An activity that was asleep with an empty queue receives startup when dispatched for new work. The checkpoint sets `was_running` for activities that were running or interrupted or had startup queued when saved. The core always receives startup with the sender's registered IDs. See the [startup input contract](input.md#startup-and-restart).
 

@@ -170,13 +170,13 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 Use the [mail example](#sending-a-message) to ask Ivenna for a channel check.
 
-> In an activity, open a channel named `task-input` and send `first` before starting a receiver.
+> Open an activity for this check. In that activity, open a channel named `task-input` and send `first` before starting a receiver.
 >
 > Use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" channel receive CHANNEL_ID`, substituting the complete channel ID. Send `first` again and read the output with `continue_host_shell`. Then send and read `second`. If a send returns `channel_no_receiver` or `channel_would_block` after launch, check the receiver process and let it reach its next waiting read before retrying.
 >
 > Close the channel after both reads. Report each send result, the receiver output, and its exit status.
 
-The initial send should return `channel_no_receiver`. The two successful sends should return `accepted` and produce one JSON line each, with `first` and `second` in the `text` fields. The receiver should exit with status 0 when the channel closes. See [channel send outcomes](../docs/communication.md#sending-to-a-channel).
+The first attempt should return `channel_no_receiver`. Each later handoff should return `accepted` and produce one JSON line with the supplied `text`. After the closing reply, the receiver should exit with status 0. [Channel send outcomes](../docs/communication.md#sending-to-a-channel) · [Receiver exit status](../docs/communication.md#receiving-from-a-channel)
 
 ## Trying a subscription listener
 
@@ -191,7 +191,7 @@ subscription_id='release-watch-1'
 ./zig-out/bin/ivenna subscription listen "$subscription_id"
 ```
 
-After `"ready"`, enter the following line twice. Expect two `"accepted"` receipts and one observation in Ivenna's reply.
+Wait for `"ready"`, then enter the following line twice. Both attempts should return `"accepted"`. Ivenna should receive the report once.
 
 ```json
 {"key":"listen-check-1","text":"A test observation from the open listener session."}

@@ -113,7 +113,7 @@ See [reaching an existing focus](attention.md#reaching-an-existing-focus) for qu
 
 #### Callback observations
 
-Each new `callback` carries a host completion observation to the activity that started the command.
+Each new `callback` reports a host command outcome or interruption to the activity that started the command.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -124,7 +124,7 @@ Each new `callback` carries a host completion observation to the activity that s
 
 `source.host.command_id` identifies the command even if its control handle has expired. See [command lifetimes](host.md#command-lifetimes).
 
-Retained callbacks and handover samples from the former scheduling tool can still include `source: {wakeup: {}}` and their original `scheduled_for` time. See [upgrading from scheduled attention](upgrading.md#removing-scheduled-attention).
+Retained observations and handover samples can still include the former `source: {wakeup: {}}`, with `scheduled_for` when the time was saved. See [upgrading from scheduled attention](upgrading.md#removing-scheduled-attention).
 
 #### Subscription observations
 
@@ -214,16 +214,16 @@ When there are no new events, an ordinary turn contains only `current`. Retained
 
 ### Channel receivers and subscription listeners
 
-The optional lists show which registrations lacked a connection during the sample dated by `current.observed_at`. Open sessions count as connected between reads or reports. Delivery of a channel message requires a waiting read when the send runs. [Channel sends](communication.md#sending-to-a-channel) · [Listener sessions](subscriptions.md#open-a-listener-session)
+The lists report what the runtime found during the sample dated by `current.observed_at`. An open receiver session counts as connected between reads, and an open listener session between reports. A channel send requires a waiting read at the time of the handoff. [Channel sends](communication.md#sending-to-a-channel) · [Listener sessions](subscriptions.md#open-a-listener-session)
 
 | Field | Scope for the core | Scope for an activity |
 | --- | --- | --- |
 | `channels_without_receivers` | Channels across the instance | Channels opened by this activity |
 | `subscriptions_without_listeners` | Subscriptions registered by the core | Subscriptions registered by this activity |
 
-The runtime includes up to eight IDs per list. It omits empty lists and can omit both to fit the request. The state of unlisted IDs is unspecified. The sample belongs to this inference. Connection changes do not wake a focus.
+Each list includes up to eight IDs. The runtime omits empty lists and can omit both to fit the request. Use the sample only for the listed IDs and the current inference. The runtime samples connection status when an ordinary turn is already due.
 
-In this restart turn, the core sees a queued release report. The later sample shows a channel without a receiver and the same subscription without a listener.
+After restart, the core receives a report accepted earlier. The sample shows that the subscription now lacks a listener and the open channel lacks a receiver.
 
 ```yaml
 current:

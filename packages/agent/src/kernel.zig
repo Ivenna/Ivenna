@@ -7,6 +7,7 @@ const Content = @import("content").Content;
 const Input = @import("input.zig");
 const AgentTools = @import("tools.zig");
 const Sessions = @import("sessions.zig");
+const StartupHistory = @import("history.zig").StartupHistory;
 const contracts = @import("agent_contracts");
 const InstanceState = @import("instance_state");
 const Subscriptions = InstanceState.subscriptions;
@@ -42,7 +43,7 @@ pub const Kernel = struct {
         sender: Communication.Sender,
         channels: Channels,
         callbacks: contracts.Callback.Publisher,
-        history: contracts.HistoryStore,
+        history: StartupHistory,
         subscriptions: *Subscriptions.Store,
     };
 
@@ -360,7 +361,7 @@ pub const Kernel = struct {
     /// Fit continuation and admission against the same snapshot. A rejected
     /// handover changes neither the selected history nor any inbox receipt.
     fn prepareRequest(self: *Kernel, a: Allocator, work: Work, history: *Context) !FocusResult([]const Model.Item) {
-        const current = try self.sessions.current(a, work.session);
+        const current = self.sessions.current(work.session);
         const prepared = switch (try self.fitRequest(a, work, history, current, false)) {
             .ready => |ready| ready,
             .over_limit => |limit| return self.prepareLimitedRequest(a, work, history, current, limit),
@@ -555,8 +556,7 @@ const SubscriptionFixture = struct {
     channel_send: ?struct { id: []const u8, text: []const u8 } = null,
     open_channel_id: ?[]const u8 = null,
     reserved_channel_id: ?[]const u8 = null,
-    receiver_connected: bool = false,
-    has_receiver_error: ?anyerror = null,
+    receiver_sample: std.Io.Cancelable!?bool = false,
 
     fn deinit(self: *SubscriptionFixture) void {
         self.storage.arena.deinit();
@@ -574,6 +574,8 @@ const SubscriptionFixture = struct {
             .shared_tools = &.{},
             .activity_tools = &.{},
         };
+        var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+        defer scratch.deinit();
         return Kernel.init(testing.allocator, testing.io, .{
             .engine = engine,
             .subscriptions = subscriptions,
@@ -590,7 +592,7 @@ const SubscriptionFixture = struct {
                 },
             },
             .callbacks = undefined,
-            .history = self.storage.port(),
+            .history = try StartupHistory.load(scratch.allocator(), self.storage.port()),
         }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
     }
 
@@ -602,11 +604,10 @@ const SubscriptionFixture = struct {
         return self.send_outcome;
     }
 
-    fn hasReceiver(context: *anyopaque, id: []const u8) !bool {
+    fn hasReceiver(context: *anyopaque, id: []const u8) std.Io.Cancelable!?bool {
         const self: *SubscriptionFixture = @ptrCast(@alignCast(context));
-        if (self.has_receiver_error) |err| return err;
-        const open_id = self.open_channel_id orelse return false;
-        return self.receiver_connected and std.mem.eql(u8, open_id, id);
+        std.debug.assert(std.mem.eql(u8, self.open_channel_id.?, id));
+        return self.receiver_sample;
     }
 
     fn reserveChannel(context: *anyopaque, channel_id: []const u8) !void {
@@ -893,14 +894,16 @@ test "ordinary turns refresh current connection status and give observations pri
 
     // A transient receiver probe failure drops only that sample; the prepared
     // request still proceeds with the subscription status.
-    fixture.has_receiver_error = error.SystemResources;
+    fixture.receiver_sample = null;
     const degraded = (try kernel.prepareRequest(a, core.work, &history)).ready;
     const degraded_turn = degraded[degraded.len - 1].message.text;
     try testing.expect(std.mem.indexOf(u8, degraded_turn, "channels_without_receivers:") == null);
     try testing.expect(std.mem.indexOf(u8, degraded_turn, subscription_id) != null);
-    fixture.has_receiver_error = null;
 
-    fixture.receiver_connected = true;
+    fixture.receiver_sample = error.Canceled;
+    try testing.expectError(error.Canceled, kernel.prepareRequest(a, core.work, &history));
+
+    fixture.receiver_sample = true;
     const reconnected = (try kernel.prepareRequest(a, core.work, &history)).ready;
     const reconnected_turn = reconnected[reconnected.len - 1].message.text;
     try testing.expect(std.mem.indexOf(u8, reconnected_turn, "channels_without_receivers:") == null);
@@ -923,6 +926,13 @@ test "ordinary turns refresh current connection status and give observations pri
     const summary_turn = summary[summary.len - 1].message.text;
     try testing.expect(std.mem.indexOf(u8, summary_turn, "channels_without_receivers:") == null);
     try testing.expect(std.mem.indexOf(u8, summary_turn, "subscriptions_without_listeners:") == null);
+
+    // A damaged registration is a store failure, independent of listener presence.
+    try store.db.execNoArgs(
+        \\CREATE TEMP TABLE subscriptions (id INTEGER, reference TEXT, focus_id TEXT);
+        \\INSERT INTO subscriptions VALUES (1, NULL, 'core-1');
+    );
+    try testing.expectError(error.InvalidStateDatabase, kernel.prepareRequest(a, core.work, &history));
 }
 
 test "an activity can withdraw another focus's subscription by reference" {

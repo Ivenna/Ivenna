@@ -38,7 +38,7 @@ pub fn listen(io: std.Io, data_directory: []const u8) !net.Server {
 }
 
 pub fn connect(io: std.Io, data_directory: []const u8, id: []const u8) !net.Stream {
-    if (id.len == 0 or id.len > max_id_bytes) return error.UnknownChannel;
+    if (id.len > max_id_bytes) return error.UnknownChannel;
     const socket = try openSocket(true);
     errdefer socket.close(io);
     const name = address(data_directory);
@@ -116,6 +116,25 @@ pub fn reply(connection: net.Stream, response: Response) WriteError!void {
     const header = [_]u8{@backingInt(std.meta.activeTag(response))};
     const text = if (response == .message) response.message else "";
     try writePacket(connection, &header, text);
+}
+
+/// The connection task can wait briefly for a matched message to drain.
+pub fn replyClosed(connection: net.Stream, io: std.Io) !void {
+    reply(connection, .closed) catch |err| switch (err) {
+        error.WouldBlock => {
+            const packet = [_]u8{@backingInt(std.meta.Tag(Response).closed)};
+            const result = try io.operateTimeout(.{ .net_write = .{
+                .socket_handle = connection.socket.handle,
+                .data = &.{&packet},
+            } }, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
+            const size = result.net_write catch |write_err| switch (write_err) {
+                error.ConnectionResetByPeer, error.SocketUnconnected => return error.PeerDisconnected,
+                else => return write_err,
+            };
+            std.debug.assert(size == packet.len);
+        },
+        else => return err,
+    };
 }
 
 pub fn readResponse(connection: net.Stream, buffer: *[response_buffer_size]u8) !Response {

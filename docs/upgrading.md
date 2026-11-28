@@ -2,19 +2,19 @@
 
 ## Moving receivers and listeners to sessions
 
-This update changes the receiver and listener commands. The kernel upgrades the instance database on startup, even for an instance with no receivers or listeners.
+This update changes the receiver and listener commands and removes `schedule_attention`. The kernel upgrades the instance database on its first start with the new build, even for an instance with no receivers or listeners.
 
-1. Stop the kernel and every receiver and listener for the instance, including independently run clients. Keep the old executable and take a matched backup of the mailbox, instance database, and any listener progress. [Backups and transfers](running.md#backups-and-transfers)
-2. Install the same updated build for the kernel and its clients. Update the client programs and import any positions Ivenna stored into the listeners' own state. Use the backup to recover any old reminders you want to carry forward. [Subscription listeners](#update-subscription-listeners) · [Channel receivers](#update-older-channel-receivers) · [Removing scheduled attention](#removing-scheduled-attention)
-3. Start `ivenna serve` with the existing mailbox and `DATA_DIR`. Startup removes the old cursor column if present and preserves the mailbox binding, subscription IDs, accepted report keys, and queued reports. Then start the updated clients with their saved IDs.
+1. Stop the kernel and its receiver and listener processes, including independent clients. Keep the previous executable with a matched backup of the mailbox, instance database, and listener state. [Backups and transfers](running.md#backups-and-transfers)
+2. Install the same updated build for the kernel and its clients. Update your programs and import any saved source positions from the backup into their listeners. To keep a pending reminder, recover its original time and text from the same backup. [Subscription listeners](#update-subscription-listeners) · [Channel receivers](#update-older-channel-receivers) · [Removing scheduled attention](#removing-scheduled-attention)
+3. Start `ivenna serve` with the existing mailbox and `DATA_DIR`. Startup verifies the pairing before removing the old cursor column, if present. It preserves the mailbox binding, subscription IDs, accepted report keys, and queued reports. Once the kernel is ready, start the updated clients with their saved IDs and recreate any reminders you recovered. [Checking readiness](running.md#service-status-and-reception)
 
-To return to the old executable after migration, restore the pre-upgrade mailbox, database, and listener progress before restarting it. [Restore an instance](running.md#backups-and-transfers)
+To roll back, restore the matched backup, including listener state, and start the previous executable. [Restore an instance](running.md#backups-and-transfers)
 
 ### Update subscription listeners
 
-Replace `subscription inspect`, `subscription publish`, and `subscription checkpoint` with a `subscription listen` session. If your listener already uses `listen` with request wrappers, send each report as a top-level JSON object after `"ready"`. Keep the same keys for reports you retry. [Listener protocol](subscriptions.md)
+Replace `subscription inspect`, `subscription publish`, and `subscription checkpoint` with a `subscription listen` session. If your program uses the earlier `listen` protocol with wrapped requests, remove the wrapper and send each report as a top-level JSON object after `"ready"`. Keep the original key for any report you retry. [Listener protocol](subscriptions.md)
 
-If Ivenna stored source positions, export them by subscription ID from the pre-upgrade database backup. Import each position into the corresponding listener's own state before starting it.
+If the pre-upgrade database has a `cursor` column, export saved source positions by subscription ID from the backup. Import each position into the corresponding listener's own state before starting it.
 
 ```sh
 sqlite3 -readonly -json /path/to/backup/state.sqlite3 \
@@ -30,14 +30,12 @@ The listener owns later source progress. [Resuming at the source](subscriptions.
 
 ## Removing scheduled attention
 
-The first startup without `schedule_attention` retires wakeups that have yet to enter working history, including copies already in `Ivenna Callbacks`. Admitted wakeup observations and dated handover samples remain readable. Host completion callbacks and queued subscription reports still go to their original focuses.
+The first startup with this build retires scheduled wakeups that have yet to enter working history, including copies already in `Ivenna Callbacks`. Wakeup observations already in history and dated handover samples remain readable. Host completions and queued subscription reports still go to their original focuses.
 
-To carry old reminders forward or retain a rollback point, use the matched backup from the [session upgrade](#moving-receivers-and-listeners-to-sessions). If your database and clients are already on the session format, take a matched backup with the old kernel stopped before starting the updated build. Keep the previous executable if you want to roll back. [Backups and transfers](running.md#backups-and-transfers)
+Use the matched backup from the [session upgrade](#moving-receivers-and-listeners-to-sessions) to recover reminders. Take this backup before first startup even if your clients already use sessions.
 
-1. In the backup, find the selected checkpoint in `Ivenna History`. For each reminder you want to recreate, record its `.at_unix_ms` and `.text` from `.wakeups` in the checkpoint's ZON body. The entry in `.callbacks` with the same `.id` gives its named reference. If `.text` is null, look for the reminder body in `Ivenna Callbacks` with the matching `X-Ivenna-Callback-Id`. [Finding the selected checkpoint](architecture.md#history-storage) · [Callback mail](architecture.md#callback-delivery)
-2. After startup, register a subscription in the focus that should receive the reminder. Configure an independent timer listener with the returned ID, the original scheduled time, and the reminder text. [Reports from a schedule](subscriptions.md#reporting-from-a-schedule)
-
-To roll back, restore the matched pre-upgrade backup and start the previous executable. [Restoring a backup](running.md#backups-and-transfers)
+1. Find the selected checkpoint in the backup's `Ivenna History` folder. In its ZON body, record `.at_unix_ms` and `.text` for the desired entry in `.wakeups`. The matching `.id` in `.callbacks` gives its named reference. If `.text` is null, find the reminder text in `Ivenna Callbacks` using the corresponding `X-Ivenna-Callback-Id` header. [Checkpoint selection](architecture.md#history-storage) · [Callback mail](architecture.md#callback-delivery)
+2. After startup, have the intended focus register a subscription. Configure an independent timer listener with the subscription ID, original scheduled time, and reminder text. [Reports from a schedule](subscriptions.md#reporting-from-a-schedule)
 
 ## Working history encoding
 

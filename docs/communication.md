@@ -87,11 +87,11 @@ Here `handle-messages` reads one JSON object per line from the receiver's stdout
 {"text":"/work/ready.csv"}
 ```
 
-The receiver flushes each line before requesting the next message. A full output pipe can delay that request while the receiver stays connected. See [send outcomes](#sending-to-a-channel).
+The receiver flushes each line before requesting the next message. If the output pipe is full, the receiver stays connected while it waits to write. A send can return `channel_would_block` until a receiver can take the message. See [send outcomes](#sending-to-a-channel).
 
-When Ivenna closes the channel, the receiver writes any message already handed off and exits with status 0. Closing the receiver's output pipe also ends the process with status 0. If the pipe closes during a write, the reader may receive a partial line.
+After Ivenna closes the channel, the receiver writes any message already handed off and exits with status 0 when it reads the closing reply. Closing the receiver's output pipe also ends the process with status 0. If the pipe closes during a write, the reader may receive a partial line.
 
-An unknown channel ID, a failed connection, or a lost connection before the channel's closing reply produces an error on stderr and exit status 1. After a kernel restart, reconnect to a restored channel with the same ID. [Channel lifetimes](#channel-lifetimes)
+An unknown channel ID, a failed connection, or a lost connection before the closing reply produces an error on stderr and exit status 1. The kernel can disconnect before sending the closing reply if the socket stays full. See [local channel handling](architecture.md#local-channels).
 
 ### Sending to a channel
 
@@ -111,8 +111,8 @@ If the call returns one of these errors, the message stays unsent and unqueued.
 
 | Send error | Meaning |
 | --- | --- |
-| `channel_no_receiver` | No receiver is connected to the open channel. |
-| `channel_would_block` | The channel service was busy or connected receivers could not take the message yet. |
+| `channel_no_receiver` | No receiver was connected when the runtime checked. Start or reconnect a receiver before retrying. |
+| `channel_would_block` | The channel service was busy or connected receivers could not take the message yet. Retry when a receiver is waiting. |
 | `unknown_channel` | No open channel matches the supplied ID. |
 | `channel_message_too_long` | The text exceeds the channel's message limit. |
 

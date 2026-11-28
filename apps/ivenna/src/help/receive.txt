@@ -1,18 +1,19 @@
 ivenna channel receive CHANNEL_ID
 
-Pass the complete ID returned by open_channel. Run the receiver before sending
-to the channel. It writes one JSON object per line to stdout.
+Set DATA_DIR to the instance data directory and pass the complete ID returned
+by open_channel. Start the receiver before sending to the channel. It writes
+one JSON object per line to stdout.
 
   {"text":"/work/ready.csv"}
 
-The receiver stays connected and flushes each line before requesting the next
-message. When the channel closes, it writes any message already handed off
-and exits with status 0. It also exits with status 0 if the output pipe closes.
-A write in progress can leave a partial line.
+The receiver flushes each line before requesting the next message. After a
+channel closes, the receiver writes any message already handed off and exits
+with status 0 when it reads the closing reply. It also exits with status 0 if
+the output pipe closes. A write in progress can leave a partial line.
 
-Set DATA_DIR to the instance data directory. Ivenna host commands inherit
-DATA_DIR and can run "$IVENNA" channel receive CHANNEL_ID.
+Ivenna host commands inherit DATA_DIR and can run
+"$IVENNA" channel receive CHANNEL_ID.
 
-An unknown channel ID, a failed connection, or a lost connection produces
-an error on stderr and exit status 1.
+An unknown channel ID, a failed connection, or a lost connection before the
+closing reply produces an error on stderr and exit status 1.
 See docs/running.md#channel-receivers in the Ivenna repository for deployment.

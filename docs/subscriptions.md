@@ -20,7 +20,7 @@ After receiving `"ready"`, write reports as JSON lines to stdin and read one JSO
 
 | Field | Meaning |
 | --- | --- |
-| `key` | Nonempty string that identifies the observation within this subscription. Use the same key for every attempt to send that observation. |
+| `key` | Nonempty string that identifies the observation within this subscription. Use a distinct key for each observation and reuse it on retries. |
 | `text` | Observation text of 1–2,048 UTF-8 bytes. |
 | `source_time_unix_ms` | Optional time of the reported event, in whole Unix milliseconds from `-62167219200000` through `253402300799000`. |
 
@@ -33,14 +33,14 @@ After `"ready"`, receipts report line outcomes in input order.
 | Receipt | Outcome | Session |
 | --- | --- | --- |
 | `"accepted"` | The first successful write for a key queues the report. A retry confirms that same report. | Stays open |
-| `"busy"` | The instance database was busy. | Stays open |
-| `"storage_full"` | The instance database was out of space. | Stays open |
+| `"busy"` | The instance database was busy. Retry the report. | Stays open |
+| `"storage_full"` | The instance database was out of space. Free space and retry the report. | Stays open |
 | `"invalid_request"` | The report could not be parsed, contains an invalid field, or exceeds the line limit. | Exits with status 1 for an oversized line. Otherwise stays open. |
 | `"withdrawn"` | The subscription ID is unknown or withdrawn. | Exits with status 1 |
 
 Close stdin to finish with status 0 after the final report. The command processes a final nonempty line even without a newline.
 
-If the output pipe closes while the command writes a receipt, it exits with status 1. If you lose a receipt, the report may already be saved. Reopen the session if needed and retry with the original subscription ID and report key.
+If writing a receipt fails, the command exits with status 1. A report may already be saved when its receipt is missing. Reconnect if needed and send the same report with its original subscription ID and key.
 
 ## Resume at the source
 
@@ -60,4 +60,4 @@ Subscribing again to the same source gives the listener a new ID with its own ac
 
 ## Reporting after a channel read
 
-A program can take work from a channel and report its outcome to a subscribed focus. Give it the `channel_id` for receiving work and the `subscription_id` for sending reports. The channel confirms a message handoff, and the subscription confirms receipt of the program's report. See [sending to a channel](communication.md#sending-to-a-channel) and [write receipts](#write-receipts-and-recovery).
+A program can take work from a channel and report its outcome to a subscribed focus. Give it the `channel_id` for receiving work and the `subscription_id` for sending reports. The channel's `accepted` status confirms the handoff. The listener's `"accepted"` receipt confirms that the report was saved for the subscribing focus. See [sending to a channel](communication.md#sending-to-a-channel) and [write receipts](#write-receipts-and-recovery).

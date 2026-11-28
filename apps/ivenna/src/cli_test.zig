@@ -72,22 +72,12 @@ test "a subscription listener streams writes without the kernel and stops after 
     const a = arena.allocator();
     var temporary = testing.tmpDir(.{});
     defer temporary.cleanup();
-    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    var owner = try state.subscriptions.Store.initialize(a, io, path);
+    var fixture = try SubscriptionFixture.init(a, temporary.dir);
+    const owner = &fixture.store;
     defer owner.close();
     const id = (try owner.create(a, "research-2", "-release watch", "test listener")).subscription_id;
     try testing.expectEqualDeep(@as([]const []const u8, &.{id}), try owner.subscriptionsWithoutListeners(a, "research-2", 1));
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", directory);
-
-    var child = try std.process.spawn(io, .{
-        .argv = &.{ executable, "subscription", "listen", id },
-        .environ_map = &env,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .inherit,
-    });
+    var child = try fixture.listen(id, .inherit);
     defer child.kill(io);
     const input = child.stdin.?;
     var buffer: [256]u8 = undefined;
@@ -132,21 +122,11 @@ test "a subscription listener accepts a final report at EOF without a newline" {
     const a = arena.allocator();
     var temporary = testing.tmpDir(.{});
     defer temporary.cleanup();
-    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    var owner = try state.subscriptions.Store.initialize(a, io, path);
+    var fixture = try SubscriptionFixture.init(a, temporary.dir);
+    const owner = &fixture.store;
     defer owner.close();
     const id = (try owner.create(a, "research-2", "-release watch", "test listener")).subscription_id;
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", directory);
-
-    var child = try std.process.spawn(io, .{
-        .argv = &.{ executable, "subscription", "listen", id },
-        .environ_map = &env,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .inherit,
-    });
+    var child = try fixture.listen(id, .inherit);
     defer child.kill(io);
     const input = child.stdin.?;
     var buffer: [256]u8 = undefined;
@@ -175,21 +155,11 @@ test "a subscription listener rejects an oversized line with invalid_request" {
     const a = arena.allocator();
     var temporary = testing.tmpDir(.{});
     defer temporary.cleanup();
-    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    var owner = try state.subscriptions.Store.initialize(a, io, path);
+    var fixture = try SubscriptionFixture.init(a, temporary.dir);
+    const owner = &fixture.store;
     defer owner.close();
     const id = (try owner.create(a, "research-2", "-release watch", "test listener")).subscription_id;
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", directory);
-
-    var child = try std.process.spawn(io, .{
-        .argv = &.{ executable, "subscription", "listen", id },
-        .environ_map = &env,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .inherit,
-    });
+    var child = try fixture.listen(id, .inherit);
     defer child.kill(io);
     const input = child.stdin.?;
     var buffer: [256]u8 = undefined;
@@ -205,33 +175,52 @@ test "a subscription listener rejects an oversized line with invalid_request" {
 }
 
 test "an unknown subscription reports withdrawn before ready" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var fixture = try SubscriptionFixture.init(a, temporary.dir);
+    defer fixture.store.close();
+    const result = try std.process.run(a, testing.io, .{
+        .argv = &.{ executable, "subscription", "listen", "missing-1" },
+        .environ_map = &fixture.env,
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } },
+    });
+    try testing.expectEqualStrings("\"withdrawn\"\n", result.stdout);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+}
+
+test "losing an accepted subscription receipt leaves the report stored" {
     const io = testing.io;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var temporary = testing.tmpDir(.{});
     defer temporary.cleanup();
-    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
-    const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    var owner = try state.subscriptions.Store.initialize(a, io, path);
-    defer owner.close();
-    var env = std.process.Environ.Map.init(a);
-    try env.put("DATA_DIR", directory);
+    var fixture = try SubscriptionFixture.init(a, temporary.dir);
+    defer fixture.store.close();
+    const focus = "research-2";
+    const id = (try fixture.store.create(a, focus, "release", "test listener")).subscription_id;
 
-    var child = try std.process.spawn(io, .{
-        .argv = &.{ executable, "subscription", "listen", "missing-1" },
-        .environ_map = &env,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .inherit,
-    });
+    var child = try fixture.listen(id, .pipe);
     defer child.kill(io);
     var buffer: [256]u8 = undefined;
     var output = child.stdout.?.readerStreaming(io, &buffer);
-    const reader = &output.interface;
-    try testing.expectEqualStrings("withdrawn", (try readJsonLine(a, reader)).string);
-    try testing.expectEqual(null, try readOutputLine(reader));
+    try testing.expectEqualStrings("ready", (try readJsonLine(a, &output.interface)).string);
+    child.stdout.?.close(io);
+    child.stdout = null;
+    try child.stdin.?.writeStreamingAll(io, "{\"key\":\"item-19\",\"text\":\"New release\"}\n");
+
+    var diagnostics = child.stderr.?.readerStreaming(io, &buffer);
+    const diagnostic = (try readOutputLine(&diagnostics.interface)) orelse return error.MissingOutputLine;
+    try testing.expect(std.mem.indexOf(u8, diagnostic, "the report was accepted") != null);
     try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, try child.wait(io));
+
+    const through = try fixture.store.latestSequence(focus);
+    const pending = try fixture.store.pending(a, focus, 0, through, 2);
+    try testing.expectEqual(1, pending.len);
+    try testing.expectEqualStrings("New release", pending[0].text);
 }
 
 test "channel receive requires the instance data directory" {
@@ -266,7 +255,7 @@ test "a channel delivers one message per read and tracks the receiver session" {
         try expectReceiveReply(reserved, .unknown_channel);
     }
     channels.activate(id);
-    try testing.expect(!try channels.hasReceiver(id));
+    try testing.expectEqual(@as(?bool, false), try channels.hasReceiver(id));
     try expectSendOutcome(channels, id, "before any receiver", .no_receiver);
 
     const oversize: [contracts.Channels.max_message_bytes + 1]u8 = @splat('x');
@@ -276,13 +265,13 @@ test "a channel delivers one message per read and tracks the receiver session" {
         const receiver = try channel_ipc.connect(io, directory, id);
         defer receiver.close(io);
         try expectReceiveReply(receiver, .waiting);
-        try testing.expect(try channels.hasReceiver(id));
+        try testing.expectEqual(@as(?bool, true), try channels.hasReceiver(id));
         try expectSendOutcome(channels, id, maximum, .accepted);
         try expectReceiveReply(receiver, .{ .message = maximum });
-        try testing.expect(try channels.hasReceiver(id));
+        try testing.expectEqual(@as(?bool, true), try channels.hasReceiver(id));
         try expectSendOutcome(channels, id, "no pending read", .would_block);
     }
-    try testing.expect(!try channels.hasReceiver(id));
+    try testing.expectEqual(@as(?bool, false), try channels.hasReceiver(id));
     try expectSendOutcome(channels, id, "no connection", .no_receiver);
 
     const replacement = try channel_ipc.connect(io, directory, id);
@@ -491,6 +480,29 @@ fn expectMessage(result: std.json.Value, message: []const u8) !void {
     try testing.expectEqual(1, result.object.count());
     try testing.expectEqualStrings(message, result.object.get("text").?.string);
 }
+
+const SubscriptionFixture = struct {
+    store: state.subscriptions.Store,
+    env: std.process.Environ.Map,
+
+    fn init(a: std.mem.Allocator, directory: std.Io.Dir) !SubscriptionFixture {
+        const path = try directory.realPathFileAlloc(testing.io, ".", a);
+        const database = try std.fs.path.join(a, &.{ path, state.filename });
+        var env = std.process.Environ.Map.init(a);
+        try env.put("DATA_DIR", path);
+        return .{ .store = try state.subscriptions.Store.initialize(a, testing.io, database, null), .env = env };
+    }
+
+    fn listen(self: *const SubscriptionFixture, id: []const u8, stderr: std.process.SpawnOptions.StdIo) !std.process.Child {
+        return std.process.spawn(testing.io, .{
+            .argv = &.{ executable, "subscription", "listen", id },
+            .environ_map = &self.env,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = stderr,
+        });
+    }
+};
 
 const Receiver = struct {
     env: std.process.Environ.Map,

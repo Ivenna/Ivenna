@@ -84,7 +84,7 @@ Ivenna sends supported image references to the configured model service for retr
 
 ### Model requests
 
-An ordinary inference request sends the selected working history, newly admitted observations, and any [receiver and listener observations](input.md#channel-receivers-and-subscription-listeners) sampled for that turn. An activity's request can include correspondence and tool results inherited from the core. See [inference turns](input.md#inference-turns) and [retained tool content](content.md#context-and-continuity).
+An ordinary inference request sends the focus's selected history and new observations. It can include a sample of channels without receivers or subscriptions without listeners. An activity's history can include correspondence and tool results inherited from the core. [Inference turns](input.md#inference-turns) · [Connection samples](input.md#channel-receivers-and-subscription-listeners) · [Retained tool content](content.md#context-and-continuity)
 
 A handover request sends the history to summarize and a dated [sample of runtime state](input.md#sampled-state).
 
@@ -207,13 +207,13 @@ The executable embeds its model-facing resources and can run independently of th
 
 Give each kernel its own mailbox, `DATA_DIR`, and `SERVICE_ADDRESS`. If startup reports `AddressInUse`, check whether another process owns `SERVICE_ADDRESS` or a kernel is already running for the data directory.
 
-The kernel opens the instance database, initializes mail, checks memory, restores saved sessions or creates the core, and completes storage maintenance before opening reception. Check [reception readiness](#service-status-and-reception) before [sending a letter](usage.md#sending-a-letter). The kernel writes diagnostics to standard error.
+The kernel checks mail and memory, selects the mailbox checkpoint if one exists, and checks database pairing before applying any migration. It restores saved sessions or creates the core and completes storage maintenance before opening reception. Check readiness before sending a letter. The kernel writes diagnostics to standard error. [Startup and recovery](architecture.md#startup-and-interruption) · [Reception readiness](#service-status-and-reception)
 
 Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
 
 ## Channel receivers
 
-Use the same build of `ivenna` for the kernel and the receiver. Run both in the same Linux network namespace under the same effective UID. Both processes must resolve `DATA_DIR` to the same absolute path after following symbolic links. When using separate containers, share the kernel's network namespace and mount the instance data directory at the same path. If the containers remap users, the effective UID must have the same number and map to the same Linux user on both sides.
+Run the kernel and receiver with the same build, in the same Linux network namespace, under the same effective UID. Both processes must resolve `DATA_DIR` to the same absolute path after following symbolic links. In separate containers, share the kernel's network namespace and mount the data directory at the same path. With user remapping, use the same effective UID on both sides and map it to the same Linux user.
 
 For a receiver launched independently, set `DATA_DIR` to the instance data directory and pass the complete ID returned by `open_channel`.
 
@@ -221,13 +221,13 @@ For a receiver launched independently, set `DATA_DIR` to the instance data direc
 DATA_DIR=/path/to/instance/data /path/to/ivenna channel receive 'task-input-18'
 ```
 
-Ivenna's own host commands inherit the resolved `DATA_DIR` and the executable path in `IVENNA`. See the [host command environment](host.md#command-environment) and [receiver session](communication.md#receiving-from-a-channel).
+For programs launched through an Ivenna host command, use the inherited paths. [Host command environment](host.md#command-environment) · [Receiver protocol](communication.md#receiving-from-a-channel)
 
-If `channel receive` reports that the channel service is unavailable, check that the kernel is running and review the requirements above. The kernel can also refuse a connection when all receiver slots are in use.
+If `channel receive` fails to connect or loses its connection before the closing reply, check that the kernel is running and review the requirements above. The kernel can also refuse a connection when all receiver slots are in use.
 
 ## Subscription listeners
 
-Run subscription listeners on the kernel host. Set `DATA_DIR` to the instance's data directory. Use an absolute path for an independently launched listener that may start from a different working directory. Ivenna's host commands inherit absolute paths in `IVENNA` and `DATA_DIR`. [Host command environment](host.md#command-environment) · [Listener protocol](subscriptions.md#open-a-listener-session)
+Run subscription listeners on the kernel host with the same build as the kernel. Set `DATA_DIR` to the instance's data directory. Use an absolute path for a listener that can start from a different working directory. Programs launched through an Ivenna host command can use the inherited paths. [Host command environment](host.md#command-environment) · [Listener protocol](subscriptions.md#open-a-listener-session)
 
 The listener needs write access to the database, its SQLite sidecar files, and their directory. The kernel and listeners also need read access to the same `<DATA_DIR>/subscription-listeners.lock` on a filesystem that supports Linux open-file-description locks. The first process creates it with owner-only permissions. If the kernel and listener run as different users, give both users read access to the file.
 
@@ -286,7 +286,7 @@ A subscription report that cannot fit stays in the instance database. Withdrawin
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work (including model recovery waits) and host commands, and wait for the runtime's tasks to end. Failure of a required service such as history storage, or an unrecoverable execution error, also stops the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
-Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries. Keep access to the configured memory workspace and to host artifacts still needed for the work. If startup reports `SubscriptionCatalogMismatch`, check that the mailbox and instance database belong to the same instance. When restoring data, use [matched backups](#backups-and-transfers).
+Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries. Keep access to the configured memory workspace and any host artifacts the work still needs. If startup reports `SubscriptionCatalogMismatch`, check both the instance database and the mailbox checkpoint. A bound database requires its paired checkpoint. [Backups and transfers](#backups-and-transfers)
 
 A checkpoint whose publication was unconfirmed can still be selected on restart. Startup confirms a fresh checkpoint for the restored state before reception opens. See [startup recovery](architecture.md#startup-and-interruption).
 
@@ -370,9 +370,9 @@ DeepSeek can finish parsing and store a file after the connection closes. Use th
 
 Back up the mailbox and instance database as a pair. Startup checks the database identity, which stays the same across snapshots of an instance. Pairing an older mailbox with a newer database can lose a report if the database removed it after the mailbox snapshot was taken.
 
-If taking the mailbox and database backups separately, stop the kernel before either backup begins and leave it stopped until both finish. Use a [SQLite backup](https://www.sqlite.org/backup.html) of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners too and include any SQLite sidecar files with the database.
+If taking the mailbox and database backups separately, stop the kernel before either backup begins and leave it stopped until both finish. Use SQLite's backup interface for a snapshot of `<DATA_DIR>/state.sqlite3`. For a direct file copy, stop independent listeners too and include any SQLite sidecar files with the database. [SQLite backup](https://www.sqlite.org/backup.html)
 
-Save listener progress before taking the database backup so the saved positions are covered by that backup. Keep listener schedules and buffered reports the source cannot replay with the backup. [Source progress](subscriptions.md#resume-at-the-source)
+Copy the listeners' saved source positions before taking the database backup. A later source position can skip reports that the restored database never received. Keep listener schedules and buffered reports the source cannot replay with the backup. [Source progress](subscriptions.md#resume-at-the-source)
 
 To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup.
 

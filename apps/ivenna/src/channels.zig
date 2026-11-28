@@ -35,18 +35,25 @@ pub const Registry = struct {
         }
     };
     const Receiver = struct {
+        const State = enum { waiting, between_reads, closed, finished };
+
         connection: Stream,
         node: std.DoublyLinkedList.Node = .{},
-        state: enum { waiting, between_reads, finished } = .finished,
+        state: State = .finished,
 
         fn park(self: *Receiver, receivers: *std.DoublyLinkedList) void {
             receivers.append(&self.node);
             self.state = .waiting;
         }
 
-        fn finish(self: *Receiver, receivers: *std.DoublyLinkedList) void {
+        fn detach(self: *Receiver, receivers: *std.DoublyLinkedList, state: State) void {
+            std.debug.assert(state == .closed or state == .finished);
             receivers.remove(&self.node);
-            self.state = .finished;
+            self.state = state;
+        }
+
+        fn interrupt(self: *Receiver, receivers: *std.DoublyLinkedList, state: State) void {
+            self.detach(receivers, state);
             ipc.endRequests(self.connection);
         }
     };
@@ -98,13 +105,17 @@ pub const Registry = struct {
         var receiver: Receiver = .{ .connection = connection };
         if (!self.startReceive(id, &receiver)) return;
         while (self.waitForNext(id, &receiver)) {}
+        if (receiver.state == .closed) ipc.replyClosed(connection, self.io) catch |err| switch (err) {
+            error.Canceled, error.PeerDisconnected => {},
+            else => std.log.warn("channel '{s}' close reply failed: {s}", .{ id, @errorName(err) }),
+        };
     }
 
     fn waitForNext(self: *Registry, id: []const u8, receiver: *Receiver) bool {
         const requested_next = ipc.waitForNext(receiver.connection, self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (receiver.state == .finished) return false;
+        if (receiver.state == .finished or receiver.state == .closed) return false;
         const channel = self.channels.getPtr(id).?;
         if (receiver.state == .between_reads and requested_next) {
             // Rejoin at the back so older pending reads get first chance.
@@ -112,21 +123,23 @@ pub const Registry = struct {
             receiver.park(&channel.receivers);
             return true;
         }
-        receiver.finish(&channel.receivers);
+        receiver.detach(&channel.receivers, .finished);
         return false;
+    }
+
+    // Access under the registry mutex. Reserved channels are still private.
+    fn activeChannel(self: *Registry, id: []const u8) ?*Channel {
+        const channel = self.channels.getPtr(id) orelse return null;
+        return if (channel.active) channel else null;
     }
 
     fn startReceive(self: *Registry, id: []const u8, receiver: *Receiver) bool {
         self.mutex.lock(self.io) catch return false;
         defer self.mutex.unlock(self.io);
-        const channel = self.channels.getPtr(id) orelse {
+        const channel = self.activeChannel(id) orelse {
             ipc.reply(receiver.connection, .unknown_channel) catch {};
             return false;
         };
-        if (!channel.active) {
-            ipc.reply(receiver.connection, .unknown_channel) catch {};
-            return false;
-        }
         ipc.reply(receiver.connection, .waiting) catch return false;
         receiver.park(&channel.receivers);
         return true;
@@ -142,13 +155,15 @@ pub const Registry = struct {
         } };
     }
 
-    fn hasReceiver(context: *anyopaque, id: []const u8) !bool {
+    fn hasReceiver(context: *anyopaque, id: []const u8) std.Io.Cancelable!?bool {
         const self: *Registry = @ptrCast(@alignCast(context));
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        const channel = self.channels.getPtr(id).?;
-        std.debug.assert(channel.active);
-        return channel.hasReceiver();
+        const channel = self.activeChannel(id).?;
+        return channel.hasReceiver() catch |err| {
+            std.log.warn("channel receiver probe failed for '{s}': {s}", .{ id, @errorName(err) });
+            return null;
+        };
     }
 
     fn reserve(context: *anyopaque, id: []const u8) !void {
@@ -178,12 +193,7 @@ pub const Registry = struct {
         var channel = removed.value;
         while (channel.receivers.first) |node| {
             const receiver: *Receiver = @alignCast(@fieldParentPtr("node", node));
-            ipc.reply(receiver.connection, .closed) catch |err| switch (err) {
-                error.PeerDisconnected => {},
-                error.WouldBlock => std.log.warn("channel '{s}' close reply would block; the receiver may observe EOF instead", .{removed.key}),
-                else => std.log.warn("channel '{s}' close reply failed: {s}; the receiver may observe EOF instead", .{ removed.key, @errorName(err) }),
-            };
-            receiver.finish(&channel.receivers);
+            receiver.interrupt(&channel.receivers, .closed);
         }
         self.allocator.free(removed.key);
     }
@@ -196,8 +206,7 @@ pub const Registry = struct {
         if (!self.mutex.tryLock()) return .would_block;
         defer self.mutex.unlock(self.io);
 
-        const channel = self.channels.getPtr(id) orelse return .unknown_channel;
-        if (!channel.active) return .unknown_channel;
+        const channel = self.activeChannel(id) orelse return .unknown_channel;
         var candidate = channel.receivers.first;
         while (candidate) |node| {
             candidate = node.next;
@@ -205,7 +214,7 @@ pub const Registry = struct {
             if (receiver.state != .waiting) continue;
             ipc.reply(receiver.connection, .{ .message = message }) catch |err| switch (err) {
                 error.PeerDisconnected => {
-                    receiver.finish(&channel.receivers);
+                    receiver.interrupt(&channel.receivers, .finished);
                     continue;
                 },
                 error.WouldBlock => continue,
@@ -217,3 +226,57 @@ pub const Registry = struct {
         return if (try channel.hasReceiver()) .would_block else .no_receiver;
     }
 };
+
+test "channel close reports retirement after a matched message fills the socket" {
+    const testing = std.testing;
+    const io = testing.io;
+    const linux = std.os.linux;
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(directory);
+    var registry = try Registry.listen(testing.allocator, io, directory);
+    defer registry.deinit();
+    var task = try io.concurrent(Registry.run, .{&registry});
+    defer task.cancel(io) catch {};
+
+    const id = "events-1";
+    const channels = registry.port();
+    try channels.reserve(id);
+    channels.activate(id);
+    const receiver = try ipc.connect(io, directory, id);
+    defer receiver.close(io);
+    var response: [ipc.response_buffer_size]u8 = undefined;
+    try testing.expectEqualDeep(@as(ipc.Response, .waiting), try readTestResponse(receiver, &response));
+
+    const server = server: {
+        try registry.mutex.lock(io);
+        defer registry.mutex.unlock(io);
+        const channel = registry.channels.getPtr(id).?;
+        const attached: *Registry.Receiver = @alignCast(@fieldParentPtr("node", channel.receivers.first.?));
+        break :server attached.connection;
+    };
+    const buffer_size: c_int = 4096;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.setsockopt(
+        server.socket.handle,
+        linux.SOL.SOCKET,
+        linux.SO.SNDBUF,
+        std.mem.asBytes(&buffer_size),
+        @sizeOf(c_int),
+    )));
+    const message: [Channels.max_message_bytes]u8 = @splat('x');
+    try testing.expectEqual(.accepted, try channels.trySend(id, &message));
+    try testing.expectError(error.WouldBlock, ipc.reply(server, .closed));
+
+    channels.close(id);
+    var hangup = [_]std.posix.pollfd{.{ .fd = receiver.socket.handle, .events = 0, .revents = 0 }};
+    try testing.expectEqual(0, try std.posix.poll(&hangup, 50));
+    try testing.expectEqualDeep(ipc.Response{ .message = &message }, try readTestResponse(receiver, &response));
+    try testing.expectEqualDeep(@as(ipc.Response, .closed), try readTestResponse(receiver, &response));
+}
+
+fn readTestResponse(receiver: Stream, buffer: *[ipc.response_buffer_size]u8) !ipc.Response {
+    var descriptors = [_]std.posix.pollfd{.{ .fd = receiver.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expect(try std.posix.poll(&descriptors, 5000) != 0);
+    return ipc.readResponse(receiver, buffer);
+}

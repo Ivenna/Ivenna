@@ -134,7 +134,7 @@ If a command writes a PDF to stdout, pass its returned log `path` to `read_resou
 
 ## Command lifetimes
 
-Control handles work in the runtime that issued them for as long as it retains them. When the initial call hands off a command, it returns a `callback_id` and registers a completion observation for the calling activity. That activity admits at most one observation with the same ID, even if another activity controls the command or drains its output. The registration keeps the caller available across sleep and restart. [Callback fields](input.md#callback-observations) · [Activity completion](attention.md#activity-completion)
+Control handles work in the runtime that issued them for as long as it retains them. When the initial call hands off a command, it returns a `callback_id` and registers its completion for the calling activity. Completion goes to that activity even if another activity controls the command or drains its output. The registration keeps the caller available across sleep and restart, and the runtime admits the callback ID to history at most once. [Callback fields](input.md#callback-observations) · [Activity completion](attention.md#activity-completion)
 
 `MAX_HOST_COMMANDS` limits live commands across all activities. Completion releases live capacity. A final result returned directly by `run_host_shell` retires its handle. Finished background handles remain available in a bounded cache for recent output collection; a continue call that drains one retires it, and older finished handles can be reclaimed for other commands. See [command lifecycle](architecture.md#command-lifecycle) for the cache limit. Full logs have a [separate retention lifecycle](running.md#host-output-and-deployment-files).
 

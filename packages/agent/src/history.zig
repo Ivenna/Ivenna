@@ -164,22 +164,19 @@ pub const History = struct {
     };
 
     fn validate(self: History, a: Allocator) !void {
-        if (self.sessions.len == 0 or self.next_callback_id == 0 or self.next_runtime_reference_id == 0) return error.InvalidHistory;
+        if (self.next_callback_id == 0 or self.next_runtime_reference_id == 0) return error.InvalidHistory;
         var identities: std.AutoHashMapUnmanaged(u64, []const u8) = .empty;
         defer identities.deinit(a);
-        var cores: usize = 0;
+        var has_core = false;
         for (self.sessions) |session| {
-            if (session.session_id == 0 or session.session_id >= self.next_session_id or
+            if (session.session_id >= self.next_session_id or
                 contracts.Reference.sequence(session.focus_id) != session.session_id) return error.InvalidHistory;
             const identity = try identities.getOrPut(a, session.session_id);
             if (identity.found_existing) return error.InvalidHistory;
             identity.value_ptr.* = session.focus_id;
-            switch (session.role) {
-                .core => {
-                    if (session.session_id != 1 or !std.mem.eql(u8, session.focus_id, "core-1")) return error.InvalidHistory;
-                    cores += 1;
-                },
-                .activity => if (session.session_id == 1) return error.InvalidHistory,
+            if (session.role == .core) {
+                if (!std.mem.eql(u8, session.focus_id, "core-1")) return error.InvalidHistory;
+                has_core = true;
             }
             for (session.observations) |event| switch (event) {
                 .assignment, .focus_message => {},
@@ -188,12 +185,12 @@ pub const History = struct {
             };
             try validateEntries(session.focus_id, session.entries orelse &.{});
         }
-        if (cores != 1) return error.InvalidHistory;
+        if (!has_core) return error.InvalidHistory;
         if (self.activity_reports) |reports| try reports.validate();
         var callbacks: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer callbacks.deinit(a);
         for (self.callbacks) |callback| {
-            if (callback.id == 0 or callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
+            if (callback.id >= self.next_callback_id or !identities.contains(callback.session_id)) return error.InvalidHistory;
             if (contracts.Reference.sequence(callback.reference) != callback.id) return error.InvalidHistory;
             if (contracts.Reference.sequence(callback.command_id) == null) return error.InvalidHistory;
             if ((try callbacks.getOrPut(a, callback.id)).found_existing) return error.InvalidHistory;
@@ -283,13 +280,24 @@ const Cache = struct {
     }
 };
 
-/// Read the pairing catalog from a raw mailbox checkpoint document. Serve
-/// uses this before the instance database migration so a mismatched mailbox
-/// cannot rewrite the existing database.
-pub fn subscriptionCatalog(a: Allocator, document: []const u8) ![32]u8 {
-    const Header = struct { subscription_catalog: [32]u8 };
-    return (try Codec.decodePrefix(Header, a, document)).subscription_catalog;
-}
+/// The selected mailbox checkpoint supplies both the subscription catalog
+/// for database startup and the records to restore.
+pub const StartupHistory = struct {
+    store: Store,
+    checkpoint: ?Checkpoint,
+
+    pub fn load(a: Allocator, store: Store) !StartupHistory {
+        const document = try store.load(a);
+        return .{
+            .store = store,
+            .checkpoint = if (document) |bytes| try Codec.decode(Checkpoint, a, bytes) else null,
+        };
+    }
+
+    pub fn subscriptionCatalog(self: StartupHistory) ?[32]u8 {
+        return if (self.checkpoint) |checkpoint| checkpoint.subscription_catalog else null;
+    }
+};
 
 pub const Persistence = struct {
     allocator: Allocator,
@@ -306,14 +314,7 @@ pub const Persistence = struct {
         self.* = undefined;
     }
 
-    pub fn load(self: *Persistence, a: Allocator, max_sessions: usize) !?History {
-        const document = try self.store.load(a) orelse {
-            self.cache.deinit();
-            self.cache = .init(self.allocator);
-            self.published_checkpoint_digest = null;
-            return null;
-        };
-        const checkpoint = try Codec.decode(Checkpoint, a, document);
+    pub fn restore(self: *Persistence, a: Allocator, max_sessions: usize, checkpoint: Checkpoint) !History {
         if (checkpoint.sessions.len > max_sessions) return error.SessionCapacityUnavailable;
         const sessions = try a.alloc(History.Session, checkpoint.sessions.len);
         var candidate: Cache = .init(self.allocator);
@@ -769,7 +770,8 @@ test "forking history rewrites legacy files and raw images" {
         .activity_reports = null,
     }));
 
-    var history = (try persistence.load(a, 1)).?;
+    const initial = try StartupHistory.load(a, persistence.store);
+    var history = try persistence.restore(a, 1, initial.checkpoint.?);
     try t.expectEqual(7, history.next_runtime_reference_id);
     try t.expectEqual(0, history.channels.len);
     try t.expectEqual(null, history.usage_scope);
@@ -814,7 +816,8 @@ test "forking history rewrites legacy files and raw images" {
     const fork_exchange = try Codec.decode(Source, a, added[2].body);
     const stored_parts = fork_exchange.entry.value.exchange[0].tool_result.content.parts;
     try t.expectEqualStrings("AP+JIlwK", stored_parts[2].image.base64.encoded);
-    const continued = (try persistence.load(a, 2)).?.sessions;
+    const restored = try StartupHistory.load(a, persistence.store);
+    const continued = (try persistence.restore(a, 2, restored.checkpoint.?)).sessions;
     try t.expectEqualDeep(core.entries.?, continued[0].entries.?);
     try t.expectEqualDeep(fork.entries.?, continued[1].entries.?);
 }

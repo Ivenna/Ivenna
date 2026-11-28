@@ -1,3 +1,5 @@
+const std = @import("std");
+
 /// The transport hands text to waiting local receivers by channel ID.
 pub const Channels = struct {
     pub const max_message_bytes = 4096;
@@ -18,7 +20,7 @@ pub const Channels = struct {
 
     pub const VTable = struct {
         trySend: *const fn (*anyopaque, []const u8, []const u8) anyerror!SendOutcome,
-        hasReceiver: *const fn (context: *anyopaque, channel_id: []const u8) anyerror!bool,
+        hasReceiver: *const fn (context: *anyopaque, channel_id: []const u8) std.Io.Cancelable!?bool,
         reserve: *const fn (context: *anyopaque, channel_id: []const u8) anyerror!void,
         activate: *const fn (context: *anyopaque, channel_id: []const u8) void,
         close: *const fn (context: *anyopaque, channel_id: []const u8) void,
@@ -28,9 +30,9 @@ pub const Channels = struct {
         return self.vtable.trySend(self.context, channel_id, text);
     }
 
-    /// Sample connected receivers, including those between reads. The caller
-    /// keeps the channel active through this check.
-    pub fn hasReceiver(self: Channels, channel_id: []const u8) !bool {
+    /// Sample connected receivers, including those between reads. A null
+    /// result means the sample is unavailable. The caller keeps the channel active.
+    pub fn hasReceiver(self: Channels, channel_id: []const u8) std.Io.Cancelable!?bool {
         return self.vtable.hasReceiver(self.context, channel_id);
     }
 
