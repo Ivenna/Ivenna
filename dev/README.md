@@ -182,7 +182,7 @@ The first attempt should return `channel_no_receiver`. Each later handoff should
 
 Use the [mail example](#sending-a-message) to ask Ivenna for a subscription check.
 
-> Register a test subscription in the core and send me its complete ID. When a report arrives, tell me what you received.
+> Register a test subscription in the main focus and send me its complete ID. When a report arrives, tell me what you received.
 
 In a second terminal at the repository root, load the instance environment and start an independent listener. Replace `release-watch-1` with the ID you received. [Registering a subscription](../docs/attention.md#subscriptions) · [Loading the instance environment](#configuration)
 
@@ -203,7 +203,7 @@ Press `Ctrl+D` on a new line to close the listener. If you only created the subs
 
 ## Stopping and restarting
 
-Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run -- serve`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how running host commands stop, and how Ivenna continues interrupted work.
+Press `Ctrl+C` and wait for the kernel to exit. Leave the services running, then start the kernel again with `zig build run -- serve` and check readiness. To observe how a focus resumes work across restarts, follow the continuity exercise. [Checking readiness](#starting-the-kernel) · [Restart behavior](../docs/running.md#stopping-and-restarting) · [Continuity exercise](../docs/testing.md#evaluating-continuity-across-interruptions)
 
 To remove the local middleware containers:
 
@@ -219,9 +219,9 @@ For compatible updates, keep the same instance directory. If you edit its `.env`
 
 ### Kernel
 
-Check the [upgrade guide](../docs/upgrading.md) for changes to defaults, stored data, and caller interfaces.
+For a new revision, check the upgrade guide before starting it with existing instance data. [Upgrading Ivenna](../docs/upgrading.md)
 
-After editing code or [embedded resources](../docs/development.md#model-facing-resources), stop the kernel and run `zig build run -- serve` to rebuild and restart it. To use another source checkout, run the update steps from its root and point independent channel receivers and subscription listeners at that checkout's `zig-out/bin/ivenna`. The kernel starts file browsing and host commands from that checkout.
+After editing code or embedded resources, stop the kernel and run `zig build run -- serve` to rebuild and restart it. To switch source checkouts, launch from the new checkout's root and use its `zig-out/bin/ivenna` for independent channel receivers and subscription listeners. The kernel starts file browsing and host commands from the directory where you launch it. [Embedded resources](../docs/development.md#model-facing-resources)
 
 ### Memory
 

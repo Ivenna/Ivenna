@@ -6,7 +6,7 @@ The Ivenna kernel connects to a model service, a mail service, and an SSH worksp
 
 Run `ivenna` on Linux with abstract Unix socket support. The kernel's execution environment needs `/bin/sh` and an OpenSSH client.
 
-The core and activities can read regular files and list directories wherever the kernel's OS account has access. Choose the account and filesystem mounts accordingly. Host commands run as the same account.
+All focuses can read regular files and list directories wherever the kernel's OS account has access. Choose the account and filesystem mounts accordingly. Host commands run as the same account.
 
 Terminal mode additionally requires Linux 5.3 or newer with `pidfd_open`, `pidfd_send_signal`, and `TIOCGPTPEER` available, a working `/dev/ptmx` backed by devpts, and util-linux `setsid` at `/usr/bin/setsid`. It enumerates processes under `/proc` to find and clean up its session's foreground and background jobs. Batch and pipe modes do not require this terminal transport.
 
@@ -48,12 +48,12 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `LLM_MODEL` | DeepSeek model name | `deepseek-flash` |
 | `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens per response, including reasoning tokens | `65536` |
 | `LLM_REQUEST_TIMEOUT_MS` | Time limit for one inference attempt or one file upload, including upload negotiation | `600000` (10 minutes) |
-| `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary core requests | `low` |
+| `LLM_CORE_REASONING_EFFORT` | Reasoning effort for ordinary requests from the main focus | `low` |
 | `LLM_ACTIVITY_REASONING_EFFORT` | Reasoning effort for ordinary activity-session requests | `max` |
-| `LLM_COMPACTION_REASONING_EFFORT` | Reasoning effort used to write a handover summary | `max` |
+| `LLM_COMPACTION_REASONING_EFFORT` | Reasoning effort used during quiet reflection | `max` |
 | `DEEPSEEK_API_KEY` | DeepSeek Fetch credential for [web page access](#web-page-access) | Web page retrieval disabled |
-| `CONTEXT_COMPACT_AT_TOKENS` | Input-token threshold for compaction | `262144` |
-| `CONTEXT_COMPACT_AT_BYTES` | Fallback threshold for compaction, in encoded request bytes | `1048576` (1 MiB) |
+| `CONTEXT_COMPACT_AT_TOKENS` | Input-token threshold for soft compaction | `262144` |
+| `CONTEXT_COMPACT_AT_BYTES` | Fallback threshold for soft compaction, in encoded request bytes | `1048576` (1 MiB) |
 | `CONTEXT_OBSERVATION_BATCH_BYTES` | Target for the encoded bytes a batch of observations adds to a request | `1048576` (1 MiB) |
 | `SERVICE_ADDRESS` | HTTP health and reception-readiness listener | `0.0.0.0:8090` |
 | `MAIL_SESSION_URL` | URL for [JMAP session discovery](#mail-service) | `http://127.0.0.1:8088/jmap/session` |
@@ -63,7 +63,7 @@ Set connection addresses, identities, and storage paths for the chosen deploymen
 | `MAIL_PASSWORD` | Mail password | Required for username/password authentication |
 | `MAIL_AUTHORIZATION` | Complete HTTP Authorization header | Unset; use username/password |
 | `MAIL_POLL_INTERVAL_MS` | Milliseconds between checks for mail and subscription reports | `2000` |
-| `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the core | `128` |
+| `MAX_SESSIONS` | Maximum registered session identities, including sleeping sessions and the main focus | `128` |
 | `MAX_PENDING_EVENTS` | Maximum ordinary accepted events buffered per session | `64` |
 | `MAX_HOST_COMMANDS` | Maximum live host commands across all activity sessions | `8` |
 | `DATA_DIR` | Persistent directory for instance state and host command output | Required |
@@ -84,31 +84,25 @@ Ivenna sends supported image references to the configured model service for retr
 
 ### Model requests
 
-An ordinary inference request sends the focus's selected history and new observations. It can include a sample of channels without receivers or subscriptions without listeners. An activity's history can include correspondence and tool results inherited from the core. [Inference turns](input.md#inference-turns) · [Connection samples](input.md#channel-receivers-and-subscription-listeners) · [Retained tool content](content.md#context-and-continuity)
+Ordinary inference and quiet reflection use the same configured model and `LLM_MAX_OUTPUT_TOKENS`. That limit covers reasoning, assistant text, and tool-call arguments. [Inference turns](input.md#inference-turns) · [Quiet reflection](input.md#quiet-reflection-and-resumption)
 
-A handover request sends the history to summarize and a dated [sample of runtime state](input.md#sampled-state).
+The main focus defaults to lower reasoning effort for responsive correspondence and coordination. Ordinary activity work defaults to higher effort. Set `LLM_CORE_REASONING_EFFORT` or `LLM_ACTIVITY_REASONING_EFFORT` to tune the corresponding role. `LLM_COMPACTION_REASONING_EFFORT` applies to quiet reflection in either role. Use an effort name supported by your model. Ivenna sends the value as written. [Configuration defaults](#configuration) · [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/)
 
-Core and activity sessions share the configured model and output-token limit. `LLM_MAX_OUTPUT_TOKENS` covers reasoning, assistant text, and tool-call arguments.
-
-Ordinary core requests use a lower default reasoning effort for responsive correspondence and coordination. Activities use a higher default for deeper reasoning. Handover requests in either role use `LLM_COMPACTION_REASONING_EFFORT`. To override any of the three defaults, set the corresponding variable to a nonempty effort name supported by your model. Ivenna sends that name as written. See the [configuration table](#configuration) and [DeepSeek Responses request fields](https://api-docs.deepseek.com/api/create-response/).
-
-`LLM_REQUEST_TIMEOUT_MS` applies separately to each inference attempt, including compaction. A temporary outage can therefore delay a decision beyond this timeout. For each file upload, the timeout covers the entire negotiation. See [when model work stalls](#when-model-work-stalls) and [file outcomes](content.md#complete-files).
+`LLM_REQUEST_TIMEOUT_MS` applies separately to each inference attempt, including quiet reflection. A temporary outage can therefore delay a decision beyond this timeout. For each file upload, the timeout covers the entire negotiation. [When model work stalls](#when-model-work-stalls) · [File outcomes](content.md#complete-files)
 
 ### Context budgets
 
-The kernel considers summarizing older history when the last committed ordinary round's input token count reaches `CONTEXT_COMPACT_AT_TOKENS`. When that count is unavailable, as on a new activity's first request, the kernel uses `CONTEXT_COMPACT_AT_BYTES`. It measures the encoded request with the older history before adding pending work or new observations. See [what compaction measures](architecture.md#when-compaction-runs).
+The soft thresholds let a focus reflect while its ordinary request still fits. `CONTEXT_COMPACT_AT_TOKENS` uses the input token count from the last saved ordinary round. When that count is unavailable, `CONTEXT_COMPACT_AT_BYTES` uses the encoded request size with the older history eligible for reflection. [Compaction triggers and measurements](architecture.md#when-compaction-runs)
 
 `CONTEXT_OBSERVATION_BATCH_BYTES` sets the target for encoded bytes added by a batch of new observations. The first observation can exceed that target if the full request fits the adapter's limits. See [how observations are admitted](architecture.md#activation-admission).
 
-For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKENS` for output. Set the token threshold below the remaining input space to leave room for a complete tool exchange and incoming observations. Evaluate compaction frequency and continuity on representative work. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/), [evaluating compaction](testing.md#evaluating-compaction), and [evaluating continuity](testing.md#evaluating-continuity-across-interruptions).
+For a model with a shared input and output window, reserve `LLM_MAX_OUTPUT_TOKENS` for output. Set the token threshold below the remaining input space to leave room for a complete tool exchange and incoming observations. Evaluate compaction frequency and continuity on representative work. See [DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/), [evaluating quiet reflection](testing.md#evaluating-quiet-reflection), and [evaluating continuity](testing.md#evaluating-continuity-across-interruptions).
 
-The [model request limits](content.md#model-request-checks) apply to the complete encoded request. The model service checks its own limits after processing the input.
-
-If a focus pauses at a request limit, check the logs for the limit it hit. The history and queued observations remain available when the focus resumes. See [when model work stalls](#when-model-work-stalls) and [handover outcomes](architecture.md#continuing-with-a-handover).
+The adapter checks limits on the complete encoded request and can require compaction before a soft threshold is reached. The model service applies its own limits after processing the input. If either limit pauses a focus, check the kernel log for the reason. [Model request limits](content.md#model-request-checks) · [When model work stalls](#when-model-work-stalls) · [Recovering from an admission failure](#recovering-from-an-admission-failure)
 
 ### Session and command capacity
 
-`MAX_SESSIONS` counts the core and all registered activities, including those asleep. Startup fails if saved identities exceed it; with a value of `1`, only the core fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a slot. Ready sessions can advance concurrently. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes). The session and command defaults are tuning starting points; size them for the workload and resources available.
+`MAX_SESSIONS` counts the main focus and all registered activities, including those asleep. Startup fails if saved identities exceed it; with a value of `1`, only the main focus fits. New forks fail at capacity, while existing sessions remain addressable. Activity completion releases a slot. Ready sessions can advance concurrently. Host commands have a separate live limit and [handle retention lifecycle](host.md#command-lifetimes). The session and command defaults are tuning starting points; size them for the workload and resources available.
 
 `MAX_PENDING_EVENTS` counts correspondence, callbacks, assignments, and focus messages buffered for a session. Subscription reports wait in SQLite until they fit an ordinary request. Startup observations, activity expressions, endings, and notices of activity interruption are exempt from the queue limit. Correspondence and callback mail have independent intake allowances and stay in their mailboxes when their destination is full. A focus message returns `focus_queue_full` when the recipient cannot accept it.
 
@@ -268,15 +262,15 @@ To follow a focus, look for its ID in the kernel's standard error. `retrying inf
 
 For inference HTTP errors, the adapter logs the status and the service's request ID when available. It also logs a usable error code from an HTTP 400 or 429 response. Include the request ID when contacting the model provider about a rejection.
 
-- **Temporary outage.** The kernel retries ordinary inference and summaries needed to resolve a hard limit. During soft compaction, a temporary failure returns control to the ordinary request. The first retry wait is 250–500 milliseconds. The range doubles after each failure up to 2.5–5 minutes. A longer delay requested by the service in `Retry-After` takes precedence. Retries reuse completed tool results. A lost model response can still incur charges.
-- **Interrupted focus.** A rejected request or an unusable response pauses the focus with its history intact. This includes letters saved and acknowledged before inference, even if the model service rejects the request for exceeding its token window. Another observation can resume the focus, and the core receives a notice if an activity was interrupted. If HTTP 403 or 404 recurs across focuses, check model access and `LLM_BASE_URL`.
+- **Temporary outage.** The kernel retries ordinary inference and reflections needed to resolve a hard limit. During soft compaction, a temporary failure returns control to the ordinary request. The first retry wait is 250–500 milliseconds. The range doubles after each failure up to 2.5–5 minutes. A longer delay requested by the service in `Retry-After` takes precedence. Retries reuse completed tool results. A lost model response can still incur charges.
+- **Interrupted focus.** A rejected request or an unusable response pauses the focus with its history intact. This includes letters saved and acknowledged before inference, even if the model service rejects the request for exceeding its token window. Another observation can resume the focus, and the main focus receives a notice if an activity was interrupted. If HTTP 403 or 404 recurs across focuses, check model access and `LLM_BASE_URL`.
 - **Kernel exit.** A shared failure on the inference endpoint, such as HTTP 401, exhausted account quota, or an incompatible protocol, closes reception and stops the kernel. Correct the reported problem before restarting. See [model transport](architecture.md#model-transport).
 
 For a file upload rejection, look for `model file endpoint returned HTTP` in the kernel log. Ivenna records the rejection in the tool result and can continue with the next inference, including when the file endpoint returns HTTP 401. See [file upload outcomes](content.md#complete-files).
 
 ### Recovering from an admission failure
 
-If the core cannot admit an incoming letter within the adapter's request limits, the letter stays unacknowledged in the mailbox. Later correspondence waits behind it. Another accepted observation or a restart can prompt a new attempt. Polling that same letter leaves it pending.
+If the main focus cannot admit an incoming letter within the adapter's request limits, the letter stays unacknowledged in the mailbox. Later correspondence waits behind it. Another accepted observation or a restart can prompt a new attempt. Polling that same letter leaves it pending.
 
 If admission keeps failing, look for a request-limit warning under the focus's ID in the kernel log. It gives the measured size or count and the applicable limit. To withdraw an oversized letter, stop the kernel, move it out of eligible intake, then restart. The kernel rebuilds pending deliveries from the mailbox. You can send a shorter letter with a reference to the original material. See [model request limits](content.md#model-request-checks), [mail intake](#mail-intake), and [sharing material to read](usage.md#sharing-material-to-read).
 
@@ -292,7 +286,7 @@ If startup reports `SubscriptionCatalogMismatch`, verify that `<DATA_DIR>/state.
 
 A checkpoint whose publication was unconfirmed can still be selected on restart. Startup confirms a fresh checkpoint for the restored state before reception opens. See [startup recovery](architecture.md#startup-and-interruption).
 
-At restart the core sees the current outgoing correspondent IDs, including changes to [`MAIL_CORRESPONDENTS`](#outgoing-correspondents). An activity with unfinished work can also resume on startup. See the [startup observation contract](input.md#startup-and-restart) for delivery timing. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
+At restart the main focus sees the current outgoing correspondent IDs, including changes to [`MAIL_CORRESPONDENTS`](#outgoing-correspondents). An activity with unfinished work can also resume on startup. See the [startup observation contract](input.md#startup-and-restart) for delivery timing. A letter can appear again if the kernel stopped between saving the observation and acknowledging its mail copy.
 
 Registered host completions keep their original receiving sessions across restart. Ivenna uses the stored result when available and reports an interruption with unknown effects otherwise.
 
@@ -302,11 +296,9 @@ An interrupted operation may have produced effects without a saved result. Inclu
 
 ### Updating the executable
 
-Before updating across a change in storage format, make a [matched backup](#backups-and-transfers) and keep the executable that can read it. Use that executable to resume the instance from the backup if needed. To start a fresh instance, use a separate mailbox and `DATA_DIR`.
+Check the upgrade guide before replacing an existing executable. For a storage format change, keep a matched backup and the executable that can read it. To start a fresh instance, use a separate mailbox and `DATA_DIR`. [Upgrading Ivenna](upgrading.md) · [Backups and transfers](#backups-and-transfers)
 
-If `ivenna serve` reports `IncompatibleStateSchema`, check `DATA_DIR` and use a build that supports the instance database's schema. After installing an update, start its kernel before connecting new listeners so startup can apply any supported migration.
-
-See [upgrading Ivenna](upgrading.md) for changes that require deployment steps.
+If `ivenna serve` reports `IncompatibleStateSchema`, verify `DATA_DIR` and which build last opened the instance database. Use a build that supports the installed schema. If a listener reports this error during an update, verify its `DATA_DIR` and executable and check that the kernel has completed the upgrade. [Instance database](architecture.md#instance-database)
 
 ## Data and retention
 
@@ -337,13 +329,13 @@ Ivenna does not monitor quota or evict live records in response to account capac
 
 An identifiable callback copy, including one in Trash, preserves the first result for that callback ID. Once the copy expires, a publisher can create another. If the receiving session has already admitted that ID, the kernel acknowledges the new copy without presenting the observation again. See [callback admission](architecture.md#event-sources-and-callback-admission).
 
-Keep original correspondence separately if you need it beyond the Trash retention period. Compaction can replace detailed observations and tool exchanges with a handover. Correspondents manage their own copies.
+Keep original correspondence separately if you need it beyond the Trash retention period. Compaction can replace detailed observations and tool exchanges with a continuity note. Correspondents manage their own copies.
 
 ### Working history
 
 The kernel publishes checkpoints in `Ivenna History` as messages with the subject `Ivenna history checkpoint`. The selected checkpoint identifies separate records for each session's working history, its pending internal observations (including queued assignments), and the activity outbox's unread reports. Pending observations and reports enter the receiving focus's working history on admission. See the [storage layout](architecture.md#persistent-working-history) and [recovery state inventory](architecture.md#recovery-state).
 
-An idle kernel typically publishes two revisions when the core receives a letter and the model responds without tool calls. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response.
+An idle kernel typically publishes two revisions when the main focus receives a letter and the model responds without tool calls. The first saves the incoming observation before Ivenna acknowledges the letter. The second saves the model response.
 
 Ivenna cleans up the history folder at startup and periodically while it runs. Unpublished preparations and superseded checkpoints can remain in `Ivenna History` between passes. To identify the checkpoint selected on restart or diagnose `AmbiguousHistoryRevision`, see [mailbox checkpoint selection](architecture.md#history-storage).
 
@@ -352,11 +344,11 @@ Ivenna cleans up the history folder at startup and periodically while it runs. U
 | `Ivenna History` | Selected published checkpoint and the records it selects for session histories, pending internal observations, and unread activity reports |
 | Trash | Unselected checkpoints and history records |
 
-Forks store independent copies of inherited history. Include these copies when sizing runtime memory and the mailbox. Compaction replaces older records with a handover and carries forward selected recent records. Previous records can then move to Trash while other sessions keep their own copies.
+Forks store independent copies of inherited history. Include these copies when sizing runtime memory and the mailbox. Compaction replaces older records with a continuity note and carries forward selected recent records. Previous records can then move to Trash while other sessions keep their own copies.
 
-A sleeping activity retains its history even when its context is unloaded. When the activity ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. The activity's messages and ending remain available to the core until they enter the core's history. Shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
+A sleeping activity retains its history even when its context is unloaded. When the activity ends, the next confirmed checkpoint omits its working history, allowing maintenance to move those records to Trash. The activity's messages and ending remain available to the main focus until they enter the main focus's history. Shared memory follows its own lifecycle. See [history retention](architecture.md#history-retention) for selection rules.
 
-Unread activity expressions retain each text in order with its original observation time. Ending times are also retained. The core admits reports that fit its ordinary request. Unread reference metadata grows with the backlog, and all unread bodies occupy mailbox storage. Activity messages and endings are outside `MAX_PENDING_EVENTS`, so size runtime memory and mailbox capacity for work that can accumulate before the core next reads it. See [activity reports](architecture.md#activity-reports) for reading and admission behavior.
+Unread activity expressions retain each text in order with its original observation time. Ending times are also retained. The main focus admits reports that fit its ordinary request. Unread reference metadata grows with the backlog, and all unread bodies occupy mailbox storage. Activity messages and endings are outside `MAX_PENDING_EVENTS`, so size runtime memory and mailbox capacity for work that can accumulate before the main focus next reads it. See [activity reports](architecture.md#activity-reports) for reading and admission behavior.
 
 ### Subscription retention
 
@@ -378,7 +370,7 @@ Copy the listeners' saved source positions before taking the database backup. A 
 
 To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup.
 
-Restore each listener's schedule and source position from the corresponding backup before resuming it with its restored subscription ID. Listeners that can replay from an earlier position can use the original report keys. [Resuming at the source](subscriptions.md#resume-at-the-source)
+Restore each listener's schedule and source position from the corresponding backup. A listener can resume with its restored subscription ID when its executable supports the restored database. If the source can replay from an earlier position, use the original report keys. [Resuming at the source](subscriptions.md#resume-at-the-source) · [Listener deployment](#subscription-listeners)
 
 Start `ivenna serve` with the restored mailbox and database before reconnecting channel receivers. Reuse restored channel IDs when they still identify the intended channels. If the backup predates a channel registration, open a replacement channel and give its ID to the receiver. [Channel lifetimes](communication.md#channel-lifetimes)
 

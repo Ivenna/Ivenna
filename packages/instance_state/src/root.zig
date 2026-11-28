@@ -6,6 +6,6 @@ pub const filename = database.filename;
 pub const subscriptions = @import("subscriptions.zig");
 
 test {
-    _ = database;
+    _ = @import("migrations.zig");
     _ = subscriptions;
 }

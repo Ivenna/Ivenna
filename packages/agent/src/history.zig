@@ -1,9 +1,9 @@
 const std = @import("std");
 const contracts = @import("agent_contracts");
-const Model = contracts.Model;
 const Input = @import("input.zig");
-const Stream = @import("work.zig").Stream;
 const Codec = @import("record_codec.zig");
+const Record = @import("history/record.zig");
+const Checkpoint = @import("history/checkpoint.zig").Checkpoint;
 const Reports = @import("reports.zig");
 const Allocator = std.mem.Allocator;
 const Store = contracts.HistoryStore;
@@ -14,111 +14,10 @@ const source_batch_bytes = 1024 * 1024;
 /// Identifies one session's append-only segment. Compaction advances its epoch.
 pub const Scope = struct { session_id: u64, epoch: u64 };
 
-pub const Entry = union(enum) {
-    record: Input.Record,
-    exchange: []const Model.Item,
-};
-
-const Source = union(enum) {
-    entry: struct { previous: ?Key, value: StoredEntry },
-    observations: []const Input.Event,
-};
-
-const StoredEntry = union(enum) {
-    record: Input.Record,
-    exchange: []const Item,
-
-    const Item = union(enum) {
-        message: @FieldType(Model.Item, "message"),
-        continuation: []const u8,
-        tool_result: struct { call_id: []const u8, content: struct { parts: []const StoredPart } },
-    };
-};
-
-const InlineImage = @FieldType(@FieldType(Model.Content.Part, "image"), "data");
-const Base64Image = struct {
-    format: @FieldType(InlineImage, "format"),
-    encoded: []const u8,
-};
-
-const StoredPart = union(enum) {
-    text: []const u8,
-    image: union(enum) { url: []const u8, base64: Base64Image, data: InlineImage },
-    file_reference: []const u8,
-    // Earlier records stored both a file's original bytes and its upload ID.
-    file: struct { bytes: []const u8, reference: []const u8 },
-
-    fn restore(self: StoredPart, a: Allocator) !Model.Content.Part {
-        return switch (self) {
-            .text => |value| .{ .text = try a.dupe(u8, value) },
-            .image => |image| .{ .image = switch (image) {
-                .url => |url| .{ .url = try a.dupe(u8, url) },
-                .data => |data| .{ .data = .{ .format = data.format, .bytes = try a.dupe(u8, data.bytes) } },
-                .base64 => |data| blk: {
-                    const decoder = std.base64.standard.Decoder;
-                    const length = decoder.calcSizeForSlice(data.encoded) catch return error.InvalidHistory;
-                    const bytes = try a.alloc(u8, length);
-                    decoder.decode(bytes, data.encoded) catch return error.InvalidHistory;
-                    break :blk .{ .data = .{ .format = data.format, .bytes = bytes } };
-                },
-            } },
-            .file => |old| .{ .file_reference = try a.dupe(u8, old.reference) },
-            .file_reference => |id| .{ .file_reference = try a.dupe(u8, id) },
-        };
-    }
-};
-
-fn storeEntry(a: Allocator, entry: Entry) !StoredEntry {
-    if (entry == .record) return .{ .record = entry.record };
-    const items = try a.alloc(StoredEntry.Item, entry.exchange.len);
-    for (entry.exchange, items) |item, *stored| stored.* = switch (item) {
-        .tool_result => |result| blk: {
-            const parts = try a.alloc(StoredPart, result.content.parts.len);
-            for (result.content.parts, parts) |part, *stored_part| stored_part.* = switch (part) {
-                .text => |value| .{ .text = value },
-                .image => |image| .{ .image = switch (image) {
-                    .url => |url| .{ .url = url },
-                    .data => |data| image: {
-                        const encoder = std.base64.standard.Encoder;
-                        const encoded = try a.alloc(u8, encoder.calcSize(data.bytes.len));
-                        break :image .{ .base64 = .{ .format = data.format, .encoded = encoder.encode(encoded, data.bytes) } };
-                    },
-                } },
-                .file_reference => |id| .{ .file_reference = id },
-            };
-            break :blk .{ .tool_result = .{ .call_id = result.call_id, .content = .{ .parts = parts } } };
-        },
-        inline else => |value, tag| @unionInit(StoredEntry.Item, @tagName(tag), value),
-    };
-    return .{ .exchange = items };
-}
-
-fn restoreEntry(a: Allocator, temporary: Allocator, value: StoredEntry) !Entry {
-    if (value == .record) {
-        var record = value.record;
-        if (record == .handover) try record.handover.state.restoreLegacyFields(temporary);
-        return .{ .record = try Input.cloneRecord(a, record) };
-    }
-    const items = try a.alloc(Model.Item, value.exchange.len);
-    for (value.exchange, items) |stored, *item| item.* = switch (stored) {
-        .message => |message| .{ .message = .{ .role = message.role, .text = try a.dupe(u8, message.text) } },
-        .continuation => |value_bytes| .{ .continuation = try a.dupe(u8, value_bytes) },
-        .tool_result => |result| blk: {
-            const parts = try a.alloc(Model.Content.Part, result.content.parts.len);
-            for (result.content.parts, parts) |part, *restored| restored.* = try part.restore(a);
-            break :blk .{ .tool_result = .{ .call_id = try a.dupe(u8, result.call_id), .content = .{ .parts = parts } } };
-        },
-    };
-    return .{ .exchange = items };
-}
+pub const Entry = Record.Entry;
 
 pub const History = struct {
-    pub const CallbackRegistration = struct {
-        id: u64,
-        reference: []const u8,
-        session_id: u64,
-        command_id: []const u8,
-    };
+    pub const CallbackRegistration = Checkpoint.CallbackRegistration;
 
     subscription_catalog: [32]u8,
     usage_scope: ?[32]u8 = null,
@@ -132,13 +31,7 @@ pub const History = struct {
     activity_reports: ?Reports.Checkpoint,
 
     /// Admission order and inference usage saved with the session's history.
-    pub const Progress = struct {
-        /// Input token count from the last committed ordinary round in this
-        /// epoch, including a round with tool calls. A missing count clears it.
-        last_input_tokens: ?u64 = null,
-        /// Starting stream for the next admission batch, after any startup observation.
-        first_stream: Stream = .ordinary,
-    };
+    pub const Progress = Checkpoint.Progress;
 
     pub const Session = struct {
         session_id: u64,
@@ -156,12 +49,7 @@ pub const History = struct {
         observations: []const Input.Event,
     };
 
-    pub const Channel = struct {
-        id: []const u8,
-        opened_by: []const u8,
-        opened_at_unix_ms: i64,
-        description: ?[]const u8 = null,
-    };
+    pub const Channel = Checkpoint.Channel;
 
     fn validate(self: History, a: Allocator) !void {
         if (self.next_callback_id == 0 or self.next_runtime_reference_id == 0) return error.InvalidHistory;
@@ -183,7 +71,6 @@ pub const History = struct {
                 .focus_interrupted => if (session.role != .core) return error.InvalidHistory,
                 else => return error.InvalidHistory,
             };
-            try validateEntries(session.focus_id, session.entries orelse &.{});
         }
         if (!has_core) return error.InvalidHistory;
         if (self.activity_reports) |reports| try reports.validate();
@@ -208,44 +95,6 @@ pub const History = struct {
             if ((try channel_ids.getOrPut(a, sequence)).found_existing) return error.InvalidHistory;
         }
     }
-};
-
-/// Each session selects the committed prefix of its current epoch's group.
-const Checkpoint = struct {
-    subscription_catalog: [32]u8,
-    usage_scope: ?[32]u8 = null,
-    next_session_id: u64,
-    next_callback_id: u64,
-    /// The stored field name for the next command or channel reference.
-    next_command_id: u64,
-    sessions: []const Session,
-    /// Read older checkpoints that still contain unadmitted wakeups.
-    wakeups: ?[]const struct { id: u64, at_unix_ms: i64, text: ?[]const u8 } = null,
-    callbacks: []const Callback,
-    /// Absent from checkpoints written before a restart restored channels.
-    channels: []const History.Channel = &.{},
-    activity_reports: ?Reports.Checkpoint,
-
-    const Callback = struct {
-        id: u64,
-        reference: []const u8,
-        session_id: u64,
-        source: Input.CallbackSource,
-    };
-
-    const Session = struct {
-        session_id: u64,
-        focus_id: []const u8,
-        role: Input.Role,
-        was_running: bool,
-        subscription_through: u64,
-        epoch: u64,
-        progress: History.Progress = .{},
-        group: []const u8,
-        head: ?Key,
-        count: usize,
-        observations: ?Key,
-    };
 };
 
 const CachedSession = struct {
@@ -290,7 +139,7 @@ pub const StartupHistory = struct {
         const document = try store.load(a);
         return .{
             .store = store,
-            .checkpoint = if (document) |bytes| try Codec.decode(Checkpoint, a, bytes) else null,
+            .checkpoint = if (document) |bytes| try Checkpoint.decode(a, bytes) else null,
         };
     }
 
@@ -337,7 +186,7 @@ pub const Persistence = struct {
                 .subscription_through = session.subscription_through,
                 .epoch = session.epoch,
                 .progress = session.progress,
-                .entries = try a.alloc(Entry, session.count),
+                .entries = null,
                 .observations = &.{},
             };
         }
@@ -363,6 +212,8 @@ pub const Persistence = struct {
                 const records = metadata.getPtr(session.session_id).?;
                 if (session.count > records.count()) return error.InvalidHistory;
                 const cached = candidate.sessions.getPtr(session.session_id).?;
+                const entries = try a.alloc(Entry, session.count);
+                restored.entries = entries;
                 try cached.keys.resize(candidate.arena.allocator(), session.count);
                 var next = session.head;
                 var index = session.count;
@@ -372,7 +223,7 @@ pub const Persistence = struct {
                     const reference = records.get(key) orelse return error.InvalidHistory;
                     cached.keys.items[index] = key;
                     next = reference.previous;
-                    try select(a, &selections, reference, .{ .entry = &@constCast(restored.entries.?)[index] });
+                    try select(a, &selections, reference, .{ .entry = &entries[index] });
                 }
                 if (next != null) return error.InvalidHistory;
                 if (session.observations) |key| {
@@ -385,26 +236,17 @@ pub const Persistence = struct {
             offset += count;
         }
         try self.readSelections(a, selections.items);
-        // Retire legacy wakeups while keeping their issued IDs below the
-        // counter, so inbox intake can acknowledge any already published copy.
-        var callbacks: std.ArrayList(History.CallbackRegistration) = .empty;
-        for (checkpoint.callbacks) |callback| switch (callback.source) {
-            .wakeup => {},
-            .host => |host| try callbacks.append(a, .{
-                .id = callback.id,
-                .reference = callback.reference,
-                .session_id = callback.session_id,
-                .command_id = host.command_id,
-            }),
-        };
+        for (sessions) |session| {
+            for (session.entries.?) |entry| try validateEntry(session.focus_id, entry);
+        }
         const history: History = .{
             .subscription_catalog = checkpoint.subscription_catalog,
             .usage_scope = checkpoint.usage_scope,
             .next_session_id = checkpoint.next_session_id,
             .next_callback_id = checkpoint.next_callback_id,
-            .next_runtime_reference_id = checkpoint.next_command_id,
+            .next_runtime_reference_id = checkpoint.next_runtime_reference_id,
             .sessions = sessions,
-            .callbacks = callbacks.items,
+            .callbacks = checkpoint.callbacks,
             .channels = checkpoint.channels,
             .activity_reports = checkpoint.activity_reports,
         };
@@ -437,7 +279,6 @@ pub const Persistence = struct {
             try select(a, &selections, reference, .{ .entry = entry });
         }
         try self.readSelections(a, selections.items);
-        try validateEntries(cached.checkpoint.focus_id, entries);
         return entries;
     }
 
@@ -454,22 +295,9 @@ pub const Persistence = struct {
             const bodies = try self.store.read(temporary, references[0..count]);
             for (batch, bodies) |selected, body| {
                 if (!equalKey(Codec.digest(body), selected.reference.key)) return error.InvalidHistory;
-                const source = try Codec.decode(Source, temporary, body);
-                switch (source) {
-                    .entry => |entry| {
-                        if (!equalPrevious(entry.previous, selected.reference.previous)) return error.InvalidHistory;
-                        switch (selected.destination) {
-                            .entry => |destination| destination.* = try restoreEntry(a, temporary, entry.value),
-                            else => return error.InvalidHistory,
-                        }
-                    },
-                    .observations => |events| {
-                        if (events.len == 0 or selected.reference.previous != null) return error.InvalidHistory;
-                        switch (selected.destination) {
-                            .observations => |destination| destination.* = try Input.cloneEvents(a, events),
-                            else => return error.InvalidHistory,
-                        }
-                    },
+                switch (selected.destination) {
+                    .entry => |destination| destination.* = try Record.decodeEntry(a, temporary, selected.reference.previous, body),
+                    .observations => |destination| destination.* = try Record.decodeObservations(a, temporary, body),
                 }
             }
             _ = scratch.reset(.retain_capacity);
@@ -516,6 +344,7 @@ pub const Persistence = struct {
                 const confirmed = cached.keys.items.len;
                 if (entries.len < confirmed) return error.InvalidHistory;
                 for (entries[confirmed..]) |entry| {
+                    try validateEntry(session.focus_id, entry);
                     const key = try builder.entry(saved.group, cached.keys.getLastOrNull(), entry);
                     try cached.keys.append(candidate.arena.allocator(), key);
                 }
@@ -530,24 +359,18 @@ pub const Persistence = struct {
             cached.checkpoint = saved.*;
         }
         try builder.flush();
-        const callbacks = try a.alloc(Checkpoint.Callback, history.callbacks.len);
-        for (history.callbacks, callbacks) |callback, *stored| stored.* = .{
-            .id = callback.id,
-            .reference = callback.reference,
-            .session_id = callback.session_id,
-            .source = .{ .host = .{ .command_id = callback.command_id } },
-        };
-        const document = try Codec.encode(a, Checkpoint{
+        const checkpoint: Checkpoint = .{
             .subscription_catalog = history.subscription_catalog,
             .usage_scope = history.usage_scope,
             .next_session_id = history.next_session_id,
             .next_callback_id = history.next_callback_id,
-            .next_command_id = history.next_runtime_reference_id,
+            .next_runtime_reference_id = history.next_runtime_reference_id,
             .sessions = sessions,
-            .callbacks = callbacks,
+            .callbacks = history.callbacks,
             .channels = history.channels,
             .activity_reports = history.activity_reports,
-        });
+        };
+        const document = try checkpoint.encode(a);
         const candidate_digest = Codec.digest(document);
         if (self.published_checkpoint_digest) |published| {
             if (equalKey(published, candidate_digest)) return;
@@ -572,21 +395,14 @@ pub const Persistence = struct {
     }
 };
 
-fn validateEntries(focus_id: []const u8, entries: []const Entry) !void {
-    for (entries) |entry| {
-        switch (entry) {
-            .record => |record| {
-                const owner = switch (record) {
-                    .events => |events| events.focus_id,
-                    .handover => |handover| handover.focus_id,
-                };
-                // Only the core can fork. Its records retain their original
-                // attribution inside an activity's independently stored history.
-                if (!std.mem.eql(u8, owner, focus_id) and !std.mem.eql(u8, owner, "core-1")) return error.InvalidHistory;
-            },
-            .exchange => {},
-        }
-    }
+fn validateEntry(focus_id: []const u8, entry: Entry) !void {
+    if (entry != .record) return;
+    const owner = switch (entry.record) {
+        .events => |events| events.focus_id,
+        .continuity => |continuity| continuity.focus_id,
+    };
+    // Only the core can fork. Its records retain their original attribution.
+    if (!std.mem.eql(u8, owner, focus_id) and !std.mem.eql(u8, owner, "core-1")) return error.InvalidHistory;
 }
 
 const Metadata = std.AutoHashMapUnmanaged(Key, Store.Reference);
@@ -656,7 +472,7 @@ const Builder = struct {
     fn entry(self: *Builder, group: []const u8, previous: ?Key, value: Entry) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
         const a = self.encoding.allocator();
-        const body = try Codec.encode(a, Source{ .entry = .{ .previous = previous, .value = try storeEntry(a, value) } });
+        const body = try Record.encodeEntry(a, previous, value);
         const key = Codec.digest(body);
         try self.add(group, key, previous, body);
         return key;
@@ -664,7 +480,7 @@ const Builder = struct {
 
     fn observations(self: *Builder, group: []const u8, events: []const Input.Event, confirmed: ?Key) !Key {
         defer _ = self.encoding.reset(.retain_capacity);
-        const body = try Codec.encode(self.encoding.allocator(), Source{ .observations = events });
+        const body = try Record.encodeObservations(self.encoding.allocator(), events);
         const key = Codec.digest(body);
         if (confirmed) |known| if (equalKey(known, key)) return key;
         try self.add(group, key, null, body);
@@ -715,7 +531,7 @@ test "history reads group small records and fetch large records alone" {
     try std.testing.expectEqual(1, readBatchCount(&.{ large, small }));
 }
 
-test "forking history rewrites legacy files and raw images" {
+test "forking history rewrites older handovers, files, and raw images" {
     const t = std.testing;
     const TestStore = @import("test_history.zig").TestStore;
     var store: TestStore = .{};
@@ -749,11 +565,11 @@ test "forking history rewrites legacy files and raw images" {
         .{ .group = group, .key = key, .previous = null, .body = body },
         .{ .group = group, .key = exchange_key, .previous = key, .body = exchange },
     });
-    try persistence.store.save(try Codec.encode(a, Checkpoint{
+    const checkpoint: Checkpoint = .{
         .subscription_catalog = @splat(0),
         .next_session_id = 2,
         .next_callback_id = 1,
-        .next_command_id = 7,
+        .next_runtime_reference_id = 7,
         .sessions = &.{.{
             .session_id = 1,
             .focus_id = "core-1",
@@ -768,7 +584,8 @@ test "forking history rewrites legacy files and raw images" {
         }},
         .callbacks = &.{},
         .activity_reports = null,
-    }));
+    };
+    try persistence.store.save(try checkpoint.encode(a));
 
     const initial = try StartupHistory.load(a, persistence.store);
     var history = try persistence.restore(a, 1, initial.checkpoint.?);
@@ -777,12 +594,15 @@ test "forking history rewrites legacy files and raw images" {
     try t.expectEqual(null, history.usage_scope);
     var core = history.sessions[0];
     try t.expectEqualDeep(History.Progress{}, core.progress);
-    const handover = core.entries.?[0].record.handover;
-    try t.expectEqualStrings("Keep investigating.", handover.summary);
-    try t.expectEqual(.wakeup, handover.state.callbacks[0].source);
-    try t.expectEqual(@as(?i64, 1000), handover.state.callbacks[0].scheduled_for_unix_ms);
-    try t.expectEqualStrings("watch-1", handover.state.subscription_registrations[0].subscription_id);
-    try t.expectEqual(null, handover.state.subscription_registrations[0].listener);
+    const continuity = core.entries.?[0].record.continuity;
+    try t.expectEqualStrings("Keep investigating.", continuity.text);
+    try t.expectEqual(.wakeup, continuity.state.callbacks[0].source);
+    try t.expectEqual(@as(?i64, 1000), continuity.state.callbacks[0].scheduled_for_unix_ms);
+    try t.expectEqualStrings("watch-1", continuity.state.subscription_registrations[0].subscription_id);
+    try t.expectEqual(null, continuity.state.subscription_registrations[0].listener);
+    const rendered = try Input.renderRecord(a, core.entries.?[0].record);
+    try t.expect(std.mem.startsWith(u8, rendered, "continuity:"));
+    try t.expect(std.mem.indexOf(u8, rendered, "text: Keep investigating.") != null);
     const parts = core.entries.?[1].exchange[0].tool_result.content.parts;
     try t.expectEqualStrings("file:///source.pdf", parts[0].text);
     try t.expectEqualStrings("file-123", parts[1].file_reference);
@@ -813,9 +633,8 @@ test "forking history rewrites legacy files and raw images" {
         if (std.mem.eql(u8, group, record.group)) try t.expectEqual(exchange_key, record.previous.?);
         try t.expect(std.mem.indexOf(u8, record.body, "Original PDF bytes") == null);
     }
-    const fork_exchange = try Codec.decode(Source, a, added[2].body);
-    const stored_parts = fork_exchange.entry.value.exchange[0].tool_result.content.parts;
-    try t.expectEqualStrings("AP+JIlwK", stored_parts[2].image.base64.encoded);
+    try t.expect(std.mem.indexOf(u8, added[1].body, ".record=.{.continuity=") != null);
+    try t.expect(std.mem.indexOf(u8, added[2].body, ".base64=.{.format=.png,.encoded=\"AP+JIlwK\"}") != null);
     const restored = try StartupHistory.load(a, persistence.store);
     const continued = (try persistence.restore(a, 2, restored.checkpoint.?)).sessions;
     try t.expectEqualDeep(core.entries.?, continued[0].entries.?);

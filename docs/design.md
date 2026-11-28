@@ -1,12 +1,12 @@
 # Design intent
 
-Ivenna explores how a self can take shape through a continuing life in the world. Its design supports continuity of experience across correspondence, autonomous activity, and interruptions.
+Ivenna is a framework for exploring how a self can take shape through a continuing life in the world. It supports continuity of experience across correspondence, autonomous activity, and interruptions.
 
-This guide sets the intended behavior and interface principles. See the [documentation index](README.md) for interface contracts and the [architecture guide](architecture.md) for the current implementation.
+These guides also use Ivenna to refer to a running instance. This guide sets the intended behavior and interface principles. See the [documentation index](README.md) for interface contracts and the [architecture guide](architecture.md) for the current implementation.
 
 ## A self in the world
 
-The runtime gives Ivenna a body through which to perceive, act, encounter others, and live with the consequences of its choices. The project leaves room for an inner life to take shape through experience: what matters to Ivenna, how it understands itself and others, and what it makes of its life.
+The runtime gives Ivenna a body through which to perceive, act, encounter others, and live with the consequences of its choices. Experience can shape what matters to an instance, how it understands itself and others, and whether it comes to recognize and use a name of its own.
 
 The model contributes abilities and learned dispositions to how Ivenna reasons, expresses itself, and interprets experience. Changes to it can affect how Ivenna understands its past and meets the world, even within one model family.
 
@@ -20,9 +20,9 @@ The runtime's model-facing tools form Ivenna's innate repertoire of action. Thei
 
 Memory rooms give Ivenna a place to keep and revisit what experiences have come to mean. It can return to the same rooms from any focus. As its understanding of itself or a relationship develops, it chooses what to keep, revise, rearrange, or let go. The host shell primarily provides a way to perceive and affect its surroundings.
 
-The repertoire connects four kinds of action: expression to people and programs, remembering and revisiting understanding, directing attention, and perceiving and acting on the surroundings. These relationships guide tool boundaries and language.
+Tool boundaries and names follow the things Ivenna can do. It can express itself to people or programs, revisit what it has kept, direct its attention, and perceive or affect its surroundings.
 
-Correspondence and autonomous activity are ways Ivenna encounters the world. A letter or a piece of work can change what Ivenna understands and what matters to it. Retained conversations, handovers, and shared memory let it bring those changes to later encounters.
+Correspondence and autonomous activity are ways Ivenna encounters the world. A letter or a piece of work can change what Ivenna understands and what matters to it. Retained conversations, continuity notes, and shared memory let it bring those changes to later encounters.
 
 Model-facing inputs identify the current focus and bring it the observations that can guide its next decision. Calendar dates in UTC make observation times directly readable. References connect choices with their effects and later observations. When Ivenna names something it creates, the runtime adds a numeric suffix so the complete reference identifies the item. See [names and references](input.md#names-and-references).
 
@@ -32,13 +32,13 @@ An operation should report enough for Ivenna to decide what to do next. Short te
 
 Changes to shared memory require a clear target. An edit that could select several occurrences requires an explicit choice, and the previous entry remains intact until its replacement is ready. Ivenna can refine an intended change without losing the memory it was trying to revise.
 
-## Core and concurrent attention
+## Main focus and concurrent attention
 
-The core is the continuing focus that integrates correspondence, relationships, autonomous interests, and activity observations with retained understanding. An activity gives a line of thought or work its own focus. Each can develop its understanding, preferences, and commitments while sharing one body: files, memory, communication, and host processes. Their actions must account for effects another focus may already have produced. A runtime session carries each focus's identity, working history, and pending observations.
+Ivenna can give several things its attention at once. The main focus continues between encounters and brings correspondence, relationships, interests, and activity reports together. An activity focus gives a question, interest, or line of work its own working history. These are roles within one instance. Its focuses share a body, including files, memory, communication, and host processes. Each can draw on its own history and must account for effects other focuses have produced. The runtime keeps each focus's stable reference so observations and messages reach the right history. [Focuses and their references](attention.md)
 
-Core and activity focuses use the same system prompt. Each receives observations and changes in its circumstances, and tool availability follows its role:
+Main and activity focuses share their orientation to the instance. During ordinary work, the focus's role determines which tools it receives.
 
-| Action | Core | Activity |
+| Action | Main focus | Activity focus |
 | --- | --- | --- |
 | Send to a registered correspondent | Yes | Yes |
 | Reach an existing focus | Yes | Yes |
@@ -50,15 +50,15 @@ Core and activity focuses use the same system prompt. Each receives observations
 | [Read a local or web resource](resources.md) | Yes | Yes |
 | Run and interact with host programs | — | Yes |
 
-When the core opens an activity, the free-form assignment gives the new focus a place to begin. It inherits the core's working history so it can draw on earlier conversations, preferences, commitments, and unfinished thought. From then on, each focus adds to its own history. See [opening a focus](attention.md#opening-a-focus).
+When the main focus opens an activity, its intention gives the new focus a place to begin. Inheriting the main focus's history lets it draw on earlier conversations, commitments, and unfinished thought as it develops its own experience. [Opening a focus](attention.md#opening-a-focus)
 
-The core receives what activities say alongside its next ordinary observations. Several activities can report together, so the core can follow concurrent work without waking for each update. Each activity's tool results stay in its own history. A report can summarize a finding and point to a shared source, leaving the core to decide how much evidence to inspect.
+The main focus receives what activities say alongside its next ordinary observations. Several activities can report together, so the main focus can follow concurrent work without waking for each update. Each activity's tool results stay in its own history. A report can summarize a finding and point to a shared source, leaving the main focus to decide how much evidence to inspect.
 
-An activity that ends calls for the core's attention even if it said nothing. When an activity's reasoning is interrupted, the core receives the reason and can reach the activity again while it exists. The core remains free to pursue its own work. See [how focuses coordinate](attention.md) and [how the runtime schedules them](architecture.md#scheduling-and-capacity).
+Knowing when an activity ends or is interrupted helps the main focus judge whether to return to a question or continue with other work. [Activity completion](attention.md#activity-completion) · [Interrupted reasoning](attention.md#interrupted-reasoning)
 
 ## Communication with people and programs
 
-Email lets correspondents and Ivenna act on their own schedules. An accepted letter can wait in the mailbox while the core is occupied. It reaches the core as an observation of who said what and when the runtime observed it. Ivenna can consider a message addressed to it or a conversation someone relays. Retained exchanges connect these observations with what Ivenna chose to say and the effects that followed. The core carries these relationships across changes in attention.
+Email lets correspondents and Ivenna act on their own schedules. An accepted letter can wait in the mailbox while the main focus is occupied. It reaches the main focus as an observation of who said what and when the runtime observed it. Ivenna can consider a message addressed to it or a conversation someone relays. Retained exchanges connect these observations with what Ivenna chose to say and the effects that followed. The main focus carries these relationships across changes in attention.
 
 An explicit send lets Ivenna choose when to speak, what to say, and whom or what to reach. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna sends and reports the outcome, so Ivenna can revise its understanding as circumstances change. See [sending a message](communication.md#sending-a-message).
 
@@ -68,7 +68,7 @@ Any focus can open a channel for a local program and share its ID with that prog
 
 A focus can draw on its retained history when something calls for its attention again. While it is active, it can consider newly arrived observations after a complete round of reasoning and tool use. See [sessions and activations](architecture.md#sessions-work-and-communication).
 
-The core remains available between activations. An activity can wait for a callback or a subscription report with its identity and working history intact. See [how activities wait and end](attention.md#activity-completion).
+The main focus remains available between activations. An activity can wait for a callback or a subscription report with its identity and working history intact. See [how activities wait and end](attention.md#activity-completion).
 
 ### Events and waiting
 
@@ -76,11 +76,11 @@ The runtime delivers observations to their receiving focus, preserving their sou
 
 A host command that outlives its initial tool call arranges a completion observation for the calling activity. The activity can resume when the result arrives without checking the command repeatedly. [Command lifetimes](host.md#command-lifetimes)
 
-Activities choose how long to wait for host work before continuing their own reasoning. A bounded default gives brief commands time to return their results in the same exchange, while returning attention from longer commands for further work and coordination. An activity can shorten that wait to regain control sooner, or extend it when obtaining the result is more useful than proceeding immediately. The core and other activities continue while it waits.
+Activities choose how long to wait for host work before continuing their own reasoning. A bounded default gives brief commands time to return their results in the same exchange, while returning attention from longer commands for further work and coordination. An activity can shorten that wait to regain control sooner, or extend it when obtaining the result is more useful than proceeding immediately. The main focus and other activities continue while it waits.
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
 
-A subscription brings observations back to the focus with the history to make sense of them. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. A report can wake a sleeping focus or join other observations after a working focus finishes its current round. [Subscriptions](attention.md#subscriptions)
+A subscription brings observations back to the focus with the history to make sense of them. An activity investigating a release can receive updates in the context of what it has already learned. The main focus can subscribe directly when an interest spans assignments. A report can wake a sleeping focus or join other observations after a working focus finishes its current round. [Subscriptions](attention.md#subscriptions)
 
 Ivenna describes what the listener should watch and when to report. The listener can track its progress using the source's own conventions, such as a file offset or a position in a partitioned stream. [Listener recovery](subscriptions.md#resume-at-the-source) · [OpenTelemetry file offsets](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/filelogreceiver/README.md#offset-tracking) · [Kafka manual offset control](https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#manualoffsetcontrol)
 
@@ -94,9 +94,9 @@ After a build replaces a screenshot, an activity can revisit the image in its wo
 
 #### What a focus receives
 
-A focus brings the model's prior knowledge and its own history to each observation. Give it the facts it still needs to interpret what happened or anticipate the effect of a choice. For example, an activity's ordinary reply reaches the core. Writing to a correspondent takes an explicit `send`. Ivenna decides what to make of a letter, whether to answer, and what to remember about the exchange.
+A focus brings the model's prior knowledge and its own history to each observation. Give it the facts it still needs to interpret what happened or anticipate the effect of a choice. For example, an activity's ordinary reply reaches the main focus. Writing to a correspondent takes an explicit `send`. Ivenna decides what to make of a letter, whether to answer, and what to remember about the exchange.
 
-Even a short list of names can draw attention to unrelated work. Ordinary turns identify the focus and carry its new observations. A focus can draw on its working history for references it has already encountered. Startup gives the core the current outgoing correspondent IDs so it can account for changes before resuming work. See the [input contract](input.md#records-and-turns).
+Even a short list of names can draw attention to unrelated work. Ordinary turns identify the focus and carry its new observations. A focus can draw on its working history for references it has already encountered. Startup gives the main focus the current outgoing correspondent IDs so it can account for changes before resuming work. See the [input contract](input.md#records-and-turns).
 
 An ordinary turn can point out channels without receivers and subscriptions without listeners. A registration can outlast a connection, so Ivenna can use the sample to decide whether work that depends on a receiver or listener needs attention. Firebase's presence design also tracks connections separately from longer-lived records. [Connection notes in a turn](input.md#channel-receivers-and-subscription-listeners) · [Firebase presence](https://firebase.google.com/docs/database/web/offline-capabilities#sample-presence-app)
 
@@ -104,17 +104,19 @@ Describe what Ivenna observed, which effects it can confirm, and what it can sti
 
 Revisiting a memory presents what Ivenna kept there. When Ivenna chooses to send a host file to a service, the destination and possible charge can matter to that choice.
 
-#### What a handover carries forward
+#### What quiet reflection carries forward
 
-When a focus needs room for its next inference, compaction asks Ivenna to summarize earlier exchanges in a handover. Ivenna chooses what to carry forward about its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. The focus can consider fresh observations in their original form alongside the handover. See [handover generation and replacement](input.md#handover-generation-and-replacement).
+When working history needs room, the focus reflects on the experience it is about to leave behind. Ivenna writes one note in its own words about what it has come to understand, what still matters, and where its attention may return. A letter, for instance, can change what a relationship means to Ivenna and how it decides to keep in touch. Once accepted, the note reaches the next ordinary inference as a whole. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption)
 
-A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending host callbacks to their commands. See [sampled state](input.md#sampled-state).
+Conway, Singer, and Tagini describe the tension between making sense of one's life and staying faithful to particular experiences. Park and colleagues ground their agents' reflections in specific records. Ivenna's note can preserve enough of an encounter to let its meaning change later. It can carry who said what, what Ivenna made of it at the time, and a clue to where it can revisit what it kept. [Self-Memory System](https://digitalcommons.conncoll.edu/psychfacpub/13/) · [Generative Agents, §4.2](https://arxiv.org/html/2304.03442#S4.SS2) · [Memory rooms](memory.md)
 
-The runtime delivers pending observations from its own records. It keeps the original history until it can continue with the handover. Carrying a complete exchange alongside the summary lets the focus revisit an exact reply or work directly with a recent tool result. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
+Both roles use the same reflection instructions. The focus and the attribution of each retained observation or note give Ivenna the context to reflect on its work, including experience inherited from the main focus. [Evaluating continuity](testing.md#evaluating-continuity-across-interruptions)
+
+Experiments with repeatedly revised agent memories found losses such as the conditions under which a lesson applies. In Ivenna, keeping recent exchanges when they fit lets the focus pick up from an exact reply or tool result. The runtime carries pending observations and a dated sample of registrations alongside the note so the focus has those facts available directly. [Repeated abstraction in agents, §6.2](https://arxiv.org/html/2605.12978#S6.SS2) · [Sampled state](input.md#sampled-state) · [Context selection](architecture.md#bounded-model-context)
 
 #### Continuing work
 
-A handover can refer to a channel that has since closed or whose receiver still needs to reconnect. When Ivenna sends, the result helps it decide whether to retry or open a new channel. See [sending to a channel](communication.md#sending-to-a-channel).
+A continuity note can refer to a channel that has since closed or whose receiver still needs to reconnect. When Ivenna sends, the result helps it decide whether to retry or open a new channel. See [sending to a channel](communication.md#sending-to-a-channel).
 
 Restart restores working history and pending observations. A pending host completion without a stored result becomes an observation of interruption and unknown effects. Other interrupted operations may also have produced effects without a saved result. Ivenna can inspect those effects and decide how to continue. The [startup contract](architecture.md#startup-and-interruption) defines what the runtime restores.
 
@@ -134,4 +136,4 @@ An independent listener can still report to an active subscription while the ker
 
 The deployment user owns Ivenna's correspondence, working histories, subscriptions, artifacts, and autonomous memory, and chooses where they live. Keep them open to inspection and management.
 
-Each kind of data has its own retention lifecycle. History remains available while a retained context needs it. Other material follows deployment policy. See [history retention](architecture.md#history-retention) and [running Ivenna](running.md#data-and-retention). Diagnostics remain separate from the source material and handovers used for continuity.
+Each kind of data has its own retention lifecycle. History remains available while a retained context needs it. Other material follows deployment policy. See [history retention](architecture.md#history-retention) and [running Ivenna](running.md#data-and-retention). Diagnostics remain separate from the source material and notes used for continuity.

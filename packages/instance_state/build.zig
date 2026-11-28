@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const options = .{ .target = target, .optimize = optimize };
+    // The pinned upstream manifest excludes LICENSE from the fetched package.
+    b.addNamedLazyPath("zug-license", b.path("LICENSE.zug"));
     const mod = b.addModule("instance_state", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -11,6 +13,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "sqlite", .module = b.dependency("sqlite", options).module("sqlite") },
             .{ .name = "agent_contracts", .module = b.dependency("agent_contracts", options).module("agent_contracts") },
+            .{ .name = "zug", .module = b.dependency("zug", options).module("zug") },
         },
     });
     b.step("test", "Test instance state storage").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);

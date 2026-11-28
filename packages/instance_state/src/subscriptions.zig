@@ -1,5 +1,6 @@
 const std = @import("std");
 const sql = @import("database.zig");
+const migrations = @import("migrations.zig");
 const ListenerPresence = @import("listener_presence.zig");
 const zqlite = @import("sqlite").zqlite;
 const Allocator = std.mem.Allocator;
@@ -66,7 +67,7 @@ pub const Store = struct {
     }
 
     fn openFile(a: Allocator, io: std.Io, path: []const u8, mode: sql.OpenMode) !Store {
-        const db = try sql.open(a, path, mode);
+        const db = try openDatabase(a, path, mode);
         errdefer db.close();
         return .{
             .db = db,
@@ -75,7 +76,7 @@ pub const Store = struct {
     }
 
     pub fn openInMemory(a: Allocator) !Store {
-        return .{ .db = try sql.open(a, ":memory:", .{ .initialize = null }), .listener_presence = null };
+        return .{ .db = try openDatabase(a, ":memory:", .{ .initialize = null }), .listener_presence = null };
     }
 
     pub fn close(self: *Store) void {
@@ -222,6 +223,19 @@ pub const Store = struct {
     }
 };
 
+fn openDatabase(a: Allocator, path: []const u8, mode: sql.OpenMode) !zqlite.Conn {
+    const db = try sql.open(a, path, mode);
+    errdefer db.close();
+    switch (mode) {
+        .initialize => |checkpoint| {
+            try migrations.initialize(a, db, checkpoint);
+            try sql.exec(db, "PRAGMA journal_mode=WAL");
+        },
+        .existing => try migrations.requireCurrent(db),
+    }
+    return db;
+}
+
 test "a reconnected listener can retry an accepted report after the focus received it" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -320,6 +334,34 @@ test "a mailbox checkpoint does not create a missing database" {
     const missing = try std.fs.path.join(a, &.{ dir, "missing.sqlite3" });
     try t.expectError(error.SubscriptionCatalogMismatch, Store.initialize(a, t.io, missing, @splat('0')));
     try t.expectError(error.FileNotFound, std.Io.Dir.cwd().access(t.io, missing, .{}));
+}
+
+test "a listener can publish to a legacy database after startup upgrades it" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, sql.filename });
+    const checkpoint = checkpoint: {
+        const legacy = try sql.open(a, path, .{ .initialize = null });
+        defer legacy.close();
+        const legacy_id = std.mem.readInt(u32, "IVDB", .big);
+        try sql.exec(legacy, @embedFile("migrations/fixtures/legacy_with_cursor.sql"));
+        try sql.exec(legacy, std.fmt.comptimePrint("PRAGMA application_id={d}", .{legacy_id}));
+        try sql.exec(legacy, "INSERT INTO subscriptions(name,focus_id,listener,cursor) VALUES('news','core-1','Release feed','17')");
+        try t.expectError(error.IncompatibleStateSchema, Listener.open(a, t.io, path, "news-1"));
+        try t.expectEqual(1, try sql.integer(legacy, "SELECT count(*) FROM subscriptions WHERE cursor='17'", .{}));
+        break :checkpoint (try sql.mailboxBinding(legacy)).identity;
+    };
+    var kernel = try Store.initialize(a, t.io, path, checkpoint);
+    defer kernel.close();
+    var listener = try Listener.open(a, t.io, path, "news-1");
+    defer listener.close();
+    try listener.publish(.{ .key = "post-1", .text = "New release" }, 123);
+    try t.expectEqual(1, try kernel.latestSequence("core-1"));
 }
 
 test "listener presence follows independent sessions and active registrations" {

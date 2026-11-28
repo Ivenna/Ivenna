@@ -1,3 +1,4 @@
+-- Equivalent to the cursorless IVS3 schema in 19b4395 and the IVST v1 schema.
 CREATE TABLE mailbox_binding (
     singleton INTEGER PRIMARY KEY CHECK (singleton=1),
     identity TEXT NOT NULL,

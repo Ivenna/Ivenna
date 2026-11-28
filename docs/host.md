@@ -128,7 +128,7 @@ The portion of the log you see depends on how you observe the command.
 
 On the initial handoff and on continuations, a log object gives the byte `range` read, from `offset` up to but excluding `next_offset`. A text `preview` contains the characters in that range. Binary output omits the preview. Each stream's preview fits its share of `max_output_bytes` after JSON escaping.
 
-The core or an activity can open a log by its returned `path`, even after the command handle expires. Reading the file leaves the command's cursors in place. A `path` or `cwd` containing non-UTF-8 bytes is returned as a local file URI.
+Any focus can open a log by its returned `path`, even after the command handle expires. Reading the file leaves the command's cursors in place. A `path` or `cwd` containing non-UTF-8 bytes is returned as a local file URI.
 
 If a command writes a PDF to stdout, pass its returned log `path` to `read_resource` as `location` with `"view":"file"`. To keep it in memory, pass the same path to `remember.content.file.path`. Redirect output to a named file when you need a path even for short or empty output. For example, use `generate-report > report.txt`. See [local reads](resources.md#local-files-and-directories) and [recording a memory](memory.md#recording).
 

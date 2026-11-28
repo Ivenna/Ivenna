@@ -21,7 +21,7 @@ While a tool result remains in working history, later turns can use its text, in
 
 The runtime saves the complete tool round before the next inference, subject to the mail service's [working history limits](running.md#working-history-limits).
 
-Compaction can summarize the exchange that contains a tool result. If the handover records the host path or memory address, the focus can reopen the source to see its current contents. See [handovers](input.md#handover-generation-and-replacement) and [uploaded file retention](running.md#uploaded-model-files).
+Quiet reflection can replace an older exchange with a note. A location carried forward in the note gives the focus a way to return to the source. Reopening it reads the material then available at that location. [Quiet reflection](input.md#quiet-reflection-and-resumption) · [Reading a resource](resources.md#local-files-and-directories) · [Reading a memory](memory.md#reading) · [Uploaded file retention](running.md#uploaded-model-files)
 
 ## Source size limits
 
@@ -64,4 +64,4 @@ The Responses adapter checks the complete encoded request, including retained an
 
 The model service also checks limits that depend on processed input. A file reference may expand into text and images that count toward those limits. See DeepSeek's [image limits](https://api-docs.deepseek.com/guides/vision/#limits) and [document input limits](https://api-docs.deepseek.com/guides/document_parsing/#step-2-reference-a-document-in-chat).
 
-Compaction can make room for the latest complete tool exchange. If the kernel still cannot assemble an ordinary request within the adapter's limits, the focus pauses with its saved tool results intact. See [how compaction works](architecture.md#bounded-model-context).
+Compaction can make room for the latest complete tool exchange. If the exchange and pending observations exceed the limit together, the exchange can enter the reflection. When the runtime cannot fit a continuation request, the focus pauses with its last saved history. [Bounded model context](architecture.md#bounded-model-context)

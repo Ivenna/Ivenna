@@ -1357,13 +1357,13 @@ test "a fork inherits the complete opening round and continues its own history" 
     defer registry.endWorker(core.work.session);
 
     try core.history.appendBatch(&.{.{ .continuation = "An earlier response" }}, &.{});
-    const handover: Input.Handover = .{
+    const continuity: Input.Continuity = .{
         .focus_id = core.work.session.focus_id,
         .observed_at_unix_ms = 100,
-        .summary = "The core is following a research plan.",
+        .text = "I chose to keep exploring this plan.\n\nFollow the plan.",
         .state = .{ .activities = &.{}, .callbacks = &.{} },
     };
-    var opening = try core.history.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    var opening = try core.history.withContinuity(testing.allocator, continuity, .keep_latest_tool_round);
     defer opening.deinit();
     try registry.commitInput(core.work, 0, &opening);
     const letter: Input.Record = .{ .events = .{
@@ -1388,7 +1388,7 @@ test "a fork inherits the complete opening round and continues its own history" 
     defer registry.endWorker(activity.work.session);
     defer activity.history.deinit();
     const expected: []const @import("history.zig").Entry = &.{
-        .{ .record = .{ .handover = handover } },
+        .{ .record = .{ .continuity = continuity } },
         .{ .record = letter },
         .{ .exchange = exchange },
         .{ .record = .{ .events = .{ .focus_id = focus_id, .items = &.{.{ .assignment = .{ .task = task } }} } } },
@@ -1435,14 +1435,14 @@ test "restart retains the assignment as a new activity's first delivery" {
         defer registry.endWorker(activity.session);
         var inherited = try registry.snapshot(activity.session);
         defer inherited.deinit();
-        const legacy_handover: Input.Handover = .{
+        const inherited_note: Input.Continuity = .{
             .focus_id = focus_id,
             .observed_at_unix_ms = 100,
-            .summary = "The core's earlier work.",
+            .text = "The core's earlier work.",
             .state = .{ .activities = &.{}, .callbacks = &.{} },
         };
         var legacy = try Context.restore(testing.allocator, .{ .session_id = activity.session.session_id, .epoch = 1 }, focus_id, &.{
-            .{ .record = .{ .handover = legacy_handover } }, inherited.records()[inherited.records().len - 1],
+            .{ .record = .{ .continuity = inherited_note } }, inherited.records()[inherited.records().len - 1],
         });
         defer legacy.deinit();
         try registry.commitInput(activity, 0, &legacy);
@@ -1472,9 +1472,13 @@ test "restart retains the assignment as a new activity's first delivery" {
     defer resumed.deinit();
     const ready = try resumed.takeReadyBatch(a);
     defer for (ready) |work| resumed.endWorker(work.session);
-    var history = try resumed.snapshot(ready[1].session);
+    const activity = ready[1].session;
+    var history = try resumed.snapshot(activity);
     defer history.deinit();
-    var compacted = try history.withHandover(testing.allocator, history.records()[0].record.handover, .keep_latest_tool_round);
+    const sample = try resumed.compactionSnapshot(a, activity);
+    const reflection = try history.reflectionRequest(a, sample, "Reflect.", .keep_latest_tool_round);
+    try testing.expect(std.mem.indexOf(u8, reflection[reflection.len - 1].message.text, "inherited_history:") == null);
+    var compacted = try history.withContinuity(testing.allocator, history.records()[0].record.continuity, .keep_latest_tool_round);
     defer compacted.deinit();
     const records = compacted.records();
     try testing.expectEqual(2, records.len);
