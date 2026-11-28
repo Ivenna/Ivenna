@@ -178,7 +178,11 @@ pub const Registry = struct {
         var channel = removed.value;
         while (channel.receivers.first) |node| {
             const receiver: *Receiver = @alignCast(@fieldParentPtr("node", node));
-            ipc.reply(receiver.connection, .closed) catch {};
+            ipc.reply(receiver.connection, .closed) catch |err| switch (err) {
+                error.PeerDisconnected => {},
+                error.WouldBlock => std.log.warn("channel '{s}' close reply would block; the receiver may observe EOF instead", .{removed.key}),
+                else => std.log.warn("channel '{s}' close reply failed: {s}; the receiver may observe EOF instead", .{ removed.key, @errorName(err) }),
+            };
             receiver.finish(&channel.receivers);
         }
         self.allocator.free(removed.key);

@@ -20,15 +20,25 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
+fn reportBrokenPipe() void {
+    std.log.err("the subscription output closed before a reply could be written. A report may already be stored. Retry any unconfirmed report with its original key", .{});
+}
+
 fn failure(io: std.Io, err: anyerror) !u8 {
     if (subscription.errorReceipt(err)) |reason| {
-        try cli.writeJson(io, reason);
+        cli.writeJson(io, reason) catch |write_err| switch (write_err) {
+            error.BrokenPipe => {
+                reportBrokenPipe();
+                return 1;
+            },
+            else => return write_err,
+        };
         return 1;
     }
     switch (err) {
         error.MissingDataDirectory, error.StateStorageFailed => return 1,
         error.BrokenPipe => {
-            std.log.err("the subscription output closed before a reply could be written. A report may already be stored. Retry any unconfirmed report with its original key", .{});
+            reportBrokenPipe();
             return 1;
         },
         error.IncompatibleStateSchema => {

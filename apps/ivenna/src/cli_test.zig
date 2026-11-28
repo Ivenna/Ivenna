@@ -125,6 +125,115 @@ test "a subscription listener streams writes without the kernel and stops after 
     try testing.expectEqual(@as(?i64, 123), pending[0].source_time_unix_ms);
 }
 
+test "a subscription listener accepts a final report at EOF without a newline" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const path = try std.fs.path.join(a, &.{ directory, state.filename });
+    var owner = try state.subscriptions.Store.initialize(a, io, path);
+    defer owner.close();
+    const id = (try owner.create(a, "research-2", "-release watch", "test listener")).subscription_id;
+    var env = std.process.Environ.Map.init(a);
+    try env.put("DATA_DIR", directory);
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ executable, "subscription", "listen", id },
+        .environ_map = &env,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .inherit,
+    });
+    defer child.kill(io);
+    const input = child.stdin.?;
+    var buffer: [256]u8 = undefined;
+    var output = child.stdout.?.readerStreaming(io, &buffer);
+    const reader = &output.interface;
+
+    try testing.expectEqualStrings("ready", (try readJsonLine(a, reader)).string);
+    try input.writeStreamingAll(io, "{\"key\":\"item-18\",\"text\":\"Final line\"}");
+    // EOF delivers the buffered final line; the listener must reply before exiting.
+    input.close(io);
+    child.stdin = null;
+    try testing.expectEqualStrings("accepted", (try readJsonLine(a, reader)).string);
+    try testing.expectEqual(null, try readOutputLine(reader));
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+
+    const through = try owner.latestSequence("research-2");
+    const pending = try owner.pending(a, "research-2", 0, through, 2);
+    try testing.expectEqual(1, pending.len);
+    try testing.expectEqualStrings("Final line", pending[0].text);
+}
+
+test "a subscription listener rejects an oversized line with invalid_request" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const path = try std.fs.path.join(a, &.{ directory, state.filename });
+    var owner = try state.subscriptions.Store.initialize(a, io, path);
+    defer owner.close();
+    const id = (try owner.create(a, "research-2", "-release watch", "test listener")).subscription_id;
+    var env = std.process.Environ.Map.init(a);
+    try env.put("DATA_DIR", directory);
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ executable, "subscription", "listen", id },
+        .environ_map = &env,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .inherit,
+    });
+    defer child.kill(io);
+    const input = child.stdin.?;
+    var buffer: [256]u8 = undefined;
+    var output = child.stdout.?.readerStreaming(io, &buffer);
+    const reader = &output.interface;
+    try testing.expectEqualStrings("ready", (try readJsonLine(a, reader)).string);
+
+    var oversize: [65_538]u8 = @splat('x');
+    try input.writeStreamingAll(io, &oversize);
+    try testing.expectEqualStrings("invalid_request", (try readJsonLine(a, reader)).string);
+    try testing.expectEqual(null, try readOutputLine(reader));
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, try child.wait(io));
+}
+
+test "an unknown subscription reports withdrawn before ready" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const path = try std.fs.path.join(a, &.{ directory, state.filename });
+    var owner = try state.subscriptions.Store.initialize(a, io, path);
+    defer owner.close();
+    var env = std.process.Environ.Map.init(a);
+    try env.put("DATA_DIR", directory);
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ executable, "subscription", "listen", "missing-1" },
+        .environ_map = &env,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .inherit,
+    });
+    defer child.kill(io);
+    var buffer: [256]u8 = undefined;
+    var output = child.stdout.?.readerStreaming(io, &buffer);
+    const reader = &output.interface;
+    try testing.expectEqualStrings("withdrawn", (try readJsonLine(a, reader)).string);
+    try testing.expectEqual(null, try readOutputLine(reader));
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, try child.wait(io));
+}
+
 test "channel receive requires the instance data directory" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
