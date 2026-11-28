@@ -1,6 +1,6 @@
 # Reading resources
 
-Both the core and activities can call `read_resource`. Use an absolute host path or file URI for [local files and directories](#local-files-and-directories), or omit `location` to list the kernel's startup directory. An HTTP(S) URL opens a [remote image](#remote-images) with the image view or a [web page](#web-pages) when page retrieval is enabled.
+All focuses can call `read_resource`. Use an absolute host path or file URI for [local files and directories](#local-files-and-directories), or omit `location` to list the kernel's startup directory. An HTTP(S) URL opens a [remote image](#remote-images) with the image view or a [web page](#web-pages) when page retrieval is enabled.
 
 ## Reading a window
 
@@ -32,7 +32,7 @@ Absolute paths are literal, so `/srv/reports/Q4 #1%.pdf` opens the file with exa
 
 When web page access is enabled, use an HTTP(S) URL with the default view to fetch the page as Markdown. The URL must have a host and omit embedded usernames and passwords. The tool description names the service that receives the URL and indicates whether fetching the page may incur a charge. See [web page access](running.md#web-page-access).
 
-Continue with the snapshot's `result.uri` and `result.next_offset`. The core and activities can read the same snapshot without fetching the page again. Use `result.source_uri`, the original URL, to fetch a fresh copy.
+Continue with the snapshot's `result.uri` and `result.next_offset`. All focuses can read the same snapshot without fetching the page again. Use `result.source_uri`, the original URL, to fetch a fresh copy.
 
 For example, `{"location":"https://example.org/guide","view":{"limit":6}}` might return the heading of a page.
 

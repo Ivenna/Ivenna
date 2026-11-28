@@ -41,20 +41,20 @@ pub const ActivityReport = struct {
     }
 };
 
-pub const Handover = struct {
+pub const Continuity = struct {
     focus_id: []const u8,
     observed_at_unix_ms: i64,
-    summary: []const u8,
+    text: []const u8,
     state: State,
 
-    pub fn jsonStringify(self: Handover, writer: anytype) !void {
+    pub fn jsonStringify(self: Continuity, writer: anytype) !void {
         try writer.beginObject();
         try writer.objectField("focus_id");
         try writer.write(self.focus_id);
         try writer.objectField("observed_at");
         try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
-        try writer.objectField("summary");
-        try writer.write(self.summary);
+        try writer.objectField("text");
+        try writer.write(self.text);
         if (!self.state.isEmpty()) {
             try writer.objectField("state");
             try writer.write(self.state);
@@ -100,7 +100,7 @@ pub const FocusInterrupted = struct {
 };
 
 pub const CallbackSource = union(enum) {
-    /// Retained observations and handover samples may refer to old wakeups.
+    /// Retained observations and continuity samples may refer to old wakeups.
     wakeup,
     host: struct { command_id: []const u8 },
 
@@ -184,11 +184,15 @@ pub const Current = struct {
     subscriptions_without_listeners: []const []const u8 = &.{},
 
     pub fn jsonStringify(self: Current, writer: anytype) !void {
+        const role: []const u8 = switch (self.role) {
+            .core => "main",
+            .activity => "activity",
+        };
         try writer.beginObject();
         try writer.objectField("focus_id");
         try writer.write(self.focus_id);
         try writer.objectField("role");
-        try writer.write(self.role);
+        try writer.write(role);
         try writer.objectField("observed_at");
         try writer.write(Time.Instant{ .unix_ms = self.observed_at_unix_ms });
         if (self.channels_without_receivers.len != 0) {
@@ -203,7 +207,7 @@ pub const Current = struct {
     }
 };
 
-/// Focus identity, time, and runtime references sampled together for compaction.
+/// Focus identity, time, and runtime references sampled together for reflection.
 pub const Snapshot = struct {
     current: Current,
     state: State,
@@ -219,38 +223,16 @@ pub const SampledSubscription = struct {
     listener: ?[]const u8 = null,
 };
 
-/// Facts sampled for compaction and carried alongside the model's summary.
+/// Facts sampled for reflection and carried alongside the focus's account.
 pub const State = struct {
     activities: []const []const u8,
     callbacks: []const PendingCallback,
     subscription_registrations: []const SampledSubscription = &.{},
     channel_registrations: []const SampledChannel = &.{},
     correspondents: ?[]const []const u8 = null,
-    // Historic ZON handovers keep ID-only lists under these field names.
-    // History normalizes them at load time, before rendering or copying State.
-    subscriptions: []const []const u8 = &.{},
-    channels: []const []const u8 = &.{},
-    feeds: []const []const u8 = &.{},
-
     pub fn isEmpty(self: State) bool {
         return self.activities.len == 0 and self.callbacks.len == 0 and self.subscription_registrations.len == 0 and
             self.channel_registrations.len == 0 and self.correspondents == null;
-    }
-
-    pub fn restoreLegacyFields(self: *State, a: Allocator) !void {
-        if (self.subscription_registrations.len == 0 and self.subscriptions.len != 0) {
-            const registrations = try a.alloc(SampledSubscription, self.subscriptions.len);
-            for (self.subscriptions, registrations) |id, *registration| registration.* = .{ .subscription_id = id };
-            self.subscription_registrations = registrations;
-        }
-        if (self.channel_registrations.len == 0 and self.channels.len != 0) {
-            const registrations = try a.alloc(SampledChannel, self.channels.len);
-            for (self.channels, registrations) |id, *registration| registration.* = .{ .channel_id = id };
-            self.channel_registrations = registrations;
-        }
-        self.subscriptions = &.{};
-        self.channels = &.{};
-        self.feeds = &.{};
     }
 
     pub fn jsonStringify(self: State, writer: anytype) !void {
@@ -423,10 +405,10 @@ pub const EventGroup = struct {
     items: []const Event,
 };
 
-/// Observations and handovers retained in working history.
+/// Observations and continuity records retained in working history.
 pub const Record = union(enum) {
     events: EventGroup,
-    handover: Handover,
+    continuity: Continuity,
 };
 
 pub fn cloneRecord(a: Allocator, record: Record) !Record {
@@ -435,21 +417,21 @@ pub fn cloneRecord(a: Allocator, record: Record) !Record {
             .focus_id = try a.dupe(u8, events.focus_id),
             .items = try cloneEvents(a, events.items),
         } },
-        .handover => |handover| .{ .handover = .{
-            .focus_id = try a.dupe(u8, handover.focus_id),
-            .observed_at_unix_ms = handover.observed_at_unix_ms,
-            .summary = try a.dupe(u8, handover.summary),
-            .state = try cloneState(a, handover.state),
+        .continuity => |continuity| .{ .continuity = .{
+            .focus_id = try a.dupe(u8, continuity.focus_id),
+            .observed_at_unix_ms = continuity.observed_at_unix_ms,
+            .text = try a.dupe(u8, continuity.text),
+            .state = try cloneState(a, continuity.state),
         } },
     };
 }
 
-/// Identity and time with new observations or a compaction request.
+/// Identity and time with new observations or a quiet reflection.
 pub const Turn = struct {
     current: Current,
     purpose: union(enum) {
         work: []const Event,
-        summarize: struct { instructions: []const u8, state: State },
+        quiet_reflection: struct { instructions: []const u8, state: State, inherited_history: bool },
     },
 
     pub fn jsonStringify(self: Turn, writer: anytype) !void {
@@ -463,14 +445,18 @@ pub const Turn = struct {
                     try writer.write(events);
                 }
             },
-            .summarize => |summary| {
-                try writer.objectField("summarize");
+            .quiet_reflection => |reflection| {
+                try writer.objectField("quiet_reflection");
                 try writer.beginObject();
                 try writer.objectField("instructions");
-                try writer.write(summary.instructions);
-                if (!summary.state.isEmpty()) {
+                try writer.write(reflection.instructions);
+                if (reflection.inherited_history) {
+                    try writer.objectField("inherited_history");
+                    try writer.write(true);
+                }
+                if (!reflection.state.isEmpty()) {
                     try writer.objectField("state");
-                    try writer.write(summary.state);
+                    try writer.write(reflection.state);
                 }
                 try writer.endObject();
             },
@@ -495,6 +481,24 @@ fn render(arena: Allocator, value: anytype) ![]const u8 {
     defer output.deinit();
     try yaml.emit(&output.writer, document, .{});
     return output.toOwnedSlice();
+}
+
+test "current names each focus role and preserves its reference" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    for ([_]struct { role: Role, id: []const u8, label: []const u8 }{
+        .{ .role = .core, .id = "core-1", .label = "main" },
+        .{ .role = .activity, .id = "review-2", .label = "activity" },
+    }) |sample| {
+        const a = arena.allocator();
+        const rendered = try renderTurn(a, .{
+            .current = .{ .focus_id = sample.id, .role = sample.role, .observed_at_unix_ms = 0 },
+            .purpose = .{ .work = &.{} },
+        });
+        try testing.expect(std.mem.indexOf(u8, rendered, try std.fmt.allocPrint(a, "focus_id: {s}\n", .{sample.id})) != null);
+        try testing.expect(std.mem.indexOf(u8, rendered, try std.fmt.allocPrint(a, "role: {s}\n", .{sample.label})) != null);
+    }
 }
 
 test "activity grouping retains each source's message order, times, and silent endings" {

@@ -1,6 +1,6 @@
 # Attention
 
-The core and activities are focuses of one Ivenna. Each has a working history, an event queue, and a `focus_id`. The core's ID is `core-1`. See the [role overview](design.md#core-and-concurrent-attention) for the actions available to each focus.
+Ivenna can keep its main focus on correspondence and other ongoing concerns while it follows a question or line of work in an activity focus. Each focus has its own working history, pending observations, and a `focus_id`. The main focus has the stable ID `core-1`. [Actions available to each role](design.md#main-focus-and-concurrent-attention)
 
 | Action | Tool |
 | --- | --- |
@@ -13,21 +13,21 @@ See [names and references](input.md#names-and-references) for the `name` argumen
 
 ## Opening a focus
 
-The core calls `open_focus` with a short `name` and a nonempty `task` describing what it wants to explore or work on in the new focus.
+The main focus calls `open_focus` with a short `name` and a nonempty `task`. The task can be a question, a line of thought, or work Ivenna wants to give its own attention.
 
 ```json
 {"name":"practice","task":"Think through how to get back into practicing French."}
 ```
 
-The result gives the activity's `focus_id`. The activity can receive messages once the opening round completes.
+The result gives the new `focus_id`. The activity focus can receive messages once the opening round completes.
 
 ```json
 {"result":{"focus_id":"practice-2"}}
 ```
 
-The activity inherits the core's retained history through the end of the opening round, including results from tools called after `open_focus` in that round. The history can include earlier correspondence, work, and a handover. The supplied `task` arrives as the activity's first new observation. If the runtime summarizes the inherited history before the activity starts reasoning, the activity receives the handover and its original assignment together. See [assignment fields](input.md#assignments-and-reports) and [how an activity starts](architecture.md#activity-forks).
+The new focus inherits the main focus's retained history through the end of the opening round, including results from tools called after `open_focus` in that round. It receives the supplied `task` as its first new observation, `assignment`. If quiet reflection replaces inherited history before that first ordinary request, the request includes the continuity note and the original assignment. [Assignment fields](input.md#assignments-and-reports) · [How an activity starts](architecture.md#activity-forks)
 
-The activity adds to its own history after it starts. The core keeps its queued observations and can receive subscription reports and [what the activity says](#activity-expressions).
+The focuses continue with their own observations and working histories. The main focus can also receive what the activity says. [Activity expressions](#activity-expressions)
 
 ## Reaching an existing focus
 
@@ -47,7 +47,7 @@ The observation identifies the sending focus. When relaying someone else's words
 
 ## Subscriptions
 
-Call `subscribe` in the focus that should receive the reports. Describe in `listener` what to watch and when to report it. Ivenna saves that description with the subscription. In this example, the core follows release announcements across assignments.
+Call `subscribe` in the focus that should receive the reports. Describe in `listener` what to watch and when to report it. Ivenna saves that description with the subscription. In this example, the main focus follows release announcements across activities.
 
 ```json
 {
@@ -66,7 +66,7 @@ Arrange the listener and give it the `subscription_id`. The focus that registere
 
 A newly queued report can wake a sleeping focus. A working focus can receive several reports alongside other observations after its current round. Reports left out of that input stay queued. [Subscription observations](input.md#subscription-observations)
 
-Subscriptions survive sleep and restart. A handover can carry active subscription IDs and their descriptions. An ordinary turn can list subscriptions that have no open listener session when sampled. See [sampled state](input.md#sampled-state) and [listener sessions in the current turn](input.md#channel-receivers-and-subscription-listeners).
+Subscriptions survive sleep and restart. The dated sample accompanying a continuity note can include active subscription IDs and their descriptions. An ordinary turn can report subscriptions without an open listener session. [Sampled state](input.md#sampled-state) · [Listener sessions in the current turn](input.md#channel-receivers-and-subscription-listeners)
 
 ### Withdrawing a subscription
 
@@ -88,22 +88,22 @@ See [runtime availability](design.md#runtime-availability) for failures that int
 
 ## Activity expressions
 
-Each ordinary activity inference that produces assistant text contributes one message for the core. The runtime records that text before executing any accompanying tool calls, so a report can describe an intention whose outcome is still unknown. Tool replies belong to the activity's own exchange. To share a finding, the activity can quote the relevant passage or give the core a [location it can open](resources.md).
+Each ordinary activity inference that produces assistant text contributes one message for the main focus. The runtime records that text before executing any accompanying tool calls, so a report can describe an intention whose outcome is still unknown. Tool replies belong to the activity focus's own exchange. To share a finding, it can quote the relevant passage or give the main focus a [location it can open](resources.md).
 
-The core can receive activity messages in its next ordinary input, including a continuation after tool use. Messages that wait for a later input keep their order. The core's history attributes each admitted report to its source activity.
+The main focus can receive activity messages in its next ordinary input, including a continuation after tool use. Messages that wait for a later input keep their order. The main focus's history attributes each admitted report to its source focus.
 
 One input can carry reports from several activities alongside other observations. See [how activity reports group messages and endings](input.md#assignments-and-reports).
 
 ## Interrupted reasoning
 
-An activity can pause when its next request cannot fit, when the service rejects it, or when the response is unusable. The core receives a [`focus_interrupted` observation](input.md#activity-interruptions) with the reason. The activity keeps its working history, queued observations, and registrations. An explicit message, a command completion, or a new subscription report can resume it.
+An activity focus can pause when its next request cannot fit, when the service rejects it, or when the response is unusable. The main focus receives a [`focus_interrupted` observation](input.md#activity-interruptions) with the reason. The activity focus keeps its working history, queued observations, and registrations. An explicit message, a command completion, or a new subscription report can resume it.
 
-If a waiting observation makes a request too large, the runtime can continue pending work that fits while the observation stays queued. See [how the runtime continues after compaction](architecture.md#continuing-with-a-handover).
+If a waiting observation makes a request too large, the runtime can continue pending work that fits while the observation stays queued. See [how the runtime continues after compaction](architecture.md#resuming-after-quiet-reflection).
 
 ## Activity completion
 
-An activity with a pending host callback or an active subscription can sleep with its identity and history intact. If its last subscription is withdrawn with reports still queued, the activity remains available to receive them. [Command lifetimes](host.md#command-lifetimes)
+An activity focus with a pending host callback or an active subscription can sleep with its ID and working history intact. If its last subscription is withdrawn with reports still queued, the focus remains available to receive them. [Command lifetimes](host.md#command-lifetimes)
 
-The runtime ends the activity and frees its capacity slot once it has no work, pending callbacks, or active subscriptions left. The core can still receive unread messages under the activity's original focus ID. It also receives the ending, even if the activity produced no text. See [report fields](input.md#assignments-and-reports).
+The runtime ends the activity focus and frees its capacity slot once it has no work, pending callbacks, or active subscriptions left. The main focus can still receive unread messages under the original focus ID. It also receives the ending, even if the activity produced no text. See [report fields](input.md#assignments-and-reports).
 
-An activity can share an open channel's ID in a report so the core can keep using the channel after the activity ends. See [channel lifetimes](communication.md#channel-lifetimes).
+An activity focus can share an open channel's ID in a report so the main focus can keep using the channel after the activity ends. See [channel lifetimes](communication.md#channel-lifetimes).

@@ -25,7 +25,7 @@ const Source = union(enum) {
 };
 
 const StoredEntry = union(enum) {
-    record: Input.Record,
+    record: StoredRecord,
     exchange: []const Item,
 
     const Item = union(enum) {
@@ -33,6 +33,79 @@ const StoredEntry = union(enum) {
         continuation: []const u8,
         tool_result: struct { call_id: []const u8, content: struct { parts: []const StoredPart } },
     };
+};
+
+const StoredRecord = union(enum) {
+    events: Input.EventGroup,
+    continuity: StoredContinuity,
+    handover: struct {
+        focus_id: []const u8,
+        observed_at_unix_ms: i64,
+        summary: []const u8,
+        state: LegacyState,
+    },
+};
+
+const StoredContinuity = struct {
+    focus_id: []const u8,
+    observed_at_unix_ms: i64,
+    text: ?[]const u8 = null,
+    account: ?union(enum) {
+        reflection: struct { self: []const u8, attention: []const u8 },
+        earlier_note: []const u8,
+    } = null,
+    state: Input.State,
+
+    fn restore(self: StoredContinuity, a: Allocator) !Input.Continuity {
+        const text = if (self.account) |account| blk: {
+            if (self.text != null) return error.InvalidHistory;
+            break :blk switch (account) {
+                .reflection => |reflection| if (reflection.attention.len == 0)
+                    reflection.self
+                else
+                    try std.mem.concat(a, u8, &.{ reflection.self, "\n\n", reflection.attention }),
+                .earlier_note => |note| note,
+            };
+        } else self.text orelse return error.InvalidHistory;
+        return .{
+            .focus_id = self.focus_id,
+            .observed_at_unix_ms = self.observed_at_unix_ms,
+            .text = text,
+            .state = self.state,
+        };
+    }
+};
+
+const LegacyState = struct {
+    activities: []const []const u8,
+    callbacks: []const Input.PendingCallback,
+    subscription_registrations: []const Input.SampledSubscription = &.{},
+    channel_registrations: []const Input.SampledChannel = &.{},
+    correspondents: ?[]const []const u8 = null,
+    subscriptions: []const []const u8 = &.{},
+    channels: []const []const u8 = &.{},
+    feeds: []const []const u8 = &.{},
+
+    fn restore(self: LegacyState, a: Allocator) !Input.State {
+        var state: Input.State = .{
+            .activities = self.activities,
+            .callbacks = self.callbacks,
+            .subscription_registrations = self.subscription_registrations,
+            .channel_registrations = self.channel_registrations,
+            .correspondents = self.correspondents,
+        };
+        if (state.subscription_registrations.len == 0 and self.subscriptions.len != 0) {
+            const registrations = try a.alloc(Input.SampledSubscription, self.subscriptions.len);
+            for (self.subscriptions, registrations) |id, *registration| registration.* = .{ .subscription_id = id };
+            state.subscription_registrations = registrations;
+        }
+        if (state.channel_registrations.len == 0 and self.channels.len != 0) {
+            const registrations = try a.alloc(Input.SampledChannel, self.channels.len);
+            for (self.channels, registrations) |id, *registration| registration.* = .{ .channel_id = id };
+            state.channel_registrations = registrations;
+        }
+        return state;
+    }
 };
 
 const InlineImage = @FieldType(@FieldType(Model.Content.Part, "image"), "data");
@@ -69,7 +142,15 @@ const StoredPart = union(enum) {
 };
 
 fn storeEntry(a: Allocator, entry: Entry) !StoredEntry {
-    if (entry == .record) return .{ .record = entry.record };
+    if (entry == .record) return .{ .record = switch (entry.record) {
+        .events => |events| .{ .events = events },
+        .continuity => |continuity| .{ .continuity = .{
+            .focus_id = continuity.focus_id,
+            .observed_at_unix_ms = continuity.observed_at_unix_ms,
+            .text = continuity.text,
+            .state = continuity.state,
+        } },
+    } };
     const items = try a.alloc(StoredEntry.Item, entry.exchange.len);
     for (entry.exchange, items) |item, *stored| stored.* = switch (item) {
         .tool_result => |result| blk: {
@@ -95,8 +176,16 @@ fn storeEntry(a: Allocator, entry: Entry) !StoredEntry {
 
 fn restoreEntry(a: Allocator, temporary: Allocator, value: StoredEntry) !Entry {
     if (value == .record) {
-        var record = value.record;
-        if (record == .handover) try record.handover.state.restoreLegacyFields(temporary);
+        const record: Input.Record = switch (value.record) {
+            .events => |events| .{ .events = events },
+            .continuity => |continuity| .{ .continuity = try continuity.restore(temporary) },
+            .handover => |legacy| .{ .continuity = .{
+                .focus_id = legacy.focus_id,
+                .observed_at_unix_ms = legacy.observed_at_unix_ms,
+                .text = legacy.summary,
+                .state = try legacy.state.restore(temporary),
+            } },
+        };
         return .{ .record = try Input.cloneRecord(a, record) };
     }
     const items = try a.alloc(Model.Item, value.exchange.len);
@@ -578,7 +667,7 @@ fn validateEntries(focus_id: []const u8, entries: []const Entry) !void {
             .record => |record| {
                 const owner = switch (record) {
                     .events => |events| events.focus_id,
-                    .handover => |handover| handover.focus_id,
+                    .continuity => |continuity| continuity.focus_id,
                 };
                 // Only the core can fork. Its records retain their original
                 // attribution inside an activity's independently stored history.
@@ -715,7 +804,7 @@ test "history reads group small records and fetch large records alone" {
     try std.testing.expectEqual(1, readBatchCount(&.{ large, small }));
 }
 
-test "forking history rewrites legacy files and raw images" {
+test "forking history rewrites older handovers, files, and raw images" {
     const t = std.testing;
     const TestStore = @import("test_history.zig").TestStore;
     var store: TestStore = .{};
@@ -777,12 +866,15 @@ test "forking history rewrites legacy files and raw images" {
     try t.expectEqual(null, history.usage_scope);
     var core = history.sessions[0];
     try t.expectEqualDeep(History.Progress{}, core.progress);
-    const handover = core.entries.?[0].record.handover;
-    try t.expectEqualStrings("Keep investigating.", handover.summary);
-    try t.expectEqual(.wakeup, handover.state.callbacks[0].source);
-    try t.expectEqual(@as(?i64, 1000), handover.state.callbacks[0].scheduled_for_unix_ms);
-    try t.expectEqualStrings("watch-1", handover.state.subscription_registrations[0].subscription_id);
-    try t.expectEqual(null, handover.state.subscription_registrations[0].listener);
+    const continuity = core.entries.?[0].record.continuity;
+    try t.expectEqualStrings("Keep investigating.", continuity.text);
+    try t.expectEqual(.wakeup, continuity.state.callbacks[0].source);
+    try t.expectEqual(@as(?i64, 1000), continuity.state.callbacks[0].scheduled_for_unix_ms);
+    try t.expectEqualStrings("watch-1", continuity.state.subscription_registrations[0].subscription_id);
+    try t.expectEqual(null, continuity.state.subscription_registrations[0].listener);
+    const rendered = try Input.renderRecord(a, core.entries.?[0].record);
+    try t.expect(std.mem.startsWith(u8, rendered, "continuity:"));
+    try t.expect(std.mem.indexOf(u8, rendered, "text: Keep investigating.") != null);
     const parts = core.entries.?[1].exchange[0].tool_result.content.parts;
     try t.expectEqualStrings("file:///source.pdf", parts[0].text);
     try t.expectEqualStrings("file-123", parts[1].file_reference);
@@ -813,6 +905,8 @@ test "forking history rewrites legacy files and raw images" {
         if (std.mem.eql(u8, group, record.group)) try t.expectEqual(exchange_key, record.previous.?);
         try t.expect(std.mem.indexOf(u8, record.body, "Original PDF bytes") == null);
     }
+    const fork_note = try Codec.decode(Source, a, added[1].body);
+    try t.expectEqualDeep(continuity, (try restoreEntry(a, a, fork_note.entry.value)).record.continuity);
     const fork_exchange = try Codec.decode(Source, a, added[2].body);
     const stored_parts = fork_exchange.entry.value.exchange[0].tool_result.content.parts;
     try t.expectEqualStrings("AP+JIlwK", stored_parts[2].image.base64.encoded);
@@ -820,6 +914,47 @@ test "forking history rewrites legacy files and raw images" {
     const continued = (try persistence.restore(a, 2, restored.checkpoint.?)).sessions;
     try t.expectEqualDeep(core.entries.?, continued[0].entries.?);
     try t.expectEqualDeep(fork.entries.?, continued[1].entries.?);
+}
+
+test "older continuity records restore and rewrite their prose as one note" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { account: []const u8, text: []const u8 }{
+        .{
+            .account = ".{.reflection=.{.self=\"I remember why I promised.\",.attention=\"Read the latest letter.\"}}",
+            .text = "I remember why I promised.\n\nRead the latest letter.",
+        },
+        .{
+            .account = ".{.reflection=.{.self=\"I remember why I promised.\",.attention=\"\"}}",
+            .text = "I remember why I promised.",
+        },
+        .{
+            .account = ".{.earlier_note=\"  Keep investigating.\\n\"}",
+            .text = "  Keep investigating.\n",
+        },
+    }) |sample| {
+        const body = try std.mem.concat(a, u8, &.{
+            ".{.entry=.{.previous=null,.value=.{.record=.{.continuity=.{" ++
+                ".focus_id=\"core-1\",.observed_at_unix_ms=900,.account=",
+            sample.account,
+            ",.state=.{.activities=.{\"review-2\"},.callbacks=.{}}}}}}}",
+        });
+        const source = try Codec.decode(Source, a, body);
+        const entry = try restoreEntry(a, a, source.entry.value);
+        const note = entry.record.continuity;
+        try t.expectEqualStrings(sample.text, note.text);
+        try t.expectEqualStrings("core-1", note.focus_id);
+        try t.expectEqual(@as(i64, 900), note.observed_at_unix_ms);
+        try t.expectEqualStrings("review-2", note.state.activities[0]);
+
+        const stored = try Codec.encode(a, Source{ .entry = .{ .previous = null, .value = try storeEntry(a, entry) } });
+        try t.expect(std.mem.indexOf(u8, stored, ".text=") != null);
+        try t.expect(std.mem.indexOf(u8, stored, ".account=") == null);
+        const rewritten = try Codec.decode(Source, a, stored);
+        try t.expectEqualDeep(note, (try restoreEntry(a, a, rewritten.entry.value)).record.continuity);
+    }
 }
 
 test "earlier channel registrations can omit descriptions" {

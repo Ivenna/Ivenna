@@ -1,6 +1,6 @@
 # Runtime user messages
 
-Observations, handovers, and the current inference turn appear as YAML messages with the `user` role. See the [input definitions and renderers](../packages/agent/src/input.zig).
+Observations, continuity notes, and the current inference turn appear as YAML messages with the `user` role. See the [input definitions and renderers](../packages/agent/src/input.zig).
 
 When a tool result includes uploaded files, the inference input includes a user-role message with the tool call ID and the file IDs. See [tool result encoding](architecture.md#tool-results).
 
@@ -8,20 +8,20 @@ When a tool result includes uploaded files, the inference input includes a user-
 
 | Interface | Shape | Lifetime and meaning |
 | --- | --- | --- |
-| [`Input.Record`](#retained-records) | `events` or `handover` | Observations and handovers retained in working history |
-| [`Input.Turn`](#inference-turns) | `current` with optional `events`, or `current` with `summarize` | Focus identity and input for one inference |
+| [`Input.Record`](#retained-records) | `events` or `continuity` | Observations and continuity notes retained in working history |
+| [`Input.Turn`](#inference-turns) | `current` with optional `events`, or `current` with `quiet_reflection` | Focus identity and input for one inference |
 
 Newly admitted events enter working history as records. The runtime also retains complete model/tool exchanges when their rounds commit.
 
 `Text` denotes a string. `Time` denotes a UTC RFC 3339 string with millisecond precision, such as `2026-11-06T12:00:01.000Z`. Records, events, and callback sources are mappings with one key for the branch name and its payload as the value.
 
-The turn's `current.focus_id` identifies the focus receiving the turn. Inherited records keep their original focus IDs and observation times, so an activity can see the core's ID in its history.
+The turn's `current.focus_id` identifies the focus receiving the turn. Inherited records keep their original focus IDs and observation times, so an activity can see the main focus's ID in its history.
 
 ## Names and references
 
 The `name` supplied when opening a focus or channel, running a command, or subscribing contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
 
-Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control host commands in their originating runtime. Channel IDs can address a restored channel after restart. See [channel lifetimes](communication.md#channel-lifetimes).
+Use the complete ID to address the runtime resource. A focus keeps its ID across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control host commands in their originating runtime. Channel IDs can address a restored channel after restart. [Focus references](attention.md) · [Channel lifetimes](communication.md#channel-lifetimes)
 
 ## Retained records
 
@@ -37,7 +37,7 @@ Each `Event` selects one branch.
 | --- | --- | --- |
 | `startup` | `Startup` | Observation that a new runtime has begun |
 | `input` | `IncomingMessage` | Observation of what correspondents said |
-| `assignment` | `Assignment` | The core's initial intent for a new activity |
+| `assignment` | `Assignment` | The main focus's initial intent for a new activity |
 | `activity` | `ActivityReport` | One activity's newly admitted messages and ending information |
 | `focus_message` | `FocusMessage` | Explicit message from a focus |
 | `focus_interrupted` | `FocusInterrupted` | Runtime observation that an activity could not continue reasoning |
@@ -46,18 +46,18 @@ Each `Event` selects one branch.
 
 #### Startup and restart
 
-The core receives `startup` on first launch and every restart. A restored activity with its initial assignment still queued begins with the assignment. An activity whose assignment was already admitted receives `startup` when it next resumes after restart. See [startup and interruption](architecture.md#startup-and-interruption).
+The main focus receives `startup` on first launch and every restart. A restored activity with its initial assignment still queued begins with the assignment. An activity whose assignment was already admitted receives `startup` when it next resumes after restart. See [startup and interruption](architecture.md#startup-and-interruption).
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `observed_at` | `Time` | Time the runtime started |
-| `correspondents` | `Text[]`, supplied to the core | All outgoing correspondent IDs registered for this runtime |
+| `correspondents` | `Text[]`, supplied to the main focus | All outgoing correspondent IDs registered for this runtime |
 
-`correspondents: []` records an empty registration. An omitted field leaves registration unspecified. An activity can still see an earlier core list in inherited history. The latest dated list from startup or compaction gives the last observed registration. Sending checks the current registration when the tool runs. See [sampled state](#sampled-state) and [outgoing correspondence](communication.md#writing-to-a-correspondent).
+`correspondents: []` records an empty registration. An omitted field leaves registration unspecified. An activity can see an earlier list from the main focus in inherited history. The latest dated list from startup or quiet reflection gives the last observed registration. Sending checks the current registration when the tool runs. See [sampled state](#sampled-state) and [outgoing correspondence](communication.md#writing-to-a-correspondent).
 
 #### Incoming messages
 
-Correspondence enters the core as an `input` observation of who said what.
+Correspondence enters the main focus as an `input` observation of who said what.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -69,9 +69,9 @@ Use `from` to attribute the observation. See [correspondents and IDs](communicat
 
 #### Assignments and reports
 
-An activity's first new observation is an `assignment`. Its `task: Text` field contains the text the core passed to `open_focus`. The same text can also appear in the inherited tool call. See [opening a focus](attention.md#opening-a-focus).
+An activity's first new observation is an `assignment`. Its `task: Text` field contains the text the main focus passed to `open_focus`. The same text can also appear in the inherited tool call. See [opening a focus](attention.md#opening-a-focus).
 
-In the core's input, an `ActivityReport` groups newly admitted messages and any ending from one activity.
+In the main focus's input, an `ActivityReport` groups newly admitted messages and any ending from one activity.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -83,13 +83,13 @@ Each ordinary activity response that contains assistant text contributes one `Ac
 
 A report contains messages, an ending, or both. An ending with no unread messages has just `from_focus` and `ended_at`.
 
-One ordinary core input, including a tool continuation, can contain events and reports from several activities. Newly admitted messages for the same focus are grouped once. Each group's position follows that focus's first appearance in the selected observations, and messages within it keep their original order. Use the observation times for messages and endings from different focuses. Those times survive waiting, persistence, and restart.
+An ordinary inference in the main focus can receive reports from several activities alongside its other observations, including when it continues after a tool exchange. Newly admitted messages for the same focus are grouped once. Each group's position follows that focus's first appearance in the selected observations, and messages within it keep their original order. Use the observation times for messages and endings from different focuses. Those times survive waiting, persistence, and restart.
 
-See how the core receives [activity expressions](attention.md#activity-expressions) and when the runtime [ends an activity](attention.md#activity-completion).
+See how the main focus receives [activity expressions](attention.md#activity-expressions) and when the runtime [ends an activity](attention.md#activity-completion).
 
 #### Activity interruptions
 
-The runtime sends the core a `focus_interrupted` event when an activity has to pause reasoning.
+The runtime sends the main focus a `focus_interrupted` event when an activity has to pause reasoning.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -97,7 +97,7 @@ The runtime sends the core a `focus_interrupted` event when an activity has to p
 | `observed_at` | `Time` | Time the runtime recorded the interruption |
 | `reason` | `Text` | What prevented the activity from continuing, such as context size or a model-service refusal |
 
-The activity may have resumed or even ended by the time the core reads the event. See [interrupted reasoning](attention.md#interrupted-reasoning) for how an activity resumes.
+The activity may have resumed or even ended by the time the main focus reads the event. See [interrupted reasoning](attention.md#interrupted-reasoning) for how an activity resumes.
 
 #### Focus messages
 
@@ -124,7 +124,7 @@ Each new `callback` reports a host command outcome or interruption to the activi
 
 `source.host.command_id` identifies the command even if its control handle has expired. See [command lifetimes](host.md#command-lifetimes).
 
-Retained observations and handover samples can still include the former `source: {wakeup: {}}`, with `scheduled_for` when the time was saved. See [upgrading from scheduled attention](upgrading.md#removing-scheduled-attention).
+Retained observations and older samples can still include the former `source: {wakeup: {}}`, with `scheduled_for` when the time was saved. See [upgrading from scheduled attention](upgrading.md#removing-scheduled-attention).
 
 #### Subscription observations
 
@@ -139,46 +139,53 @@ Each `subscription` event carries one listener report to the focus that subscrib
 
 The listener can include a source link, a revision, or a gap in coverage in `text`. See [subscription delivery and withdrawal](attention.md#subscriptions).
 
-### Handovers
+### Continuity notes
 
-A `handover` record contains these fields.
+A `continuity` record carries the text a focus wrote during quiet reflection, attributed to its author and dated by the runtime.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `focus_id` | `Text` | Focus that produced this handover |
-| `observed_at` | `Time` | Observation time of the state supplied to summarization |
-| `summary` | `Text` | The model's account of what to carry forward from the summarized history |
-| `state` | `State`, when present | Runtime state sampled for that summary inference |
+| `focus_id` | `Text` | Focus that wrote the note |
+| `observed_at` | `Time` | Time the runtime sampled the reflection turn |
+| `text` | Nonblank `Text` | The note in the focus's own words |
+| `state` | `State`, when present | Runtime state sampled for that reflection |
 
 #### Sampled state
 
-The compaction turn carries the runtime sample in `summarize.state`. Its `current.observed_at` dates the turn. The accepted handover keeps the sample and time alongside the summary. Inherited handovers keep their original focus ID, time, and sample.
+The reflection turn carries the runtime sample in `quiet_reflection.state`. Its `current.observed_at` dates the turn. The accepted note keeps the sample and time alongside the focus's account. Inherited notes keep their original focus ID, time, and sample.
 
-| Field | Type | Core sample | Activity sample |
+| Field | Type | Main focus sample | Activity focus sample |
 | --- | --- | --- | --- |
 | `activities` | `Text[]` | IDs of existing activities, including sleeping and interrupted ones | — |
 | `callbacks` | `PendingCallback[]` | — | Pending host callbacks for this activity |
-| `subscriptions` | `SampledSubscription[]` | Active subscriptions for the core | Active subscriptions for this activity |
+| `subscriptions` | `SampledSubscription[]` | Active subscriptions for the main focus | Active subscriptions for this activity |
 | `channels` | `SampledChannel[]` | All open channels, including those opened by activities that have ended | Open channels created by this activity |
 | `correspondents` | `Text[]` | Registered outgoing correspondent IDs | — |
 
-Core samples always include `correspondents`, even when empty. Other collections appear when nonempty. When every field is absent, the message omits `state`. See [startup and restart](#startup-and-restart) for how to interpret the correspondent list.
+The main focus always receives `correspondents`, even when empty. Other collections appear when nonempty. When every field is absent, the message omits `state`. See [startup and restart](#startup-and-restart) for how to interpret the correspondent list.
 
 A `SampledSubscription` has `subscription_id: Text` and the registered `listener` description of what to watch and when to report. A new subscription can appear before its first report. A report accepted before withdrawal can still reach the focus after the subscription leaves the sample. See [subscriptions](attention.md#subscriptions).
 
-A `SampledChannel` has `channel_id: Text` and the `description` supplied when the channel opened, when available. A channel enters the sample after the runtime confirms its registration. A retained handover records what was open at the time of the sample. The result of a new send tells the focus whether the message reached a waiting receiver. See [opening a channel](communication.md#opening-a-channel) and [channel send outcomes](communication.md#sending-to-a-channel).
+A `SampledChannel` has `channel_id: Text` and the `description` supplied when the channel opened, when available. A channel enters the sample after the runtime confirms its registration. A continuity note records what was open at the time of the sample. The result of a new send tells the focus whether the message reached a waiting receiver. See [opening a channel](communication.md#opening-a-channel) and [channel send outcomes](communication.md#sending-to-a-channel).
 
 `listener` and `description` are `Text` or `null`. Older samples that stored only IDs use `null`. Some older checkpoints can also restore a channel without a saved description.
 
 Each `PendingCallback` contains `callback_id: Text` and `source: CallbackSource`. A callback remains pending until its observation enters the activity's history, and it can refer to a command that has already finished. See [callback observations](#callback-observations) and [command lifetimes](host.md#command-lifetimes).
 
-In this handover, the sampled state gives the core a subscription for stable releases and a channel for CSV files ready to import.
+The main focus has been learning how its correspondent wants release checks to be communicated.
 
 ```yaml
-handover:
+continuity:
   focus_id: core-1
   observed_at: "2026-11-06T12:00:01.000Z"
-  summary: The verification activity is checking the release CSVs. Review the results when the activity reports back.
+  text: |-
+    Operator's November 4 letter made me reconsider what a helpful release
+    check sounds like. They asked to hear where my confidence comes from. I
+    promised to keep the evidence visible and kept their example at
+    correspondence/operator/release-checks.md.
+
+    The verification activity is checking the release CSVs. I am waiting for
+    its report before telling Operator what I can verify.
   state:
     activities: [verify-release-2]
     subscriptions:
@@ -198,37 +205,37 @@ The last message of an inference input is the current turn.
 | --- | --- | --- |
 | `current` | `Current` | Focus identity, role, observation time, and any channel or subscription connection notes |
 | `events` | `Event[]`, when nonempty | New events for an ordinary inference |
-| `summarize` | `instructions: Text` and optional `state: State` | Request for a handover summary with any sampled state |
+| `quiet_reflection` | `instructions: Text`, optional `inherited_history: true`, and optional `state: State` | Temporary request for a continuity note from the selected history |
 
-`current` describes the focus in both ordinary and compaction turns. Connection lists appear only in ordinary turns.
+`current` describes the focus in both ordinary and reflection turns. Connection lists appear only in ordinary turns.
 
 | Field in `current` | Type | Meaning |
 | --- | --- | --- |
 | `focus_id` | `Text` | ID of the focus receiving the turn |
-| `role` | `Role` | `core` or `activity` |
+| `role` | `Role` | `main` or `activity` |
 | `observed_at` | `Time` | Time the runtime sampled this turn |
 | `channels_without_receivers` | `Text[]`, when present | IDs of open channels with no connected receiver |
 | `subscriptions_without_listeners` | `Text[]`, when present | IDs of active subscriptions with no open listener session |
 
-When there are no new events, an ordinary turn contains only `current`. Retained events and [handover samples](#sampled-state) keep their own dates.
+When there are no new events, an ordinary turn contains only `current`. Retained events and [samples](#sampled-state) keep their own dates.
 
 ### Channel receivers and subscription listeners
 
 The runtime samples connections when it prepares an ordinary turn. The notes apply to the listed IDs at `current.observed_at`. An open receiver session counts as connected between reads, and an open listener session between reports. A channel send requires a waiting read at the time of the handoff. [Channel sends](communication.md#sending-to-a-channel) · [Listener sessions](subscriptions.md#open-a-listener-session)
 
-| Field | Scope for the core | Scope for an activity |
+| Field | Scope for the main focus | Scope for an activity |
 | --- | --- | --- |
 | `channels_without_receivers` | Channels across the instance | Channels opened by this activity |
-| `subscriptions_without_listeners` | Subscriptions registered by the core | Subscriptions registered by this activity |
+| `subscriptions_without_listeners` | Subscriptions registered by the main focus | Subscriptions registered by this activity |
 
 Each list includes up to eight IDs whose lack of a connection was confirmed. The runtime omits empty lists and can omit both lists to fit the request.
 
-In this example, the core receives a report accepted before restart. At the time of this turn, the subscription has no open listener and the channel has no connected receiver.
+In this example, the main focus receives a report accepted before restart. At the time of this turn, the subscription has no open listener and the channel has no connected receiver.
 
 ```yaml
 current:
   focus_id: core-1
-  role: core
+  role: main
   observed_at: "2026-11-10T18:00:01.000Z"
   channels_without_receivers: [task-input-18]
   subscriptions_without_listeners: [release-watch-1]
@@ -242,12 +249,12 @@ events:
       text: Stable release v2.4.0 is available
 ```
 
-## Handover generation and replacement
+## Quiet reflection and resumption
 
-A compaction request presents the history to summarize and a turn with `current` and `summarize` under the shared system prompt. It offers no tools and asks for a plain-text summary. On a revision request, `summarize.instructions` says what to correct. See the [handover instructions](../packages/agent/src/compaction.md).
+A reflection request presents the selected history and a temporary turn with `current` and `quiet_reflection` under the shared system prompt. `quiet_reflection.instructions` asks for a brief note in the focus's own words and includes feedback when the kernel asks for a revision. `inherited_history: true` means all the selected history precedes the activity's first admitted assignment. Observations and notes retain their original focus IDs. Tools are unavailable during reflection. [Reflection instructions](../packages/agent/src/quiet_reflection.md)
 
-When a summary request exceeds an adapter limit, the runtime can substitute short notices for images and file references in that request. The request still includes the tool result text and source descriptions. See [summary request preparation](architecture.md#sampling-state-and-preparing-the-request).
+When a reflection request exceeds an adapter limit, the runtime can substitute short notices for images and file references in that request. The request still includes the tool result text and source descriptions. See [reflection request preparation](architecture.md#sampling-state-and-preparing-the-request).
 
-The next ordinary request begins its retained history with the accepted handover, followed by any records and complete exchanges carried forward. Observations already in history and still awaiting inference remain intact. Observations admitted for this turn appear in its `events` field. An activity whose inherited history was summarized before its first ordinary inference still sees its original [assignment](#assignments-and-reports).
+When the runtime accepts the replacement history, the next ordinary request begins its history with the `continuity` record and any entries carried forward. Its `text` is the accepted note. Observations awaiting inference already in history remain intact. A fresh ordinary turn carries newly admitted observations in `events`, including the original assignment of an activity that reflected before its first ordinary inference. The note remains part of working history while the current checkpoint selects it. [Assignments and reports](#assignments-and-reports) · [History retention](architecture.md#history-retention)
 
-See [bounded model context](architecture.md#bounded-model-context) for which history is summarized or carried forward and when a handover replaces it.
+See [bounded model context](architecture.md#bounded-model-context) for which history enters the reflection and when the note replaces it.

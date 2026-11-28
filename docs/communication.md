@@ -1,10 +1,10 @@
 # Communication
 
-The core receives incoming correspondence. Both the core and activities can send messages. To write to Ivenna, see the [correspondence guide](usage.md).
+The main focus receives incoming correspondence. All focuses can send messages. To write to Ivenna, see the [correspondence guide](usage.md).
 
 ## Sending a message
 
-Call `send` with nonempty `text` and a `to` object containing exactly one destination field. Use a complete ID from an observation, a handover, a tool result, or a message.
+Call `send` with nonempty `text` and a `to` object containing exactly one destination field. Use a complete ID from an observation, a continuity note, a tool result, or a message.
 
 | Field in `to` | Destination | Successful result |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ Tool replies contain a JSON `result` or an `error` with `code` and `message`. Ma
 
 An incoming observation's `from` field identifies who sent the email. If the operator relays Alice's words, `from` identifies the operator and the message text can attribute the words to Alice. See [correspondence observations](input.md#incoming-messages).
 
-Ivenna can write to an ID while its mailbox is registered for outgoing correspondence. This applies to replies to incoming mail and to letters Ivenna initiates. The core sees the registered IDs at startup and compaction. See [outgoing registration](running.md#outgoing-correspondents), [startup observations](input.md#startup-and-restart), and [compaction samples](input.md#sampled-state).
+Ivenna can write to an ID while its mailbox is registered for outgoing correspondence. This applies to replies to incoming mail and to letters Ivenna initiates. The main focus sees the registered IDs at startup and quiet reflection. See [outgoing registration](running.md#outgoing-correspondents), [startup observations](input.md#startup-and-restart), and [reflection samples](input.md#sampled-state).
 
 ### Writing to a correspondent
 
@@ -68,7 +68,7 @@ Any focus can call `open_channel` with a name and a nonempty description of the 
 {"result":{"channel_id":"task-input-18"}}
 ```
 
-The channel becomes available when the runtime confirms the checkpoint that saves its registration and tool result. Give the receiving program the complete `channel_id`. Use the same ID to send or close the channel. The description identifies its purpose in a later handover. See [sampled state](input.md#sampled-state) for which channels each focus sees.
+The channel becomes available when the runtime confirms the checkpoint that saves its registration and tool result. Give the receiving program the complete `channel_id`. Use the same ID to send or close the channel. Its ID and description can appear in the dated runtime sample alongside a later continuity note. [Sampled state](input.md#sampled-state)
 
 If saving the checkpoint fails, the runtime stops with the channel inactive. On restart it restores the channel and its tool result together if the selected checkpoint includes them. See [recovering from a size rejection](running.md#working-history-limits) and [checkpoint selection on restart](architecture.md#saving-and-restoration).
 

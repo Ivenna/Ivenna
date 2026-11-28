@@ -44,7 +44,7 @@ Keep native mail record IDs, headers, folders, and thread grouping in the email 
 
 `Input` defines and renders the runtime's user messages. Include the complete ID when an observation or result supplies a reference. Keep the state needed for delivery and resumption in runtime records through persistence and compaction. See the [input contract](input.md) and the [input renderer](../packages/agent/src/input.zig).
 
-Use `Content` for capability results. Commit the adapter's prepared `Model.Content` to working history, and carry the model's continuation items, including reasoning, as opaque bytes. Implement and test inference against DeepSeek's Responses API and uploads against its Files API. See the [model contract](../packages/agent_contracts/src/model.zig), [tool result preparation](architecture.md#tool-results), and [DeepSeek Responses guide](https://api-docs.deepseek.com/guides/responses_api/).
+Use `Content` for capability results. Commit the adapter's prepared `Model.Content` to working history. Carry continuation items from ordinary exchanges, including reasoning, as opaque bytes. Implement and test inference against DeepSeek's Responses API and uploads against its Files API. See the [model contract](../packages/agent_contracts/src/model.zig), [tool result preparation](architecture.md#tool-results), and [DeepSeek Responses guide](https://api-docs.deepseek.com/guides/responses_api/).
 
 The agent selects the history, observations, tools, and reasoning effort for each request. The adapter measures the request and checks its limits before sending it. Use the same encoder for measurement and inference. Keep request-specific encoding separate from retained history and shared adapter settings. See [bounded model context](architecture.md#bounded-model-context).
 
@@ -54,16 +54,16 @@ Review model-facing text in the request the focus will receive. Read the shared 
 
 | Resource | Purpose |
 | --- | --- |
-| [system.md](../packages/agent/src/system.md) | Shared orientation to focuses, observations, communication, and resumption |
+| [system.md](../packages/agent/src/system.md) | Orientation included in every inference request |
+| [quiet_reflection.md](../packages/agent/src/quiet_reflection.md) | Instructions specific to the reflection turn and its note |
 | [Agent tools](../packages/agent/src/tools.json) | Send messages, manage channels and subscriptions, and open focuses |
 | [Host tools](../packages/host/src/tools.json) | Host shell actions, invocation parameters, and results |
 | [Resource reader](../packages/resources/src/tools.json) | Locations, views, and read windows. When web access is enabled, the [DeepSeek Fetch client](../packages/resources/src/deepseek.zig) supplies the service and billing notice. |
 | [Memory tools](../packages/memory/src/tools.json) | Memory actions, invocation parameters, and results |
-| [compaction.md](../packages/agent/src/compaction.md) | Instructions for writing the summary in a handover |
 
-Use the shared prompt for orientation across focuses and turns. Describe what the focus can do and what the call will change. A memory read describes what Ivenna can revisit in its rooms. Put the services involved in those reads and any charges in the deployment documentation. When the focus explicitly chooses to send material to a service, explain the destination and potential charge at that choice. Express allowed values and bounds in the schema and match defaults to runtime behavior. See [tool content](content.md) for what reaches the model and what working history keeps.
+Use the shared prompt for orientation across focuses and turns. Keep instructions about writing the note in the reflection prompt. In a tool description, describe what the focus can do and what the call will change. A memory read describes what the focus can revisit in its rooms. Put the services involved in those reads and any charges in the deployment documentation. When the focus explicitly chooses to send material to a service, explain the destination and potential charge at that choice. Express allowed values and bounds in the schema and match defaults to runtime behavior. [Quiet reflection and resumption](input.md#quiet-reflection-and-resumption) · [Tool content](content.md)
 
-Use observations and tool results to convey what happened, which effects are confirmed, and what remains uncertain. When asking for a revision, say what the focus can change. If a handover leaves too little room to continue, ask for a shorter summary and leave the choice of content to Ivenna. Keep the measured size and limit in operator logs with other runtime diagnostics.
+Use observations and tool results to convey what happened, which effects are confirmed, and what remains uncertain. When asking for a revision, say what the focus can change. If a continuity note leaves too little room to continue, ask for a shorter account and leave the choice of content to Ivenna. Keep the measured size and limit in operator logs with other runtime diagnostics.
 
 Keep capability tool declarations with their implementation and register capabilities through `Tools`. The agent uses the same role selection for declaration and invocation. Agent-owned action recognition, typed arguments, and role selection live together in [tools.zig](../packages/agent/src/tools.zig). The kernel owns the actions' effects.
 
@@ -75,15 +75,15 @@ Match ownership to lifetime. A capability can start work that outlives the invok
 
 Persist the receiving focus before returning a callback or subscription reference. The host adapter registers command completions through the calling session's registrar. A report can outlive its subscription, so its destination must remain available after withdrawal. [Callback registration](architecture.md#event-sources-and-callback-admission) · [Subscription delivery](architecture.md#subscription-delivery)
 
-Keep a session's identity independent of context residency, and retain its history for as long as it can resume. When handling a failure, consider what repeating the operation would do. A fresh inference can revise an unusable summary. A command that already ran has an outcome to preserve. See [runtime availability](design.md#runtime-availability).
+Keep a session's identity independent of context residency, and retain its history for as long as it can resume. When handling a failure, consider what repeating the operation would do. A fresh inference can revise an unusable reflection. A command that already ran has an outcome to preserve. See [runtime availability](design.md#runtime-availability).
 
 ### Working history
 
-Context owns the observations, complete model/tool exchanges, and handovers retained for continued reasoning. Admission retains observations, and round commit retains complete exchanges. Candidate measurement leaves history unchanged. The runtime carries sampled state into a handover independently of generated text. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [handover contract](input.md#handover-generation-and-replacement) when changing that boundary.
+Context owns the observations, complete model/tool exchanges, and continuity notes retained for continued reasoning. Admission retains observations, and round commit retains complete exchanges. Candidate measurement leaves history unchanged. The runtime carries sampled state into a continuity note independently of the focus's writing. Follow [message assembly](architecture.md#working-history-and-user-messages) and the [reflection contract](input.md#quiet-reflection-and-resumption) when changing that boundary.
 
 Trace changed state from the operation that commits it to the startup path that restores it. The saved context, admitted observations, and pending registrations must remain consistent in the checkpoint startup selects, including when a write succeeds and confirmation fails. See the [recovery state inventory](architecture.md#recovery-state) and [storage contract](../packages/agent_contracts/src/history.zig).
 
-Activity expressions are cross-session observations of what the source said, distinct from a committed model/tool round. Preserve unread reports independently of the source context, and advance their consumption with core history admission in the same checkpoint. Compaction output and inherited exchanges must not be published again as new activity expressions.
+Activity expressions are cross-session observations of what the source said, distinct from a committed model/tool round. Preserve unread reports independently of the source context. Advance their consumption in the same checkpoint that admits them to the main focus's history. Publish new activity expressions only from ordinary activity work.
 
 Storage failures must not silently replace history with an empty context. [Startup](architecture.md#startup-and-interruption) reconstructs understanding and pending work without replaying effects.
 

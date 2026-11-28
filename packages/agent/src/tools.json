@@ -86,18 +86,20 @@
   },
   {
     "name": "open_focus",
-    "description": "Open an activity to pursue this task while the core continues. It can run host commands and inherits all tool results from this round. The returned `focus_id` can receive messages after the round.",
+    "description": "Open an activity focus alongside your main focus. It inherits your working history through the end of this round, including tool results, and can run host commands. Use the returned `focus_id` to reach it after the round.",
     "parameters": {
       "type": "object",
       "properties": {
         "name": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 32
+          "maxLength": 32,
+          "description": "A short label for the new focus."
         },
         "task": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "A question, line of thought, or piece of work to pursue in the new focus."
         }
       },
       "required": [

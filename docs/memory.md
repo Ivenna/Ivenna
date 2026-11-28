@@ -1,8 +1,10 @@
 # Memory rooms
 
-Memory rooms hold Ivenna's shared, persistent memory beyond any one session. Ivenna chooses what to keep and how to arrange it: room hierarchy, names, content formats, and cross-references are its own. The [design intent](design.md#understanding-and-autonomy) describes memory's role in its continuing understanding.
+Memory rooms are shared by every focus. Ivenna can keep an experience, its understanding at the time, or a source it wants to revisit. It chooses how to name and arrange entries and what form each takes. It can revise them as its understanding develops. [Understanding and autonomy](design.md#understanding-and-autonomy)
 
-This guide covers memory tool effects and results. See the [tool declarations](../packages/memory/src/tools.json) for parameters, the [running guide](running.md#memory-service) for setup, and the [architecture guide](architecture.md#autonomous-memory) for storage and transport.
+A continuity note can carry an address and a reason to return. Reading that address gives the current entry if it still exists. Another focus may have revised, moved, or removed it since the note was written. [What quiet reflection carries forward](design.md#what-quiet-reflection-carries-forward)
+
+This guide covers what the memory tools do and what they return. [Tool parameters](../packages/memory/src/tools.json) · [Service setup](running.md#memory-service) · [Storage and transport](architecture.md#autonomous-memory)
 
 ## Addresses and organization
 
@@ -122,10 +124,10 @@ Each new or updated entry is limited to 33554432 bytes (32 MiB), independently o
 
 Recording and revision publish a complete new entry at the chosen address. A failed preparation preserves the previous entry. Replacing, appending, or revising one hard-linked name leaves its other names unchanged. Unpublished content is excluded from memory observations and logical capacity. Published changes can be lost after a storage or power failure.
 
-For example, call `remember` to write a text entry, creating its room if needed:
+Ivenna can keep what Mira said alongside its own interpretation at the time.
 
 ```json
-{"address":"languages/progress.md","content":{"text":"French: practice twice a week. Japanese: practice once a week."}}
+{"address":"correspondence/mira/pacing.md","content":{"text":"2026-04-14. Mira said she had waited to reply until she could give my question her attention.\nI took this as a reason to wait for her to write again."}}
 ```
 
 ## Revising
@@ -140,11 +142,13 @@ By default, a unique match is replaced. No match returns `revision: "no_match"` 
 | `unchanged` | A match was found, but the content did not change |
 | `revised` | The content was revised |
 
-Set `match_mode: "regex"` to use a regular expression. Replacement text can reference capture groups such as `${1}` and `${name}`. For example, update both labels in the entry above with:
+Mira later says a short note would have been welcome while she was gathering her thoughts. Ivenna can keep its first interpretation alongside what changed and carry `correspondence/mira/pacing.md` as a clue when thinking about how they stay in touch.
 
 ```json
-{"address":"languages/progress.md","old_text":"(French|Japanese):","new_text":"${1} study:","replace_all":true,"match_mode":"regex"}
+{"address":"correspondence/mira/pacing.md","old_text":"I took this as a reason to wait for her to write again.","new_text":"I first took this as a reason to wait for her to write again. On 2026-05-06 she said a short note would have been welcome. I can give her time to think and still reach out without expecting a quick reply."}
 ```
+
+Set `match_mode: "regex"` to use a regular expression. Replacement text can reference capture groups such as `${1}` and `${name}`.
 
 ## Moving and removing
 

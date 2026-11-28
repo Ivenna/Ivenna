@@ -182,7 +182,7 @@ The first attempt should return `channel_no_receiver`. Each later handoff should
 
 Use the [mail example](#sending-a-message) to ask Ivenna for a subscription check.
 
-> Register a test subscription in the core and send me its complete ID. When a report arrives, tell me what you received.
+> Register a test subscription in the main focus and send me its complete ID. When a report arrives, tell me what you received.
 
 In a second terminal at the repository root, load the instance environment and start an independent listener. Replace `release-watch-1` with the ID you received. [Registering a subscription](../docs/attention.md#subscriptions) · [Loading the instance environment](#configuration)
 
@@ -203,7 +203,7 @@ Press `Ctrl+D` on a new line to close the listener. If you only created the subs
 
 ## Stopping and restarting
 
-Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run -- serve`. The [restart guide](../docs/running.md#stopping-and-restarting) explains what survives, how running host commands stop, and how Ivenna continues interrupted work.
+Press `Ctrl+C` and wait for the kernel to exit. With the services running and configuration loaded, start it again with `zig build run -- serve`. Use the restart guide to see what the runtime restores and the continuity exercise to see how a focus draws on what it carried forward. [Restart guide](../docs/running.md#stopping-and-restarting) · [Continuity exercise](../docs/testing.md#evaluating-continuity-across-interruptions)
 
 To remove the local middleware containers:
 

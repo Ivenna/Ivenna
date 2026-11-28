@@ -30,7 +30,7 @@ pub const Context = struct {
     }
 
     /// Restore a focus that has started. Its assignment separates the fork
-    /// from its own history until a handover replaces that entire prefix.
+    /// from its own history until a continuity record replaces that prefix.
     pub fn restore(allocator: Allocator, scope: Scope, focus_id: []const u8, entries: []const Entry) !Context {
         for (entries, 0..) |entry, index| {
             if (entry != .record or entry.record != .events) continue;
@@ -93,13 +93,14 @@ pub const Context = struct {
         return buildRequest(a, self.messages.items, .{ .current = current, .purpose = .{ .work = events } });
     }
 
-    /// The ordinary turn with only the history eligible for summarization.
+    /// The ordinary turn with only the history eligible for reflection.
     pub fn retainedRequest(self: *const Context, a: Allocator, current: Input.Current) ![]const Model.Item {
-        return buildRequest(a, self.summaryItems(.keep_latest_tool_round), .{ .current = current, .purpose = .{ .work = &.{} } });
+        const boundary = self.compactionBoundary(.keep_latest_tool_round);
+        return buildRequest(a, self.messages.items[0..boundary.message_index], .{ .current = current, .purpose = .{ .work = &.{} } });
     }
 
     /// Build the request used to measure the protected history and selected
-    /// observations before a handover is available.
+    /// observations before a continuity record is available.
     pub fn continuationRequest(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event, scope: CompactionScope) ![]const Model.Item {
         const pending = self.compactionBoundary(scope);
         return buildRequest(a, self.messages.items[pending.message_index..], .{ .current = current, .purpose = .{ .work = events } });
@@ -121,16 +122,16 @@ pub const Context = struct {
         return self.compactionBoundary(.keep_latest_tool_round).entry_index != self.entries.items.len;
     }
 
-    pub fn hasSummaryHistory(self: *const Context, compaction_scope: CompactionScope) bool {
-        return self.summaryEntryCount(compaction_scope) != 0;
+    pub fn hasReflectionHistory(self: *const Context, compaction_scope: CompactionScope) bool {
+        return self.reflectionEntryCount(compaction_scope) != 0;
     }
 
-    /// A lone handover only merits recompression when it prevents the next request from fitting.
+    /// Reconsider a lone continuity record only when the next request needs more room.
     pub fn canCompact(self: *const Context, compaction_scope: CompactionScope) bool {
-        return switch (self.summaryEntryCount(compaction_scope)) {
+        return switch (self.reflectionEntryCount(compaction_scope)) {
             0 => false,
             1 => switch (self.entries.items[0]) {
-                .record => |record| record != .handover,
+                .record => |record| record != .continuity,
                 .exchange => true,
             },
             else => true,
@@ -172,7 +173,7 @@ pub const Context = struct {
     }
 
     /// Extend the protected suffix over recent exchanges and their preceding
-    /// observations, up to the most recent handover.
+    /// observations, up to the most recent continuity record.
     fn recentRounds(self: *const Context, start: HistoryBoundary) HistoryBoundary {
         var retained = start;
         var cursor = start;
@@ -195,26 +196,26 @@ pub const Context = struct {
         return retained;
     }
 
-    fn summaryEntryCount(self: *const Context, compaction_scope: CompactionScope) usize {
+    fn reflectionEntryCount(self: *const Context, compaction_scope: CompactionScope) usize {
         return self.compactionBoundary(compaction_scope).entry_index;
     }
 
-    fn summaryItems(self: *const Context, compaction_scope: CompactionScope) []const Model.Item {
+    /// Assemble the reflection request from selected history and sampled state.
+    pub fn reflectionRequest(self: *const Context, a: Allocator, snapshot: Input.Snapshot, instructions: []const u8, compaction_scope: CompactionScope) ![]Model.Item {
         const boundary = self.compactionBoundary(compaction_scope);
-        return self.messages.items[0..boundary.message_index];
-    }
-
-    /// Assemble the summary request from selected history and sampled state.
-    pub fn summaryRequest(self: *const Context, a: Allocator, snapshot: Input.Snapshot, instructions: []const u8, compaction_scope: CompactionScope) ![]Model.Item {
-        return buildRequest(a, self.summaryItems(compaction_scope), .{
+        return buildRequest(a, self.messages.items[0..boundary.message_index], .{
             .current = snapshot.current,
-            .purpose = .{ .summarize = .{ .instructions = instructions, .state = snapshot.state } },
+            .purpose = .{ .quiet_reflection = .{
+                .instructions = instructions,
+                .state = snapshot.state,
+                .inherited_history = boundary.entry_index != 0 and boundary.entry_index <= self.inherited_through,
+            } },
         });
     }
 
-    /// Replace media in the summary request while keeping the source descriptions.
+    /// Replace media in the reflection request while keeping the source descriptions.
     /// Return true when a request item changed. The retained history stays intact.
-    pub fn replaceSummaryMedia(a: Allocator, messages: []Model.Item) !bool {
+    pub fn replaceReflectionMedia(a: Allocator, messages: []Model.Item) !bool {
         var replaced = false;
         for (messages) |*item| {
             if (item.* != .tool_result) continue;
@@ -222,8 +223,8 @@ pub const Context = struct {
             for (item.tool_result.content.parts, 0..) |part, index| {
                 const note = switch (part) {
                     .text => continue,
-                    .image => "[Image unavailable for this handover.]",
-                    .file_reference => "[File unavailable for this handover.]",
+                    .image => "[Image unavailable during this reflection.]",
+                    .file_reference => "[File unavailable during this reflection.]",
                 };
                 if (copy == null) copy = try a.dupe(Model.Content.Part, item.tool_result.content.parts);
                 copy.?[index] = .{ .text = note };
@@ -245,12 +246,12 @@ pub const Context = struct {
         return messages;
     }
 
-    pub fn withHandover(self: *const Context, allocator: Allocator, handover: Input.Handover, compaction_scope: CompactionScope) !Context {
+    pub fn withContinuity(self: *const Context, allocator: Allocator, continuity: Input.Continuity, compaction_scope: CompactionScope) !Context {
         const scope: Scope = .{ .session_id = self.scope.session_id, .epoch = try std.math.add(u64, self.scope.epoch, 1) };
         var replacement = try init(allocator, scope, self.focus_id);
         errdefer replacement.deinit();
-        try replacement.appendRecord(.{ .handover = handover });
-        const count = self.summaryEntryCount(compaction_scope);
+        try replacement.appendRecord(.{ .continuity = continuity });
+        const count = self.reflectionEntryCount(compaction_scope);
         for (self.entries.items[count..]) |entry| try replacement.append(entry);
         return replacement;
     }
@@ -359,7 +360,7 @@ test "retained exchanges own their source buffers" {
     try std.testing.expectEqualStrings("file-1234", reply.content.parts[2].file_reference);
 }
 
-test "candidate handover retains sampled references and leaves earlier history available" {
+test "candidate continuity record retains sampled references and leaves earlier history available" {
     var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
@@ -374,10 +375,10 @@ test "candidate handover retains sampled references and leaves earlier history a
     var channel_id = "consumer-8".*;
     var description = "Accept CSV paths.".*;
     var correspondent_id = "reviewer+notes".*;
-    const handover: Input.Handover = .{
+    const continuity: Input.Continuity = .{
         .focus_id = "core-1",
         .observed_at_unix_ms = 900,
-        .summary = "A command is still awaiting observation.",
+        .text = "I am carrying the plan forward.\n\nA command is still awaiting observation.",
         .state = .{
             .activities = &.{&activity_id},
             .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = &command_id } } }},
@@ -386,9 +387,9 @@ test "candidate handover retains sampled references and leaves earlier history a
             .correspondents = &.{&correspondent_id},
         },
     };
-    const current: Input.Current = .{ .focus_id = handover.focus_id, .role = .core, .observed_at_unix_ms = 900 };
-    const summary = try original.summaryRequest(a, .{ .current = current, .state = handover.state }, "Summarize.", .keep_latest_tool_round);
-    var replacement = try original.withHandover(std.testing.allocator, handover, .keep_latest_tool_round);
+    const current: Input.Current = .{ .focus_id = continuity.focus_id, .role = .core, .observed_at_unix_ms = 900 };
+    const reflection = try original.reflectionRequest(a, .{ .current = current, .state = continuity.state }, "Reflect.", .keep_latest_tool_round);
+    var replacement = try original.withContinuity(std.testing.allocator, continuity, .keep_latest_tool_round);
     defer replacement.deinit();
     @memset(&activity_id, 0);
     @memset(&command_id, 0);
@@ -401,9 +402,9 @@ test "candidate handover retains sampled references and leaves earlier history a
     try std.testing.expectEqual(@as(usize, 2), original.records().len);
     try std.testing.expectEqualStrings("Keep working on our plan.", original.records()[0].record.events.items[0].input.text);
     try std.testing.expectEqual(@as(usize, 1), replacement.records().len);
-    const retained = replacement.records()[0].record.handover;
-    try std.testing.expectEqual(handover.observed_at_unix_ms, retained.observed_at_unix_ms);
-    try std.testing.expectEqualStrings(handover.summary, retained.summary);
+    const retained = replacement.records()[0].record.continuity;
+    try std.testing.expectEqual(continuity.observed_at_unix_ms, retained.observed_at_unix_ms);
+    try std.testing.expectEqualStrings(continuity.text, retained.text);
     const expected_state: Input.State = .{
         .activities = &.{"practice-2"},
         .callbacks = &.{.{ .callback_id = "inspect-3", .source = .{ .host = .{ .command_id = "inspect-7" } } }},
@@ -413,7 +414,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     };
     try std.testing.expectEqualDeep(expected_state, retained.state);
     const next = try replacement.request(a, current, &.{});
-    for ([_][]const u8{ summary[summary.len - 1].message.text, next[1].message.text }) |rendered| {
+    for ([_][]const u8{ reflection[reflection.len - 1].message.text, next[1].message.text }) |rendered| {
         try std.testing.expect(std.mem.indexOf(u8, rendered, "releases-4") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered, "Report stable releases.") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered, "consumer-8") != null);
@@ -422,7 +423,7 @@ test "candidate handover retains sampled references and leaves earlier history a
     }
 }
 
-test "compaction summarizes older entries and carries forward the complete latest tool round" {
+test "compaction reflects on older entries and carries forward the complete latest tool round" {
     const testing = std.testing;
     var scratch: std.heap.ArenaAllocator = .init(testing.allocator);
     defer scratch.deinit();
@@ -450,11 +451,11 @@ test "compaction summarizes older entries and carries forward the complete lates
     try original.appendBatch(latest[0..1], latest[1..]);
 
     const snapshot: Input.Snapshot = .{ .current = current, .state = state };
-    const summary = try original.summaryRequest(a, snapshot, "Summarize.", .keep_latest_tool_round);
-    try testing.expectEqualDeep(earlier, summary[1 .. summary.len - 1]);
-    try testing.expect(try Context.replaceSummaryMedia(a, summary));
-    try testing.expectEqualDeep(earlier[0], summary[1]);
-    const projected_reply = summary[2].tool_result;
+    const reflection = try original.reflectionRequest(a, snapshot, "Reflect.", .keep_latest_tool_round);
+    try testing.expectEqualDeep(earlier, reflection[1 .. reflection.len - 1]);
+    try testing.expect(try Context.replaceReflectionMedia(a, reflection));
+    try testing.expectEqualDeep(earlier[0], reflection[1]);
+    const projected_reply = reflection[2].tool_result;
     try testing.expectEqualStrings(earlier[1].tool_result.call_id, projected_reply.call_id);
     const parts = projected_reply.content.parts;
     try testing.expectEqualDeep(earlier[1].tool_result.content.parts[0], parts[0]);
@@ -462,13 +463,13 @@ test "compaction summarizes older entries and carries forward the complete lates
     try testing.expect(parts[2] == .text);
     try testing.expectEqualDeep(earlier, original.records()[0].exchange);
 
-    const handover: Input.Handover = .{
+    const continuity: Input.Continuity = .{
         .focus_id = current.focus_id,
         .observed_at_unix_ms = current.observed_at_unix_ms,
-        .summary = "Earlier work.",
+        .text = "I worked on the plan.",
         .state = state,
     };
-    var replacement = try original.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    var replacement = try original.withContinuity(testing.allocator, continuity, .keep_latest_tool_round);
     defer replacement.deinit();
     const next = try replacement.request(a, current, &.{});
     try testing.expectEqualDeep(latest, next[2 .. next.len - 1]);
@@ -493,30 +494,30 @@ test "compaction retains checkpointed observations following a tool round that s
     var restored = try Context.restore(testing.allocator, scope, current.focus_id, entries);
     defer restored.deinit();
     const state: Input.State = .{ .activities = &.{}, .callbacks = &.{} };
-    const handover: Input.Handover = .{ .focus_id = current.focus_id, .observed_at_unix_ms = current.observed_at_unix_ms, .summary = "Previous work.", .state = state };
+    const continuity: Input.Continuity = .{ .focus_id = current.focus_id, .observed_at_unix_ms = current.observed_at_unix_ms, .text = "I took the earlier report seriously.", .state = state };
 
-    var replacement = try restored.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    var replacement = try restored.withContinuity(testing.allocator, continuity, .keep_latest_tool_round);
     defer replacement.deinit();
     try testing.expectEqualDeep(entries[1..], replacement.records()[1..]);
-    var smaller = try restored.withHandover(testing.allocator, handover, .keep_pending_observations);
+    var smaller = try restored.withContinuity(testing.allocator, continuity, .keep_pending_observations);
     defer smaller.deinit();
     try testing.expectEqualDeep(entries[2..], smaller.records()[1..]);
     try restored.appendBatch(&.{.{ .continuation = "Assistant response" }}, &.{});
-    var after_response = try restored.withHandover(testing.allocator, handover, .keep_latest_tool_round);
+    var after_response = try restored.withContinuity(testing.allocator, continuity, .keep_latest_tool_round);
     defer after_response.deinit();
     try testing.expect(after_response.records()[1..].len == 0);
 }
 
-test "recent retention carries complete exchanges and their observations across a handover" {
+test "recent retention carries complete exchanges and their observations across a continuity record" {
     const testing = std.testing;
     const current: Input.Current = .{ .focus_id = "core-1", .role = .core, .observed_at_unix_ms = 1000 };
     const scope: Scope = .{ .session_id = 1, .epoch = 0 };
     const state: Input.State = .{ .activities = &.{}, .callbacks = &.{} };
-    const handover: Input.Handover = .{ .focus_id = current.focus_id, .observed_at_unix_ms = 900, .summary = "Earlier work.", .state = state };
+    const continuity: Input.Continuity = .{ .focus_id = current.focus_id, .observed_at_unix_ms = 900, .text = "I worked on the plan.", .state = state };
     const evidence: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "Keep this evidence.", .observed_at_unix_ms = 910 } };
     const arrival: Input.Event = .{ .input = .{ .from = &.{"operator"}, .text = "New observation.", .observed_at_unix_ms = 950 } };
     const entries: []const Entry = &.{
-        .{ .record = .{ .handover = handover } },
+        .{ .record = .{ .continuity = continuity } },
         .{ .exchange = &.{.{ .continuation = "Older exchange" }} },
         .{ .record = .{ .events = .{ .focus_id = current.focus_id, .items = &.{evidence} } } },
         .{ .exchange = &.{
@@ -533,7 +534,7 @@ test "recent retention carries complete exchanges and their observations across 
     var original = try Context.restore(testing.allocator, scope, current.focus_id, entries);
     defer original.deinit();
 
-    var replacement = try original.withHandover(testing.allocator, handover, .keep_recent_rounds);
+    var replacement = try original.withContinuity(testing.allocator, continuity, .keep_recent_rounds);
     defer replacement.deinit();
     try testing.expectEqualDeep(entries[2..], replacement.records()[1..]);
 }

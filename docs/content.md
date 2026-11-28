@@ -21,7 +21,7 @@ While a tool result remains in working history, later turns can use its text, in
 
 The runtime saves the complete tool round before the next inference, subject to the mail service's [working history limits](running.md#working-history-limits).
 
-Compaction can summarize the exchange that contains a tool result. If the handover records the host path or memory address, the focus can reopen the source to see its current contents. See [handovers](input.md#handover-generation-and-replacement) and [uploaded file retention](running.md#uploaded-model-files).
+Quiet reflection can replace an older exchange with a note. A host path or memory address carried forward in the note lets the focus reopen the source as it exists at that address. [Quiet reflection](input.md#quiet-reflection-and-resumption) · [Uploaded file retention](running.md#uploaded-model-files)
 
 ## Source size limits
 

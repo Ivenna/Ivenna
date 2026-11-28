@@ -1,5 +1,11 @@
 # Upgrading Ivenna
 
+## Resuming with continuity notes
+
+Stop the kernel, keep the previous executable with a matched backup of the mailbox and instance database, and start the updated build with the same instance data. Use the matched backup and its executable to roll back after the updated kernel saves a continuity record. [Updating the executable](running.md#updating-the-executable) · [Backups and transfers](running.md#backups-and-transfers)
+
+The updated kernel can read earlier handovers and continuity notes. In captured inference input, read their text under `continuity.text` and identify the main role as `current.role: main`. The main focus keeps its `core-1` reference. Reuse the instance's context settings and memory workspace. [Input contract](input.md#continuity-notes) · [Context budgets](running.md#context-budgets) · [Earlier history formats](architecture.md#saving-and-restoration)
+
 ## Moving receivers and listeners to sessions
 
 This update changes the receiver and listener commands and removes `schedule_attention`. The kernel upgrades the instance database on its first start with the new build, even for an instance with no receivers or listeners.
@@ -39,17 +45,17 @@ Use the matched backup from the [session upgrade](#moving-receivers-and-listener
 
 ## Working history encoding
 
-The updated kernel restores image bytes and upload IDs from records selected by the saved checkpoint. Newly written records store uploaded files by ID and encode inline images losslessly in Base64. This also applies when a fork or handover copies an older record. Older records keep their original bodies until the mail service expires them from Trash.
+The updated kernel restores image bytes and upload IDs from records selected by the saved checkpoint. Newly written records store uploaded files by ID and encode inline images losslessly in Base64. This also applies when a fork or context replacement copies an older record. Older records keep their original bodies until the mail service expires them from Trash.
 
 1. Stop the kernel. Keep the previous executable and make a [matched backup of the mailbox and instance database](running.md#backups-and-transfers).
-2. If you use the supplied Stalwart setup, [update and apply your mail plan](../dev/README.md#mail). Check the [working history limits](running.md#working-history-limits) against the largest rounds you expect to save, including retained exchanges that a fork or handover can rewrite in the new encoding.
+2. If you still need the earlier Stalwart plan update for image and file encoding, [update and apply your mail plan](../dev/README.md#mail). Check the [working history limits](running.md#working-history-limits) against the largest rounds you expect to save, including retained exchanges that a fork or context replacement can rewrite in the new encoding.
 3. Start the updated executable with the existing mailbox and its paired instance database.
 
 To roll back after the update writes records in the new encoding, stop the kernel, restore the matched backup, and start the previous executable.
 
 ## Adopting the new reasoning defaults
 
-The activity reasoning default changed from `high` to `max`. Handovers previously used a fixed effort of `high` and now have a separate setting that defaults to `max`.
+The activity reasoning default changed from `high` to `max`. Quiet reflection uses the separate setting introduced for compaction, which defaults to `max`.
 
 The earlier `.env.example` set `LLM_ACTIVITY_REASONING_EFFORT=high` explicitly. Remove that override from the kernel's launch environment to adopt the new activity default. To keep the previous defaults, set both `LLM_ACTIVITY_REASONING_EFFORT` and `LLM_COMPACTION_REASONING_EFFORT` to `high`. Restart the kernel with the chosen settings. See [model requests](running.md#model-requests) and [loading the local environment](../dev/README.md#configuration).
 

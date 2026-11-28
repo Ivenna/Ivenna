@@ -1,6 +1,6 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
-const Compaction = @import("compaction.zig");
+const Reflection = @import("reflection.zig");
 const Engine = @import("engine.zig").Engine;
 const FocusResult = @import("engine.zig").FocusResult;
 const Content = @import("content").Content;
@@ -332,16 +332,17 @@ pub const Kernel = struct {
         }
     }
 
-    const Selection = union(enum) { count: usize, over_limit: Model.Limit };
-    const Prepared = struct { items: []Model.Item, events: []const Input.Event, count: usize };
+    const Selected = struct { count: usize, bytes: u64 };
+    const Selection = union(enum) { selected: Selected, over_limit: Model.Limit };
+    const Prepared = struct { items: []Model.Item, events: []const Input.Event, selected: Selected };
     const Fit = union(enum) { ready: Prepared, over_limit: Model.Limit };
     const CompactionTrigger = union(enum) { threshold: Prepared, limit };
-    const core_extra_history_bytes = 256 * 1024;
+    const recent_history_bytes = 256 * 1024;
 
     /// Bound the space added by a batch of observations across I/O pages.
     /// Always give the first observation the full space available to it.
     fn selectEvents(self: *Kernel, a: Allocator, work: Work, history: *const Context, current: Input.Current, events: *std.ArrayList(Input.Event)) !Selection {
-        var count: usize = 0;
+        var selected: Selected = .{ .count = 0, .bytes = 0 };
         var trial_arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer trial_arena.deinit();
         var batch_target = self.limits.observation_batch_bytes;
@@ -355,23 +356,23 @@ pub const Kernel = struct {
                 included_history = true;
             }
             if (page.violation == null and page.bytes <= batch_target) {
-                count = events.items.len;
+                selected = .{ .count = events.items.len, .bytes = page.bytes };
                 if (page.bytes == batch_target) break;
                 if (!try self.sessions.extendReports(work)) break;
                 continue;
             }
-            for (count + 1..events.items.len + 1) |end| {
+            for (selected.count + 1..events.items.len + 1) |end| {
                 const measured = if (end == events.items.len) page else try self.measureEvents(&trial_arena, history, current, events.items[0..end]);
                 if (measured.violation) |limit| {
-                    if (count == 0) return .{ .over_limit = limit };
+                    if (selected.count == 0) return .{ .over_limit = limit };
                     break;
                 }
-                if (count != 0 and measured.bytes > batch_target) break;
-                count = end;
+                if (selected.count != 0 and measured.bytes > batch_target) break;
+                selected = .{ .count = end, .bytes = measured.bytes };
             }
             break;
         }
-        return .{ .count = count };
+        return .{ .selected = selected };
     }
 
     fn measureEvents(self: *Kernel, scratch: *std.heap.ArenaAllocator, history: *const Context, current: Input.Current, events: []const Input.Event) !Model.Measurement {
@@ -383,7 +384,7 @@ pub const Kernel = struct {
     }
 
     /// Fit continuation and admission against the same snapshot. A rejected
-    /// handover changes neither the selected history nor any inbox receipt.
+    /// continuity record changes neither the selected history nor any inbox receipt.
     fn prepareRequest(self: *Kernel, a: Allocator, work: Work, history: *Context) !FocusResult([]const Model.Item) {
         const current = self.sessions.current(work.session);
         const prepared = switch (try self.fitRequest(a, work, history, current, false)) {
@@ -391,7 +392,7 @@ pub const Kernel = struct {
             .over_limit => |limit| return self.prepareLimitedRequest(a, work, history, current, limit),
         };
         if (history.canCompact(.keep_latest_tool_round) and try self.reachedCompactionThreshold(history, current, work.session.progress.last_input_tokens)) {
-            const scope = try self.softCompactionScope(a, history, current.role);
+            const scope = try self.softCompactionScope(a, history);
             switch (try self.compactRequest(a, work, history, current, scope, .{ .threshold = prepared })) {
                 .ready => |input| return .{ .ready = input },
                 .interrupted => |reason| std.log.warn("soft compaction skipped for {s}. {s}", .{ work.session.focus_id, reason }),
@@ -409,7 +410,7 @@ pub const Kernel = struct {
         if ((try self.engine.measure(trial, minimal, current.role)).violation) |pending_limit| {
             if (!history.hasToolRoundToKeep()) return requestOverLimit(work, pending_limit);
             // The tool exchange and unanswered observations exceed the limit
-            // together. Keep the observations intact and summarize the exchange.
+            // together. Keep the observations intact and include the exchange in the reflection.
             scope = .keep_pending_observations;
             minimal = try history.continuationRequest(trial, current, &.{}, scope);
             if ((try self.engine.measure(trial, minimal, current.role)).violation) |observations_limit|
@@ -428,7 +429,7 @@ pub const Kernel = struct {
             }
         }
 
-        const compacted = if (history.hasSummaryHistory(scope))
+        const compacted = if (history.hasReflectionHistory(scope))
             try self.compactRequest(a, work, history, current, scope, .limit)
         else
             requestOverLimit(work, limit);
@@ -460,8 +461,8 @@ pub const Kernel = struct {
         return (try self.engine.measure(a, retained, current.role)).bytes >= self.limits.compact_at_bytes;
     }
 
-    fn softCompactionScope(self: *Kernel, a: Allocator, history: *const Context, role: Input.Role) !Context.CompactionScope {
-        if (role != .core or !history.canCompact(.keep_recent_rounds)) return .keep_latest_tool_round;
+    fn softCompactionScope(self: *Kernel, a: Allocator, history: *const Context) !Context.CompactionScope {
+        if (!history.canCompact(.keep_recent_rounds)) return .keep_latest_tool_round;
         const additional = history.additionalRecentItems();
         if (additional.len == 0) return .keep_latest_tool_round;
         for (additional) |item| {
@@ -472,7 +473,7 @@ pub const Kernel = struct {
             }
         }
         const measured = try self.engine.model.measure(a, .{ .history = additional, .tools = &.{}, .reasoning_effort = "none" });
-        return if (measured.bytes <= core_extra_history_bytes) .keep_recent_rounds else .keep_latest_tool_round;
+        return if (measured.bytes <= recent_history_bytes) .keep_recent_rounds else .keep_latest_tool_round;
     }
 
     fn compactionSnapshot(self: *Kernel, a: Allocator, session: *Sessions.Session) !Input.Snapshot {
@@ -482,23 +483,25 @@ pub const Kernel = struct {
     }
 
     fn compactRequest(self: *Kernel, a: Allocator, work: Work, history: *Context, current: Input.Current, scope: Context.CompactionScope, trigger: CompactionTrigger) !FocusResult([]const Model.Item) {
-        var rejection: ?Compaction.Rejection = null;
+        var rejection: ?Reflection.Rejection = null;
         const retry: Engine.Retry = if (trigger == .limit) .wait_for_service else .single_attempt;
-        const summary_attempts: usize = if (trigger == .limit) 2 else 1;
-        for (0..summary_attempts) |_| {
+        const attempts: usize = if (trigger == .limit) 2 else 1;
+        for (0..attempts) |_| {
             const snapshot = try self.compactionSnapshot(a, work.session);
-            switch (try Compaction.summarize(self.engine, a, history, snapshot, scope, rejection, retry)) {
+            switch (try Reflection.reflect(self.engine, a, history, snapshot, scope, rejection, retry)) {
                 .interrupted => |reason| return .{ .interrupted = reason },
                 .rejected => |reason| rejection = reason,
-                .handover => |handover| {
-                    var candidate = try history.withHandover(self.allocator, handover, scope);
+                .continuity => |continuity| {
+                    var candidate = try history.withContinuity(self.allocator, continuity, scope);
                     defer candidate.deinit();
                     const fit = switch (trigger) {
-                        .threshold => |selected| try self.fitSelected(a, &candidate, current, selected.events, selected.count),
+                        .threshold => |original| try self.fitSelected(a, &candidate, current, original.events, original.selected.count),
                         .limit => try self.fitRequest(a, work, &candidate, current, history.hasPendingContinuation()),
                     };
                     switch (fit) {
                         .ready => |prepared| {
+                            if (trigger == .threshold and prepared.selected.bytes >= trigger.threshold.selected.bytes)
+                                return .{ .interrupted = "The continuity record did not make more room." };
                             const items = try self.admit(a, work, &candidate, prepared, true);
                             std.mem.swap(Context, history, &candidate);
                             std.log.debug("compacted {s}: {s} trigger, history epoch {d}", .{
@@ -518,19 +521,19 @@ pub const Kernel = struct {
         if (work.activation.deliveries.items.len == 0) return self.fitSelected(a, history, current, &.{}, 0);
         var events: std.ArrayList(Input.Event) = .empty;
         defer events.deinit(a);
-        const count = switch (try self.selectEvents(a, work, history, current, &events)) {
-            .count => |selected| selected,
+        const selected = switch (try self.selectEvents(a, work, history, current, &events)) {
+            .selected => |selection| selection,
             .over_limit => |limit| return if (may_defer) self.fitSelected(a, history, current, &.{}, 0) else .{ .over_limit = limit },
         };
-        const selected = try Input.coalesceActivityReports(a, events.items[0..count]);
-        return .{ .ready = .{ .items = try history.request(a, current, selected), .events = selected, .count = count } };
+        const grouped = try Input.coalesceActivityReports(a, events.items[0..selected.count]);
+        return .{ .ready = .{ .items = try history.request(a, current, grouped), .events = grouped, .selected = selected } };
     }
 
     fn fitSelected(self: *Kernel, a: Allocator, history: *const Context, current: Input.Current, events: []const Input.Event, count: usize) !Fit {
         const items = try history.request(a, current, events);
         const measured = try self.engine.measure(a, items, current.role);
         if (measured.violation) |limit| return .{ .over_limit = limit };
-        return .{ .ready = .{ .items = items, .events = events, .count = count } };
+        return .{ .ready = .{ .items = items, .events = events, .selected = .{ .count = count, .bytes = measured.bytes } } };
     }
 
     /// Rendered input borrows history. Commit the selected events only after
@@ -545,9 +548,9 @@ pub const Kernel = struct {
         }
 
         const pending = work.activation.deliveries.items.len != 0;
-        if (prepared.count != 0) try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = prepared.events } });
-        if (pending or compacted) try self.sessions.commitInput(work, prepared.count, history);
-        if (prepared.count != 0) {
+        if (prepared.selected.count != 0) try history.appendRecord(.{ .events = .{ .focus_id = work.session.focus_id, .items = prepared.events } });
+        if (pending or compacted) try self.sessions.commitInput(work, prepared.selected.count, history);
+        if (prepared.selected.count != 0) {
             for (work.activation.deliveries.items) |delivery| {
                 const receipt = delivery.receipt orelse continue;
                 try self.inbox.acknowledge(a, receipt);
@@ -824,8 +827,8 @@ test "core startup reports the outgoing registration of each runtime" {
         try testing.expectEqualDeep(ids, startup.correspondents.?);
         if (ids.len == 0) {
             const snapshot = try kernel.compactionSnapshot(a, work.session);
-            const summary = try history.summaryRequest(a, snapshot, "Summarize.", .keep_latest_tool_round);
-            try testing.expect(std.mem.indexOf(u8, summary[summary.len - 1].message.text, marker) != null);
+            const reflection = try history.reflectionRequest(a, snapshot, "Reflect.", .keep_latest_tool_round);
+            try testing.expect(std.mem.indexOf(u8, reflection[reflection.len - 1].message.text, marker) != null);
         }
         try SubscriptionFixture.finish(&kernel, work, &history);
     }
@@ -982,10 +985,10 @@ test "ordinary turns refresh current connection status and give observations pri
     try testing.expect(std.mem.indexOf(u8, constrained_turn, "subscriptions_without_listeners:") == null);
 
     const snapshot = try kernel.compactionSnapshot(a, core.work.session);
-    const summary = try history.summaryRequest(a, snapshot, "Summarize.", .keep_latest_tool_round);
-    const summary_turn = summary[summary.len - 1].message.text;
-    try testing.expect(std.mem.indexOf(u8, summary_turn, "channels_without_receivers:") == null);
-    try testing.expect(std.mem.indexOf(u8, summary_turn, "subscriptions_without_listeners:") == null);
+    const reflection = try history.reflectionRequest(a, snapshot, "Reflect.", .keep_latest_tool_round);
+    const reflection_turn = reflection[reflection.len - 1].message.text;
+    try testing.expect(std.mem.indexOf(u8, reflection_turn, "channels_without_receivers:") == null);
+    try testing.expect(std.mem.indexOf(u8, reflection_turn, "subscriptions_without_listeners:") == null);
 
     // A damaged registration is a store failure, independent of listener presence.
     try store.db.execNoArgs(
@@ -1253,12 +1256,12 @@ test "restart resumes observation source rotation after the startup observation"
 test "restart uses saved input-token counts only for a matching model scope" {
     const testing = std.testing;
     const Budget = struct {
-        fn measure(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Measurement {
-            return .{ .bytes = 100 };
+        fn measure(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
+            return .{ .bytes = 100 + request.history.len };
         }
 
         fn next(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Outcome {
-            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "Retained summary." } };
+            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "I intend to continue." } };
         }
     };
     const cases = [_]struct { before: ?[32]u8, after: ?[32]u8, compacts: bool }{
@@ -1349,10 +1352,10 @@ test "compaction gives a complete fresh exchange and observation room beyond the
     const BudgetModel = struct {
         hard_limit: u64,
         older_bytes: u64,
-        handover_bytes: u64,
-        summaries: usize = 0,
-        summary_saw_omission: bool = false,
-        summary: enum { success, rejection, outage } = .success,
+        continuity_bytes: u64,
+        reflections: usize = 0,
+        reflection_saw_omission: bool = false,
+        outcome: enum { success, rejection, outage, empty_reflection } = .success,
 
         fn measure(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -1360,7 +1363,7 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             for (request.history) |item| switch (item) {
                 .message => |message| {
                     if (std.mem.indexOf(u8, message.text, "older context marker") != null) bytes += self.older_bytes;
-                    if (std.mem.indexOf(u8, message.text, "A useful handover.") != null) bytes += self.handover_bytes;
+                    if (std.mem.indexOf(u8, message.text, "I told the correspondent I would return.") != null) bytes += self.continuity_bytes;
                     if (std.mem.indexOf(u8, message.text, "large observation marker") != null) bytes += 6;
                 },
                 .tool_result => |result| for (result.content.parts) |part| {
@@ -1378,18 +1381,19 @@ test "compaction gives a complete fresh exchange and observation room beyond the
             const self: *@This() = @ptrCast(@alignCast(context));
             try testing.expectEqual(@as(usize, 0), request.tools.len);
             const turn = request.history[request.history.len - 1].message.text;
-            try testing.expect(std.mem.indexOf(u8, turn, "\nsummarize:") != null);
+            try testing.expect(std.mem.indexOf(u8, turn, "\nquiet_reflection:") != null);
             for (request.history) |item| {
                 if (item == .message) try testing.expect(std.mem.indexOf(u8, item.message.text, "large observation marker") == null);
                 if (item != .tool_result) continue;
                 try testing.expect(item.tool_result.content.parts[0] == .text);
-                self.summary_saw_omission = true;
+                self.reflection_saw_omission = true;
             }
-            self.summaries += 1;
-            return switch (self.summary) {
-                .success => .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "A useful handover." } },
+            self.reflections += 1;
+            return switch (self.outcome) {
+                .success => .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "I told the correspondent I would return." } },
                 .rejection => .{ .rejected = .request_rejected },
                 .outage => .{ .unavailable = .{} },
+                .empty_reflection => .{ .response = .{ .output = &.{}, .calls = &.{}, .text = null } },
             };
         }
     };
@@ -1403,26 +1407,29 @@ test "compaction gives a complete fresh exchange and observation room beyond the
     const Case = struct {
         ceiling: u64,
         older_bytes: u64 = 5,
-        handover_bytes: u64 = 0,
-        summary: @FieldType(BudgetModel, "summary") = .success,
+        continuity_bytes: u64 = 0,
+        outcome: @FieldType(BudgetModel, "outcome") = .success,
         compacted: bool = true,
         delivered: bool = true,
         kept_image: bool = true,
         observed_tokens: ?u64 = null,
         compact_at_bytes: u64 = 4,
-        summaries: usize = 1,
+        reflections: usize = 1,
     };
     for ([_]Case{
         .{ .ceiling = 40 },
-        .{ .ceiling = 40, .compact_at_bytes = 6, .compacted = false, .summaries = 0 },
-        .{ .ceiling = 40, .summary = .outage, .compacted = false },
-        .{ .ceiling = 40, .observed_tokens = 7, .compacted = false, .summaries = 0 },
+        .{ .ceiling = 40, .compact_at_bytes = 6, .compacted = false, .reflections = 0 },
+        .{ .ceiling = 40, .outcome = .outage, .compacted = false },
+        .{ .ceiling = 40, .outcome = .empty_reflection, .compacted = false },
+        .{ .ceiling = 40, .continuity_bytes = 5, .compacted = false },
+        .{ .ceiling = 40, .continuity_bytes = 6, .compacted = false },
+        .{ .ceiling = 40, .observed_tokens = 7, .compacted = false, .reflections = 0 },
         .{ .ceiling = 40, .observed_tokens = 8, .compact_at_bytes = 100 },
         .{ .ceiling = 16 },
-        // With its actual handover the pending exchange fits on its own.
-        .{ .ceiling = 16, .older_bytes = 8, .handover_bytes = 4, .delivered = false },
-        .{ .ceiling = 16, .summary = .rejection, .compacted = false, .delivered = false },
-        .{ .ceiling = 15, .compacted = false, .delivered = false, .summaries = 0 },
+        // With the new continuity record, only the pending exchange fits.
+        .{ .ceiling = 16, .older_bytes = 8, .continuity_bytes = 4, .delivered = false },
+        .{ .ceiling = 16, .outcome = .rejection, .compacted = false, .delivered = false },
+        .{ .ceiling = 15, .compacted = false, .delivered = false, .reflections = 0 },
         .{ .ceiling = 14, .delivered = false },
         .{ .ceiling = 8, .kept_image = false },
     }) |case| {
@@ -1457,15 +1464,15 @@ test "compaction gives a complete fresh exchange and observation room beyond the
         var model: BudgetModel = .{
             .hard_limit = case.ceiling,
             .older_bytes = case.older_bytes,
-            .handover_bytes = case.handover_bytes,
-            .summary = case.summary,
+            .continuity_bytes = case.continuity_bytes,
+            .outcome = case.outcome,
         };
         engine.model = .{ .context = &model, .vtable = &.{ .next = BudgetModel.next, .measure = BudgetModel.measure, .prepareToolResult = undefined } };
         kernel.limits.compact_at_bytes = case.compact_at_bytes;
         kernel.limits.compact_at_tokens = 8;
         const input = (try kernel.prepareRequest(a, work, &history)).ready;
-        try testing.expectEqual(case.summaries, model.summaries);
-        try testing.expectEqual(!case.kept_image, model.summary_saw_omission);
+        try testing.expectEqual(case.reflections, model.reflections);
+        try testing.expectEqual(!case.kept_image, model.reflection_saw_omission);
         const turn = input[input.len - 1].message.text;
         try testing.expectEqual(case.delivered, std.mem.indexOf(u8, turn, "large observation marker") != null);
         if (case.kept_image) {
@@ -1527,11 +1534,11 @@ test "an empty completion closes admitted work before retrying an oversized wait
     try testing.expect(!completed.hasPendingContinuation());
 }
 
-test "a lone handover is shortened only if needed to fit the next observation" {
+test "a lone continuity record is shortened only if needed to fit the next observation" {
     const testing = std.testing;
     const Stub = struct {
         limit: u64,
-        summaries: usize = 0,
+        reflections: usize = 0,
 
         fn measure(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -1551,7 +1558,9 @@ test "a lone handover is shortened only if needed to fit the next observation" {
             const self: *@This() = @ptrCast(@alignCast(context));
             try testing.expect(std.mem.indexOf(u8, request.history[1].message.text, "Earlier commitments") != null);
             try testing.expect(std.mem.indexOf(u8, request.history[2].message.text, "Incoming letter") == null);
-            self.summaries += 1;
+            self.reflections += 1;
+            if (self.reflections == 1) return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = " \n\t" } };
+            try testing.expect(std.mem.indexOf(u8, request.history[2].message.text, "Leave a brief reflection in your own words.") != null);
             return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "Prior commitments, condensed." } };
         }
     };
@@ -1579,26 +1588,26 @@ test "a lone handover is shortened only if needed to fit the next observation" {
         } } }));
         const work = try SubscriptionFixture.takeWork(&kernel, a);
         defer kernel.sessions.endWorker(work.session);
-        const handover: Input.Handover = .{
+        const continuity: Input.Continuity = .{
             .focus_id = work.session.focus_id,
             .observed_at_unix_ms = 90,
-            .summary = "Earlier commitments and open questions.",
+            .text = "Earlier commitments and open questions.",
             .state = .{ .activities = &.{}, .callbacks = &.{} },
         };
         var history = try Context.restore(testing.allocator, .{ .session_id = work.session.session_id, .epoch = 0 }, work.session.focus_id, &.{
-            .{ .record = .{ .handover = handover } },
+            .{ .record = .{ .continuity = continuity } },
         });
         defer history.deinit();
 
         const result = try kernel.prepareRequest(a, work, &history);
-        try testing.expectEqual(@as(usize, @intFromBool(limit == 32)), stub.summaries);
+        try testing.expectEqual(@as(usize, if (limit == 32) 2 else 0), stub.reflections);
         if (limit == 8) {
             try testing.expect(result == .interrupted);
             try testing.expect(!work.activation.admitted);
         } else {
             try testing.expect(std.mem.indexOf(u8, result.ready[result.ready.len - 1].message.text, "Incoming letter") != null);
         }
-        try testing.expectEqualStrings(if (limit == 32) "Prior commitments, condensed." else handover.summary, history.records()[0].record.handover.summary);
+        try testing.expectEqualStrings(if (limit == 32) "Prior commitments, condensed." else continuity.text, history.records()[0].record.continuity.text);
     }
 }
 
@@ -1609,7 +1618,7 @@ test "a fork continues with its first assignment and applies the ordinary compac
     ;
     const Stub = struct {
         limit: u64,
-        summaries: usize = 0,
+        reflections: usize = 0,
 
         fn measure(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -1639,8 +1648,10 @@ test "a fork continues with its first assignment and applies the ordinary compac
             };
             try testing.expect(inherited_call);
             try testing.expect(inherited_reply);
-            self.summaries += 1;
-            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "A summary of the core's work." } };
+            const turn = request.history[request.history.len - 1].message.text;
+            try testing.expect(std.mem.indexOf(u8, turn, "inherited_history: true") != null);
+            self.reflections += 1;
+            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "I inherit the core's interest in the plan." } };
         }
     };
     const Case = struct { threshold: u64, limit: u64, compacted: bool = false };
@@ -1681,7 +1692,7 @@ test "a fork continues with its first assignment and applies the ordinary compac
         defer history.deinit();
 
         const result = try kernel.prepareRequest(a, assignment, &history);
-        try testing.expectEqual(@as(usize, @intFromBool(case.compacted)), stub.summaries);
+        try testing.expectEqual(@as(usize, @intFromBool(case.compacted)), stub.reflections);
         if (case.limit == 5) {
             try testing.expect(result == .interrupted);
             try testing.expect(!assignment.activation.admitted);
@@ -1691,35 +1702,46 @@ test "a fork continues with its first assignment and applies the ordinary compac
         try testing.expect(std.mem.indexOf(u8, input[input.len - 1].message.text, "Read the plan.") != null);
         try testing.expectEqual(@as(u64, @intFromBool(case.compacted)), history.scope.epoch);
         if (case.compacted) {
-            try testing.expect(std.mem.indexOf(u8, input[1].message.text, "A summary of the core's work.") != null);
+            try testing.expect(std.mem.indexOf(u8, input[1].message.text, "I inherit the core's interest in the plan.") != null);
         } else {
             try testing.expectEqualStrings("open-focus", input[input.len - 2].tool_result.call_id);
         }
     }
 }
 
-test "the first inference after a handover checkpoint receives the original observation after restart" {
+test "the first inference after a continuity record is checkpointed receives the original observation after restart" {
     const testing = std.testing;
+    const reflection = "  I told the correspondent I would return.\n\nRead the latest letter.\n";
+    const reflection_output = "Native reflection output";
     const Stub = struct {
         pending: bool = false,
 
-        fn measure(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Measurement {
-            return .{ .bytes = 32 };
+        fn measure(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
+            const has_reflection = request.history[1] == .message and std.mem.indexOf(u8, request.history[1].message.text, "I told the correspondent I would return.") != null;
+            return .{ .bytes = if (has_reflection) 24 else 32 };
         }
 
         fn next(context: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Outcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             var observations: usize = 0;
-            for (request.history) |item| {
-                if (item == .message) observations += std.mem.count(u8, item.message.text, "Original question");
-            }
+            var has_reflection_turn = false;
+            for (request.history) |item| switch (item) {
+                .message => |message| {
+                    observations += std.mem.count(u8, message.text, "Original question");
+                    has_reflection_turn = has_reflection_turn or std.mem.indexOf(u8, message.text, "\nquiet_reflection:") != null;
+                },
+                .continuation => |value| try testing.expect(!std.mem.eql(u8, value, reflection_output)),
+                .tool_result => {},
+            };
+            try testing.expectEqual(!self.pending, has_reflection_turn);
             if (!self.pending) {
                 try testing.expectEqual(@as(usize, 0), observations);
                 self.pending = true;
-                return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = "A useful handover." } };
+                return .{ .response = .{ .output = &.{.{ .continuation = reflection_output }}, .calls = &.{}, .text = reflection } };
             }
             try testing.expectEqual(@as(usize, 1), observations);
-            try testing.expect(std.mem.indexOf(u8, request.history[1].message.text, "A useful handover.") != null);
+            try testing.expect(std.mem.indexOf(u8, request.history[1].message.text, "I told the correspondent I would return.") != null);
+            try testing.expect(std.mem.indexOf(u8, request.history[1].message.text, "Read the latest letter.") != null);
             self.pending = false;
             return .{ .response = SubscriptionFixture.empty_response };
         }
@@ -1752,6 +1774,7 @@ test "the first inference after a handover checkpoint receives the original obse
         engine.model = port;
         kernel.limits.compact_at_bytes = 32;
         try testing.expect((try kernel.prepareRequest(a, work, &history)) == .ready);
+        try testing.expectEqualStrings(reflection, history.records()[0].record.continuity.text);
         try testing.expect(stub.pending);
     }
     var restored = try fixture.kernel(&engine, &store);
@@ -1760,11 +1783,70 @@ test "the first inference after a handover checkpoint receives the original obse
     restored.limits.compact_at_bytes = 32;
     const work = try SubscriptionFixture.takeWork(&restored, a);
     defer restored.sessions.endWorker(work.session);
+    var history = try restored.sessions.snapshot(work.session);
+    defer history.deinit();
+    try testing.expectEqualStrings(reflection, history.records()[0].record.continuity.text);
     try testing.expectEqual(null, try restored.respond(work));
     try testing.expect(!stub.pending);
 }
 
-test "a pending document can accompany completed exchanges across a handover" {
+test "an activity keeps recent completed exchanges intact after a quiet reflection" {
+    const testing = std.testing;
+    const older = "Earlier activity exchange";
+    const reflection = "I still care about the plan.\n\nTest the proposed change.";
+    const recent = [_]Model.Item{ .{ .continuation = "Recent activity exchange" }, .{ .continuation = "Latest activity exchange" } };
+    const ModelStub = struct {
+        fn measure(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Measurement {
+            return .{ .bytes = request.history.len };
+        }
+
+        fn next(_: *anyopaque, _: Allocator, request: Model.Request) anyerror!Model.Outcome {
+            const turn = request.history[request.history.len - 1].message.text;
+            try testing.expect(std.mem.indexOf(u8, turn, "\nquiet_reflection:") != null);
+            try testing.expect(std.mem.indexOf(u8, turn, "inherited_history:") == null);
+            try testing.expectEqualStrings(older, request.history[request.history.len - 2].continuation);
+            for (request.history) |item| {
+                if (item != .continuation) continue;
+                for (recent) |kept| try testing.expect(!std.mem.eql(u8, kept.continuation, item.continuation));
+            }
+            return .{ .response = .{ .output = &.{}, .calls = &.{}, .text = reflection } };
+        }
+    };
+
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    const a = fixture.storage.arena.allocator();
+    var store = try Subscriptions.Store.openInMemory(a);
+    defer store.close();
+    var engine: Engine = undefined;
+    var kernel = try fixture.kernel(&engine, &store);
+    defer kernel.deinit();
+    const startup = try SubscriptionFixture.takeWork(&kernel, a);
+    defer kernel.sessions.endWorker(startup.session);
+    var core = try SubscriptionFixture.admit(&kernel, a, startup);
+    defer core.deinit();
+    var round: Kernel.RuntimeRound = .{ .kernel = &kernel, .work = startup };
+    defer round.deinit();
+    _ = try kernel.sessions.prepareFork(startup, &round.changes, "research", "Read the plan.");
+    try core.appendBatch(&.{.{ .continuation = "Open the activity" }}, &.{.{ .tool_result = .{ .call_id = "open-focus", .content = .{ .parts = &.{} } } }});
+    try round.commit(&core, null);
+
+    const activity = try SubscriptionFixture.takeWork(&kernel, a);
+    defer kernel.sessions.endWorker(activity.session);
+    var history = try SubscriptionFixture.admit(&kernel, a, activity);
+    defer history.deinit();
+    try history.appendBatch(&.{.{ .continuation = older }}, &.{});
+    for (recent) |item| try history.appendBatch(&.{item}, &.{});
+
+    engine.model.vtable = &.{ .next = ModelStub.next, .measure = ModelStub.measure, .prepareToolResult = undefined };
+    kernel.limits.compact_at_bytes = 4;
+    const input = (try kernel.prepareRequest(a, activity, &history)).ready;
+    try testing.expectEqual(@as(u64, 1), history.scope.epoch);
+    try testing.expectEqualDeep(recent[0..], input[2 .. input.len - 1]);
+    try testing.expectEqualStrings(reflection, history.records()[0].record.continuity.text);
+}
+
+test "a pending document can accompany completed exchanges across a continuity record" {
     const testing = std.testing;
     const probe = struct {
         fn measure(_: *anyopaque, _: Allocator, _: Model.Request) anyerror!Model.Measurement {
@@ -1795,11 +1877,11 @@ test "a pending document can accompany completed exchanges across a handover" {
         try history.appendBatch(&.{.{ .continuation = "Completed call" }}, &.{.{ .tool_result = .{ .call_id = "completed", .content = .{ .parts = &.{completed} } } }});
         try history.appendBatch(pending[0..1], pending[1..]);
 
-        const scope = try kernel.softCompactionScope(a, &history, .core);
-        var replacement = try history.withHandover(testing.allocator, .{
+        const scope = try kernel.softCompactionScope(a, &history);
+        var replacement = try history.withContinuity(testing.allocator, .{
             .focus_id = "core-1",
             .observed_at_unix_ms = 100,
-            .summary = "Older work.",
+            .text = "I value the older work.",
             .state = .{ .activities = &.{}, .callbacks = &.{} },
         }, scope);
         defer replacement.deinit();

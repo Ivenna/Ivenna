@@ -90,8 +90,8 @@ Each probe handler owns its connection. The kernel owns intake and session worke
 
 | Concept | Role and lifetime |
 | --- | --- |
-| Core session | Persistent coordinating session with its own history and input queue |
-| Activity session | Session forked by the core with inherited context, an assignment, and its own subsequent history and queue |
+| Main session | Persistent session for the main focus, with its own history and input queue |
+| Activity session | Session forked by the main focus with inherited context, an assignment, and its own subsequent history and queue |
 | `input` event | Correspondence observation with sender IDs, text, and observation time |
 | Delivery | An owned observation retained through durable admission and any transport receipt acknowledgement |
 | Activation | One worker running a session through model and tool rounds until the activation completes or is interrupted |
@@ -99,7 +99,7 @@ Each probe handler owns its connection. The kernel owns intake and session worke
 
 The [session registry](../packages/agent/src/sessions.zig) serializes queue and history changes. A worker retains its inference output and context while the tool batch executes, then commits the complete round before its model-round arena ends.
 
-The registry stores an internal numeric ID, a stable named `focus_id`, and an `Input.Role` of `core` or `activity` for each session. The role selects the available tools. Activity messages and endings go to the core. Subscription reports go to the focus that registered. Sleeping and interrupted sessions retain their identities and roles through context unloading and restart. Completed activities leave the registry; session IDs increase monotonically and are not reused. The core remains registered.
+The registry stores an internal numeric ID, a stable `focus_id`, and an `Input.Role` of `core` or `activity` for each session. The role selects the available tools. The input renderer uses `main` for the stored `core` role and presents the complete stored `focus_id`. Activity messages and endings go to the main focus. Subscription reports go to the focus that registered. Sleeping and interrupted sessions retain their identities and roles through context unloading and restart. The registry removes completed activities and issues monotonically increasing session IDs. The main focus remains registered.
 
 ### Scheduling and capacity
 
@@ -107,11 +107,11 @@ Each ready session can claim its own worker. The registry allows one activation 
 
 Separate [limits](running.md#configuration) bound registered sessions, ordinary deliveries buffered per session, and live host commands. The ordinary queue allowance counts correspondence, callbacks, assignments, and focus messages. Mail stays in its source when the destination is full. Startup and activity interruption notices can still enter the queue. The registry reads activity and subscription reports from their durable stores as it prepares model input.
 
-Sleeping activities retain their session slots. Completing an activity releases its slot. Forks and activity resumption are independent of space in the core's ordinary queue. Outstanding callback registrations and unread reports can grow with pending work.
+Sleeping activities retain their session slots. Completing an activity releases its slot. Forks and activity resumption are independent of space in the main focus's ordinary queue. Outstanding callback registrations and unread reports can grow with pending work.
 
 ### Message delivery
 
-Incoming correspondence enters the core's queue in intake order, independently of mail threads. The core also reads activity reports during admission. See [activity reports](#activity-reports) and [activation admission](#activation-admission).
+Incoming correspondence enters the main focus's queue in intake order, independently of mail threads. The main focus also reads activity reports during admission. See [activity reports](#activity-reports) and [activation admission](#activation-admission).
 
 The tool decoder reads the single field in `send.to` to select a destination variant. The kernel routes the complete ID to the mail sender, session registry, or channel registry. For a focus destination, the registry checks membership and queue capacity under its lock, then checkpoints the queued message with the calling focus's ID. The kernel renders the outcome as a tool reply. See [tool decoding](../packages/agent/src/tools.zig), [outgoing mail](#outgoing-mail), [local channels](#local-channels), and [sending outcomes](communication.md#sending-a-message).
 
@@ -127,9 +127,9 @@ Once the kernel confirms retirement, the transport removes the channel and wakes
 
 ## Activation admission
 
-The email adapter supplies correspondence and callback envelopes with optional opaque receipts. The agent routes correspondence to the core and callbacks to the registered session. A delivery owns its copy of the observation and any receipt needed to acknowledge it. See the [delivery and activation types](../packages/agent/src/work.zig).
+The email adapter supplies correspondence and callback envelopes with optional opaque receipts. The agent routes correspondence to the main focus and callbacks to the registered session. A delivery owns its copy of the observation and any receipt needed to acknowledge it. See the [delivery and activation types](../packages/agent/src/work.zig).
 
-At a model-round boundary, the registry puts any pending startup observation first. For the rest of the batch, it cycles through ordinary deliveries, subscription reports, and activity reports, starting at the focus's saved position. Only the core reads activity reports. The registry preserves arrival order within each source and reads reports in pages of 64. `Input.coalesceActivityReports` groups activity facts by focus before measurement.
+At a model-round boundary, the registry puts any pending startup observation first. For the rest of the batch, it cycles through ordinary deliveries, subscription reports, and activity reports, starting at the focus's saved position. Only the main focus reads activity reports. The registry preserves arrival order within each source and reads reports in pages of 64. `Input.coalesceActivityReports` groups activity facts by focus before measurement.
 
 The kernel measures how many encoded bytes the grouped observations add to the request. It extends the batch across report pages up to the observation batch target, checking the complete request against the adapter's limits. The first observation may exceed the batch target. If the full request with that observation exceeds an adapter limit, the kernel checks whether compaction can make room. See [context budgets](running.md#context-budgets) and [when compaction runs](#when-compaction-runs).
 
@@ -139,15 +139,15 @@ The worker renders the selected observations in the current turn and appends a r
 
 ## Activity forks
 
-The core's `open_focus` call reserves an activity identity and prepares its assignment. After every tool in the round returns, the worker appends the model output and replies to the core's history. Each activity opened in that round inherits a copy, including replies from calls that ran after `open_focus`. The registry publishes the core's updated history, the new sessions, and their queued assignments in one checkpoint. See [opening a focus](attention.md#opening-a-focus).
+The main focus's `open_focus` call reserves an activity identity and prepares its assignment. After every tool in the round returns, the worker appends the model output and replies to the main focus's history. Each activity opened in that round inherits a copy, including replies from calls that ran after `open_focus`. The registry publishes the main focus's updated history, the new sessions, and their queued assignments in one checkpoint. See [opening a focus](attention.md#opening-a-focus).
 
-The assignment enters the activity's first ordinary request through admission. Until then, even the opening tool exchange is inherited history, eligible for compaction. When restoring an activity, the registry treats the whole saved history as inherited if the assignment is still queued. Otherwise, the retained assignment marks the start of the activity's own history. Once compaction summarizes the assignment, the activity restores its history from its own handover. See [activation admission](#activation-admission), [assignment observations](input.md#assignments-and-reports), and the [context implementation](../packages/agent/src/context.zig).
+The assignment enters the activity's first ordinary request through admission. Until then, even the opening tool exchange is inherited history, eligible for compaction. When restoring an activity, the registry treats the whole saved history as inherited if the assignment is still queued. Otherwise, the retained assignment marks the start of the activity's own history. Once quiet reflection replaces the prefix through the assignment, restoration starts from the activity's own continuity note and any entries carried forward. See [activation admission](#activation-admission), [assignment observations](input.md#assignments-and-reports), and the [context implementation](../packages/agent/src/context.zig).
 
 ## Activity reports
 
-An ordinary activity response contributes one assistant message when it contains `output_text`, including an explicitly empty string. The registry records the source focus and the time it collected the response. If the response calls tools, the registry publishes the message before the first tool runs. The core can therefore receive the activity's stated intention even if execution stops before a tool result is saved. For a response without tool calls, the registry publishes the text at [round completion](#activation-and-session-completion).
+An ordinary activity response contributes one assistant message when it contains `output_text`, including an explicitly empty string. The registry records the source focus and the time it collected the response. If the response calls tools, the registry publishes the message before the first tool runs. The main focus can therefore receive the activity's stated intention even if execution stops before a tool result is saved. For a response without tool calls, the registry publishes the text at [round completion](#activation-and-session-completion).
 
-The [activity outbox](../packages/agent/src/reports.zig) stores each message and ending as a separate immutable record linked to its predecessor. An ending records when the runtime closed the activity and requests core attention even if the activity produced no text. Messages alone wait for the core's next ordinary input. The checkpoint selects unread records by storage group, head key, unread count, and ending count.
+The [activity outbox](../packages/agent/src/reports.zig) stores each message and ending as a separate immutable record linked to its predecessor. An ending records when the runtime closed the activity and calls for the main focus's attention even if the activity produced no text. Messages alone wait for the main focus's next ordinary input. The checkpoint selects unread records by storage group, head key, unread count, and ending count.
 
 At [admission](#activation-admission), history retains the grouped observations with their original times. The outbox advances by the number of individual records and endings consumed. The remaining records stay available even after their source activity ends. See [working history](running.md#working-history) for the storage cost of unread reports.
 
@@ -158,7 +158,7 @@ Tool replies lead to another round. For a response without tool calls, the regis
 | State after the response | Result for the focus |
 | --- | --- |
 | An observation requests further attention | The focus retains the response and continues its activation. |
-| The core has no work requesting attention | The core goes idle with the response in its retained history. |
+| The main focus has no work requesting attention | The main focus goes idle with the response in its retained history. |
 | An activity has no input ready and still has a pending callback or active subscription | The activity sleeps with its updated history until more work arrives. |
 | An activity has no input ready, pending callback, or active subscription | The activity ends. One checkpoint drops the session from saved history and selects the outbox records for its final message (if present) and its ending, in that order. |
 
@@ -170,7 +170,7 @@ At startup and after a withdrawal, the dispatcher checks sleeping activities. Qu
 
 An activation can end when admission cannot fit the next request, the model service rejects it, or the response cannot be used. The registry keeps the focus, its saved working history, and its registrations. It returns unadmitted deliveries and their receipts to the front of the queue. Unadmitted activity and subscription reports remain in their respective stores. If the model rejects a request after admission, its observations are already in history and receipt acknowledgement has finished.
 
-For an interrupted activity, one checkpoint records the unfinished activity and a `focus_interrupted` observation for the core. The worker releases the focus and an activity may unload its context. After failed admission the focus waits for fresh input or a restart. The registry counts arrivals received while the worker was busy and compares the latest subscription report sequence with the sequence it sampled when collecting the batch. If admission succeeded before inference failed, the queued work following that input can resume the focus. See [interrupted reasoning](attention.md#interrupted-reasoning).
+For an interrupted activity, one checkpoint records the unfinished activity and a `focus_interrupted` observation for the main focus. The worker releases the focus and an activity may unload its context. After failed admission the focus waits for fresh input or a restart. The registry counts arrivals received while the worker was busy and compares the latest subscription report sequence with the sequence it sampled when collecting the batch. If admission succeeded before inference failed, the queued work following that input can resume the focus. See [interrupted reasoning](attention.md#interrupted-reasoning).
 
 ## Event sources and callback admission
 
@@ -202,7 +202,7 @@ A `listen` process owns a SQLite connection for publication and holds a Linux op
 
 ## Working history and user messages
 
-[Context](../packages/agent/src/context.zig) owns retained events, complete native `Model.Item` exchanges, and handovers. It caches their rendered model input. Model output stays in opaque adapter continuation bytes, including reasoning. Tool replies keep their typed content. See [how history is stored and restored](#persistent-working-history).
+[Context](../packages/agent/src/context.zig) owns retained events, complete native `Model.Item` exchanges, and continuity notes. It caches their rendered model input. Ordinary model output stays in opaque adapter continuation bytes, including reasoning. Tool replies keep their typed content. See [how history is stored and restored](#persistent-working-history).
 
 Context puts the same embedded [system prompt](../packages/agent/src/system.md) before the selected history and current turn for every focus. The turn identifies the focus and its role. Engine selects tools separately. Request measurements include the prompt's encoded size for ordinary inference and compaction.
 
@@ -216,7 +216,7 @@ For an ordinary request, the kernel first selects history and observations that 
 
 Kernel calls inference and tool execution separately. The same worker owns the activation until the batch completes. Engine invokes the calls in order while other sessions can run their own batches concurrently. Unknown tools and invalid arguments become ordinary tool errors.
 
-Engine selects ordinary reasoning effort by role. Compaction uses the same summary effort for both roles. The Responses adapter encodes the selected value as `reasoning.effort` and uses the same encoder and limits for measurement and inference. See [compaction](../packages/agent/src/compaction.zig), the [Responses adapter](../packages/responses/src/provider.zig), and [model request settings](running.md#model-requests).
+Engine selects ordinary reasoning effort by role. Quiet reflection uses the same effort for both roles. The Responses adapter encodes the selected value as `reasoning.effort` and uses the same encoder and limits for measurement and inference. See [reflection](../packages/agent/src/reflection.zig), the [Responses adapter](../packages/responses/src/provider.zig), and [model request settings](running.md#model-requests).
 
 ### Model transport
 
@@ -232,7 +232,7 @@ The adapter sends the selected history with each inference request because DeepS
 
 Engine retries temporary unavailability during ordinary inference and compaction required by an adapter limit. The worker releases the attempt's temporary allocations and waits outside the registry lock. It retries with the same request, including the original observation time. Cancellation interrupts the exchange or the wait. A validated response can supply tool calls for execution. See [when model work stalls](running.md#when-model-work-stalls) for the retry schedule.
 
-A rejected ordinary inference interrupts the activation. The interruption observation describes the reason, such as a context-window limit or an incomplete response. The runtime logs HTTP diagnostics and exact limit measurements. See [how compaction handles rejection](#continuing-with-a-handover).
+A rejected ordinary inference interrupts the activation. The interruption observation describes the reason, such as a context-window limit or an incomplete response. The runtime logs HTTP diagnostics and exact limit measurements. See [how compaction handles rejection](#resuming-after-quiet-reflection).
 
 ### Tool results
 
@@ -246,7 +246,7 @@ Images travel in the function-call output as `input_image` parts. The encoder bu
 
 ## Bounded model context
 
-The kernel can compact older history before the next ordinary inference. A focus's pending continuation consists of its complete tool exchange awaiting inference, if present, and any unanswered observations already admitted to its history. Queued observations enter the ordinary request through [admission](#activation-admission).
+The kernel can make room in working history through quiet reflection before the next ordinary inference. A focus's pending continuation consists of its complete tool exchange awaiting inference, if present, and any unanswered observations already admitted to its history. Queued observations enter the ordinary request through [admission](#activation-admission).
 
 ### When compaction runs
 
@@ -254,42 +254,42 @@ The kernel considers soft compaction when the next ordinary request fits the ada
 
 The Responses adapter reads `usage.input_tokens`, which includes cached input. It derives a usage scope from the configured model name and base URL, trimming trailing slashes from the URL. On restart, the registry restores the saved count when the checkpoint and current model port supply the same usage scope. See the [model port](../packages/agent_contracts/src/model.zig), [Responses adapter](../packages/responses/src/provider.zig), and [DeepSeek Responses usage](https://api-docs.deepseek.com/guides/responses_api/#response-fields).
 
-When the count is unavailable, including after a fork or handover replacement, the kernel measures an ordinary request containing the eligible history, system prompt, tools, settings, and current turn metadata. Pending work and new observations count toward the full request size. If the only eligible record is a handover, the kernel considers shortening it only when the full request exceeds an adapter limit. See [adapter and model limits](content.md#model-request-checks).
+When the count is unavailable, including after a fork or history replacement, the kernel measures an ordinary request containing the eligible history, system prompt, tools, settings, and current turn metadata. Pending work and new observations count toward the full request size. If the only eligible record is a continuity note, the kernel considers rewriting it only when the full request exceeds an adapter limit. See [adapter and model limits](content.md#model-request-checks).
 
-### History used for a summary
+### History used for reflection
 
-Compaction carries admitted unanswered observations forward intact. It also preserves the pending tool exchange unless that exchange and the unanswered observations together exceed an adapter limit. In that case, the exchange can enter the summary. During soft compaction, the core can also retain up to two completed exchanges and their preceding observations when the additional history fits within 256 KiB and contains no file references.
+Compaction carries admitted unanswered observations forward intact. It also preserves the pending tool exchange unless that exchange and the unanswered observations together exceed an adapter limit. In that case, the exchange can enter the reflection. During soft compaction, either role can also retain up to two of its own completed exchanges and their preceding observations when the additional history fits within 256 KiB and contains no file references. Quiet reflection considers the older prefix being replaced.
 
 ### Sampling state and preparing the request
 
-The session registry reads `current` and samples runtime state under its lock. The kernel adds the sender's registered outgoing correspondent IDs for the core. See the [sampling implementation](../packages/agent/src/sessions.zig) and [fields supplied to each role](input.md#sampled-state).
+The session registry reads `current` and samples runtime state under its lock. The kernel adds the sender's registered outgoing correspondent IDs for the main focus. See the [sampling implementation](../packages/agent/src/sessions.zig) and [fields supplied to each role](input.md#sampled-state).
 
-`Context.summaryRequest` combines the system prompt and selected history with a summary turn carrying the instructions and state sample. The request uses the configured summary effort and offers no tools. See the [summary instructions](../packages/agent/src/compaction.md) and [handover contract](input.md#handover-generation-and-replacement).
+The reflection request combines the system prompt and selected history with a temporary `quiet_reflection` turn carrying the shared reflection instructions and state sample. It uses the configured reflection effort and offers no tools. See the [reflection instructions](../packages/agent/src/quiet_reflection.md) and [input contract](input.md#quiet-reflection-and-resumption).
 
-If the summary request contains media and exceeds an adapter limit, the runtime substitutes omission notices for images and file references in the request and measures it again. The request keeps tool-call IDs and the original text, including source descriptions. The substitution applies only to the summary request.
+If the reflection request contains media and exceeds an adapter limit, the runtime substitutes omission notices for images and file references in that request and measures it again. The request keeps tool-call IDs and the original text, including source descriptions.
 
-### Continuing with a handover
+### Resuming after quiet reflection
 
-The kernel accepts a summary response when it contains nonempty text and no tool calls. It pairs the text with the state and time sampled for that attempt, then measures the next ordinary request with the proposed handover. If that request fits, the registry starts a new epoch and saves the handover, the entries carried forward, and any newly admitted observations in one checkpoint. See the [ordinary turn layout](input.md#handover-generation-and-replacement) and [retention of earlier epochs](#history-retention).
+The kernel takes nonblank text from a reflection response without tool calls. It pairs the text as written with the focus ID and the state and time sampled for that attempt. The reflection turn and native response items are temporary. The kernel measures the next ordinary request with the proposed note. On acceptance, the registry starts a new epoch and saves the note, the entries carried forward, and any newly admitted observations in one checkpoint. See [resumption](input.md#quiet-reflection-and-resumption) and [retention of earlier epochs](#history-retention).
 
-Soft compaction tries one summary. The kernel tests a replacement with the observation batch already selected for ordinary inference. A failed summary or an oversized replacement leaves the original, fitting request available for inference.
+Soft compaction tries one reflection. The kernel tests a replacement with the observation batch already selected for ordinary inference and requires a smaller encoded request. A failed reflection or a replacement that saves no space uses the original, fitting request for inference.
 
-At a hard limit, the kernel checks whether removing older history would leave room for the first queued observation. If the observation still cannot fit, it stays queued. A new activity whose assignment alone exceeds the available space pauses before requesting a summary.
+At a hard limit, the kernel checks whether removing older history would leave room for the first queued observation. If the observation still cannot fit, it stays queued. A new activity whose assignment alone exceeds the available space pauses before requesting a reflection.
 
-If the kernel generates a handover, it tries the replacement with queued observations first. When only the handover and pending work fit, it commits that continuation. An unusable summary or an oversized replacement can prompt one revision with a fresh state sample. If the kernel cannot make room for the first queued observation, it can still continue pending work with the original history when that request fits. If no continuation fits, the worker interrupts the activation. See [interrupted activations](#interrupted-activations) and [inference retries](#model-transport).
+If the kernel generates a continuity note, it tries the replacement with queued observations first. When only the note and pending work fit, it commits that continuation. An unusable reflection or an oversized replacement can prompt one revision with a fresh state sample. If the kernel cannot make room for the first queued observation, it can still continue pending work with the original history when that request fits. If no continuation fits, the worker interrupts the activation. See [interrupted activations](#interrupted-activations) and [inference retries](#model-transport).
 
 ## Persistent working history
 
-The agent's [history persistence](../packages/agent/src/history.zig) stores immutable records and a checkpoint selecting each session's current history segment. A fork persists its copied entries in the activity's own storage group. Compaction advances a session's epoch and starts the new history with a handover while preserving identity and role.
+The agent's [history persistence](../packages/agent/src/history.zig) stores immutable records and a checkpoint selecting each session's current history segment. A fork persists its copied entries in the activity's own storage group. Compaction advances a session's epoch and starts the new history with a continuity note while preserving identity and role.
 
 | Term | Meaning |
 | --- | --- |
-| Session | A core or activity session with its own identity and role |
-| Segment | An append-only sequence identified by `Scope { session_id, epoch }`; a fork starts the activity's first segment and compaction starts a replacement |
+| Session | A main or activity session with its own identity and role |
+| Segment | An append-only sequence identified by `Scope { session_id, epoch }`. A fork starts the activity's first segment and compaction starts a replacement. |
 | Storage group | An opaque identifier used by `HistoryStore` to discover related immutable records, such as a session segment or report journal |
 | Committed chain | The checkpoint's selected records in one segment, identified by a head key and entry count |
 
-Each entry contains an event record, a handover, or a complete model/tool exchange. Inherited records keep their original focus references. See the [retained record contract](input.md#retained-records) and [tool result preparation](#tool-results).
+Each entry contains an event record, a continuity note, or a complete model/tool exchange. Inherited records keep their original focus references. See the [retained record contract](input.md#retained-records) and [tool result preparation](#tool-results).
 
 Working history and the activity outbox share a record codec for UTF-8 ZON bodies and SHA-256 content keys. The encoder can omit defaulted optional fields. An entry record contains the entry and its predecessor's key within the segment, or null for the first entry. The storage group and predecessor keys distinguish entries with equal payloads. Unread internal observations occupy a separate record in the session's current group. See the [record codec](../packages/agent/src/record_codec.zig).
 
@@ -311,17 +311,17 @@ The registry records a checkpoint save error before releasing its lock and propa
 
 Restoration follows the selected checkpoint's predecessor chains using record metadata, then fetches and decodes the selected bodies. The agent uses estimated stored sizes to group small records and fetch larger bodies individually. It validates record hashes, kinds, counts, and predecessor metadata. Matching physical duplicates can supply one logical record. A selected record that is missing, cannot be decoded, or fails validation prevents restoration.
 
-Owners of retained event and handover records must match the complete ID of the restoring focus or the core (`core-1`). A saved channel's opening focus ID must have a suffix below the next focus sequence. If the opener is still in the checkpoint, the recorded ID must match that session's complete ID.
+Owners of retained event and continuity records must match the complete ID of the restoring focus or the main focus (`core-1`). A saved channel's opening focus ID must have a suffix below the next focus sequence. If the opener is still in the checkpoint, the recorded ID must match that session's complete ID.
 
-The reader restores original image bytes from either raw-byte or Base64 records. For earlier file parts it requires the saved upload ID and discards the source bytes. For older handovers, it converts channel and subscription ID lists to sampled records with null descriptions and drops retired feed IDs. See [upgrading working history](upgrading.md#working-history-encoding).
+The reader restores original image bytes from either raw-byte or Base64 records. For earlier file parts it requires the saved upload ID and discards the source bytes. At the storage boundary, the reader restores text from earlier handover and continuity formats. It joins the two passages of a split continuity account in their original order. It converts old channel and subscription ID lists to sampled records with null descriptions and drops retired feed IDs. See [upgrading working history](upgrading.md#working-history-encoding).
 
-The checkpoint reader retires pending wakeup registrations from older builds and preserves the next callback ID. Intake can then acknowledge already published wakeup mail as a duplicate. Previously admitted wakeup observations and handover samples remain readable. [Callback admission](#event-sources-and-callback-admission) · [Retained callback fields](input.md#callback-observations) · [Upgrade guide](upgrading.md#removing-scheduled-attention)
+The checkpoint reader retires pending wakeup registrations from older builds and preserves the next callback ID. Intake can then acknowledge already published wakeup mail as a duplicate. Previously admitted wakeup observations and dated samples remain readable. [Callback admission](#event-sources-and-callback-admission) · [Retained callback fields](input.md#callback-observations) · [Upgrade guide](upgrading.md#removing-scheduled-attention)
 
-At startup the registry validates every selected session's history in temporary memory, then keeps a materialized context for the core. When it schedules an activity with no loaded context, it reads that activity's segment. The registry restores the outbox's unread metadata at startup and reads report bodies at admission. Delivery objects, receipts, worker ownership, and host process handles exist only at runtime. See [startup and interruption](#startup-and-interruption).
+At startup the registry validates every selected session's history in temporary memory, then keeps a materialized context for the main focus. When it schedules an activity with no loaded context, it reads that activity's segment. The registry restores the outbox's unread metadata at startup and reads report bodies at admission. Delivery objects, receipts, worker ownership, and host process handles exist only at runtime. See [startup and interruption](#startup-and-interruption).
 
 ### History retention
 
-Compaction replaces the session's selected segment. Once the replacement checkpoint is confirmed, its earlier epoch is no longer needed for continuation. A completed activity's history becomes unselected when its removal is confirmed in a checkpoint. The core's outbox retains that activity's unread messages and ending until they enter the core's history. Shared autonomous memory follows its own lifecycle. Context unloading preserves the current selection; previous checkpoints are not restoration roots.
+The confirmed checkpoint selects the current history segment. A confirmed compaction replaces that selection with the new epoch, including its continuity note. Confirming an activity's removal drops its history from the selection. The activity outbox retains its unread messages and ending until they enter the main focus's history. Unloading a context preserves its selection for resumption. Shared autonomous memory has its own lifecycle.
 
 Maintenance runs before reception opens. During intake, it runs after a poll once at least 60 seconds have passed since the previous maintenance run finished. The registry serializes maintenance with checkpoint saves. `HistoryStore.Retention` names every `(group, key)` selected by the confirmed checkpoint, including unread observations and outbox reports.
 
@@ -329,9 +329,9 @@ The [email adapter](#mail-retention) keeps selected records in History and retir
 
 ## Startup and interruption
 
-During assembly, the application discovers the mail account and checks memory with `inspect_memory_space`. Kernel initialization selects the mailbox checkpoint once. It passes that selection to the database for pairing and to the session registry for restoration. On first launch, the registry creates the core. [Kernel initialization](../packages/agent/src/kernel.zig) · [Instance database](#instance-database) · [Recovery state](#recovery-state)
+During assembly, the application discovers the mail account and checks memory with `inspect_memory_space`. Kernel initialization selects the mailbox checkpoint once. It passes that selection to the database for pairing and to the session registry for restoration. On first launch, the registry creates the main focus. [Kernel initialization](../packages/agent/src/kernel.zig) · [Instance database](#instance-database) · [Recovery state](#recovery-state)
 
-The registry restores pending internal observations before deciding whether a restored activity needs `startup`. A queued initial assignment supplies the first observation. For other activities, `was_running` or an unread internal observation triggers startup during restoration. An activity that was asleep with an empty queue receives startup when dispatched for new work. The checkpoint sets `was_running` for activities that were running or interrupted or had startup queued when saved. The core always receives startup with the sender's registered IDs. See the [startup input contract](input.md#startup-and-restart).
+The registry restores pending internal observations before deciding whether a restored activity needs `startup`. A queued initial assignment supplies the first observation. For other activities, `was_running` or an unread internal observation triggers startup during restoration. An activity that was asleep with an empty queue receives startup when dispatched for new work. The checkpoint sets `was_running` for activities that were running or interrupted or had startup queued when saved. The main focus always receives startup with the sender's registered IDs. See the [startup input contract](input.md#startup-and-restart).
 
 The registry publishes a fresh checkpoint before acknowledging subscription reports already admitted to working history. The kernel rebuilds the live channel registry from every saved registration. Pending receive requests are tied to connections from the earlier runtime, so programs reconnect and request fresh reads. [Checkpoint publication](#history-storage) · [Subscription delivery](#subscription-delivery) · [Local channels](#local-channels)
 
@@ -387,7 +387,7 @@ Intake reads callbacks only from `Ivenna Callbacks` and also requires a complete
 
 Ordinary intake finds unhandled correspondence outside `Ivenna Callbacks`, `Ivenna History`, Drafts, Junk, and Trash. Drafts and private callback, outbound, or state records are excluded. Read and starred state do not select input. [EmailTransport](../packages/email/src/email_transport.zig) projects supported From IDs, complete text, and observation time according to [communication](communication.md#incoming-email-text).
 
-`Inbox.Poll { messages, callbacks }` supplies independent allowances; zero disables a stream. The registry accounts for tracked receipts and pending callbacks and disables correspondence when the core is full. The adapter reads each oldest eligible prefix, paging past unsupported records, then merges by `receivedAt` without a combined cap. Correspondence backlog cannot consume callback allowance; FIFO applies within each selected stream and session queue, not account-wide across destinations. Rejected input stays stored.
+`Inbox.Poll { messages, callbacks }` supplies independent allowances; zero disables a stream. The registry accounts for tracked receipts and pending callbacks and disables correspondence when the main focus is full. The adapter reads each oldest eligible prefix, paging past unsupported records, then merges by `receivedAt` without a combined cap. Correspondence backlog cannot consume callback allowance; FIFO applies within each selected stream and session queue, not account-wide across destinations. Rejected input stays stored.
 
 After durable admission, acknowledgement sets `ivenna-handled` and moves the copy to Trash, preserving its read and answered state. The registry tracks receipts in memory. It defers a repeat receipt while the original delivery is in progress. If a later poll still offers an acknowledged receipt, the kernel repeats the same update. A new mail copy of an already consumed callback also needs acknowledgement. If the adapter cannot confirm the update after recovery, the kernel closes reception and exits. See the [inbox contract](../packages/agent_contracts/src/inbox.zig), [callback admission](#event-sources-and-callback-admission), and [reception](#service-and-reception).
 
@@ -451,7 +451,7 @@ The handler translates selected-entry filesystem and pattern failures into tool 
 
 ## Resource reads
 
-[Resources](../packages/resources/src/root.zig) provides `read_resource` to the core and every activity. Its [locator](../packages/resources/src/locator.zig) selects the reader for a host path or file URI, a web URL, or a snapshot URI. Resources and Host receive the same startup directory from the application and share a [path representation](../packages/agent_contracts/src/local_path.zig) that preserves filename bytes.
+[Resources](../packages/resources/src/root.zig) provides `read_resource` to the main focus and every activity. Its [locator](../packages/resources/src/locator.zig) selects the reader for a host path or file URI, a web URL, or a snapshot URI. Resources and Host receive the same startup directory from the application and share a [path representation](../packages/agent_contracts/src/local_path.zig) that preserves filename bytes.
 
 Local files and web snapshots share the [text page sizing and UTF-8 boundary rules](../packages/resources/src/window.zig). The [local reader](../packages/resources/src/local.zig) sizes directory pages by entry count and the space their URIs occupy. It reads entry names and types during iteration and looks up metadata on request or when the type is unknown.
 
