@@ -63,6 +63,18 @@ pub const Store = struct {
         return openFile(a, io, path, .initialize);
     }
 
+    /// Verify the mailbox checkpoint's catalog against the database before
+    /// `initialize` runs the schema migration. A mismatch returns without
+    /// touching the existing file, including a legacy application id, version,
+    /// or cursor column.
+    pub fn preflight(a: Allocator, io: std.Io, path: []const u8, expected_catalog: ?[32]u8) !void {
+        const stored = try sql.mailboxIdentity(a, io, path);
+        if (expected_catalog) |catalog| {
+            const existing = stored orelse return error.SubscriptionCatalogMismatch;
+            if (!std.mem.eql(u8, &existing, &catalog)) return error.SubscriptionCatalogMismatch;
+        }
+    }
+
     fn openFile(a: Allocator, io: std.Io, path: []const u8, mode: sql.OpenMode) !Store {
         const db = try sql.open(a, path, mode);
         errdefer db.close();
@@ -282,6 +294,115 @@ test "a reconnected listener can retry an accepted report after the focus receiv
     const later = try kernel.pending(a, activity, through, try kernel.latestSequence(activity), 8);
     try t.expectEqual(1, later.len);
     try t.expectEqualStrings(renewed, later[0].reference);
+}
+
+test "withdrawing the highest subscription does not let a replacement inherit its listener" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, sql.filename });
+    var kernel = try Store.initialize(a, t.io, path);
+    defer kernel.close();
+
+    _ = (try kernel.create(a, "core-1", "feed", "first")).subscription_id;
+    const latest = (try kernel.create(a, "core-1", "feed", "latest")).subscription_id;
+    var listener = try Listener.open(a, t.io, path, latest);
+    defer listener.close();
+    try t.expect(try kernel.withdraw(latest));
+
+    const replacement = (try kernel.create(a, "core-1", "replacement", "feed")).subscription_id;
+    try t.expect(!std.mem.eql(u8, latest, replacement));
+    try t.expect(std.mem.endsWith(u8, replacement, "-3"));
+    const sampled = try kernel.subscriptionsWithoutListeners(a, "core-1", 8);
+    try t.expectEqualStrings(replacement, sampled[0]);
+    // The withdrawn listener still holds the old id. Without AUTOINCREMENT,
+    // SQLite would reuse that id and the replacement would look connected.
+    try t.expectError(error.SubscriptionWithdrawn, Listener.open(a, t.io, path, latest));
+}
+
+test "legacy migration preserves a deleted subscription high-water id" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, sql.filename });
+
+    var store = try Store.initialize(a, t.io, path);
+    try sql.exec(store.db,
+        \\INSERT INTO subscriptions(id,name,focus_id,listener) VALUES(5,'old','core-1','gone');
+        \\DELETE FROM subscriptions WHERE id=5;
+        \\ALTER TABLE subscriptions ADD COLUMN cursor TEXT;
+    );
+    try sql.exec(store.db, std.fmt.comptimePrint("PRAGMA application_id={d}", .{std.mem.readInt(u32, "IVS2", .big)}));
+    try sql.exec(store.db, "PRAGMA user_version=0");
+    store.close();
+
+    var migrated = try Store.initialize(a, t.io, path);
+    defer migrated.close();
+    const ref = (try migrated.create(a, "core-1", "feed", "new")).subscription_id;
+    try t.expect(std.mem.endsWith(u8, ref, "-6"));
+}
+
+test "mailbox preflight leaves a legacy database unchanged on mismatch" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, sql.filename });
+
+    var store = try Store.initialize(a, t.io, path);
+    const identity = try store.identity();
+    try sql.exec(store.db,
+        \\INSERT INTO subscriptions(id,name,focus_id,listener) VALUES(3,'news','core-1','Release feed');
+        \\ALTER TABLE subscriptions ADD COLUMN cursor TEXT;
+        \\UPDATE subscriptions SET cursor='17';
+    );
+    try sql.exec(store.db, std.fmt.comptimePrint("PRAGMA application_id={d}", .{std.mem.readInt(u32, "IVS3", .big)}));
+    try sql.exec(store.db, "PRAGMA user_version=0");
+    store.close();
+
+    const legacy_id = std.mem.readInt(u32, "IVS3", .big);
+    var wrong = identity;
+    wrong[0] = if (wrong[0] == '0') '1' else '0';
+    try t.expectError(error.SubscriptionCatalogMismatch, Store.preflight(a, t.io, path, wrong));
+    {
+        const raw = try sql.openRawForTest(a, path);
+        defer raw.close();
+        try t.expectEqual(legacy_id, try sql.integer(raw, "PRAGMA application_id", .{}));
+        try t.expectEqual(0, try sql.integer(raw, "PRAGMA user_version", .{}));
+        try t.expectEqual(1, try sql.integer(raw, "SELECT count(*) FROM pragma_table_xinfo('subscriptions') WHERE name='cursor'", .{}));
+        try t.expectEqual(1, try sql.integer(raw, "SELECT count(*) FROM subscriptions WHERE id=3 AND cursor='17'", .{}));
+    }
+
+    // A matching catalog passes without migrating; `initialize` owns migration.
+    try Store.preflight(a, t.io, path, identity);
+    {
+        const raw = try sql.openRawForTest(a, path);
+        defer raw.close();
+        try t.expectEqual(legacy_id, try sql.integer(raw, "PRAGMA application_id", .{}));
+        try t.expectEqual(1, try sql.integer(raw, "SELECT count(*) FROM subscriptions WHERE cursor='17'", .{}));
+    }
+
+    const missing = try std.fs.path.join(a, &.{ dir, "missing.sqlite3" });
+    try t.expectError(error.SubscriptionCatalogMismatch, Store.preflight(a, t.io, missing, identity));
+    try t.expectError(error.FileNotFound, std.Io.Dir.cwd().access(t.io, missing, .{}));
+
+    var migrated = try Store.initialize(a, t.io, path);
+    defer migrated.close();
+    try t.expectEqual(std.mem.readInt(u32, "IVST", .big), try sql.integer(migrated.db, "PRAGMA application_id", .{}));
+    try t.expectEqual(1, try sql.integer(migrated.db, "PRAGMA user_version", .{}));
+    try t.expectEqual(0, try sql.integer(migrated.db, "SELECT count(*) FROM pragma_table_xinfo('subscriptions') WHERE name='cursor'", .{}));
+    try t.expectEqual(1, try sql.integer(migrated.db, "SELECT count(*) FROM subscriptions WHERE id=3", .{}));
 }
 
 test "listener presence follows independent sessions and active registrations" {

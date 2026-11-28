@@ -283,6 +283,14 @@ const Cache = struct {
     }
 };
 
+/// Read the pairing catalog from a raw mailbox checkpoint document. Serve
+/// uses this before the instance database migration so a mismatched mailbox
+/// cannot rewrite the existing database.
+pub fn subscriptionCatalog(a: Allocator, document: []const u8) ![32]u8 {
+    const Header = struct { subscription_catalog: [32]u8 };
+    return (try Codec.decodePrefix(Header, a, document)).subscription_catalog;
+}
+
 pub const Persistence = struct {
     allocator: Allocator,
     store: Store,

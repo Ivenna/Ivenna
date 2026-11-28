@@ -26,8 +26,6 @@ pub fn run(init: std.process.Init) !void {
     var channels = try ChannelRegistry.listen(init.gpa, io, data_directory);
     defer channels.deinit();
     const database_path = try std.fs.path.join(a, &.{ data_directory, state.filename });
-    var subscription_store = try state.subscriptions.Store.initialize(init.gpa, io, database_path);
-    defer subscription_store.close();
     var mail: email.Integration = undefined;
     try mail.init(init.gpa, io, .{
         .session_url = config.mail_session_url,
@@ -36,6 +34,16 @@ pub fn run(init: std.process.Init) !void {
         .correspondent_addresses = config.mail_correspondents,
     });
     defer mail.deinit();
+    // Check the mailbox pairing against the existing database before
+    // `initialize` migrates it. Starting with the wrong mailbox must leave the
+    // other instance's schema and cursor values untouched.
+    const checkpoint_catalog: ?[32]u8 = if (try mail.history().load(a)) |document|
+        try agent.subscriptionCatalog(a, document)
+    else
+        null;
+    try state.subscriptions.Store.preflight(init.gpa, io, database_path, checkpoint_catalog);
+    var subscription_store = try state.subscriptions.Store.initialize(init.gpa, io, database_path);
+    defer subscription_store.close();
     var memory_client: memory.Memory = .{ .io = io, .ssh_target = config.memory_ssh_target, .ssh_config = config.memory_ssh_config };
     try memory_client.checkAvailable(a);
     var host_env = try init.environ_map.clone(a);

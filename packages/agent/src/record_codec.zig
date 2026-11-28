@@ -27,6 +27,22 @@ pub fn decode(comptime T: type, a: Allocator, data: []const u8) !T {
     };
 }
 
+/// Decode a prefix of a larger document, ignoring fields that follow it.
+/// Startup reads the pairing catalog without materializing session records.
+pub fn decodePrefix(comptime T: type, a: Allocator, data: []const u8) !T {
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    return std.zon.parse.fromSlice(T, .{
+        .gpa = a,
+        .arena = a,
+        .source = try a.dupeSentinel(u8, data, 0),
+        .diagnostics = &diagnostics,
+        .ignore_unknown_fields = true,
+    }) catch |err| switch (err) {
+        error.ParseZon => error.InvalidHistory,
+        else => err,
+    };
+}
+
 pub fn digest(data: []const u8) Key {
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});

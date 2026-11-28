@@ -39,6 +39,30 @@ pub fn open(a: Allocator, path: []const u8, mode: OpenMode) !zqlite.Conn {
     return conn;
 }
 
+/// Read the mailbox binding identity without migrating or enforcing the
+/// current schema version. Startup compares it with the mailbox checkpoint
+/// before `open(.initialize)` is allowed to rewrite a legacy database.
+pub fn mailboxIdentity(a: Allocator, io: std.Io, path: []const u8) !?[32]u8 {
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    const path_z = try a.dupeSentinel(u8, path, 0);
+    defer a.free(path_z);
+    const conn = try connect(path_z, c.SQLITE_OPEN_READWRITE);
+    defer conn.close();
+    try checked(conn.busyTimeout(5000));
+    if (try integer(conn, "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mailbox_binding')", .{}) == 0)
+        return null;
+    const s = try statement(conn, "SELECT identity FROM mailbox_binding WHERE singleton=1", .{});
+    defer s.deinit();
+    if (!try checked(s.step())) return error.InvalidStateDatabase;
+    const id = try requiredText(s, 0);
+    if (id.len != 32) return error.InvalidStateDatabase;
+    return id[0..32].*;
+}
+
 fn connect(path: [:0]const u8, flags: c_int) !zqlite.Conn {
     var handle: ?*c.sqlite3 = null;
     const rc = c.sqlite3_open_v2(path.ptr, &handle, flags, null);
@@ -92,6 +116,15 @@ fn migrateSchema(conn: zqlite.Conn) !void {
         try exec(conn, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
     }
     try exec(conn, "COMMIT");
+}
+
+/// Test-only connection for inspecting a legacy database without migrating it.
+pub fn openRawForTest(a: Allocator, path: []const u8) !zqlite.Conn {
+    if (!@import("builtin").is_test) @compileError("only tests can open an unchecked database");
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArguments;
+    const path_z = try a.dupeSentinel(u8, path, 0);
+    defer a.free(path_z);
+    return connect(path_z, c.SQLITE_OPEN_READWRITE);
 }
 
 pub fn exec(conn: zqlite.Conn, query: [:0]const u8) !void {
