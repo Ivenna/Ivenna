@@ -214,16 +214,16 @@ When there are no new events, an ordinary turn contains only `current`. Retained
 
 ### Channel receivers and subscription listeners
 
-The lists report what the runtime found during the sample dated by `current.observed_at`. An open receiver session counts as connected between reads, and an open listener session between reports. A channel send requires a waiting read at the time of the handoff. [Channel sends](communication.md#sending-to-a-channel) · [Listener sessions](subscriptions.md#open-a-listener-session)
+The runtime samples connections when it prepares an ordinary turn. The notes apply to the listed IDs at `current.observed_at`. An open receiver session counts as connected between reads, and an open listener session between reports. A channel send requires a waiting read at the time of the handoff. [Channel sends](communication.md#sending-to-a-channel) · [Listener sessions](subscriptions.md#open-a-listener-session)
 
 | Field | Scope for the core | Scope for an activity |
 | --- | --- | --- |
 | `channels_without_receivers` | Channels across the instance | Channels opened by this activity |
 | `subscriptions_without_listeners` | Subscriptions registered by the core | Subscriptions registered by this activity |
 
-Each list includes up to eight IDs. The runtime omits empty lists and can omit both to fit the request. Use the sample only for the listed IDs and the current inference. The runtime samples connection status when an ordinary turn is already due.
+Each list includes up to eight IDs whose lack of a connection was confirmed. The runtime omits empty lists and can omit both lists to fit the request.
 
-After restart, the core receives a report accepted earlier. The sample shows that the subscription now lacks a listener and the open channel lacks a receiver.
+In this example, the core receives a report accepted before restart. At the time of this turn, the subscription has no open listener and the channel has no connected receiver.
 
 ```yaml
 current:

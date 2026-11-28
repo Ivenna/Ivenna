@@ -207,7 +207,7 @@ The executable embeds its model-facing resources and can run independently of th
 
 Give each kernel its own mailbox, `DATA_DIR`, and `SERVICE_ADDRESS`. If startup reports `AddressInUse`, check whether another process owns `SERVICE_ADDRESS` or a kernel is already running for the data directory.
 
-The kernel checks mail and memory, selects the mailbox checkpoint if one exists, and checks database pairing before applying any migration. It restores saved sessions or creates the core and completes storage maintenance before opening reception. Check readiness before sending a letter. The kernel writes diagnostics to standard error. [Startup and recovery](architecture.md#startup-and-interruption) · [Reception readiness](#service-status-and-reception)
+Wait for reception to open before sending a letter. The kernel writes startup diagnostics to standard error. [Reception readiness](#service-status-and-reception) · [Startup and recovery](architecture.md#startup-and-interruption)
 
 Startup reads and validates all selected session history, including sleeping sessions. Allow for the resulting I/O and temporary memory use when sizing the deployment. See [history restoration](architecture.md#saving-and-restoration) for context loading behavior.
 
@@ -286,7 +286,9 @@ A subscription report that cannot fit stays in the instance database. Withdrawin
 
 Send `SIGTERM`, or press `Ctrl+C` when running in a terminal, to close reception, cancel session work (including model recovery waits) and host commands, and wait for the runtime's tasks to end. Failure of a required service such as history storage, or an unrecoverable execution error, also stops the runtime. Diagnose the failure and restore any unavailable services before restarting.
 
-Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries. Keep access to the configured memory workspace and any host artifacts the work still needs. If startup reports `SubscriptionCatalogMismatch`, check both the instance database and the mailbox checkpoint. A bound database requires its paired checkpoint. [Backups and transfers](#backups-and-transfers)
+Run `ivenna serve` with the same mail account, `MAIL_ADDRESS`, and `DATA_DIR` to resume saved focuses and pending deliveries. Keep access to the configured memory workspace and any host artifacts the work still needs.
+
+If startup reports `SubscriptionCatalogMismatch`, verify that `<DATA_DIR>/state.sqlite3` and the checkpoint in the configured mailbox belong to the same instance. If either is missing, restore the mailbox and database from a matched backup. [Database pairing](architecture.md#instance-database) · [Backups and transfers](#backups-and-transfers)
 
 A checkpoint whose publication was unconfirmed can still be selected on restart. Startup confirms a fresh checkpoint for the restored state before reception opens. See [startup recovery](architecture.md#startup-and-interruption).
 
@@ -376,7 +378,9 @@ Copy the listeners' saved source positions before taking the database backup. A 
 
 To restore an instance, stop the kernel, subscription listeners, and any channel receivers that reconnect automatically. Move the current database and any accompanying SQLite journal, write-ahead log, or shared-memory files aside. Restore the database and mailbox from the matched backup.
 
-Resume listeners using their restored subscription IDs. Restore their schedules and source progress from the corresponding backup. Listeners that can replay from an earlier position can use the original report keys. Reuse restored channel IDs when they still identify the intended channels. If the backup predates a channel registration, open a replacement channel and give its ID to the receiver. See [channel lifetimes](communication.md#channel-lifetimes).
+Restore each listener's schedule and source position from the corresponding backup before resuming it with its restored subscription ID. Listeners that can replay from an earlier position can use the original report keys. [Resuming at the source](subscriptions.md#resume-at-the-source)
+
+Start `ivenna serve` with the restored mailbox and database before reconnecting channel receivers. Reuse restored channel IDs when they still identify the intended channels. If the backup predates a channel registration, open a replacement channel and give its ID to the receiver. [Channel lifetimes](communication.md#channel-lifetimes)
 
 History and callback mail are JMAP Email objects. A backup or transfer used for continuation must preserve the selected checkpoint, every session and outbox record it selects from `Ivenna History`, and pending mail in `Ivenna Callbacks`.
 

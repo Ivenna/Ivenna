@@ -108,12 +108,6 @@ pub const Registry = struct {
         subscriptions: *Subscriptions.Store,
         startup: Startup,
     ) !Registry {
-        const binding = try subscriptions.binding();
-        const subscription_catalog = binding.identity;
-        if (startup_history.subscriptionCatalog()) |checkpoint_catalog| {
-            if (!std.mem.eql(u8, &checkpoint_catalog, &subscription_catalog)) return error.SubscriptionCatalogMismatch;
-        } else if (binding.bound) return error.SubscriptionCatalogMismatch;
-
         const history = startup_history.store;
         var self: Registry = .{
             .allocator = allocator,
@@ -121,7 +115,7 @@ pub const Registry = struct {
             .max_sessions = max_sessions,
             .max_pending = max_pending,
             .subscriptions = subscriptions,
-            .subscription_catalog = subscription_catalog,
+            .subscription_catalog = startup_history.subscriptionCatalog() orelse try subscriptions.identity(),
             .usage_scope = startup.usage_scope,
             .history = .init(allocator, history),
             .reports = try Reports.Outbox.init(allocator, history, null),
@@ -572,12 +566,9 @@ pub const Registry = struct {
             const has_receiver = (try transport.hasReceiver(channel.id)) orelse continue;
             if (!has_receiver) try channel_ids.append(a, try a.dupe(u8, channel.id));
         }
-        // Connection status is advisory. A busy, full, or unavailable state
-        // store must not abort a turn whose request is already assembled;
-        // structural corruption and cancellation remain fatal.
         const subscription_ids = self.subscriptions.subscriptionsWithoutListeners(a, session.focus_id, limit) catch |err| switch (err) {
-            error.StateStoreBusy, error.StateStoreFull, error.StateStorageFailed => blk: {
-                std.log.warn("could not sample subscription listeners for '{s}': {s}", .{ session.focus_id, @errorName(err) });
+            error.StateStoreBusy => blk: {
+                std.log.warn("subscription registrations are busy while sampling listeners for '{s}'", .{session.focus_id});
                 break :blk &.{};
             },
             else => return err,
@@ -1110,101 +1101,6 @@ fn initTestRegistry(storage: *TestStore, subscriptions: *Subscriptions.Store, st
     defer scratch.deinit();
     const selected = try StartupHistory.load(scratch.allocator(), storage.port());
     return Registry.init(testing.allocator, testing.io, 2, 3, selected, subscriptions, startup);
-}
-
-test "startup republishes the checkpoint selected for database pairing" {
-    const testing = std.testing;
-    var storage: TestStore = .{};
-    defer storage.arena.deinit();
-    var temporary = testing.tmpDir(.{});
-    defer temporary.cleanup();
-    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-    const path = try temporary.dir.realPathFileAlloc(testing.io, ".", a);
-    const database = try std.fs.path.join(a, &.{ path, @import("instance_state").filename });
-    {
-        var subscriptions = try Subscriptions.Store.initialize(a, testing.io, database, null);
-        defer subscriptions.close();
-        var registry = try initTestRegistry(&storage, &subscriptions, .{});
-        defer registry.deinit();
-    }
-    const saved = storage.checkpoint.?;
-    const saves = storage.saves;
-    const selected = try StartupHistory.load(a, storage.port());
-    var subscriptions = try Subscriptions.Store.initialize(a, testing.io, database, selected.subscriptionCatalog());
-    defer subscriptions.close();
-    // Changes to the mailbox after selection cannot change the restored checkpoint.
-    storage.checkpoint = null;
-    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, selected, &subscriptions, .{});
-    defer registry.deinit();
-    try testing.expectEqual(saves + 1, storage.saves);
-    try testing.expectEqualStrings(saved, storage.checkpoint.?);
-}
-
-test "startup rejects a bound subscription store without a checkpoint" {
-    const testing = std.testing;
-    var storage: TestStore = .{};
-    defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
-    defer subscriptions.close();
-    try subscriptions.markBound();
-
-    try testing.expectError(error.SubscriptionCatalogMismatch, initTestRegistry(&storage, &subscriptions, .{}));
-    try testing.expectEqual(0, storage.saves);
-    try testing.expect(try subscriptions.isBound());
-}
-
-test "startup rejects a subscription store that does not match the checkpoint" {
-    const testing = std.testing;
-    var storage: TestStore = .{};
-    defer storage.arena.deinit();
-    const a = storage.arena.allocator();
-
-    var checkpoint_store = try Subscriptions.Store.openInMemory(testing.allocator);
-    defer checkpoint_store.close();
-    const checkpoint_catalog = try checkpoint_store.identity();
-    try storage.port().save(try std.mem.concat(a, u8, &.{
-        \\.{ .subscription_catalog =
-        ,
-        try @import("record_codec.zig").encode(a, checkpoint_catalog),
-        \\, .next_session_id = 2, .next_callback_id = 1, .next_command_id = 1,
-        \\   .sessions = .{.{ .session_id = 1, .focus_id = "core-1", .role = .core, .was_running = false,
-        \\       .subscription_through = 1, .epoch = 0, .group = "core", .head = null, .count = 0, .observations = null }},
-        \\   .callbacks = .{}, .activity_reports = null,
-        \\}
-        ,
-    }));
-
-    var other = try Subscriptions.Store.openInMemory(testing.allocator);
-    defer other.close();
-    const created = try other.create(a, "core-1", "feed", "watch changes");
-    try other.publishInMemory(created.subscription_id, .{ .key = "post-1", .text = "Keep me" }, 10);
-    try testing.expectEqual(1, try other.latestSequence("core-1"));
-
-    const saves = storage.saves;
-    try testing.expectError(error.SubscriptionCatalogMismatch, initTestRegistry(&storage, &other, .{}));
-    try testing.expectEqual(saves, storage.saves);
-    try testing.expectEqual(1, try other.latestSequence("core-1"));
-    try testing.expect(!try other.isBound());
-
-    // The catalog check must run before restore: this checkpoint is otherwise
-    // invalid, so a late guard would fail with InvalidHistory instead.
-    var malformed: TestStore = .{};
-    defer malformed.arena.deinit();
-    const malformed_a = malformed.arena.allocator();
-    try malformed.port().save(try std.mem.concat(malformed_a, u8, &.{
-        \\.{ .subscription_catalog =
-        ,
-        try @import("record_codec.zig").encode(malformed_a, checkpoint_catalog),
-        \\, .next_session_id = 2, .next_callback_id = 1, .next_command_id = 1,
-        \\   .sessions = .{.{ .session_id = 1, .focus_id = "core-1", .role = .core, .was_running = false,
-        \\       .subscription_through = 0, .epoch = 0, .group = "", .head = null, .count = 0, .observations = null }},
-        \\   .callbacks = .{}, .activity_reports = null,
-        \\}
-        ,
-    }));
-    try testing.expectError(error.SubscriptionCatalogMismatch, initTestRegistry(&malformed, &other, .{}));
 }
 
 test "an interrupted activation retains its receipts and only fresh arrivals wake it" {

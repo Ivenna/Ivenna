@@ -6,13 +6,13 @@ A listener sends reports to the focus that subscribed. See [registering a subscr
 
 Start `ivenna subscription listen SUBSCRIPTION_ID` as a child process with the ID returned by `subscribe`. In an Ivenna host command, use the executable in `IVENNA`. For an independent listener, see [listener deployment](running.md#subscription-listeners).
 
-Wait for the JSON string `"ready"` on stdout before sending reports. On startup failure, the command exits with status 1 and may write a receipt such as `"withdrawn"` for an unknown or withdrawn ID. [Receipt meanings](#write-receipts-and-recovery)
+Wait for the JSON string `"ready"` on stdout before sending reports. If the session cannot open, the command exits with status 1. The receipt for an unknown or withdrawn ID is `"withdrawn"`. [Receipt meanings](#write-receipts-and-recovery)
 
 Keep stdin and stdout open for as long as you use the session. Several sessions may use the same subscription. Each counts as connected while open, including between reports. See [listener sessions in the current turn](input.md#channel-receivers-and-subscription-listeners).
 
 ## Publish an observation
 
-After receiving `"ready"`, write reports as JSON lines to stdin and read one JSON receipt per report from stdout.
+After receiving `"ready"`, write reports as JSON lines to stdin and read their JSON receipts from stdout.
 
 ```json
 {"key":"release-v2.4.0","text":"Stable release v2.4.0 is available"}
@@ -40,7 +40,9 @@ After `"ready"`, receipts report line outcomes in input order.
 
 Close stdin to finish with status 0 after the final report. The command processes a final nonempty line even without a newline.
 
-If writing a receipt fails, the command exits with status 1. A report may already be saved when its receipt is missing. Reconnect if needed and send the same report with its original subscription ID and key.
+If writing a receipt fails, the command exits with status 1.
+
+If a receipt is missing, the report may already be saved. Reconnect if the session ended, then resend the same report with its original subscription ID and key. A retry can confirm acceptance while that subscription remains active.
 
 ## Resume at the source
 

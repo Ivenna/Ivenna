@@ -43,8 +43,7 @@ pub const Kernel = struct {
         sender: Communication.Sender,
         channels: Channels,
         callbacks: contracts.Callback.Publisher,
-        history: StartupHistory,
-        subscriptions: *Subscriptions.Store,
+        history: contracts.HistoryStore,
     };
 
     pub const Config = struct {
@@ -54,7 +53,32 @@ pub const Kernel = struct {
         max_pending_events: usize,
     };
 
-    pub fn init(allocator: Allocator, io: std.Io, dependencies: Dependencies, config: Config) !Kernel {
+    /// Initialize the caller's unopened store and borrow it until deinit.
+    /// The caller closes the store after deinitializing the kernel.
+    pub fn init(
+        allocator: Allocator,
+        io: std.Io,
+        dependencies: Dependencies,
+        config: Config,
+        database_path: []const u8,
+        subscriptions: *Subscriptions.Store,
+    ) !Kernel {
+        var scratch = std.heap.ArenaAllocator.init(allocator);
+        defer scratch.deinit();
+        const history = try StartupHistory.load(scratch.allocator(), dependencies.history);
+        subscriptions.* = try Subscriptions.Store.initialize(allocator, io, database_path, history.subscriptionCatalog());
+        errdefer subscriptions.close();
+        return initSelected(allocator, io, dependencies, config, history, subscriptions);
+    }
+
+    fn initSelected(
+        allocator: Allocator,
+        io: std.Io,
+        dependencies: Dependencies,
+        config: Config,
+        history: StartupHistory,
+        subscriptions: *Subscriptions.Store,
+    ) !Kernel {
         var kernel: Kernel = .{
             .allocator = allocator,
             .io = io,
@@ -70,8 +94,8 @@ pub const Kernel = struct {
                 io,
                 config.max_sessions,
                 config.max_pending_events,
-                dependencies.history,
-                dependencies.subscriptions,
+                history,
+                subscriptions,
                 .{
                     .correspondents = dependencies.sender.registered_correspondents,
                     .usage_scope = dependencies.engine.model.usage_scope,
@@ -549,6 +573,7 @@ const TestStore = @import("test_history.zig").TestStore;
 const SubscriptionFixture = struct {
     const testing = std.testing;
     const empty_response: Model.Response = .{ .output = &.{}, .calls = &.{}, .text = null };
+    const config: Kernel.Config = .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 };
     storage: TestStore = .{},
     correspondents: []const []const u8 = &.{},
     usage_scope: ?[32]u8 = null,
@@ -562,7 +587,7 @@ const SubscriptionFixture = struct {
         self.storage.arena.deinit();
     }
 
-    fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *Subscriptions.Store) !Kernel {
+    fn dependencies(self: *SubscriptionFixture, engine: *Engine) Kernel.Dependencies {
         engine.* = .{
             .allocator = testing.allocator,
             .io = testing.io,
@@ -574,11 +599,8 @@ const SubscriptionFixture = struct {
             .shared_tools = &.{},
             .activity_tools = &.{},
         };
-        var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-        defer scratch.deinit();
-        return Kernel.init(testing.allocator, testing.io, .{
+        return .{
             .engine = engine,
-            .subscriptions = subscriptions,
             .inbox = undefined,
             .sender = .{ .context = undefined, .submit = undefined, .registered_correspondents = self.correspondents },
             .channels = .{
@@ -592,8 +614,16 @@ const SubscriptionFixture = struct {
                 },
             },
             .callbacks = undefined,
-            .history = try StartupHistory.load(scratch.allocator(), self.storage.port()),
-        }, .{ .limits = .{}, .poll_interval_ms = 1, .max_sessions = 3, .max_pending_events = 3 });
+            .history = self.storage.port(),
+        };
+    }
+
+    fn kernel(self: *SubscriptionFixture, engine: *Engine, subscriptions: *Subscriptions.Store) !Kernel {
+        const ports = self.dependencies(engine);
+        var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+        defer scratch.deinit();
+        const history = try StartupHistory.load(scratch.allocator(), ports.history);
+        return Kernel.initSelected(testing.allocator, testing.io, ports, config, history, subscriptions);
     }
 
     fn trySendToChannel(context: *anyopaque, id: []const u8, text: []const u8) !Channels.SendOutcome {
@@ -688,6 +718,36 @@ const SubscriptionFixture = struct {
         return std.json.parseFromSliceLeaky(std.json.Value, a, reply.parts[0].text, .{});
     }
 };
+
+test "startup republishes the checkpoint selected for database pairing" {
+    const testing = std.testing;
+    var fixture: SubscriptionFixture = .{};
+    defer fixture.deinit();
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const a = fixture.storage.arena.allocator();
+    const directory = try temporary.dir.realPathFileAlloc(testing.io, ".", a);
+    const database_path = try std.fs.path.join(a, &.{ directory, InstanceState.filename });
+    var engine: Engine = undefined;
+    const ports = fixture.dependencies(&engine);
+    var subscriptions: Subscriptions.Store = undefined;
+    const config = SubscriptionFixture.config;
+    {
+        var kernel = try Kernel.init(testing.allocator, testing.io, ports, config, database_path, &subscriptions);
+        defer subscriptions.close();
+        defer kernel.deinit();
+    }
+
+    const saved = fixture.storage.checkpoint.?;
+    const loads = fixture.storage.loads;
+    const saves = fixture.storage.saves;
+    var kernel = try Kernel.init(testing.allocator, testing.io, ports, config, database_path, &subscriptions);
+    defer subscriptions.close();
+    defer kernel.deinit();
+    try testing.expectEqual(loads + 1, fixture.storage.loads);
+    try testing.expectEqual(saves + 1, fixture.storage.saves);
+    try testing.expectEqualStrings(saved, fixture.storage.checkpoint.?);
+}
 
 test "intake closes reception if it cannot acknowledge a new copy of a consumed callback" {
     const testing = std.testing;
@@ -926,16 +986,6 @@ test "ordinary turns refresh current connection status and give observations pri
     const summary_turn = summary[summary.len - 1].message.text;
     try testing.expect(std.mem.indexOf(u8, summary_turn, "channels_without_receivers:") == null);
     try testing.expect(std.mem.indexOf(u8, summary_turn, "subscriptions_without_listeners:") == null);
-
-    // A transient storage read failure drops only the advisory subscription
-    // sample; the channel sample and the prepared request still proceed.
-    fixture.receiver_sample = false;
-    store.failNextSampleForTest(error.StateStorageFailed);
-    const storage_degraded = (try kernel.prepareRequest(a, core.work, &history)).ready;
-    const storage_degraded_turn = storage_degraded[storage_degraded.len - 1].message.text;
-    try testing.expect(std.mem.indexOf(u8, storage_degraded_turn, "channels_without_receivers:") != null);
-    try testing.expect(std.mem.indexOf(u8, storage_degraded_turn, channel_id) != null);
-    try testing.expect(std.mem.indexOf(u8, storage_degraded_turn, "subscriptions_without_listeners:") == null);
 
     // A damaged registration is a store failure, independent of listener presence.
     try store.db.execNoArgs(

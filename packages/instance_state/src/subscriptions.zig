@@ -58,9 +58,6 @@ pub const Listener = struct {
 pub const Store = struct {
     db: zqlite.Conn,
     listener_presence: ?ListenerPresence,
-    /// Tests can force the next listener sample to fail without corrupting
-    /// the database. Always null in production.
-    test_sample_failure: ?anyerror = null,
 
     /// Open the database paired with the selected mailbox checkpoint and
     /// install or migrate its schema. A checkpoint requires an existing file.
@@ -94,27 +91,8 @@ pub const Store = struct {
         return self.db.changes() != 0;
     }
 
-    pub const Binding = struct {
-        identity: [32]u8,
-        bound: bool,
-    };
-
-    pub fn binding(self: *Store) !Binding {
-        const value = try sql.mailboxBinding(self.db);
-        return .{ .identity = value.identity, .bound = value.bound };
-    }
-
     pub fn identity(self: *Store) ![32]u8 {
-        return (try self.binding()).identity;
-    }
-
-    pub fn failNextSampleForTest(self: *Store, err: anyerror) void {
-        if (!@import("builtin").is_test) @compileError("only tests can inject sample failures");
-        self.test_sample_failure = err;
-    }
-
-    pub fn isBound(self: *Store) !bool {
-        return (try self.binding()).bound;
+        return (try sql.mailboxBinding(self.db)).identity;
     }
 
     pub fn markBound(self: *Store) !void {
@@ -162,10 +140,6 @@ pub const Store = struct {
     }
 
     pub fn subscriptionsWithoutListeners(self: *Store, a: Allocator, focus_id: []const u8, limit: usize) ![]const []const u8 {
-        if (@import("builtin").is_test) if (self.test_sample_failure) |err| {
-            self.test_sample_failure = null;
-            return err;
-        };
         const s = try sql.statement(self.db, "SELECT id,reference FROM subscriptions WHERE focus_id=? ORDER BY id DESC", .{focus_id});
         defer s.deinit();
         var references: std.ArrayList([]const u8) = .empty;

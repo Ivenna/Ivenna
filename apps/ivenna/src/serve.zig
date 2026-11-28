@@ -71,27 +71,19 @@ pub fn run(init: std.process.Init) !void {
         .reasoning = config.llm_reasoning,
     };
     var subscription_store: state.subscriptions.Store = undefined;
-    var kernel = startup: {
-        var scratch = std.heap.ArenaAllocator.init(init.gpa);
-        defer scratch.deinit();
-        const history = try agent.StartupHistory.load(scratch.allocator(), mail.history());
-        subscription_store = try state.subscriptions.Store.initialize(init.gpa, io, database_path, history.subscriptionCatalog());
-        errdefer subscription_store.close();
-        break :startup try agent.Kernel.init(init.gpa, io, .{
-            .engine = &engine,
-            .inbox = mail.inbox(),
-            .sender = mail.sender(),
-            .channels = channels.port(),
-            .history = history,
-            .callbacks = mail.callbackPublisher(),
-            .subscriptions = &subscription_store,
-        }, .{
-            .limits = config.context_limits,
-            .poll_interval_ms = config.mail_poll_interval_ms,
-            .max_sessions = config.max_sessions,
-            .max_pending_events = config.max_pending_events,
-        });
-    };
+    var kernel = try agent.Kernel.init(init.gpa, io, .{
+        .engine = &engine,
+        .inbox = mail.inbox(),
+        .sender = mail.sender(),
+        .channels = channels.port(),
+        .history = mail.history(),
+        .callbacks = mail.callbackPublisher(),
+    }, .{
+        .limits = config.context_limits,
+        .poll_interval_ms = config.mail_poll_interval_ms,
+        .max_sessions = config.max_sessions,
+        .max_pending_events = config.max_pending_events,
+    }, database_path, &subscription_store);
     defer subscription_store.close();
     defer kernel.deinit();
     const action: std.posix.Sigaction = .{

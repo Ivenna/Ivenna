@@ -9,6 +9,7 @@ pub const TestStore = struct {
     groups: usize = 0,
     records: std.ArrayList(Store.Record) = .empty,
     checkpoint: ?[]const u8 = null,
+    loads: usize = 0,
     saves: usize = 0,
     fail_save: SaveFailure = .none,
 
@@ -26,6 +27,7 @@ pub const TestStore = struct {
 
     fn load(context: *anyopaque, a: Allocator) anyerror!?[]const u8 {
         const self: *TestStore = @ptrCast(@alignCast(context));
+        self.loads += 1;
         return if (self.checkpoint) |body| try a.dupe(u8, body) else null;
     }
 

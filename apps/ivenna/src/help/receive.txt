@@ -16,4 +16,5 @@ Ivenna host commands inherit DATA_DIR and can run
 
 An unknown channel ID, a failed connection, or a lost connection before the
 closing reply produces an error on stderr and exit status 1.
-See docs/running.md#channel-receivers in the Ivenna repository for deployment.
+See docs/communication.md#receiving-from-a-channel for the receiver protocol
+and docs/running.md#channel-receivers for deployment.
