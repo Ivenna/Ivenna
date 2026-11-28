@@ -196,7 +196,7 @@ pub const Host = struct {
         const needs_handoff = !job.settled;
         self.mutex.unlock(self.shell.io);
         if (needs_handoff) {
-            const registration = try registrar.open(a, args.name.bytes, .{ .host = .{ .command_id = job.command_id } });
+            const registration = try registrar.open(a, args.name.bytes, job.command_id);
             try self.mutex.lock(self.shell.io);
             job.callback_id = registration.id;
             job.retained = true;

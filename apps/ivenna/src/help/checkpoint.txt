@@ -1,8 +1,0 @@
-ivenna subscription checkpoint SUBSCRIPTION_ID
-
-Save the listener's position without queuing an observation. Send the cursor
-change as one JSON object on stdin. This example skips item 18 after the listener
-has saved position "17".
-
-  printf '%s\n' '{"from":"17","to":"18"}' |
-    ivenna subscription checkpoint 'release-watch-1'

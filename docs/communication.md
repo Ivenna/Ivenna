@@ -74,49 +74,46 @@ If saving the checkpoint fails, the runtime stops with the channel inactive. On 
 
 ### Receiving from a channel
 
-Run `ivenna receive CHANNEL_ID` to wait for one message. In an Ivenna host command, use the executable path in `IVENNA`. For a receiver launched independently, see [receiver setup](running.md#channel-receivers).
+Run `ivenna channel receive CHANNEL_ID` before sending to the channel. An Ivenna host command can use the executable in `IVENNA`. For an independent receiver, see [receiver setup](running.md#channel-receivers).
 
 ```sh
 channel_id='task-input-18'
-"$IVENNA" receive "$channel_id"
+"$IVENNA" channel receive "$channel_id" | ./handle-messages
 ```
 
-Use `--timeout MS` to set a positive wait in milliseconds. A completed single read writes one JSON line to stdout and exits with status 0.
+Here `handle-messages` reads one JSON object per line from the receiver's stdout.
 
-| JSON on stdout | Meaning |
-| --- | --- |
-| `{"status":"message","text":"/work/ready.csv"}` | One message was read. |
-| `{"status":"timeout"}` | The wait ended before a message arrived. |
-| `{"status":"closed"}` | The channel closed before the read matched a message or timed out. |
-
-Use `--follow` to stream one `message` record per line. When the channel closes, the follower writes any message already handed off and ends the stream with status 0.
-
-```sh
-"$IVENNA" receive "$channel_id" --follow | ./handle-messages
+```json
+{"text":"/work/ready.csv"}
 ```
 
-Here `handle-messages` reads JSON lines from stdin. The `receive` command flushes each line before requesting the next read. A full pipe delays that request. In that gap, a send can return `channel_would_block` if no other receiver is waiting.
+The receiver flushes each line before requesting the next message. If the output pipe is full, the receiver stays connected while it waits to write. A send can return `channel_would_block` until a receiver can take the message. See [send outcomes](#sending-to-a-channel).
 
-If the output pipe closes during a wait or write, either mode exits with status 0, possibly without a complete line for the current read. An unknown ID on the initial request or an unavailable channel service produces a diagnostic on stderr and exit status 1. Run `ivenna receive --help` for syntax and limits.
+After Ivenna closes the channel, the receiver writes any message already handed off and exits with status 0 when it reads the closing reply. Closing the receiver's output pipe also ends the process with status 0. If the pipe closes during a write, the reader may receive a partial line.
+
+An unknown channel ID, a failed connection, or a lost connection before the closing reply produces an error on stderr and exit status 1. The kernel can disconnect before sending the closing reply if the socket stays full. See [local channel handling](architecture.md#local-channels).
 
 ### Sending to a channel
 
-While a program is waiting to receive, call `send` with the complete ID in `to.channel_id` and up to 4,096 UTF-8 bytes of text.
+Call `send` with the complete ID in `to.channel_id` and up to 4,096 UTF-8 bytes of text.
 
 ```json
 {"to":{"channel_id":"task-input-18"},"text":"/work/ready.csv"}
 ```
 
-`send` returns without waiting for a receiver. The `accepted` status confirms that the runtime handed the message to a waiting receive request. A subscription report can tell a focus how the program handled it. See [reporting after a channel read](subscriptions.md#reporting-after-a-channel-read).
+`send` attempts an immediate handoff to one waiting receiver. The `accepted` status confirms the handoff. The receiving program can report how it handled the message through a subscription. See [reporting after a channel read](subscriptions.md#reporting-after-a-channel-read).
 
 ```json
 {"result":{"channel_id":"task-input-18","status":"accepted"}}
 ```
 
+If the call returns one of these errors, the message stays unsent and unqueued.
+
 | Send error | Meaning |
 | --- | --- |
-| `channel_would_block` | The message remains unsent and unqueued. The registry was busy or no waiting request accepted the message. You can retry when a receiver is waiting. |
-| `unknown_channel` | The lookup found no open channel for the supplied ID. |
+| `channel_no_receiver` | No receiver was connected when the runtime checked. Start or reconnect a receiver before retrying. |
+| `channel_would_block` | The channel service was busy or connected receivers could not take the message yet. Retry when a receiver is waiting. |
+| `unknown_channel` | No open channel matches the supplied ID. |
 | `channel_message_too_long` | The text exceeds the channel's message limit. |
 
 ### Closing a channel
@@ -131,10 +128,10 @@ Either role can call `close_channel` with a complete channel ID.
 {"result":{"channel_id":"task-input-18","changed":true}}
 ```
 
-The runtime confirms retirement before ending [outstanding reads](#receiving-from-a-channel). Closing an ID that is already absent returns `changed: false`.
+The runtime confirms retirement before ending [receiver connections](#receiving-from-a-channel). Closing an ID that is already absent returns `changed: false`.
 
 ### Channel lifetimes
 
 A channel stays open when its readers exit or its opening focus ends. Use `close_channel` to retire its ID.
 
-After restart, an open channel keeps its ID and any saved description. Start a fresh read with that ID once the kernel is running again. Each new read waits for a new send. With no receiver waiting, a send to the restored channel returns `channel_would_block`. See [receiver deployment](running.md#channel-receivers).
+An open channel keeps its ID and any saved description across restart. A receiver can reconnect with that ID once the kernel is running again. The focus's [current input](input.md#channel-receivers-and-subscription-listeners) can list channels with no connected receiver.

@@ -1,3 +1,5 @@
+const std = @import("std");
+
 /// The transport hands text to waiting local receivers by channel ID.
 pub const Channels = struct {
     pub const max_message_bytes = 4096;
@@ -5,6 +7,8 @@ pub const Channels = struct {
     pub const SendOutcome = enum {
         /// The complete message was handed to a pending receive operation.
         accepted,
+        /// The open channel had no connected receiver when checked.
+        no_receiver,
         /// This attempt made no handoff and stored no message.
         would_block,
         unknown_channel,
@@ -16,6 +20,7 @@ pub const Channels = struct {
 
     pub const VTable = struct {
         trySend: *const fn (*anyopaque, []const u8, []const u8) anyerror!SendOutcome,
+        hasReceiver: *const fn (context: *anyopaque, channel_id: []const u8) std.Io.Cancelable!?bool,
         reserve: *const fn (context: *anyopaque, channel_id: []const u8) anyerror!void,
         activate: *const fn (context: *anyopaque, channel_id: []const u8) void,
         close: *const fn (context: *anyopaque, channel_id: []const u8) void,
@@ -23,6 +28,12 @@ pub const Channels = struct {
 
     pub fn trySend(self: Channels, channel_id: []const u8, text: []const u8) !SendOutcome {
         return self.vtable.trySend(self.context, channel_id, text);
+    }
+
+    /// Sample connected receivers, including those between reads. A null
+    /// result means the sample is unavailable. The caller keeps the channel active.
+    pub fn hasReceiver(self: Channels, channel_id: []const u8) std.Io.Cancelable!?bool {
+        return self.vtable.hasReceiver(self.context, channel_id);
     }
 
     /// Reserve a fresh channel ID without exposing it to sends or reads. On

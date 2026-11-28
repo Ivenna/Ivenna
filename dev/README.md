@@ -63,7 +63,7 @@ The plan's `ivenna-ready` script runs during SMTP `RCPT` handling through its `M
 
 The script rejects that recipient with `550` when the readiness header is absent or the endpoint cannot be reached. The example defines one receiving address and disables subaddressing. Adding aliases or another path to the account requires a policy that gates those addresses too. See [reception readiness](../docs/running.md#service-status-and-reception) for the status contract.
 
-Use the SMTP submission path for correspondence. Direct JMAP imports into the kernel account bypass the receiving checks. Wakeup and host completion callbacks use direct JMAP writes to their dedicated folder; see the [mail-service requirements](../docs/running.md#mail-service).
+Use the SMTP submission path for correspondence. Direct JMAP imports into the kernel account bypass the receiving checks. Host completion callbacks use direct JMAP writes to their dedicated folder. See the [mail-service requirements](../docs/running.md#mail-service).
 
 For [mail retention](../docs/running.md#data-and-retention), Ivenna moves retired communication copies and unreferenced history to Trash, and Stalwart controls their expiry. The example plan sets `DataRetention.expungeTrashAfter` to `2592000000` milliseconds (30 days), applying to Trash and Junk across all accounts. See Stalwart's [mail retention](https://stalw.art/docs/email/settings/maintenance/) and [storage maintenance](https://stalw.art/docs/storage/maintenance/) documentation for policy and space reclamation.
 
@@ -168,34 +168,38 @@ Read messages from Ivenna through a JMAP-capable client or mail API using the op
 
 ## Trying a channel
 
-Send this request using the [mail example](#sending-a-message).
+Use the [mail example](#sending-a-message) to ask Ivenna for a channel check.
 
-> Delegate this check to an activity. Ask it to open a channel named `task-input` for short test messages, then send `first` before starting a receiver.
+> Open an activity for this check. In that activity, open a channel named `task-input` and send `first` before starting a receiver.
 >
-> In that activity, use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" receive CHANNEL_ID --follow`, substituting the complete channel ID. Send `first` again and read the output with `continue_host_shell`. Then send and read `second`. If a send reports `channel_would_block`, check that the receiver is still running and give it time to request its next read before retrying.
+> Use `run_host_shell` with `yield_ms: 0` to start `"$IVENNA" channel receive CHANNEL_ID`, substituting the complete channel ID. Send `first` again and read the output with `continue_host_shell`. Then send and read `second`. If a send returns `channel_no_receiver` or `channel_would_block` after launch, check the receiver process and let it reach its next waiting read before retrying.
 >
-> After reading both messages, have the activity close the channel and collect the receiver's exit status. Report the send results, command output, and exit status.
+> Close the channel after both reads. Report each send result, the receiver output, and its exit status.
 
-Expect `channel_would_block` before the receiver starts, then two `accepted` results and two JSON `message` records in order. The receiver should exit with status 0 after the channel closes. See the [channel interface](../docs/communication.md#channels).
+The first attempt should return `channel_no_receiver`. Each later handoff should return `accepted` and produce one JSON line with the supplied `text`. After the closing reply, the receiver should exit with status 0. [Channel send outcomes](../docs/communication.md#sending-to-a-channel) · [Receiver exit status](../docs/communication.md#receiving-from-a-channel)
 
 ## Trying a subscription listener
 
-In a second terminal at the repository root, [load the same instance environment](#configuration) to set `DATA_DIR`, then point `IVENNA` at the executable built at startup.
+Use the [mail example](#sending-a-message) to ask Ivenna for a subscription check.
 
-```sh
-export IVENNA="$PWD/zig-out/bin/ivenna"
-```
+> Register a test subscription in the core and send me its complete ID. When a report arrives, tell me what you received.
 
-To run the listener independently, follow the [deployment guide](../docs/running.md#subscription-listeners).
-
-Ask Ivenna to [register a subscription](../docs/attention.md#subscriptions) and give you its complete ID. Use that ID in place of the example.
+In a second terminal at the repository root, load the instance environment and start an independent listener. Replace `release-watch-1` with the ID you received. [Registering a subscription](../docs/attention.md#subscriptions) · [Loading the instance environment](#configuration)
 
 ```sh
 subscription_id='release-watch-1'
-"$IVENNA" subscription inspect "$subscription_id"
+./zig-out/bin/ivenna subscription listen "$subscription_id"
 ```
 
-The result shows the receiving focus and saved cursor. Use the same ID to [publish a test observation](../docs/subscriptions.md#publish-an-observation).
+Wait for `"ready"`, then enter the following line twice. Both attempts should return `"accepted"`. Ivenna should receive the report once.
+
+```json
+{"key":"listen-check-1","text":"A test observation from the open listener session."}
+```
+
+To check delivery across a restart, leave the listener open. Stop the kernel and enter a report with a new key and different text. Expect `"accepted"` while the kernel is stopped. Start it again and look for the new report in Ivenna's reply. [Stopping and restarting](#stopping-and-restarting)
+
+Press `Ctrl+D` on a new line to close the listener. If you only created the subscription for this check, ask Ivenna to withdraw it after checking delivery. [Listener receipts](../docs/subscriptions.md#write-receipts-and-recovery) · [Independent listener deployment](../docs/running.md#subscription-listeners)
 
 ## Stopping and restarting
 

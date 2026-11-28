@@ -19,7 +19,7 @@ The turn's `current.focus_id` identifies the focus receiving the turn. Inherited
 
 ## Names and references
 
-The `name` supplied when opening a focus or channel, running a command, scheduling attention, or subscribing contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
+The `name` supplied when opening a focus or channel, running a command, or subscribing contains one to 32 Unicode code points, excludes ASCII controls, and includes at least one character besides an ASCII space. The runtime appends a numeric suffix, as in `practice-2`, so repeated names within a resource type produce distinct IDs.
 
 Use the complete ID to identify the item. Focus IDs remain stable across waiting, context unloading, and restart. Ending an activity retires its ID permanently. A callback ID connects the arrangement, sampled pending state, and eventual observation. Command IDs control host commands in their originating runtime. Channel IDs can address a restored channel after restart. See [channel lifetimes](communication.md#channel-lifetimes).
 
@@ -41,7 +41,7 @@ Each `Event` selects one branch.
 | `activity` | `ActivityReport` | One activity's newly admitted messages and ending information |
 | `focus_message` | `FocusMessage` | Explicit message from a focus |
 | `focus_interrupted` | `FocusInterrupted` | Runtime observation that an activity could not continue reasoning |
-| `callback` | `Callback` | A registered wakeup or host completion observation |
+| `callback` | `Callback` | A host command completion observation |
 | `subscription` | `SubscriptionReport` | A listener's report to the focus that subscribed |
 
 #### Startup and restart
@@ -113,17 +113,18 @@ See [reaching an existing focus](attention.md#reaching-an-existing-focus) for qu
 
 #### Callback observations
 
-Each `callback` carries a registered observation to the focus that arranged it.
+Each new `callback` reports a host command outcome or interruption to the activity that started the command.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `callback_id` | `Text` | Complete ID returned by `schedule_attention` or a `run_host_shell` handoff |
-| `source` | `Source` | `{wakeup: {}}` or `{host: {command_id: "build-17"}}` |
-| `scheduled_for` | `Time`, when known for a wakeup | Originally scheduled time from `schedule_attention.at` |
+| `callback_id` | `Text` | Complete ID returned by a `run_host_shell` handoff |
+| `source` | `CallbackSource` | `{host: {command_id: "build-17"}}` |
 | `observed_at` | `Time` | Time the runtime observed the callback during intake |
-| `text` | `Text` | Supplied wakeup text or serialized host result or diagnostic |
+| `text` | `Text` | Serialized host result or diagnostic |
 
-Compare a wakeup's `scheduled_for` and `observed_at` to see how much time passed before intake. For a host callback, `source.host.command_id` identifies the command even if its control handle has expired. See [callback delivery](attention.md#callback-observations) and [command lifetimes](host.md#command-lifetimes).
+`source.host.command_id` identifies the command even if its control handle has expired. See [command lifetimes](host.md#command-lifetimes).
+
+Retained observations and handover samples can still include the former `source: {wakeup: {}}`, with `scheduled_for` when the time was saved. See [upgrading from scheduled attention](upgrading.md#removing-scheduled-attention).
 
 #### Subscription observations
 
@@ -132,8 +133,8 @@ Each `subscription` event carries one listener report to the focus that subscrib
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `subscription_id` | `Text` | ID returned by `subscribe`, shared by all reports for that subscription |
-| `observed_at` | `Time` | Time recorded by `ivenna subscription publish` before saving the report |
-| `source_time` | `Time`, when supplied | Time the listener attributes to the upstream event |
+| `observed_at` | `Time` | Time `ivenna subscription listen` recorded before saving the report |
+| `source_time` | `Time`, when supplied | Time of the reported event, as supplied by the listener |
 | `text` | `Text` | Listener's account of what it observed |
 
 The listener can include a source link, a revision, or a gap in coverage in `text`. See [subscription delivery and withdrawal](attention.md#subscriptions).
@@ -156,7 +157,7 @@ The compaction turn carries the runtime sample in `summarize.state`. Its `curren
 | Field | Type | Core sample | Activity sample |
 | --- | --- | --- | --- |
 | `activities` | `Text[]` | IDs of existing activities, including sleeping and interrupted ones | — |
-| `callbacks` | `PendingCallback[]` | Pending callbacks for the core | Pending callbacks for this activity |
+| `callbacks` | `PendingCallback[]` | — | Pending host callbacks for this activity |
 | `subscriptions` | `SampledSubscription[]` | Active subscriptions for the core | Active subscriptions for this activity |
 | `channels` | `SampledChannel[]` | All open channels, including those opened by activities that have ended | Open channels created by this activity |
 | `correspondents` | `Text[]` | Registered outgoing correspondent IDs | — |
@@ -169,22 +170,17 @@ A `SampledChannel` has `channel_id: Text` and the `description` supplied when th
 
 `listener` and `description` are `Text` or `null`. Older samples that stored only IDs use `null`. Some older checkpoints can also restore a channel without a saved description.
 
-Each `PendingCallback` contains `callback_id: Text` and `source: Source`, with `scheduled_for: Time` when the original scheduled time of a wakeup is known. A callback remains pending until its observation enters the history of the focus that arranged it. A pending host callback can refer to a command that has already finished. See [callback observations](#callback-observations) and [command lifetimes](host.md#command-lifetimes).
+Each `PendingCallback` contains `callback_id: Text` and `source: CallbackSource`. A callback remains pending until its observation enters the activity's history, and it can refer to a command that has already finished. See [callback observations](#callback-observations) and [command lifetimes](host.md#command-lifetimes).
 
-In this handover, the sampled state gives the core a time to revisit release verification and a channel for CSV files ready to import.
+In this handover, the sampled state gives the core a subscription for stable releases and a channel for CSV files ready to import.
 
 ```yaml
 handover:
   focus_id: core-1
   observed_at: "2026-11-06T12:00:01.000Z"
-  summary: The verification activity is checking the release CSVs. Revisit the results when the review wakeup arrives.
+  summary: The verification activity is checking the release CSVs. Review the results when the activity reports back.
   state:
     activities: [verify-release-2]
-    callbacks:
-      - callback_id: review-release-5
-        source:
-          wakeup: {}
-        scheduled_for: "2026-11-07T18:00:00.000Z"
     subscriptions:
       - subscription_id: release-watch-1
         listener: Report each stable release in the project changelog.
@@ -200,27 +196,42 @@ The last message of an inference input is the current turn.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `current` | `Current` | Identity, role, and observation time |
+| `current` | `Current` | Focus identity, role, observation time, and any channel or subscription connection notes |
 | `events` | `Event[]`, when nonempty | New events for an ordinary inference |
 | `summarize` | `instructions: Text` and optional `state: State` | Request for a handover summary with any sampled state |
 
-`current` has the same fields in ordinary and compaction turns.
+`current` describes the focus in both ordinary and compaction turns. Connection lists appear only in ordinary turns.
 
 | Field in `current` | Type | Meaning |
 | --- | --- | --- |
 | `focus_id` | `Text` | ID of the focus receiving the turn |
 | `role` | `Role` | `core` or `activity` |
 | `observed_at` | `Time` | Time the runtime sampled this turn |
+| `channels_without_receivers` | `Text[]`, when present | IDs of open channels with no connected receiver |
+| `subscriptions_without_listeners` | `Text[]`, when present | IDs of active subscriptions with no open listener session |
 
-An ordinary turn with no new events contains only `current`. Retained events and [state samples](#sampled-state) keep their own dates.
+When there are no new events, an ordinary turn contains only `current`. Retained events and [handover samples](#sampled-state) keep their own dates.
 
-In this restart turn, the core sees its outgoing registration and a release report queued before restart. See [how a listener reports observations](subscriptions.md#publish-an-observation).
+### Channel receivers and subscription listeners
+
+The runtime samples connections when it prepares an ordinary turn. The notes apply to the listed IDs at `current.observed_at`. An open receiver session counts as connected between reads, and an open listener session between reports. A channel send requires a waiting read at the time of the handoff. [Channel sends](communication.md#sending-to-a-channel) · [Listener sessions](subscriptions.md#open-a-listener-session)
+
+| Field | Scope for the core | Scope for an activity |
+| --- | --- | --- |
+| `channels_without_receivers` | Channels across the instance | Channels opened by this activity |
+| `subscriptions_without_listeners` | Subscriptions registered by the core | Subscriptions registered by this activity |
+
+Each list includes up to eight IDs whose lack of a connection was confirmed. The runtime omits empty lists and can omit both lists to fit the request.
+
+In this example, the core receives a report accepted before restart. At the time of this turn, the subscription has no open listener and the channel has no connected receiver.
 
 ```yaml
 current:
   focus_id: core-1
   role: core
   observed_at: "2026-11-10T18:00:01.000Z"
+  channels_without_receivers: [task-input-18]
+  subscriptions_without_listeners: [release-watch-1]
 events:
   - startup:
       observed_at: "2026-11-10T18:00:00.000Z"

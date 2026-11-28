@@ -1,7 +1,7 @@
 [
   {
     "name": "send",
-    "description": "Send text to one correspondent, focus, or channel. A correspondence `reference` confirms submission for delivery. A focus message becomes an observation and can wake its recipient. A channel send attempts an immediate handoff to one waiting receiver. `accepted` confirms the handoff. Unsent text stays unqueued.",
+    "description": "Send text to a correspondent, focus, or channel. For a correspondent, `reference` confirms submission for delivery. A focus receives the message as an observation and may wake for it. On a channel, `accepted` confirms a handoff to a waiting receiver.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -53,7 +53,7 @@
   },
   {
     "name": "open_channel",
-    "description": "Open a channel for local programs. Give its `channel_id` to the receiver. A receiver can reconnect with the same ID, even after this focus ends or Ivenna restarts. In a host command, `\"$IVENNA\" receive --help` shows how to receive.",
+    "description": "Open a channel for a local program. Give the returned `channel_id` to the receiver. An open channel can outlast this focus and keeps its ID across restarts. In a host command, `\"$IVENNA\" channel receive --help` shows how to connect.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -70,7 +70,7 @@
   },
   {
     "name": "close_channel",
-    "description": "Close a channel and end waiting reads. `changed` tells you whether this call closed the channel.",
+    "description": "Close a channel and disconnect its receivers.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -108,37 +108,8 @@
     }
   },
   {
-    "name": "schedule_attention",
-    "description": "Schedule a wakeup to return to something later. The core receives the supplied text in a callback identified by the returned `callback_id`. The wakeup survives restart.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 32
-        },
-        "at": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Use a date and time with `Z` or an explicit UTC offset. Past times are already due."
-        },
-        "text": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "required": [
-        "name",
-        "at",
-        "text"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "subscribe",
-    "description": "Register this focus to receive observations from a listener you set up. Give the listener the returned `subscription_id`. Its reports can wake this focus. In host commands, `\"$IVENNA\" subscription --help` lists the listener commands.",
+    "description": "Subscribe this focus to reports from a listener you arrange. Give the listener the returned `subscription_id`. Its reports can wake this focus. In a host command, `\"$IVENNA\" subscription listen --help` shows how to report.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -150,7 +121,7 @@
         "listener": {
           "type": "string",
           "minLength": 1,
-          "description": "Briefly describe what the listener watches and when it should report."
+          "description": "Describe what the listener watches and when it should report."
         }
       },
       "required": ["name", "listener"],
@@ -159,7 +130,7 @@
   },
   {
     "name": "withdraw_subscription",
-    "description": "Withdraw a subscription by ID to stop accepting new reports. Accepted reports can still reach the subscribing focus. Stop the listener separately if needed.",
+    "description": "Stop accepting new reports for a subscription. Reports already accepted can still reach its focus. The listener may keep running.",
     "parameters": {
       "type": "object",
       "properties": {

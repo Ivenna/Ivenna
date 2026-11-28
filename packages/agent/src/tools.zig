@@ -1,7 +1,6 @@
 const std = @import("std");
 const contracts = @import("agent_contracts");
 const Input = @import("input.zig");
-const Time = @import("time.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Destination = union(enum) {
@@ -26,7 +25,6 @@ pub const Request = union(enum) {
     open_channel: struct { name: []const u8, description: []const u8 },
     close_channel: struct { channel_id: []const u8 },
     open_focus: struct { name: []const u8, task: []const u8 },
-    schedule_attention: struct { name: []const u8, at: Time.Instant, text: []const u8 },
     subscribe: struct { name: []const u8, listener: []const u8 },
     withdraw_subscription: struct { subscription_id: []const u8 },
 
@@ -48,7 +46,6 @@ pub const Request = union(enum) {
             .close_channel => |args| if (args.channel_id.len == 0) return error.InvalidToolArguments,
             .subscribe => {},
             .open_focus => |args| if (args.task.len == 0) return error.InvalidToolArguments,
-            .schedule_attention => |args| if (args.text.len == 0) return error.InvalidToolArguments,
             .withdraw_subscription => |args| if (args.subscription_id.len == 0) return error.InvalidToolArguments,
         }
         return request;
@@ -70,7 +67,6 @@ fn parseArguments(comptime T: type, value: std.json.Value) !T {
         @field(result, name) = switch (Field) {
             []const u8 => try string(present),
             Destination => try Destination.parse(present),
-            Time.Instant => Time.parse(try string(present)) catch return error.InvalidToolArguments,
             else => @compileError("unsupported tool argument type: " ++ @typeName(Field)),
         };
     }
@@ -80,7 +76,7 @@ fn parseArguments(comptime T: type, value: std.json.Value) !T {
 fn available(tag: std.meta.Tag(Request), role: Input.Role) bool {
     return switch (tag) {
         .send, .open_channel, .close_channel, .subscribe, .withdraw_subscription => true,
-        .open_focus, .schedule_attention => role == .core,
+        .open_focus => role == .core,
     };
 }
 

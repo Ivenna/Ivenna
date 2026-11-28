@@ -1,18 +1,12 @@
 const std = @import("std");
 const sql = @import("database.zig");
+const ListenerPresence = @import("listener_presence.zig");
 const zqlite = @import("sqlite").zqlite;
 const Allocator = std.mem.Allocator;
 const Reference = @import("agent_contracts").Reference;
 
 pub const Created = struct {
     subscription_id: []const u8,
-};
-
-pub const Subscription = struct {
-    subscription_id: []const u8,
-    focus_id: []const u8,
-    listener: []const u8,
-    cursor: ?[]const u8,
 };
 
 pub const ActiveRegistration = struct {
@@ -28,35 +22,64 @@ pub const Report = struct {
     observed_at_unix_ms: i64,
 };
 
-/// Source positions are UTF-8 strings supplied by the listener.
-pub const Cursor = struct {
-    from: ?[]const u8 = null,
-    to: []const u8,
-};
-
 pub const NewReport = struct {
     key: []const u8,
     text: []const u8,
     source_time_unix_ms: ?i64 = null,
-    cursor: ?Cursor = null,
 };
-pub const PublishResult = enum { accepted, duplicate };
+
+/// Owns one subscription connection, including its live presence. All
+/// requests use the registration selected when this listener connected.
+pub const Listener = struct {
+    store: Store,
+    registration_id: i64,
+
+    pub fn open(a: Allocator, io: std.Io, path: []const u8, reference: []const u8) !Listener {
+        var store = try Store.openFile(a, io, path, .existing);
+        errdefer store.close();
+        const id = try store.registrationId(reference);
+        try store.listener_presence.?.attach(id);
+        return .{ .store = store, .registration_id = id };
+    }
+
+    pub fn close(self: *Listener) void {
+        self.store.close();
+        self.* = undefined;
+    }
+
+    pub fn publish(self: *Listener, report: NewReport, received_unix_ms: i64) !void {
+        try self.store.publish(self.registration_id, report, received_unix_ms);
+    }
+};
 
 /// Each Store owns one SQLite connection. Serialize calls on a shared Store
 /// and supply an arena for query results. The kernel and independent listeners
 /// open separate connections to the instance database.
 pub const Store = struct {
     db: zqlite.Conn,
+    listener_presence: ?ListenerPresence,
 
-    pub fn open(a: Allocator, path: []const u8) !Store {
-        return .{ .db = try sql.open(a, path, .read_write) };
+    /// Open the database paired with the selected mailbox checkpoint and
+    /// install or migrate its schema. A checkpoint requires an existing file.
+    pub fn initialize(a: Allocator, io: std.Io, path: []const u8, checkpoint_catalog: ?[32]u8) !Store {
+        return openFile(a, io, path, .{ .initialize = checkpoint_catalog });
+    }
+
+    fn openFile(a: Allocator, io: std.Io, path: []const u8, mode: sql.OpenMode) !Store {
+        const db = try sql.open(a, path, mode);
+        errdefer db.close();
+        return .{
+            .db = db,
+            .listener_presence = try ListenerPresence.open(io, std.fs.path.dirname(path) orelse "."),
+        };
     }
 
     pub fn openInMemory(a: Allocator) !Store {
-        return .{ .db = try sql.open(a, ":memory:", .initialize) };
+        return .{ .db = try sql.open(a, ":memory:", .{ .initialize = null }), .listener_presence = null };
     }
 
     pub fn close(self: *Store) void {
+        if (self.listener_presence) |presence| presence.close();
         self.db.close();
         self.* = undefined;
     }
@@ -69,16 +92,7 @@ pub const Store = struct {
     }
 
     pub fn identity(self: *Store) ![32]u8 {
-        const s = try sql.statement(self.db, "SELECT identity FROM mailbox_binding WHERE singleton=1", .{});
-        defer s.deinit();
-        if (!try sql.checked(s.step())) return error.InvalidStateDatabase;
-        const id = try sql.requiredText(s, 0);
-        if (id.len != 32) return error.InvalidStateDatabase;
-        return id[0..32].*;
-    }
-
-    pub fn isBound(self: *Store) !bool {
-        return try sql.integer(self.db, "SELECT bound FROM mailbox_binding WHERE singleton=1", .{}) != 0;
+        return (try sql.mailboxBinding(self.db)).identity;
     }
 
     pub fn markBound(self: *Store) !void {
@@ -118,25 +132,41 @@ pub const Store = struct {
         return registrations.toOwnedSlice(a);
     }
 
-    pub fn inspect(self: *Store, a: Allocator, reference: []const u8) !?Subscription {
-        const s = try sql.statement(self.db, "SELECT reference,focus_id,listener,cursor FROM subscriptions WHERE reference=?", .{reference});
+    fn registrationId(self: *Store, reference: []const u8) !i64 {
+        const s = try sql.statement(self.db, "SELECT id FROM subscriptions WHERE reference=?", .{reference});
         defer s.deinit();
-        if (!try sql.checked(s.step())) return null;
-        return .{
-            .subscription_id = try sql.copyText(a, s, 0),
-            .focus_id = try sql.copyText(a, s, 1),
-            .listener = try sql.copyText(a, s, 2),
-            .cursor = if (s.columnType(3) == .null) null else try sql.copyText(a, s, 3),
-        };
+        if (!try sql.checked(s.step())) return error.SubscriptionWithdrawn;
+        return s.int(0);
+    }
+
+    pub fn subscriptionsWithoutListeners(self: *Store, a: Allocator, focus_id: []const u8, limit: usize) ![]const []const u8 {
+        const s = try sql.statement(self.db, "SELECT id,reference FROM subscriptions WHERE focus_id=? ORDER BY id DESC", .{focus_id});
+        defer s.deinit();
+        var references: std.ArrayList([]const u8) = .empty;
+        while (references.items.len < limit and try sql.checked(s.step())) {
+            const reference = try sql.requiredText(s, 1);
+            if (self.listener_presence) |presence| {
+                const connected = presence.connected(s.int(0)) catch |err| switch (err) {
+                    error.Canceled => return err,
+                    error.Unexpected => {
+                        std.log.warn("subscription listener probe failed for '{s}': {s}", .{ reference, @errorName(err) });
+                        continue;
+                    },
+                };
+                if (connected) continue;
+            }
+            try references.append(a, try a.dupe(u8, reference));
+        }
+        return references.toOwnedSlice(a);
     }
 
     pub fn withdraw(self: *Store, reference: []const u8) !bool {
         return self.change("DELETE FROM subscriptions WHERE reference=?", .{reference});
     }
 
-    /// Save the report, its retry key, and any cursor advance together. The
-    /// listener boundary supplies UTF-8 report fields and source positions.
-    pub fn publish(self: *Store, reference: []const u8, report: NewReport, received_unix_ms: i64) !PublishResult {
+    /// Save the report and its retry key in one transaction. The listener
+    /// boundary supplies UTF-8 report fields.
+    fn publish(self: *Store, id: i64, report: NewReport, received_unix_ms: i64) !void {
         if (report.text.len == 0 or report.text.len > 2048 or report.key.len == 0)
             return error.InvalidArguments;
         // The model renders source timestamps as four-digit UTC years. zdt
@@ -145,37 +175,25 @@ pub const Store = struct {
             return error.InvalidArguments;
         try sql.exec(self.db, "BEGIN IMMEDIATE");
         errdefer sql.rollback(self.db);
-        const registered = try self.change(
-            \\INSERT INTO accepted_report_keys(subscription_id,key) SELECT id,? FROM subscriptions WHERE reference=?
+        const inserted = try self.change(
+            \\INSERT INTO accepted_report_keys(subscription_id,key) SELECT id,? FROM subscriptions WHERE id=?
             \\ON CONFLICT(subscription_id,key) DO NOTHING
-        , .{ report.key, reference });
-        if (!registered) {
-            try self.requireRegistration(reference);
-            try sql.exec(self.db, "COMMIT");
-            return .duplicate;
-        }
-        if (report.cursor) |cursor| try self.advanceCursor(reference, cursor);
-        _ = try self.change(
-            \\INSERT INTO subscription_reports(reference,focus_id,text,source_time,received)
-            \\SELECT reference,focus_id,?,?,? FROM subscriptions WHERE reference=?
-        , .{ report.text, report.source_time_unix_ms, received_unix_ms, reference });
-        try sql.exec(self.db, "COMMIT");
-        return .accepted;
-    }
-
-    pub fn checkpoint(self: *Store, reference: []const u8, cursor: Cursor) !void {
-        try self.advanceCursor(reference, cursor);
-    }
-
-    fn advanceCursor(self: *Store, reference: []const u8, cursor: Cursor) !void {
-        if (try self.change("UPDATE subscriptions SET cursor=? WHERE reference=? AND cursor IS ?", .{ cursor.to, reference, cursor.from })) return;
-        try self.requireRegistration(reference);
-        return error.CursorConflict;
-    }
-
-    fn requireRegistration(self: *Store, reference: []const u8) !void {
-        if (try sql.integer(self.db, "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE reference=?)", .{reference}) == 0)
+        , .{ report.key, id });
+        if (inserted) {
+            _ = try self.change(
+                \\INSERT INTO subscription_reports(reference,focus_id,text,source_time,received)
+                \\SELECT reference,focus_id,?,?,? FROM subscriptions WHERE id=?
+            , .{ report.text, report.source_time_unix_ms, received_unix_ms, id });
+        } else if (try sql.integer(self.db, "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id=?)", .{id}) == 0) {
             return error.SubscriptionWithdrawn;
+        }
+        try sql.exec(self.db, "COMMIT");
+    }
+
+    pub fn publishInMemory(self: *Store, reference: []const u8, report: NewReport, received_unix_ms: i64) !void {
+        if (!@import("builtin").is_test) @compileError("only tests can publish to an in-memory store");
+        std.debug.assert(self.listener_presence == null);
+        try self.publish(try self.registrationId(reference), report, received_unix_ms);
     }
 
     pub fn pending(self: *Store, a: Allocator, focus_id: []const u8, after: u64, through: u64, limit: usize) ![]const Report {
@@ -204,7 +222,7 @@ pub const Store = struct {
     }
 };
 
-test "independent connections preserve cursors, retries and the destination of accepted reports" {
+test "a reconnected listener can retry an accepted report after the focus received it" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -214,11 +232,8 @@ test "independent connections preserve cursors, retries and the destination of a
     const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
     const filename = sql.filename;
     const path = try std.fs.path.join(a, &.{ dir, filename });
-    try sql.initialize(a, path);
-    var kernel = try Store.open(a, path);
+    var kernel = try Store.initialize(a, t.io, path, null);
     defer kernel.close();
-    var producer = try Store.open(a, path);
-    defer producer.close();
     const activity = "read-2";
     const ref = (try kernel.create(a, activity, "feed", "watch changes")).subscription_id;
     if (@hasDecl(std.Io.File.Permissions, "toMode")) {
@@ -227,33 +242,40 @@ test "independent connections preserve cursors, retries and the destination of a
             try t.expectEqual(0, stat.permissions.toMode() & 0o077);
         }
     }
-    const first = NewReport{ .key = "post-1", .text = "First", .cursor = .{ .to = "" }, .source_time_unix_ms = -62_167_219_200_000 };
-    try t.expectEqual(.accepted, try producer.publish(ref, first, 10));
+    const first = NewReport{ .key = "post-1", .text = "First", .source_time_unix_ms = -62_167_219_200_000 };
+    {
+        var producer = try Listener.open(a, t.io, path, ref);
+        defer producer.close();
+        try producer.publish(first, 10);
+    }
     const other = (try kernel.create(a, "core-1", "feed", "read a second feed")).subscription_id;
-    try t.expectEqual(.accepted, try producer.publish(other, .{ .key = first.key, .text = "For the core" }, 11));
+    {
+        var other_listener = try Listener.open(a, t.io, path, other);
+        defer other_listener.close();
+        try other_listener.publish(.{ .key = first.key, .text = "For the core" }, 11);
+    }
     // Acknowledging a later sequence for another focus leaves this delivery pending.
     try kernel.acknowledge("core-1", try kernel.latestSequence("core-1"));
     const admitted = (try kernel.pending(a, activity, 0, try kernel.latestSequence(activity), 1))[0];
     try t.expectEqualStrings("First", admitted.text);
     try kernel.acknowledge(activity, admitted.sequence);
-    const retry = NewReport{ .key = first.key, .text = "Edited retry", .cursor = .{ .from = "", .to = "retry cursor" } };
-    try t.expectEqual(.duplicate, try producer.publish(ref, retry, 15));
+    var producer = try Listener.open(a, t.io, path, ref);
+    defer producer.close();
+    try producer.publish(first, 15);
     try t.expectEqual(0, try kernel.latestSequence(activity));
 
-    var next = NewReport{ .key = "post-2", .text = "Second", .cursor = .{ .to = "tail" }, .source_time_unix_ms = std.math.maxInt(i64) };
-    try t.expectError(error.InvalidArguments, producer.publish(ref, next, 20));
+    var next = NewReport{ .key = "post-2", .text = "Second", .source_time_unix_ms = std.math.maxInt(i64) };
+    try t.expectError(error.InvalidArguments, producer.publish(next, 20));
     next.source_time_unix_ms = null;
-    try t.expectError(error.CursorConflict, producer.publish(ref, next, 20));
-    next.cursor.?.from = (try producer.inspect(a, ref)).?.cursor;
-    try t.expectEqualStrings("", next.cursor.?.from.?);
-    try t.expectEqual(.accepted, try producer.publish(ref, next, 20));
-    try t.expectEqualStrings("tail", (try producer.inspect(a, ref)).?.cursor.?);
+    try producer.publish(next, 20);
 
     try t.expect(try kernel.withdraw(ref));
     const renewed = (try kernel.create(a, activity, "feed", "watch changes")).subscription_id;
-    try t.expectError(error.SubscriptionWithdrawn, producer.publish(ref, next, 25));
+    try t.expectError(error.SubscriptionWithdrawn, producer.publish(next, 25));
     const through = try kernel.latestSequence(activity);
-    try t.expectEqual(.accepted, try producer.publish(renewed, first, 30));
+    var replacement = try Listener.open(a, t.io, path, renewed);
+    defer replacement.close();
+    try replacement.publish(first, 30);
     const sampled = try kernel.pending(a, activity, admitted.sequence, through, 8);
     try t.expectEqual(1, sampled.len);
     try t.expectEqualStrings(ref, sampled[0].reference);
@@ -261,4 +283,72 @@ test "independent connections preserve cursors, retries and the destination of a
     const later = try kernel.pending(a, activity, through, try kernel.latestSequence(activity), 8);
     try t.expectEqual(1, later.len);
     try t.expectEqualStrings(renewed, later[0].reference);
+}
+
+test "withdrawing the highest subscription does not let a replacement inherit its listener" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, sql.filename });
+    var kernel = try Store.initialize(a, t.io, path, null);
+    defer kernel.close();
+
+    const latest = (try kernel.create(a, "core-1", "feed", "watch updates")).subscription_id;
+    var listener = try Listener.open(a, t.io, path, latest);
+    defer listener.close();
+    try t.expect(try kernel.withdraw(latest));
+
+    const replacement = (try kernel.create(a, "core-1", "feed", "watch updates")).subscription_id;
+    // The withdrawn listener still holds the old id. Without AUTOINCREMENT,
+    // SQLite would reuse that id and the replacement would look connected.
+    try t.expectEqualDeep(@as([]const []const u8, &.{replacement}), try kernel.subscriptionsWithoutListeners(a, "core-1", 8));
+    try t.expectError(error.SubscriptionWithdrawn, Listener.open(a, t.io, path, latest));
+}
+
+test "a mailbox checkpoint does not create a missing database" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const missing = try std.fs.path.join(a, &.{ dir, "missing.sqlite3" });
+    try t.expectError(error.SubscriptionCatalogMismatch, Store.initialize(a, t.io, missing, @splat('0')));
+    try t.expectError(error.FileNotFound, std.Io.Dir.cwd().access(t.io, missing, .{}));
+}
+
+test "listener presence follows independent sessions and active registrations" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = t.tmpDir(.{});
+    defer temporary.cleanup();
+    const dir = try temporary.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, sql.filename });
+    var kernel = try Store.initialize(a, t.io, path, null);
+    defer kernel.close();
+    const ref = (try kernel.create(a, "core-1", "feed", "watch changes")).subscription_id;
+    const other = (try kernel.create(a, "read-2", "feed", "watch another source")).subscription_id;
+    try t.expectEqualDeep(@as([]const []const u8, &.{ref}), try kernel.subscriptionsWithoutListeners(a, "core-1", 8));
+
+    {
+        var first = try Listener.open(a, t.io, path, ref);
+        defer first.close();
+        {
+            var second = try Listener.open(a, t.io, path, ref);
+            defer second.close();
+            var reopened = try Store.initialize(a, t.io, path, null);
+            defer reopened.close();
+            try t.expectEqual(0, (try reopened.subscriptionsWithoutListeners(a, "core-1", 8)).len);
+            try t.expectEqualDeep(@as([]const []const u8, &.{other}), try reopened.subscriptionsWithoutListeners(a, "read-2", 8));
+        }
+        try t.expectEqual(0, (try kernel.subscriptionsWithoutListeners(a, "core-1", 8)).len);
+    }
+    try t.expectEqualDeep(@as([]const []const u8, &.{ref}), try kernel.subscriptionsWithoutListeners(a, "core-1", 8));
 }

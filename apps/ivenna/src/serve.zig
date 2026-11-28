@@ -26,9 +26,6 @@ pub fn run(init: std.process.Init) !void {
     var channels = try ChannelRegistry.listen(init.gpa, io, data_directory);
     defer channels.deinit();
     const database_path = try std.fs.path.join(a, &.{ data_directory, state.filename });
-    try state.initialize(a, database_path);
-    var subscription_store = try state.subscriptions.Store.open(init.gpa, database_path);
-    defer subscription_store.close();
     var mail: email.Integration = undefined;
     try mail.init(init.gpa, io, .{
         .session_url = config.mail_session_url,
@@ -73,6 +70,7 @@ pub fn run(init: std.process.Init) !void {
         .activity_tools = &activity_tools,
         .reasoning = config.llm_reasoning,
     };
+    var subscription_store: state.subscriptions.Store = undefined;
     var kernel = try agent.Kernel.init(init.gpa, io, .{
         .engine = &engine,
         .inbox = mail.inbox(),
@@ -80,13 +78,13 @@ pub fn run(init: std.process.Init) !void {
         .channels = channels.port(),
         .history = mail.history(),
         .callbacks = mail.callbackPublisher(),
-        .subscriptions = &subscription_store,
     }, .{
         .limits = config.context_limits,
         .poll_interval_ms = config.mail_poll_interval_ms,
         .max_sessions = config.max_sessions,
         .max_pending_events = config.max_pending_events,
-    });
+    }, database_path, &subscription_store);
+    defer subscription_store.close();
     defer kernel.deinit();
     const action: std.posix.Sigaction = .{
         .handler = .{ .handler = requestStop },

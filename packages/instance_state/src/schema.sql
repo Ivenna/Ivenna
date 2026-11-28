@@ -9,8 +9,7 @@ CREATE TABLE subscriptions (
     name TEXT NOT NULL,
     reference TEXT AS (name || '-' || id) UNIQUE,
     focus_id TEXT NOT NULL,
-    listener TEXT NOT NULL,
-    cursor TEXT
+    listener TEXT NOT NULL
 ) STRICT;
 CREATE INDEX subscriptions_by_focus ON subscriptions(focus_id);
 -- Each report keeps its destination after the registration is withdrawn.

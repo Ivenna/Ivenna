@@ -1,5 +1,4 @@
 const std = @import("std");
-const state = @import("instance_state");
 const receive = @import("receive.zig");
 const cli = @import("cli.zig");
 const serve = @import("serve.zig");
@@ -8,64 +7,26 @@ const subscription = @import("subscription.zig");
 pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    const command = cli.parse(args[1..]) catch |err| return failure(init.io, err);
+    const command = cli.parse(args[1..]) catch return 1;
     switch (command) {
         .serve => try serve.run(init),
         .help => |help| try std.Io.File.stdout().writeStreamingAll(init.io, help),
-        .receive => |options| receive.run(init, options) catch |err| switch (err) {
+        .receive => |id| receive.run(init, id) catch |err| switch (err) {
             error.BrokenPipe => return 0,
-            else => return failure(init.io, err),
+            else => return channelFailure(err),
         },
-        .subscription => |request| runSubscription(init, request) catch |err| return failure(init.io, err),
+        .listen => |id| return subscription.run(init, id),
     }
     return 0;
 }
 
-fn runSubscription(init: std.process.Init, request: @FieldType(cli.Command, "subscription")) !void {
-    const a = init.arena.allocator();
-    const directory = init.environ_map.get("DATA_DIR") orelse "";
-    if (directory.len == 0) {
-        std.log.err("set DATA_DIR to the instance's data directory", .{});
-        return error.MissingDataDirectory;
+fn channelFailure(err: anyerror) u8 {
+    switch (err) {
+        error.MissingDataDirectory => {},
+        error.UnknownChannel => std.log.err("no open channel matches CHANNEL_ID. Check the complete channel ID and DATA_DIR", .{}),
+        error.ChannelServiceUnavailable => std.log.err("the channel connection failed or ended without a closing reply. Check that the kernel for DATA_DIR is running and uses the same build as the receiver", .{}),
+        error.InvalidChannelReply => std.log.err("invalid reply from the channel service. Check that 'ivenna serve' and 'ivenna channel receive' use the same build", .{}),
+        else => std.log.err("{s}", .{@errorName(err)}),
     }
-    const path = try std.fs.path.join(a, &.{ directory, state.filename });
-    var store = try state.subscriptions.Store.open(a, path);
-    defer store.close();
-    switch (request.action) {
-        .inspect => try cli.writeJson(init.io, try store.inspect(a, request.id)),
-        .publish => try cli.writeJson(init.io, try subscription.publish(a, init.io, &store, request.id)),
-        .checkpoint => {
-            try subscription.checkpoint(a, init.io, &store, request.id);
-            try cli.writeJson(init.io, "accepted");
-        },
-    }
-}
-
-fn failure(io: std.Io, err: anyerror) !u8 {
-    const reason: []const u8 = switch (err) {
-        error.InvalidArguments => "invalid_request",
-        error.SubscriptionWithdrawn => "withdrawn",
-        error.CursorConflict => "cursor_conflict",
-        error.StateStoreBusy => "busy",
-        error.StateStoreFull => "storage_full",
-        error.InvalidReceiveArguments, error.MissingDataDirectory, error.StateStorageFailed => return 1,
-        error.UnknownChannel => {
-            std.log.err("no open channel matches CHANNEL_ID. Check the complete ID and DATA_DIR", .{});
-            return 1;
-        },
-        error.ChannelServiceUnavailable => {
-            std.log.err("the channel service is unavailable. Check that the kernel is running and DATA_DIR points to its data directory", .{});
-            return 1;
-        },
-        error.InvalidChannelReply => {
-            std.log.err("the channel service returned an invalid reply. Check that serve and receive use the same build", .{});
-            return 1;
-        },
-        else => {
-            std.log.err("{s}", .{@errorName(err)});
-            return 1;
-        },
-    };
-    try cli.writeJson(io, reason);
     return 1;
 }

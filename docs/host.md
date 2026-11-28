@@ -36,7 +36,7 @@ Each command starts a fresh shell. The `cwd` and `shell` arguments accept litera
 
 The inherited environment requests plain output with `NO_COLOR=1` and pagers set to `cat`. `TERM` is `dumb`, or `xterm-256color` in terminal mode. Login initialization can change the environment and working directory.
 
-Host commands receive the absolute path to the `ivenna` executable as `IVENNA` and the canonical absolute path to the instance's data directory as `DATA_DIR`. A program in any input mode can use this environment to [receive channel messages](communication.md#receiving-from-a-channel) or [publish subscription observations](subscriptions.md#publish-an-observation).
+Host commands receive the absolute path to the `ivenna` executable as `IVENNA` and the canonical absolute path to the instance's data directory as `DATA_DIR`. A program in any input mode can use this environment to receive channel messages or start a subscription listener. [Receiving from a channel](communication.md#receiving-from-a-channel) · [Opening a listener session](subscriptions.md#open-a-listener-session)
 
 ## Input modes
 
@@ -134,7 +134,7 @@ If a command writes a PDF to stdout, pass its returned log `path` to `read_resou
 
 ## Command lifetimes
 
-Control handles work in the runtime that issued them for as long as it retains them. Each command handed off by its initial call has one completion observation registered for the activity that started it. The observation still goes to that activity when another activity controls the command or drains its output. The registration keeps the originating activity available to receive it after sleep or restart. See [activity completion](attention.md#activity-completion).
+Control handles work in the runtime that issued them for as long as it retains them. When the initial call hands off a command, it returns a `callback_id` and registers its completion for the calling activity. Completion goes to that activity even if another activity controls the command or drains its output. The registration keeps the caller available across sleep and restart, and the runtime admits the callback ID to history at most once. [Callback fields](input.md#callback-observations) · [Activity completion](attention.md#activity-completion)
 
 `MAX_HOST_COMMANDS` limits live commands across all activities. Completion releases live capacity. A final result returned directly by `run_host_shell` retires its handle. Finished background handles remain available in a bounded cache for recent output collection; a continue call that drains one retires it, and older finished handles can be reclaimed for other commands. See [command lifecycle](architecture.md#command-lifecycle) for the cache limit. Full logs have a [separate retention lifecycle](running.md#host-output-and-deployment-files).
 

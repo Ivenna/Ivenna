@@ -24,7 +24,7 @@ The repertoire connects four kinds of action: expression to people and programs,
 
 Correspondence and autonomous activity are ways Ivenna encounters the world. A letter or a piece of work can change what Ivenna understands and what matters to it. Retained conversations, handovers, and shared memory let it bring those changes to later encounters.
 
-Model-facing inputs identify the current focus and bring it the observations that can guide its next decision. Calendar dates with explicit UTC offsets make observation times and future attention directly readable. References connect choices with their effects and later observations. When Ivenna names something it creates, the runtime adds a numeric suffix so the complete reference identifies the item. See [names and references](input.md#names-and-references).
+Model-facing inputs identify the current focus and bring it the observations that can guide its next decision. Calendar dates in UTC make observation times directly readable. References connect choices with their effects and later observations. When Ivenna names something it creates, the runtime adds a numeric suffix so the complete reference identifies the item. See [names and references](input.md#names-and-references).
 
 Ivenna can forget details, confuse references, or choose actions that fail. Observations and operation results give it evidence to reconsider its choices. Command handles let it revisit ongoing host work. See [continuing a command](host.md#continuing-and-controlling-a-command).
 
@@ -45,7 +45,6 @@ Core and activity focuses use the same system prompt. Each receives observations
 | Open a channel, send to it, or close it | Yes | Yes |
 | Remember, revisit, revise, arrange, and forget | Yes | Yes |
 | Open an activity focus | Yes | — |
-| Schedule a wakeup | Yes | — |
 | Subscribe to observations for the current focus | Yes | Yes |
 | Withdraw a subscription by its complete reference | Yes | Yes |
 | [Read a local or web resource](resources.md) | Yes | Yes |
@@ -63,7 +62,7 @@ Email lets correspondents and Ivenna act on their own schedules. An accepted let
 
 An explicit send lets Ivenna choose when to speak, what to say, and whom or what to reach. References can come from its observations, earlier actions, or communication with others. It can carry those references forward as its relationships and commitments develop. The runtime checks the target when Ivenna sends and reports the outcome, so Ivenna can revise its understanding as circumstances change. See [sending a message](communication.md#sending-a-message).
 
-Any focus can open a channel with a description of its purpose and share its ID with a local program or another focus. The program chooses when to receive a message and how to act on it. A send immediately tells Ivenna whether the runtime handed the message to a waiting receiver. The channel can outlive its opening focus, and the same ID lets a replacement receiver connect or an existing receiver reconnect after restart. The program can continue its work after Ivenna closes the channel. See [channels](communication.md#channels).
+Any focus can open a channel for a local program and share its ID with that program or another focus. The receiving program chooses when to read and how to act on a message. A send tells Ivenna whether the handoff succeeded. When the transport can check receiver state, the result distinguishes an absent receiver from one that cannot take the message yet. NATS also reports an absent responder immediately. A channel can outlive its opening focus, and receivers can reconnect by ID after restart. Closing the channel ends its receiver sessions while the programs can continue their other work. [Channels](communication.md#channels) · [NATS no-responders detection](https://docs.nats.io/concepts/request-reply#no-responders-detection)
 
 ## Sessions and continued work
 
@@ -75,15 +74,17 @@ The core remains available between activations. An activity can wait for a callb
 
 The runtime delivers observations to their receiving focus, preserving their sources. Ivenna considers what each observation means in light of what it already knows.
 
-The core can schedule a wakeup for a particular time. A host command that outlives its initial tool call arranges a completion observation for the calling activity. Each callback binds one observation to its receiving session across sleep and restart, so work can resume without repeated model checks. See [returning later](attention.md#returning-later) and [callback observations](attention.md#callback-observations).
+A host command that outlives its initial tool call arranges a completion observation for the calling activity. The activity can resume when the result arrives without checking the command repeatedly. [Command lifetimes](host.md#command-lifetimes)
 
 Activities choose how long to wait for host work before continuing their own reasoning. A bounded default gives brief commands time to return their results in the same exchange, while returning attention from longer commands for further work and coordination. An activity can shorten that wait to regain control sooner, or extend it when obtaining the result is more useful than proceeding immediately. The core and other activities continue while it waits.
 
 When execution outlasts the wait, the activity can continue other work or sleep until its completion observation arrives. Tool replies and admitted observations guide its next inference together, after the complete round. Commands remain observable and controllable across activities through shared handles. See [host shell](host.md).
 
-A focus can subscribe to a source it wants to follow over time. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. Ivenna gives the subscription reference to the listener it sets up and chooses which changes the listener reports. A report can bring a sleeping focus back to its work, and a working focus can consider several reports together after its current round.
+A subscription brings observations back to the focus with the history to make sense of them. An activity investigating a release can receive updates in the context of what it has already learned. The core can subscribe directly when an interest spans assignments. A report can wake a sleeping focus or join other observations after a working focus finishes its current round. [Subscriptions](attention.md#subscriptions)
 
-The subscription stays with its focus across sleep, handover, and restart. Any focus with its reference can withdraw it when the source no longer needs attention. Observations already accepted still belong to the focus that subscribed. See [subscriptions](attention.md#subscriptions).
+Ivenna describes what the listener should watch and when to report. The listener can track its progress using the source's own conventions, such as a file offset or a position in a partitioned stream. [Listener recovery](subscriptions.md#resume-at-the-source) · [OpenTelemetry file offsets](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/filelogreceiver/README.md#offset-tracking) · [Kafka manual offset control](https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#manualoffsetcontrol)
+
+Ivenna retains accepted reports for delivery across interruptions. Withdrawal stops new reports, and queued reports keep their original destination. A listener can retry a report with the same key on an active subscription after losing the receipt or restarting before it saved progress. The receipt confirms acceptance even when the report has already reached its focus. The key identifies a report within its subscription, much as CloudEvents identifies an event by its source and ID. [Report receipts](subscriptions.md#write-receipts-and-recovery) · [CloudEvents event ID](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md#id)
 
 ### Context and continuity
 
@@ -97,6 +98,8 @@ A focus brings the model's prior knowledge and its own history to each observati
 
 Even a short list of names can draw attention to unrelated work. Ordinary turns identify the focus and carry its new observations. A focus can draw on its working history for references it has already encountered. Startup gives the core the current outgoing correspondent IDs so it can account for changes before resuming work. See the [input contract](input.md#records-and-turns).
 
+An ordinary turn can point out channels without receivers and subscriptions without listeners. A registration can outlast a connection, so Ivenna can use the sample to decide whether work that depends on a receiver or listener needs attention. Firebase's presence design also tracks connections separately from longer-lived records. [Connection notes in a turn](input.md#channel-receivers-and-subscription-listeners) · [Firebase presence](https://firebase.google.com/docs/database/web/offline-capabilities#sample-presence-app)
+
 Describe what Ivenna observed, which effects it can confirm, and what it can still act on. Keep mailbox receipts, checkpoints, and request bookkeeping in the runtime. Preserve the source of inherited experience so a focus can interpret it alongside its own. See [opening a focus](attention.md#opening-a-focus).
 
 Revisiting a memory presents what Ivenna kept there. When Ivenna chooses to send a host file to a service, the destination and possible charge can matter to that choice.
@@ -105,7 +108,7 @@ Revisiting a memory presents what Ivenna kept there. When Ivenna chooses to send
 
 When a focus needs room for its next inference, compaction asks Ivenna to summarize earlier exchanges in a handover. Ivenna chooses what to carry forward about its understanding, relationships, preferences, and commitments. For unfinished work, it can preserve reasoning, evidence, known effects, and uncertainties. The focus can consider fresh observations in their original form alongside the handover. See [handover generation and replacement](input.md#handover-generation-and-replacement).
 
-A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending wakeups to the absolute times the focus chose for returning. See [sampled state](input.md#sampled-state).
+A dated sample accompanies Ivenna's summary so a focus can recover references whose original exchanges were summarized. It connects channel IDs to their purposes, subscription IDs to what listeners watch and when they report, and pending host callbacks to their commands. See [sampled state](input.md#sampled-state).
 
 The runtime delivers pending observations from its own records. It keeps the original history until it can continue with the handover. Carrying a complete exchange alongside the summary lets the focus revisit an exact reply or work directly with a recent tool result. See [how the runtime selects a handover](architecture.md#continuing-with-a-handover).
 

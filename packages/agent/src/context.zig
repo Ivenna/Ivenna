@@ -87,8 +87,9 @@ pub const Context = struct {
     }
 
     /// Present new observations once alongside the retained history. The
-    /// request borrows self through inference and owns its rendered turn in a.
-    pub fn request(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event) ![]const Model.Item {
+    /// request owns its item list and final user turn in a. History items
+    /// borrow self through inference.
+    pub fn request(self: *const Context, a: Allocator, current: Input.Current, events: []const Input.Event) ![]Model.Item {
         return buildRequest(a, self.messages.items, .{ .current = current, .purpose = .{ .work = events } });
     }
 

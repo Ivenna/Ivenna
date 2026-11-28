@@ -1,6 +1,7 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
 const History = @import("history.zig").History;
+const StartupHistory = @import("history.zig").StartupHistory;
 const Scope = @import("history.zig").Scope;
 const Persistence = @import("history.zig").Persistence;
 const Subscriptions = @import("instance_state").subscriptions;
@@ -79,7 +80,6 @@ pub const Registry = struct {
     core: *Session,
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
     noticed: std.StringHashMapUnmanaged(enum { scheduled, acknowledged }) = .empty,
-    wakeups: std.AutoArrayHashMapUnmanaged(u64, History.Wakeup) = .empty,
     callbacks: std.ArrayList(History.CallbackRegistration) = .empty,
     /// Open channel registrations confirmed by a checkpoint. The channel
     /// transport owns waiting readers.
@@ -104,17 +104,18 @@ pub const Registry = struct {
         io: std.Io,
         max_sessions: usize,
         max_pending: usize,
-        history: contracts.HistoryStore,
+        startup_history: StartupHistory,
         subscriptions: *Subscriptions.Store,
         startup: Startup,
     ) !Registry {
+        const history = startup_history.store;
         var self: Registry = .{
             .allocator = allocator,
             .io = io,
             .max_sessions = max_sessions,
             .max_pending = max_pending,
             .subscriptions = subscriptions,
-            .subscription_catalog = try subscriptions.identity(),
+            .subscription_catalog = startup_history.subscriptionCatalog() orelse try subscriptions.identity(),
             .usage_scope = startup.usage_scope,
             .history = .init(allocator, history),
             .reports = try Reports.Outbox.init(allocator, history, null),
@@ -125,9 +126,8 @@ pub const Registry = struct {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const saved = try self.history.load(a, max_sessions);
-        if (saved) |retained| {
-            if (!std.mem.eql(u8, &retained.subscription_catalog, &self.subscription_catalog)) return error.SubscriptionCatalogMismatch;
+        if (startup_history.checkpoint) |checkpoint| {
+            const retained = try self.history.restore(a, max_sessions, checkpoint);
             const reports = try Reports.Outbox.init(allocator, history, retained.activity_reports);
             self.reports.deinit();
             self.reports = reports;
@@ -155,12 +155,6 @@ pub const Registry = struct {
             }
             self.core = self.sessions.get(1).?;
             for (retained.callbacks) |callback| try self.appendCallback(callback);
-            for (retained.wakeups) |wakeup| {
-                var owned = wakeup;
-                owned.text = if (wakeup.text) |text| try allocator.dupe(u8, text) else null;
-                errdefer if (owned.text) |text| allocator.free(text);
-                try self.wakeups.put(allocator, wakeup.id, owned);
-            }
             for (retained.sessions) |record| {
                 const session = self.sessions.get(record.session_id).?;
                 for (record.observations) |event| {
@@ -172,7 +166,6 @@ pub const Registry = struct {
             }
             for (retained.channels) |record| try self.appendChannel(record);
         } else {
-            if (try subscriptions.isBound()) return error.SubscriptionCatalogMismatch;
             const core = try allocator.create(Session);
             core.* = .{ .session_id = 1, .role = .core };
             errdefer self.destroySession(core);
@@ -200,8 +193,6 @@ pub const Registry = struct {
         var notice_keys = self.noticed.keyIterator();
         while (notice_keys.next()) |key| self.allocator.free(key.*);
         self.noticed.deinit(self.allocator);
-        for (self.wakeups.values()) |wakeup| if (wakeup.text) |text| self.allocator.free(text);
-        self.wakeups.deinit(self.allocator);
         for (self.callbacks.items) |callback| self.freeCallback(callback);
         self.callbacks.deinit(self.allocator);
         for (self.channels.items) |channel| self.freeChannel(channel);
@@ -240,15 +231,14 @@ pub const Registry = struct {
                 // been published and its receipt acknowledged.
                 if (self.queued_callbacks.contains(callback.id)) return .deferred;
                 const registration = self.callbackLocked(callback.id) orelse {
-                    if (callback.id != 0 and callback.id < self.next_callback_id) return .duplicate;
+                    if (callback.id < self.next_callback_id) return .duplicate;
                     return error.UnknownCallback;
                 };
                 break :blk .{ self.sessions.get(registration.session_id).?, Input.Event{ .callback = .{
                     .callback_id = registration.reference,
-                    .source = registration.source,
+                    .source = .{ .host = .{ .command_id = registration.command_id } },
                     .observed_at_unix_ms = callback.observed_at_unix_ms,
                     .text = callback.text,
-                    .scheduled_for_unix_ms = self.wakeupTimeLocked(callback.id),
                 } } };
             },
         };
@@ -547,7 +537,6 @@ pub const Registry = struct {
             .next_session_id = self.next_session_id,
             .next_callback_id = self.next_callback_id,
             .next_runtime_reference_id = self.next_runtime_reference_id,
-            .wakeups = self.wakeups.values(),
             .callbacks = self.callbacks.items,
             .sessions = retained.items,
             .channels = self.channels.items,
@@ -555,10 +544,40 @@ pub const Registry = struct {
         });
     }
 
-    pub fn current(self: *Registry, a: Allocator, session: *Session) !Input.Current {
+    /// The focus ID borrows the worker's session through request rendering.
+    pub fn current(self: *Registry, session: *const Session) Input.Current {
+        return .{
+            .focus_id = session.focus_id,
+            .role = session.role,
+            .observed_at_unix_ms = self.now(),
+        };
+    }
+
+    pub fn currentWithConnectionStatus(self: *Registry, a: Allocator, session: *Session, transport: contracts.Channels) !?Input.Current {
         try self.lock();
         defer self.mutex.unlock(self.io);
-        return self.currentLocked(a, session);
+        const limit = 8;
+        var channel_ids: std.ArrayList([]const u8) = .empty;
+        var index = self.channels.items.len;
+        while (index > 0 and channel_ids.items.len < limit) {
+            index -= 1;
+            const channel = self.channels.items[index];
+            if (!self.channelVisibleTo(session, channel)) continue;
+            const has_receiver = (try transport.hasReceiver(channel.id)) orelse continue;
+            if (!has_receiver) try channel_ids.append(a, try a.dupe(u8, channel.id));
+        }
+        const subscription_ids = self.subscriptions.subscriptionsWithoutListeners(a, session.focus_id, limit) catch |err| switch (err) {
+            error.StateStoreBusy => blk: {
+                std.log.warn("subscription registrations are busy while sampling listeners for '{s}'", .{session.focus_id});
+                break :blk &.{};
+            },
+            else => return err,
+        };
+        if (channel_ids.items.len == 0 and subscription_ids.len == 0) return null;
+        var sample = self.current(session);
+        sample.channels_without_receivers = try channel_ids.toOwnedSlice(a);
+        sample.subscriptions_without_listeners = subscription_ids;
+        return sample;
     }
 
     pub fn compactionSnapshot(self: *Registry, a: Allocator, session: *Session) !Input.Snapshot {
@@ -575,8 +594,7 @@ pub const Registry = struct {
         var own_callbacks: std.ArrayList(Input.PendingCallback) = .empty;
         for (self.callbacks.items) |callback| if (callback.session_id == session.session_id) try own_callbacks.append(a, .{
             .callback_id = try a.dupe(u8, callback.reference),
-            .source = try cloneSource(a, callback.source),
-            .scheduled_for_unix_ms = self.wakeupTimeLocked(callback.id),
+            .source = .{ .host = .{ .command_id = try a.dupe(u8, callback.command_id) } },
         });
         const subscriptions = try self.subscriptions.activeRegistrations(a, session.focus_id);
         const registrations = try a.alloc(Input.SampledSubscription, subscriptions.len);
@@ -586,14 +604,14 @@ pub const Registry = struct {
         };
         var channels: std.ArrayList(Input.SampledChannel) = .empty;
         for (self.channels.items) |channel| {
-            if (session != self.core and !std.mem.eql(u8, channel.opened_by, session.focus_id)) continue;
+            if (!self.channelVisibleTo(session, channel)) continue;
             try channels.append(a, .{
                 .channel_id = try a.dupe(u8, channel.id),
                 .description = if (channel.description) |text| try a.dupe(u8, text) else null,
             });
         }
         return .{
-            .current = try self.currentLocked(a, session),
+            .current = self.current(session),
             .state = .{
                 .activities = activities,
                 .callbacks = try own_callbacks.toOwnedSlice(a),
@@ -603,20 +621,16 @@ pub const Registry = struct {
         };
     }
 
+    fn channelVisibleTo(self: *const Registry, session: *const Session, channel: History.Channel) bool {
+        return session == self.core or std.mem.eql(u8, channel.opened_by, session.focus_id);
+    }
+
     fn liveSessionsLocked(self: *Registry, a: Allocator) ![]*Session {
         const live = try a.alloc(*Session, self.sessions.count());
         var sessions = self.sessions.valueIterator();
         for (live) |*session| session.* = sessions.next().?.*;
         std.mem.sort(*Session, live, {}, lessSessionId);
         return live;
-    }
-
-    fn currentLocked(self: *Registry, a: Allocator, session: *Session) !Input.Current {
-        return .{
-            .focus_id = try a.dupe(u8, session.focus_id),
-            .role = session.role,
-            .observed_at_unix_ms = self.now(),
-        };
     }
 
     /// Commit the outcome of a round without tool calls. Returns true when
@@ -717,46 +731,6 @@ pub const Registry = struct {
         try self.saveLocked();
     }
 
-    pub fn scheduleWakeup(self: *Registry, a: Allocator, work: Work, name: []const u8, at: i64, text: []const u8) ![]const u8 {
-        try self.lock();
-        defer self.mutex.unlock(self.io);
-        assertWork(work);
-        const registration = registered: {
-            try self.wakeups.ensureUnusedCapacity(self.allocator, 1);
-            const owned = try self.allocator.dupe(u8, text);
-            errdefer self.allocator.free(owned);
-            const callback = try self.registerCallbackLocked(a, work.session, name, .wakeup);
-            self.wakeups.putAssumeCapacityNoClobber(callback.id, .{ .id = callback.id, .at_unix_ms = at, .text = owned });
-            break :registered callback;
-        };
-        errdefer a.free(registration.reference);
-        try self.saveLocked();
-        return registration.reference;
-    }
-
-    pub fn dueWakeups(self: *Registry, a: Allocator) ![]const contracts.Callback.Message {
-        try self.lock();
-        defer self.mutex.unlock(self.io);
-        var due: std.ArrayList(contracts.Callback.Message) = .empty;
-        const observed_at = self.now();
-        for (self.wakeups.values()) |wakeup| {
-            if (wakeup.at_unix_ms > observed_at) continue;
-            const text = wakeup.text orelse continue;
-            try due.append(a, .{ .id = wakeup.id, .text = try a.dupe(u8, text) });
-        }
-        return due.toOwnedSlice(a);
-    }
-
-    /// Intake confirms a due wakeup's publication before polling for callbacks.
-    pub fn markWakeupPublished(self: *Registry, id: u64) !void {
-        try self.lock();
-        defer self.mutex.unlock(self.io);
-        const wakeup = self.wakeups.getPtr(id) orelse return; // An earlier publication was already admitted.
-        self.allocator.free(wakeup.text.?);
-        wakeup.text = null;
-        try self.saveLocked();
-    }
-
     pub fn issueRuntimeReference(self: *Registry, a: Allocator, work: Work, name: []const u8) ![]const u8 {
         try self.lock();
         defer self.mutex.unlock(self.io);
@@ -770,14 +744,18 @@ pub const Registry = struct {
         return reference;
     }
 
-    pub fn registerCallback(self: *Registry, a: Allocator, work: Work, name: []const u8, source: contracts.Callback.Source) !contracts.Callback.Registration {
+    pub fn registerCallback(self: *Registry, a: Allocator, work: Work, name: []const u8, command_id: []const u8) !contracts.Callback.Registration {
         try self.lock();
         defer self.mutex.unlock(self.io);
         assertWork(work);
-        const registration = try self.registerCallbackLocked(a, work.session, name, source);
-        errdefer a.free(registration.reference);
+        const id = self.next_callback_id;
+        const next = try std.math.add(u64, id, 1);
+        const reference = try contracts.Reference.create(a, name, id);
+        errdefer a.free(reference);
+        try self.appendCallback(.{ .id = id, .reference = reference, .session_id = work.session.session_id, .command_id = command_id });
+        self.next_callback_id = next;
         try self.saveLocked();
-        return registration;
+        return .{ .id = id, .reference = reference };
     }
 
     pub fn subscribe(self: *Registry, a: Allocator, work: Work, name: []const u8, listener: []const u8) !Subscriptions.Created {
@@ -798,40 +776,25 @@ pub const Registry = struct {
 
     /// Before startup dispatch, these registrations belong to commands from the
     /// previous runtime. Their processes and control handles are not restored.
-    pub fn pendingHostCallbacks(self: *Registry, a: Allocator) ![]const History.CallbackRegistration {
+    pub fn pendingCallbackIds(self: *Registry, a: Allocator) ![]const u64 {
         try self.lock();
         defer self.mutex.unlock(self.io);
-        var pending: std.ArrayList(History.CallbackRegistration) = .empty;
-        for (self.callbacks.items) |callback| if (callback.source == .host) try pending.append(a, .{
-            .id = callback.id,
-            .reference = try a.dupe(u8, callback.reference),
-            .session_id = callback.session_id,
-            .source = try cloneSource(a, callback.source),
-        });
-        return pending.toOwnedSlice(a);
-    }
-
-    fn registerCallbackLocked(self: *Registry, a: Allocator, session: *Session, name: []const u8, source: contracts.Callback.Source) !contracts.Callback.Registration {
-        const id = self.next_callback_id;
-        const next = try std.math.add(u64, id, 1);
-        const reference = try contracts.Reference.create(a, name, id);
-        errdefer a.free(reference);
-        try self.appendCallback(.{ .id = id, .reference = reference, .session_id = session.session_id, .source = source });
-        self.next_callback_id = next;
-        return .{ .id = id, .reference = reference };
+        const ids = try a.alloc(u64, self.callbacks.items.len);
+        for (self.callbacks.items, ids) |callback, *id| id.* = callback.id;
+        return ids;
     }
 
     fn appendCallback(self: *Registry, registration: History.CallbackRegistration) !void {
         const reference = try self.allocator.dupe(u8, registration.reference);
         errdefer self.allocator.free(reference);
-        const source = try cloneSource(self.allocator, registration.source);
-        errdefer freeSource(self.allocator, source);
-        try self.callbacks.append(self.allocator, .{ .id = registration.id, .reference = reference, .session_id = registration.session_id, .source = source });
+        const command_id = try self.allocator.dupe(u8, registration.command_id);
+        errdefer self.allocator.free(command_id);
+        try self.callbacks.append(self.allocator, .{ .id = registration.id, .reference = reference, .session_id = registration.session_id, .command_id = command_id });
     }
 
     fn freeCallback(self: *Registry, callback: History.CallbackRegistration) void {
         self.allocator.free(callback.reference);
-        freeSource(self.allocator, callback.source);
+        self.allocator.free(callback.command_id);
     }
 
     fn callbackLocked(self: *Registry, id: u64) ?History.CallbackRegistration {
@@ -842,16 +805,9 @@ pub const Registry = struct {
     fn completeCallbackLocked(self: *Registry, id: u64) void {
         for (self.callbacks.items, 0..) |callback, index| if (callback.id == id) {
             self.freeCallback(self.callbacks.orderedRemove(index));
-            break;
+            return;
         };
-        if (self.wakeups.fetchOrderedRemove(id)) |wakeup| {
-            if (wakeup.value.text) |text| self.allocator.free(text);
-        }
-    }
-
-    fn wakeupTimeLocked(self: *const Registry, id: u64) ?i64 {
-        const wakeup = self.wakeups.get(id) orelse return null;
-        return wakeup.at_unix_ms;
+        unreachable; // A queued callback retains its registration until admission.
     }
 
     pub fn acknowledged(self: *Registry, receipt: []const u8) !void {
@@ -1137,47 +1093,14 @@ fn assertWork(work: Work) void {
     std.debug.assert(work.session.state == .running and work.session.state.running == work.activation);
 }
 
-fn cloneSource(a: Allocator, source: contracts.Callback.Source) !contracts.Callback.Source {
-    return switch (source) {
-        .wakeup => .wakeup,
-        .host => |host| .{ .host = .{ .command_id = try a.dupe(u8, host.command_id) } },
-    };
-}
-
-fn freeSource(a: Allocator, source: contracts.Callback.Source) void {
-    if (source == .host) a.free(source.host.command_id);
-}
-
 const TestStore = @import("test_history.zig").TestStore;
 
-test "startup republishes an unchanged checkpoint only for its paired subscription catalog" {
+fn initTestRegistry(storage: *TestStore, subscriptions: *Subscriptions.Store, startup: Registry.Startup) !Registry {
     const testing = std.testing;
-    var storage: TestStore = .{};
-    defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
-    defer subscriptions.close();
-    {
-        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
-        registry.deinit();
-    }
-    const saved = storage.checkpoint.?;
-    const saves = storage.saves;
-
-    var other_subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
-    defer other_subscriptions.close();
-    try testing.expectError(error.SubscriptionCatalogMismatch, Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &other_subscriptions, .{}));
-    try testing.expectEqual(saves, storage.saves);
-
-    {
-        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
-        defer registry.deinit();
-        try testing.expectEqual(saves + 1, storage.saves);
-        try testing.expectEqualStrings(saved, storage.checkpoint.?);
-    }
-
-    storage.checkpoint = null;
-    try testing.expectError(error.SubscriptionCatalogMismatch, Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{}));
-    try testing.expectEqual(saves + 1, storage.saves);
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const selected = try StartupHistory.load(scratch.allocator(), storage.port());
+    return Registry.init(testing.allocator, testing.io, 2, 3, selected, subscriptions, startup);
 }
 
 test "an interrupted activation retains its receipts and only fresh arrivals wake it" {
@@ -1185,7 +1108,7 @@ test "an interrupted activation retains its receipts and only fresh arrivals wak
     defer storage.arena.deinit();
     var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    var registry = try initTestRegistry(&storage, &subscriptions, .{});
     defer registry.deinit();
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
@@ -1230,7 +1153,7 @@ test "a stale poll distinguishes queued and acknowledged mail" {
     defer storage.arena.deinit();
     var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
     defer subscriptions.close();
-    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    var registry = try initTestRegistry(&storage, &subscriptions, .{});
     defer registry.deinit();
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);
     defer scratch.deinit();
@@ -1276,88 +1199,42 @@ fn admitTestInput(registry: *Registry, a: Allocator) !struct { work: Work, histo
     return .{ .work = work, .history = history };
 }
 
-test "a wakeup retains its scheduled time after publication and restart" {
+test "startup retires old wakeup registrations without reusing their callback IDs" {
     const testing = std.testing;
-    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
     var storage: TestStore = .{};
     defer storage.arena.deinit();
+    const a = storage.arena.allocator();
     var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
     defer subscriptions.close();
+    const catalog = try subscriptions.identity();
+    try storage.port().save(try std.mem.concat(a, u8, &.{
+        \\.{ .subscription_catalog =
+        ,
+        try @import("record_codec.zig").encode(a, catalog),
+        \\, .next_session_id = 2, .next_callback_id = 3, .next_command_id = 2,
+        \\   .sessions = .{.{ .session_id = 1, .focus_id = "core-1", .role = .core, .was_running = false,
+        \\       .subscription_through = 0, .epoch = 0, .group = "core", .head = null, .count = 0, .observations = null }},
+        \\   .wakeups = .{
+        \\       .{ .id = 2, .at_unix_ms = 1000, .text = null },
+        \\   },
+        \\   .callbacks = .{
+        \\       .{ .id = 1, .reference = "build-1", .session_id = 1, .source = .{ .host = .{ .command_id = "build-1" } } },
+        \\       .{ .id = 2, .reference = "published-2", .session_id = 1, .source = .wakeup },
+        \\   }, .activity_reports = null,
+        \\}
+        ,
+    }));
 
-    const scheduled_for = 1_000;
-    const observed_at = 61_000;
-    const text = "Return to the plan.";
-    const published = scheduled: {
-        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
-        defer registry.deinit();
-        var core = try admitTestInput(&registry, a);
-        defer core.history.deinit();
-        defer registry.endWorker(core.work.session);
-        const callback_id = try registry.scheduleWakeup(a, core.work, "revisit", scheduled_for, text);
-        const due = try registry.dueWakeups(a);
-        try testing.expectEqual(1, due.len);
-        try registry.markWakeupPublished(due[0].id);
-        break :scheduled .{ .callback_id = callback_id, .message = due[0] };
-    };
-
-    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    var registry = try initTestRegistry(&storage, &subscriptions, .{});
     defer registry.deinit();
-    try testing.expectEqual(0, (try registry.dueWakeups(a)).len);
-    const snapshot = try registry.compactionSnapshot(a, registry.core);
-    try testing.expectEqual(1, snapshot.state.callbacks.len);
-    try testing.expectEqualStrings(published.callback_id, snapshot.state.callbacks[0].callback_id);
-    try testing.expectEqual(scheduled_for, snapshot.state.callbacks[0].scheduled_for_unix_ms.?);
-
-    var core = try admitTestInput(&registry, a);
-    defer core.history.deinit();
-    defer registry.endWorker(core.work.session);
-    try testing.expectEqual(.accepted, try registry.accept(.{ .content = .{ .callback = .{
-        .id = published.message.id,
-        .text = published.message.text,
-        .observed_at_unix_ms = observed_at,
+    try testing.expectEqualSlices(u64, &.{1}, try registry.pendingCallbackIds(a));
+    try testing.expect(std.mem.indexOf(u8, storage.checkpoint.?, ".wakeups") == null);
+    // The retired wakeup was the last issued ID and its mail can still arrive.
+    try testing.expectEqual(.duplicate, try registry.accept(.{ .content = .{ .callback = .{
+        .id = 2,
+        .text = "Already published by the previous kernel.",
+        .observed_at_unix_ms = 1000,
     } } }));
-    try registry.collectPending(core.work);
-    const deliveries = core.work.activation.deliveries.items;
-    try testing.expectEqual(1, deliveries.len);
-    try core.history.appendRecord(.{ .events = .{ .focus_id = core.work.session.focus_id, .items = &.{deliveries[0].event} } });
-    try registry.commitInput(core.work, deliveries.len, &core.history);
-    const observation = core.history.records()[core.history.records().len - 1].record.events.items[0].callback;
-    try testing.expectEqual(scheduled_for, observation.scheduled_for_unix_ms.?);
-    try testing.expectEqual(observed_at, observation.observed_at_unix_ms);
-    try testing.expectEqualStrings(text, observation.text);
-    try testing.expectEqual(0, (try registry.compactionSnapshot(a, registry.core)).state.callbacks.len);
-}
-
-test "a wakeup with a lost checkpoint acknowledgement becomes due after restart" {
-    const testing = std.testing;
-    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-    var storage: TestStore = .{};
-    defer storage.arena.deinit();
-    var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
-    defer subscriptions.close();
-    const text = "Return to the plan.";
-    {
-        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
-        defer registry.deinit();
-        var core = try admitTestInput(&registry, a);
-        defer core.history.deinit();
-        defer registry.endWorker(core.work.session);
-
-        storage.fail_save = .after_commit;
-        try testing.expectError(error.MailMutationUnconfirmed, registry.scheduleWakeup(a, core.work, "revisit", 1_000, text));
-        try testing.expectError(error.MailMutationUnconfirmed, registry.dueWakeups(a));
-    }
-
-    storage.fail_save = .none;
-    var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
-    defer registry.deinit();
-    const due = try registry.dueWakeups(a);
-    try testing.expectEqual(1, due.len);
-    try testing.expectEqualStrings(text, due[0].text);
 }
 
 test "compaction samples the active subscriptions addressed to this focus" {
@@ -1368,7 +1245,7 @@ test "compaction samples the active subscriptions addressed to this focus" {
     defer storage.arena.deinit();
     var subscriptions = try Subscriptions.Store.openInMemory(std.testing.allocator);
     defer subscriptions.close();
-    var registry = try Registry.init(std.testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    var registry = try initTestRegistry(&storage, &subscriptions, .{});
     defer registry.deinit();
     var core = try admitTestInput(&registry, a);
     defer core.history.deinit();
@@ -1416,7 +1293,7 @@ test "restart restores activity reports together with completion or sleeping his
         defer subscriptions.close();
 
         const previous = attempt: {
-            var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, startup);
+            var registry = try initTestRegistry(&storage, &subscriptions, startup);
             defer registry.deinit();
             var core = try admitTestInput(&registry, a);
             defer core.history.deinit();
@@ -1436,7 +1313,7 @@ test "restart restores activity reports together with completion or sleeping his
                 .records = activity.history.records().len,
             };
             if (sleeping) {
-                _ = try registry.registerCallback(a, activity.work, "read", .{ .host = .{ .command_id = "read-1" } });
+                _ = try registry.registerCallback(a, activity.work, "read", "read-1");
                 storage.fail_save = .after_commit;
                 try testing.expectError(error.MailMutationUnconfirmed, registry.commitResponse(activity.work, &activity.history, response));
             } else {
@@ -1446,7 +1323,7 @@ test "restart restores activity reports together with completion or sleeping his
         };
 
         storage.fail_save = .none;
-        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, startup);
+        var registry = try initTestRegistry(&storage, &subscriptions, startup);
         defer registry.deinit();
         const activity = registry.sessions.get(previous.activity_id);
         try testing.expectEqual(sleeping, activity != null);
@@ -1473,7 +1350,7 @@ test "a fork inherits the complete opening round and continues its own history" 
     const a = storage.arena.allocator();
     var subscriptions = try Subscriptions.Store.openInMemory(testing.allocator);
     defer subscriptions.close();
-    var registry = try Registry.init(testing.allocator, std.testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    var registry = try initTestRegistry(&storage, &subscriptions, .{});
     defer registry.deinit();
     var core = try admitTestInput(&registry, a);
     defer core.history.deinit();
@@ -1540,7 +1417,7 @@ test "restart retains the assignment as a new activity's first delivery" {
     defer subscriptions.close();
     const task = "Read the plan.";
     {
-        var registry = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+        var registry = try initTestRegistry(&storage, &subscriptions, .{});
         defer registry.deinit();
         var core = try admitTestInput(&registry, a);
         defer core.history.deinit();
@@ -1572,7 +1449,7 @@ test "restart retains the assignment as a new activity's first delivery" {
     }
 
     {
-        var restored = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+        var restored = try initTestRegistry(&storage, &subscriptions, .{});
         defer restored.deinit();
         const ready = try restored.takeReadyBatch(a);
         defer for (ready) |work| restored.endWorker(work.session);
@@ -1591,7 +1468,7 @@ test "restart retains the assignment as a new activity's first delivery" {
         restored.releaseDeliveries(work);
     }
 
-    var resumed = try Registry.init(testing.allocator, testing.io, 2, 3, storage.port(), &subscriptions, .{});
+    var resumed = try initTestRegistry(&storage, &subscriptions, .{});
     defer resumed.deinit();
     const ready = try resumed.takeReadyBatch(a);
     defer for (ready) |work| resumed.endWorker(work.session);

@@ -1,5 +1,42 @@
 # Upgrading Ivenna
 
+## Moving receivers and listeners to sessions
+
+This update changes the receiver and listener commands and removes `schedule_attention`. The kernel upgrades the instance database on its first start with the new build, even for an instance with no receivers or listeners.
+
+1. Stop the kernel and its receiver and listener processes, including independent clients. Keep the previous executable with a matched backup of the mailbox, instance database, and listener state. [Backups and transfers](running.md#backups-and-transfers)
+2. Install the same updated build for the kernel and its clients. Update your programs, carry forward any saved source positions, and recover the time and text of any pending reminders you want to keep. [Subscription listeners](#update-subscription-listeners) · [Channel receivers](#update-older-channel-receivers) · [Removing scheduled attention](#removing-scheduled-attention)
+3. Start `ivenna serve` with the existing mailbox and `DATA_DIR`. The database migration preserves the mailbox binding, subscription IDs, accepted report keys, and queued reports. Once the kernel is ready, start the updated clients with their saved IDs and recreate any reminders you recovered. [Instance database migration](architecture.md#instance-database) · [Checking readiness](running.md#service-status-and-reception)
+
+To roll back, restore the matched backup, including listener state, and start the previous executable. [Restore an instance](running.md#backups-and-transfers)
+
+### Update subscription listeners
+
+Replace `subscription inspect`, `subscription publish`, and `subscription checkpoint` with a `subscription listen` session. If your program uses the earlier `listen` protocol with wrapped requests, remove the wrapper and send each report as a top-level JSON object after `"ready"`. Keep the original key for any report you retry. [Listener protocol](subscriptions.md)
+
+If the pre-upgrade database has a `cursor` column, export saved source positions by subscription ID from the backup. Import each position into the corresponding listener's own state before starting it.
+
+```sh
+sqlite3 -readonly -json /path/to/backup/state.sqlite3 \
+  'SELECT reference, cursor FROM subscriptions WHERE cursor IS NOT NULL ORDER BY id;'
+```
+
+The listener owns later source progress. [Resuming at the source](subscriptions.md#resume-at-the-source)
+
+### Update older channel receivers
+
+- Replace `ivenna receive` and its options with `ivenna channel receive CHANNEL_ID`. Read the `text` field from each JSON line and use the process exit status to interpret the end of the stream. [Receiver sessions](communication.md#receiving-from-a-channel)
+- Update senders to handle `channel_no_receiver` and `channel_would_block`. [Channel send outcomes](communication.md#sending-to-a-channel)
+
+### Removing scheduled attention
+
+The first startup with this build retires scheduled wakeups that have yet to enter working history, including copies already in `Ivenna Callbacks`. Wakeup observations already in history and dated handover samples remain readable. Host completions and queued subscription reports still go to their original focuses.
+
+Use the matched backup from the [session upgrade](#moving-receivers-and-listeners-to-sessions) to recover reminders. Take this backup before first startup even if your clients already use sessions.
+
+1. Find the selected checkpoint in the backup's `Ivenna History` folder. In its ZON body, record `.at_unix_ms` and `.text` for the desired entry in `.wakeups`. The matching `.id` in `.callbacks` gives its named reference. If `.text` is null, find the reminder text in `Ivenna Callbacks` using the corresponding `X-Ivenna-Callback-Id` header. [Checkpoint selection](architecture.md#history-storage) · [Callback mail](architecture.md#callback-delivery)
+2. After startup, have the intended focus register a subscription. Configure an independent timer listener with the subscription ID, original scheduled time, and reminder text. [Reports from a schedule](subscriptions.md#reporting-from-a-schedule)
+
 ## Working history encoding
 
 The updated kernel restores image bytes and upload IDs from records selected by the saved checkpoint. Newly written records store uploaded files by ID and encode inline images losslessly in Base64. This also applies when a fork or handover copies an older record. Older records keep their original bodies until the mail service expires them from Trash.
@@ -27,7 +64,7 @@ To roll back, stop the kernel and restore the mailbox and instance database from
 
 ## From feeds to channels
 
-Feed readers paged through stored messages. A channel hands each message to one waiting receiver while the kernel runs. Update senders to handle `channel_would_block` when a send cannot hand off the message. See [send outcomes](communication.md#sending-to-a-channel).
+Feed readers paged through stored messages. A channel hands each message to one waiting receiver while the kernel runs. Update senders using the current [channel send outcomes](communication.md#sending-to-a-channel).
 
 ### Prepare the existing instance
 
@@ -40,9 +77,9 @@ Feed readers paged through stored messages. A channel hands each message to one 
 | --- | --- |
 | `create_feed` and `close_feed` | `open_channel` and `close_channel` |
 | `send` with `to.feed_id` | `send` with `to.channel_id` |
-| `ivenna feed read FEED_ID` | `ivenna receive CHANNEL_ID` |
+| `ivenna feed read FEED_ID` | `ivenna channel receive CHANNEL_ID` |
 
-Replace page and sequence tracking with one JSON line per read result. Use `--timeout MS` for a bounded single read or `--follow` to stream message records. See [receive results](communication.md#receiving-from-a-channel).
+Replace page and sequence tracking with a stream of JSON lines, one per message. See [receiver sessions](communication.md#receiving-from-a-channel).
 
 Start the updated kernel with the existing instance database and mailbox to resume subscriptions and working history. Open a channel for each stream you want to continue. Give its ID to the receiving program and start the receiver before sending. See [channel receiver deployment](running.md#channel-receivers).
 
@@ -59,7 +96,7 @@ COMMIT;
 
 ## From an earlier channel build
 
-Update the kernel and receiver executables together. Replace `receive --wait MS` with `receive --timeout MS`, and handle `channel_would_block` in place of `channel_not_ready`. See [receiver deployment](running.md#channel-receivers) and [send outcomes](communication.md#sending-to-a-channel).
+Use the [session upgrade](#moving-receivers-and-listeners-to-sessions) for the receiver and update senders that handled `channel_not_ready`. See [send outcomes](communication.md#sending-to-a-channel).
 
 Reuse a channel ID if the checkpoint saved its registration. Open a replacement channel for any registration absent from the checkpoint and give the new ID to the receiver. Builds before channel checkpoints saved no registrations. Some later builds kept only registrations whose opening focus was still present. See [channel lifetimes](communication.md#channel-lifetimes).
 
