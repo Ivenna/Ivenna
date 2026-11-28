@@ -572,6 +572,9 @@ pub const Registry = struct {
             const has_receiver = (try transport.hasReceiver(channel.id)) orelse continue;
             if (!has_receiver) try channel_ids.append(a, try a.dupe(u8, channel.id));
         }
+        // Connection status is advisory. A busy, full, or unavailable state
+        // store must not abort a turn whose request is already assembled;
+        // structural corruption and cancellation remain fatal.
         const subscription_ids = self.subscriptions.subscriptionsWithoutListeners(a, session.focus_id, limit) catch |err| switch (err) {
             error.StateStoreBusy, error.StateStoreFull, error.StateStorageFailed => blk: {
                 std.log.warn("could not sample subscription listeners for '{s}': {s}", .{ session.focus_id, @errorName(err) });
