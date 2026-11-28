@@ -927,6 +927,16 @@ test "ordinary turns refresh current connection status and give observations pri
     try testing.expect(std.mem.indexOf(u8, summary_turn, "channels_without_receivers:") == null);
     try testing.expect(std.mem.indexOf(u8, summary_turn, "subscriptions_without_listeners:") == null);
 
+    // A transient storage read failure drops only the advisory subscription
+    // sample; the channel sample and the prepared request still proceed.
+    fixture.receiver_sample = false;
+    store.failNextSampleForTest(error.StateStorageFailed);
+    const storage_degraded = (try kernel.prepareRequest(a, core.work, &history)).ready;
+    const storage_degraded_turn = storage_degraded[storage_degraded.len - 1].message.text;
+    try testing.expect(std.mem.indexOf(u8, storage_degraded_turn, "channels_without_receivers:") != null);
+    try testing.expect(std.mem.indexOf(u8, storage_degraded_turn, channel_id) != null);
+    try testing.expect(std.mem.indexOf(u8, storage_degraded_turn, "subscriptions_without_listeners:") == null);
+
     // A damaged registration is a store failure, independent of listener presence.
     try store.db.execNoArgs(
         \\CREATE TEMP TABLE subscriptions (id INTEGER, reference TEXT, focus_id TEXT);
